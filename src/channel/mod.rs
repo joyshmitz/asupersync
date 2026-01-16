@@ -34,8 +34,10 @@
 //! # Module Contents
 //!
 //! - [`mpsc`]: Multi-producer, single-consumer bounded channel
+//! - [`oneshot`]: Single-use channel for exactly one value
 
 pub mod mpsc;
+pub mod oneshot;
 
-// Re-export commonly used types
+// Re-export commonly used types from mpsc (the default channel)
 pub use mpsc::{channel, Receiver, SendPermit, Sender};
