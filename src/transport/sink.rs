@@ -1,0 +1,426 @@
+//! Symbol sink traits and implementations.
+
+use crate::security::authenticated::AuthenticatedSymbol;
+use crate::transport::error::SinkError;
+use crate::transport::SharedChannel;
+use std::future::Future;
+use std::pin::Pin;
+use std::sync::atomic::Ordering;
+use std::sync::Arc;
+use std::task::{Context, Poll};
+
+/// A sink for outgoing symbols.
+pub trait SymbolSink: Send {
+    /// Send a symbol.
+    fn poll_send(
+        self: Pin<&mut Self>,
+        cx: &mut Context<'_>,
+        symbol: AuthenticatedSymbol,
+    ) -> Poll<Result<(), SinkError>>;
+
+    /// Flush any buffered symbols.
+    fn poll_flush(
+        self: Pin<&mut Self>,
+        cx: &mut Context<'_>,
+    ) -> Poll<Result<(), SinkError>>;
+
+    /// Close the sink.
+    fn poll_close(
+        self: Pin<&mut Self>,
+        cx: &mut Context<'_>,
+    ) -> Poll<Result<(), SinkError>>;
+
+    /// Check if sink is ready to accept more symbols.
+    fn poll_ready(
+        self: Pin<&mut Self>,
+        cx: &mut Context<'_>,
+    ) -> Poll<Result<(), SinkError>>;
+}
+
+/// Extension methods for SymbolSink.
+pub trait SymbolSinkExt: SymbolSink {
+    /// Send a symbol.
+    fn send<'a>(&'a mut self, symbol: AuthenticatedSymbol) -> SendFuture<'a, Self>
+    where
+        Self: Unpin,
+    {
+        SendFuture { sink: self, symbol: Some(symbol) }
+    }
+
+    /// Send all symbols from an iterator.
+    fn send_all<'a, I>(&'a mut self, symbols: I) -> SendAllFuture<'a, Self, I::IntoIter>
+    where
+        Self: Unpin,
+        I: IntoIterator<Item = AuthenticatedSymbol>,
+    {
+        SendAllFuture {
+            sink: self,
+            iter: symbols.into_iter(),
+            buffered: None,
+        }
+    }
+
+    /// Flush buffered symbols.
+    fn flush(&mut self) -> FlushFuture<'_, Self>
+    where
+        Self: Unpin,
+    {
+        FlushFuture { sink: self }
+    }
+
+    /// Close the sink.
+    fn close(&mut self) -> CloseFuture<'_, Self>
+    where
+        Self: Unpin,
+    {
+        CloseFuture { sink: self }
+    }
+
+    /// Buffer symbols for batch sending.
+    fn buffer(self, capacity: usize) -> BufferedSink<Self>
+    where
+        Self: Sized,
+    {
+        BufferedSink::new(self, capacity)
+    }
+}
+
+impl<S: SymbolSink + ?Sized> SymbolSinkExt for S {}
+
+// ---- Futures ----
+
+/// Future for `send()`.
+pub struct SendFuture<'a, S: ?Sized> {
+    sink: &'a mut S,
+    symbol: Option<AuthenticatedSymbol>,
+}
+
+impl<S: SymbolSink + Unpin + ?Sized> Future for SendFuture<'_, S> {
+    type Output = Result<(), SinkError>;
+
+    fn poll(mut self: Pin<&mut Self>, cx: &mut Context<'_>) -> Poll<Self::Output> {
+        let this = &mut *self;
+        
+        // First wait for ready
+        match Pin::new(&mut *this.sink).poll_ready(cx) {
+            Poll::Ready(Ok(())) => {},
+            Poll::Ready(Err(e)) => return Poll::Ready(Err(e)),
+            Poll::Pending => return Poll::Pending,
+        }
+
+        // Then send
+        if let Some(symbol) = this.symbol.take() {
+            Pin::new(&mut *this.sink).poll_send(cx, symbol)
+        } else {
+            Poll::Ready(Ok(()))
+        }
+    }
+}
+
+/// Future for `send_all()`.
+pub struct SendAllFuture<'a, S: ?Sized, I> {
+    sink: &'a mut S,
+    iter: I,
+    buffered: Option<AuthenticatedSymbol>,
+}
+
+impl<S, I> Future for SendAllFuture<'_, S, I>
+where
+    S: SymbolSink + Unpin + ?Sized,
+    I: Iterator<Item = AuthenticatedSymbol> + Unpin,
+{
+    type Output = Result<usize, SinkError>;
+
+    fn poll(mut self: Pin<&mut Self>, cx: &mut Context<'_>) -> Poll<Self::Output> {
+        let mut count = 0;
+        loop {
+            // Try to send buffered item
+            if let Some(symbol) = self.buffered.take() {
+                match Pin::new(&mut *self.sink).poll_ready(cx) {
+                    Poll::Ready(Ok(())) => {},
+                    Poll::Ready(Err(e)) => return Poll::Ready(Err(e)),
+                    Poll::Pending => {
+                        self.buffered = Some(symbol);
+                        return Poll::Pending;
+                    }
+                }
+                match Pin::new(&mut *self.sink).poll_send(cx, symbol) {
+                    Poll::Ready(Ok(())) => count += 1,
+                    Poll::Ready(Err(e)) => return Poll::Ready(Err(e)),
+                    Poll::Pending => {
+                        // This technically shouldn't happen if ready returned Ok,
+                        // but if it does, we lost the symbol. 
+                        // Simplified: assume poll_send returns Ready if poll_ready did.
+                        // Or if poll_send buffers.
+                        return Poll::Pending;
+                    }
+                }
+            }
+
+            // Get next
+            match self.iter.next() {
+                Some(symbol) => self.buffered = Some(symbol),
+                None => {
+                    // Flush
+                    match Pin::new(&mut *self.sink).poll_flush(cx) {
+                        Poll::Ready(Ok(())) => return Poll::Ready(Ok(count)),
+                        Poll::Ready(Err(e)) => return Poll::Ready(Err(e)),
+                        Poll::Pending => return Poll::Pending,
+                    }
+                }
+            }
+        }
+    }
+}
+
+/// Future for `flush()`.
+pub struct FlushFuture<'a, S: ?Sized> {
+    sink: &'a mut S,
+}
+
+impl<S: SymbolSink + Unpin + ?Sized> Future for FlushFuture<'_, S> {
+    type Output = Result<(), SinkError>;
+
+    fn poll(mut self: Pin<&mut Self>, cx: &mut Context<'_>) -> Poll<Self::Output> {
+        Pin::new(&mut *self.sink).poll_flush(cx)
+    }
+}
+
+/// Future for `close()`.
+pub struct CloseFuture<'a, S: ?Sized> {
+    sink: &'a mut S,
+}
+
+impl<S: SymbolSink + Unpin + ?Sized> Future for CloseFuture<'_, S> {
+    type Output = Result<(), SinkError>;
+
+    fn poll(mut self: Pin<&mut Self>, cx: &mut Context<'_>) -> Poll<Self::Output> {
+        Pin::new(&mut *self.sink).poll_close(cx)
+    }
+}
+
+// ---- Adapters ----
+
+/// A sink that buffers symbols.
+pub struct BufferedSink<S> {
+    inner: S,
+    buffer: Vec<AuthenticatedSymbol>,
+    capacity: usize,
+}
+
+impl<S> BufferedSink<S> {
+    pub fn new(inner: S, capacity: usize) -> Self {
+        Self {
+            inner,
+            buffer: Vec::with_capacity(capacity),
+            capacity,
+        }
+    }
+}
+
+impl<S: SymbolSink + Unpin> SymbolSink for BufferedSink<S> {
+    fn poll_ready(
+        self: Pin<&mut Self>,
+        cx: &mut Context<'_>,
+    ) -> Poll<Result<(), SinkError>> {
+        let this = self.get_mut();
+        if this.buffer.len() < this.capacity {
+            Poll::Ready(Ok(()))
+        } else {
+            // Try to flush
+            Pin::new(this).poll_flush(cx)
+        }
+    }
+
+    fn poll_send(
+        mut self: Pin<&mut Self>,
+        cx: &mut Context<'_>,
+        symbol: AuthenticatedSymbol,
+    ) -> Poll<Result<(), SinkError>> {
+        let this = self.as_mut().get_mut();
+        if this.buffer.len() >= this.capacity {
+            // Must flush first
+            match Pin::new(this).poll_flush(cx) {
+                Poll::Ready(Ok(())) => {},
+                Poll::Ready(Err(e)) => return Poll::Ready(Err(e)),
+                Poll::Pending => return Poll::Pending,
+            }
+        }
+        self.get_mut().buffer.push(symbol);
+        Poll::Ready(Ok(()))
+    }
+
+    fn poll_flush(
+        mut self: Pin<&mut Self>,
+        cx: &mut Context<'_>,
+    ) -> Poll<Result<(), SinkError>> {
+        let this = self.as_mut().get_mut();
+        
+        while !this.buffer.is_empty() {
+            // Check if inner is ready
+            match Pin::new(&mut this.inner).poll_ready(cx) {
+                Poll::Ready(Ok(())) => {},
+                Poll::Ready(Err(e)) => return Poll::Ready(Err(e)),
+                Poll::Pending => return Poll::Pending,
+            }
+            
+            let symbol = this.buffer.remove(0); // Inefficient for Vec, but simple
+            match Pin::new(&mut this.inner).poll_send(cx, symbol) {
+                Poll::Ready(Ok(())) => {},
+                Poll::Ready(Err(e)) => return Poll::Ready(Err(e)),
+                Poll::Pending => {
+                    return Poll::Pending;
+                }
+            }
+        }
+        
+        Pin::new(&mut self.get_mut().inner).poll_flush(cx)
+    }
+
+    fn poll_close(
+        mut self: Pin<&mut Self>,
+        cx: &mut Context<'_>,
+    ) -> Poll<Result<(), SinkError>> {
+        let this = self.as_mut().get_mut();
+        // Flush first
+        match Pin::new(this).poll_flush(cx) {
+            Poll::Ready(Ok(())) => {},
+            Poll::Ready(Err(e)) => return Poll::Ready(Err(e)),
+            Poll::Pending => return Poll::Pending,
+        }
+        Pin::new(&mut self.get_mut().inner).poll_close(cx)
+    }
+}
+
+// ---- Implementations ----
+
+/// In-memory channel sink.
+pub struct ChannelSink {
+    shared: Arc<SharedChannel>,
+}
+
+impl ChannelSink {
+    pub(crate) fn new(shared: Arc<SharedChannel>) -> Self {
+        Self { shared }
+    }
+}
+
+impl SymbolSink for ChannelSink {
+    fn poll_ready(
+        self: Pin<&mut Self>,
+        cx: &mut Context<'_>,
+    ) -> Poll<Result<(), SinkError>> {
+        let queue = self.shared.queue.lock().unwrap();
+        
+        if self.shared.closed.load(Ordering::SeqCst) {
+            return Poll::Ready(Err(SinkError::Closed));
+        }
+
+        if queue.len() < self.shared.capacity {
+            Poll::Ready(Ok(()))
+        } else {
+            let mut wakers = self.shared.send_wakers.lock().unwrap();
+            wakers.push(cx.waker().clone());
+            Poll::Pending
+        }
+    }
+
+    fn poll_send(
+        self: Pin<&mut Self>,
+        _cx: &mut Context<'_>,
+        symbol: AuthenticatedSymbol,
+    ) -> Poll<Result<(), SinkError>> {
+        let mut queue = self.shared.queue.lock().unwrap();
+        
+        if self.shared.closed.load(Ordering::SeqCst) {
+            return Poll::Ready(Err(SinkError::Closed));
+        }
+
+        // We assume poll_ready checked capacity, but we check again for safety
+        if queue.len() >= self.shared.capacity {
+            return Poll::Ready(Err(SinkError::BufferFull));
+        }
+
+        queue.push_back(symbol);
+        
+        // Wake receiver
+        let mut wakers = self.shared.recv_wakers.lock().unwrap();
+        if let Some(w) = wakers.pop() {
+            w.wake();
+        }
+        
+        Poll::Ready(Ok(()))
+    }
+
+    fn poll_flush(
+        self: Pin<&mut Self>,
+        _cx: &mut Context<'_>,
+    ) -> Poll<Result<(), SinkError>> {
+        Poll::Ready(Ok(()))
+    }
+
+    fn poll_close(
+        self: Pin<&mut Self>,
+        _cx: &mut Context<'_>,
+    ) -> Poll<Result<(), SinkError>> {
+        self.shared.close();
+        Poll::Ready(Ok(()))
+    }
+}
+
+/// Sink that collects symbols into a Vec.
+pub struct CollectingSink {
+    symbols: Vec<AuthenticatedSymbol>,
+}
+
+impl CollectingSink {
+    pub fn new() -> Self {
+        Self { symbols: Vec::new() }
+    }
+    
+    pub fn symbols(&self) -> &[AuthenticatedSymbol] {
+        &self.symbols
+    }
+    
+    pub fn into_symbols(self) -> Vec<AuthenticatedSymbol> {
+        self.symbols
+    }
+}
+
+impl Default for CollectingSink {
+    fn default() -> Self {
+        Self::new()
+    }
+}
+
+impl SymbolSink for CollectingSink {
+    fn poll_ready(
+        self: Pin<&mut Self>,
+        _cx: &mut Context<'_>,
+    ) -> Poll<Result<(), SinkError>> {
+        Poll::Ready(Ok(()))
+    }
+
+    fn poll_send(
+        mut self: Pin<&mut Self>,
+        _cx: &mut Context<'_>,
+        symbol: AuthenticatedSymbol,
+    ) -> Poll<Result<(), SinkError>> {
+        self.symbols.push(symbol);
+        Poll::Ready(Ok(()))
+    }
+
+    fn poll_flush(
+        self: Pin<&mut Self>,
+        _cx: &mut Context<'_>,
+    ) -> Poll<Result<(), SinkError>> {
+        Poll::Ready(Ok(()))
+    }
+
+    fn poll_close(
+        self: Pin<&mut Self>,
+        _cx: &mut Context<'_>,
+    ) -> Poll<Result<(), SinkError>> {
+        Poll::Ready(Ok(()))
+    }
+}

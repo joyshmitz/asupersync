@@ -250,7 +250,7 @@ impl fmt::Display for SymbolKind {
 ///
 /// The symbol stores its data inline for cache efficiency. For larger
 /// payloads or streaming scenarios, consider using `SymbolRef` (future).
-#[derive(Clone, PartialEq, Eq)]
+#[derive(Clone, PartialEq, Eq, Hash)]
 pub struct Symbol {
     /// Unique identifier for this symbol.
     id: SymbolId,

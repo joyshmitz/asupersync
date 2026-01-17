@@ -19,6 +19,7 @@ path = "src/lib.rs"
 [dependencies]
 # Phase 0: prefer std/core; avoid bringing in executors/runtimes.
 # Dependencies added here must preserve determinism in the lab runtime.
+thiserror = "1.0"
 
 [dev-dependencies]
 proptest = "1.4"

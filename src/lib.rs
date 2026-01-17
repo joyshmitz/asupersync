@@ -64,6 +64,7 @@ pub mod stream;
 pub mod sync;
 pub mod time;
 pub mod trace;
+pub mod transport;
 pub mod types;
 pub mod util;
 
