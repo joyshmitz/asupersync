@@ -218,7 +218,8 @@ impl Bulkhead {
     pub fn metrics(&self) -> BulkheadMetrics {
         let queue = self.queue.read().expect("lock poisoned");
         let active = queue.iter().filter(|e| e.result.is_none()).count() as u32;
-        let used_permits = self.policy.max_concurrent - self.available_permits.load(Ordering::SeqCst);
+        let used_permits =
+            self.policy.max_concurrent - self.available_permits.load(Ordering::SeqCst);
 
         let mut m = self.metrics.read().expect("lock poisoned").clone();
         m.active_permits = used_permits;
@@ -284,12 +285,14 @@ impl Bulkhead {
         for entry in queue.iter_mut() {
             if entry.result.is_none() && entry.weight <= available {
                 // Grant this entry
-                self.available_permits.fetch_sub(entry.weight, Ordering::SeqCst);
+                self.available_permits
+                    .fetch_sub(entry.weight, Ordering::SeqCst);
                 entry.result = Some(Ok(()));
 
                 // Record wait time
                 let wait_ms = now_millis.saturating_sub(entry.enqueued_at_millis);
-                self.total_wait_time_ms.fetch_add(wait_ms, Ordering::Relaxed);
+                self.total_wait_time_ms
+                    .fetch_add(wait_ms, Ordering::Relaxed);
 
                 {
                     let mut metrics = self.metrics.write().expect("lock poisoned");
@@ -361,7 +364,11 @@ impl Bulkhead {
     /// - `Err(QueueTimeout)` if timed out
     /// - `Err(Cancelled)` if cancelled
     #[allow(clippy::option_if_let_else, clippy::significant_drop_tightening)]
-    pub fn check_entry(&self, entry_id: u64, now: Time) -> Result<Option<BulkheadPermit>, BulkheadError<()>> {
+    pub fn check_entry(
+        &self,
+        entry_id: u64,
+        now: Time,
+    ) -> Result<Option<BulkheadPermit>, BulkheadError<()>> {
         // First process the queue to handle timeouts and grants
         let _ = self.process_queue(now);
 

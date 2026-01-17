@@ -29,6 +29,10 @@ pub mod retry;
 pub mod timeout;
 
 pub use bracket::{bracket, bracket_move, commit_section, try_commit_section, Bracket};
+pub use bulkhead::{
+    Bulkhead, BulkheadError, BulkheadMetrics, BulkheadPermit, BulkheadPolicy,
+    BulkheadPolicyBuilder, BulkheadRegistry, FullCallback,
+};
 pub use circuit_breaker::{
     CircuitBreaker, CircuitBreakerError, CircuitBreakerMetrics, CircuitBreakerPolicy,
     CircuitBreakerPolicyBuilder, FailurePredicate, Permit, SlidingWindowConfig, State,
@@ -70,8 +74,4 @@ pub use retry::{
 pub use timeout::{
     effective_deadline, make_timed_result, TimedError, TimedResult, Timeout, TimeoutConfig,
     TimeoutError,
-};
-pub use bulkhead::{
-    Bulkhead, BulkheadError, BulkheadMetrics, BulkheadPermit, BulkheadPolicy,
-    BulkheadPolicyBuilder, BulkheadRegistry, FullCallback,
 };
