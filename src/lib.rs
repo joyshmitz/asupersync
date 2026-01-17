@@ -30,6 +30,7 @@
 //! - [`channel`]: Two-phase channel primitives (MPSC, etc.)
 //! - [`observability`]: Structured logging, metrics, and diagnostic context
 //! - [`security`]: Symbol authentication and security primitives
+//! - [`time`]: Sleep and timeout primitives for time-based operations
 
 #![forbid(unsafe_code)]
 #![warn(missing_docs)]
@@ -54,6 +55,7 @@ pub mod record;
 pub mod runtime;
 pub mod security;
 pub mod sync;
+pub mod time;
 pub mod trace;
 pub mod types;
 pub mod util;
