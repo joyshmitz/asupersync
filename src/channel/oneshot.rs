@@ -46,7 +46,10 @@
 //! ```
 
 use crate::cx::Cx;
+use std::future::Future;
+use std::pin::Pin;
 use std::sync::{Arc, Mutex};
+use std::task::{Context, Poll, Waker};
 
 /// Error returned when sending fails.
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
@@ -113,6 +116,8 @@ struct OneShotInner<T> {
     receiver_dropped: bool,
     /// Whether a permit is currently outstanding.
     permit_outstanding: bool,
+    /// The waker to notify when a value is sent or the channel is closed.
+    waker: Option<Waker>,
 }
 
 impl<T> OneShotInner<T> {
@@ -122,6 +127,7 @@ impl<T> OneShotInner<T> {
             sender_consumed: false,
             receiver_dropped: false,
             permit_outstanding: false,
+            waker: None,
         }
     }
 
@@ -229,6 +235,10 @@ impl<T> Drop for Sender<T> {
         // Only mark consumed if we haven't been consumed by reserve()
         if !inner.sender_consumed {
             inner.sender_consumed = true;
+            // Notify receiver that we are gone
+            if let Some(waker) = inner.waker.take() {
+                waker.wake();
+            }
         }
     }
 }
@@ -270,6 +280,10 @@ impl<T> SendPermit<T> {
             } else {
                 inner.value = Some(value);
                 inner.permit_outstanding = false;
+                // Wake the receiver
+                if let Some(waker) = inner.waker.take() {
+                    waker.wake();
+                }
                 Ok(())
             };
             drop(inner);
@@ -288,6 +302,10 @@ impl<T> SendPermit<T> {
         {
             let mut inner = self.inner.lock().expect("oneshot lock poisoned");
             inner.permit_outstanding = false;
+            // Wake the receiver to notify of close
+            if let Some(waker) = inner.waker.take() {
+                waker.wake();
+            }
         }
         self.sent = true; // Prevent drop from double-aborting
     }
@@ -299,7 +317,47 @@ impl<T> Drop for SendPermit<T> {
             // Permit dropped without sending - abort
             let mut inner = self.inner.lock().expect("oneshot lock poisoned");
             inner.permit_outstanding = false;
+            // Wake the receiver
+            if let Some(waker) = inner.waker.take() {
+                waker.wake();
+            }
         }
+    }
+}
+
+/// Future returned by [`Receiver::recv`].
+pub struct RecvFuture<'a, T> {
+    receiver: &'a Receiver<T>,
+    cx: &'a Cx,
+}
+
+impl<'a, T> Future for RecvFuture<'a, T> {
+    type Output = Result<T, RecvError>;
+
+    fn poll(self: Pin<&mut Self>, ctx: &mut Context<'_>) -> Poll<Self::Output> {
+        let mut inner = self.receiver.inner.lock().expect("oneshot lock poisoned");
+
+        // 1. Check if value is ready
+        if let Some(value) = inner.value.take() {
+            self.cx.trace("oneshot::recv received value");
+            return Poll::Ready(Ok(value));
+        }
+
+        // 2. Check if channel is closed
+        if inner.is_closed() {
+            self.cx.trace("oneshot::recv channel closed");
+            return Poll::Ready(Err(RecvError::Closed));
+        }
+
+        // 3. Check cancellation
+        if self.cx.checkpoint().is_err() {
+            self.cx.trace("oneshot::recv cancelled while waiting");
+            return Poll::Ready(Err(RecvError::Closed));
+        }
+
+        // 4. Register waker
+        inner.waker = Some(ctx.waker().clone());
+        Poll::Pending
     }
 }
 
@@ -320,9 +378,7 @@ pub struct Receiver<T> {
 impl<T> Receiver<T> {
     /// Receives a value from the channel, waiting if necessary.
     ///
-    /// This method will block the task until either:
-    /// - A value is available (returns `Ok(value)`)
-    /// - The sender is dropped without sending (returns `Err(RecvError::Closed)`)
+    /// This method returns a future that yields the value or an error.
     ///
     /// # Cancel Safety
     ///
@@ -333,37 +389,8 @@ impl<T> Receiver<T> {
     /// # Errors
     ///
     /// Returns `Err(RecvError::Closed)` if the sender was dropped without sending.
-    pub fn recv(self, cx: &Cx) -> Result<T, RecvError> {
-        cx.trace("oneshot::recv starting wait");
-
-        loop {
-            // Check for available value or closed state
-            {
-                let mut inner = self.inner.lock().expect("oneshot lock poisoned");
-
-                if let Some(value) = inner.value.take() {
-                    cx.trace("oneshot::recv received value");
-                    return Ok(value);
-                }
-
-                if inner.is_closed() {
-                    cx.trace("oneshot::recv channel closed");
-                    return Err(RecvError::Closed);
-                }
-
-                // Still waiting for sender
-            }
-
-            // Check cancellation before waiting
-            if cx.checkpoint().is_err() {
-                cx.trace("oneshot::recv cancelled while waiting");
-                return Err(RecvError::Closed);
-            }
-
-            // Phase 0: Simple spin-wait with yield
-            // Future: integrate with scheduler via proper waker
-            std::thread::yield_now();
-        }
+    pub fn recv<'a>(&'a self, cx: &'a Cx) -> RecvFuture<'a, T> {
+        RecvFuture { receiver: self, cx }
     }
 
     /// Attempts to receive a value without blocking.
@@ -372,7 +399,7 @@ impl<T> Receiver<T> {
     ///
     /// - `TryRecvError::Empty` if no value is available yet but sender exists
     /// - `TryRecvError::Closed` if the sender was dropped without sending
-    pub fn try_recv(self) -> Result<T, TryRecvError> {
+    pub fn try_recv(&self) -> Result<T, TryRecvError> {
         let mut inner = self.inner.lock().expect("oneshot lock poisoned");
 
         inner.value.take().map_or_else(
@@ -416,6 +443,9 @@ mod tests {
     use crate::types::Budget;
     use crate::util::ArenaIndex;
     use crate::{RegionId, TaskId};
+    use std::future::Future;
+    use std::pin::Pin;
+    use std::task::{Context, Poll, Waker};
 
     fn test_cx() -> Cx {
         Cx::new(
@@ -425,13 +455,29 @@ mod tests {
         )
     }
 
+    fn block_on<F: Future>(f: F) -> F::Output {
+        struct NoopWaker;
+        impl std::task::Wake for NoopWaker {
+            fn wake(self: std::sync::Arc<Self>) {}
+        }
+        let waker = Waker::from(std::sync::Arc::new(NoopWaker));
+        let mut cx = Context::from_waker(&waker);
+        let mut pinned = Box::pin(f);
+        loop {
+            match pinned.as_mut().poll(&mut cx) {
+                Poll::Ready(v) => return v,
+                Poll::Pending => std::thread::yield_now(),
+            }
+        }
+    }
+
     #[test]
     fn basic_send_recv() {
         let cx = test_cx();
         let (tx, rx) = channel::<i32>();
 
         tx.send(&cx, 42).expect("send should succeed");
-        let value = rx.recv(&cx).expect("recv should succeed");
+        let value = block_on(rx.recv(&cx)).expect("recv should succeed");
         assert_eq!(value, 42);
     }
 
@@ -443,7 +489,7 @@ mod tests {
         let permit = tx.reserve(&cx);
         permit.send(42).expect("send should succeed");
 
-        let value = rx.recv(&cx).expect("recv should succeed");
+        let value = block_on(rx.recv(&cx)).expect("recv should succeed");
         assert_eq!(value, 42);
     }
 
@@ -578,7 +624,7 @@ mod tests {
         let (tx, rx) = channel::<NonClone>();
 
         tx.send(&cx, NonClone(42)).expect("send should succeed");
-        let value = rx.recv(&cx).expect("recv should succeed");
+        let value = block_on(rx.recv(&cx)).expect("recv should succeed");
         assert_eq!(value.0, 42);
     }
 
@@ -609,7 +655,7 @@ mod tests {
         // before hitting the checkpoint in the wait loop
 
         // First iteration finds the value
-        let result = rx.recv(&cx);
+        let result = block_on(rx.recv(&cx));
         assert!(result.is_ok());
         assert_eq!(result.unwrap(), 42);
     }
@@ -624,7 +670,7 @@ mod tests {
         cx.set_cancel_requested(true);
 
         // Don't send anything, so recv will hit checkpoint
-        let err = rx.recv(&cx);
+        let err = block_on(rx.recv(&cx));
         assert!(matches!(err, Err(RecvError::Closed)));
 
         // Sender should still be usable

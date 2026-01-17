@@ -103,7 +103,7 @@ use core::fmt;
 /// Payload from a caught panic.
 ///
 /// This wraps the panic value for safe transport across task boundaries.
-#[derive(Debug, Clone)]
+#[derive(Debug, Clone, PartialEq, Eq)]
 pub struct PanicPayload {
     message: String,
 }

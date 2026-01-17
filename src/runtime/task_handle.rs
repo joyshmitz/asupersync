@@ -5,22 +5,22 @@
 
 use crate::channel::oneshot;
 use crate::cx::Cx;
-use crate::types::TaskId;
+use crate::types::{CancelReason, PanicPayload, TaskId};
 
 /// Error returned when joining a spawned task fails.
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub enum JoinError {
     /// The task was cancelled before completion.
-    Cancelled,
+    Cancelled(CancelReason),
     /// The task panicked.
-    Panicked,
+    Panicked(PanicPayload),
 }
 
 impl std::fmt::Display for JoinError {
     fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
         match self {
-            Self::Cancelled => write!(f, "task was cancelled"),
-            Self::Panicked => write!(f, "task panicked"),
+            Self::Cancelled(reason) => write!(f, "task was cancelled: {reason}"),
+            Self::Panicked(payload) => write!(f, "task panicked: {payload}"),
         }
     }
 }
@@ -49,7 +49,7 @@ impl std::error::Error for JoinError {}
 ///
 /// ```ignore
 /// let handle = scope.spawn(&mut state, cx, async { 42 });
-/// let result = handle.join(cx)?;
+/// let result = handle.join(cx).await?;
 /// assert_eq!(result, 42);
 /// ```
 #[derive(Debug)]
@@ -80,8 +80,7 @@ impl<T> TaskHandle<T> {
 
     /// Waits for the task to complete and returns its result.
     ///
-    /// This method blocks the current task until the spawned task completes,
-    /// then returns its output value.
+    /// This method yields until the spawned task completes, then returns its output value.
     ///
     /// # Errors
     ///
@@ -97,16 +96,17 @@ impl<T> TaskHandle<T> {
     ///
     /// ```ignore
     /// let handle = scope.spawn(&mut state, cx, async { 42 });
-    /// match handle.join(cx) {
+    /// match handle.join(cx).await {
     ///     Ok(value) => println!("Task returned: {value}"),
-    ///     Err(JoinError::Cancelled) => println!("Task was cancelled"),
-    ///     Err(JoinError::Panicked) => println!("Task panicked"),
+    ///     Err(JoinError::Cancelled(r)) => println!("Task was cancelled: {r}"),
+    ///     Err(JoinError::Panicked(p)) => println!("Task panicked: {p}"),
     /// }
     /// ```
-    pub fn join(self, cx: &Cx) -> Result<T, JoinError> {
+    pub async fn join(&self, cx: &Cx) -> Result<T, JoinError> {
         self.receiver
             .recv(cx)
-            .unwrap_or_else(|_| Err(JoinError::Cancelled))
+            .await
+            .unwrap_or_else(|_| Err(JoinError::Cancelled(CancelReason::race_loser())))
     }
 
     /// Attempts to get the task's result without waiting.
@@ -117,13 +117,13 @@ impl<T> TaskHandle<T> {
     /// - `Ok(None)` if the task is still running
     /// - `Err(JoinError)` if the task was cancelled or panicked
     pub fn try_join(&self) -> Result<Option<T>, JoinError> {
-        // Note: try_recv consumes self in oneshot, so we need is_ready first
-        if !self.receiver.is_ready() {
-            return Ok(None);
+        match self.receiver.try_recv() {
+            Ok(result) => Ok(Some(result?)),
+            Err(oneshot::TryRecvError::Empty) => Ok(None),
+            Err(oneshot::TryRecvError::Closed) => {
+                Err(JoinError::Cancelled(CancelReason::race_loser()))
+            }
         }
-        // Can't actually try_recv without consuming, so this is a limitation
-        // In full implementation, we'd use a different pattern
-        Ok(None)
     }
 
     /// Aborts the task (requests cancellation).
@@ -147,6 +147,9 @@ mod tests {
     use super::*;
     use crate::types::Budget;
     use crate::util::ArenaIndex;
+    use std::future::Future;
+    use std::pin::Pin;
+    use std::task::{Context, Poll, Waker};
 
     fn test_cx() -> Cx {
         Cx::new(
@@ -154,6 +157,22 @@ mod tests {
             TaskId::from_arena(ArenaIndex::new(0, 0)),
             Budget::INFINITE,
         )
+    }
+
+    fn block_on<F: Future>(f: F) -> F::Output {
+        struct NoopWaker;
+        impl std::task::Wake for NoopWaker {
+            fn wake(self: std::sync::Arc<Self>) {}
+        }
+        let waker = Waker::from(std::sync::Arc::new(NoopWaker));
+        let mut cx = Context::from_waker(&waker);
+        let mut pinned = Box::pin(f);
+        loop {
+            match pinned.as_mut().poll(&mut cx) {
+                Poll::Ready(v) => return v,
+                Poll::Pending => std::thread::yield_now(),
+            }
+        }
     }
 
     #[test]
@@ -170,7 +189,7 @@ mod tests {
         tx.send(&cx, Ok::<i32, JoinError>(42)).expect("send failed");
 
         // Join should succeed
-        let result = handle.join(&cx);
+        let result = block_on(handle.join(&cx));
         assert_eq!(result, Ok(42));
     }
 
@@ -183,11 +202,22 @@ mod tests {
         let handle = TaskHandle::new(task_id, rx);
 
         // Send a cancelled result
-        tx.send(&cx, Err::<i32, JoinError>(JoinError::Cancelled))
-            .expect("send failed");
+        tx.send(
+            &cx,
+            Err::<i32, JoinError>(JoinError::Cancelled(CancelReason::race_loser())),
+        )
+        .expect("send failed");
 
-        let result = handle.join(&cx);
-        assert_eq!(result, Err(JoinError::Cancelled));
+        let result = block_on(handle.join(&cx));
+        match result {
+            Err(JoinError::Cancelled(r)) => {
+                assert!(matches!(
+                    r.kind,
+                    crate::types::CancelKind::RaceLost
+                ));
+            }
+            _ => panic!("expected Cancelled"),
+        }
     }
 
     #[test]
@@ -198,16 +228,29 @@ mod tests {
 
         let handle = TaskHandle::new(task_id, rx);
 
-        tx.send(&cx, Err::<i32, JoinError>(JoinError::Panicked))
-            .expect("send failed");
+        tx.send(
+            &cx,
+            Err::<i32, JoinError>(JoinError::Panicked(PanicPayload::new("boom"))),
+        )
+        .expect("send failed");
 
-        let result = handle.join(&cx);
-        assert_eq!(result, Err(JoinError::Panicked));
+        let result = block_on(handle.join(&cx));
+        match result {
+            Err(JoinError::Panicked(p)) => {
+                assert!(p.to_string().contains("boom"));
+            }
+            _ => panic!("expected Panicked"),
+        }
     }
 
     #[test]
     fn join_error_display() {
-        assert_eq!(JoinError::Cancelled.to_string(), "task was cancelled");
-        assert_eq!(JoinError::Panicked.to_string(), "task panicked");
+        let cancelled = JoinError::Cancelled(CancelReason::user("stop"));
+        assert!(cancelled.to_string().contains("task was cancelled"));
+        assert!(cancelled.to_string().contains("stop"));
+
+        let panicked = JoinError::Panicked(PanicPayload::new("crash"));
+        assert!(panicked.to_string().contains("task panicked"));
+        assert!(panicked.to_string().contains("crash"));
     }
 }

@@ -4,6 +4,7 @@
 //!
 //! - [`join`]: Run multiple operations in parallel, waiting for all
 //! - [`race`]: Run multiple operations in parallel, first wins
+//! - [`select`]: Wait for the first of two futures
 //! - [`timeout`]: Add a deadline to an operation
 //! - [`bracket`]: Acquire/use/release resource safety pattern
 //! - [`retry`]: Retry with exponential backoff
@@ -64,7 +65,8 @@ pub use quorum::{
 };
 pub use race::{
     make_race_all_result, race2_outcomes, race2_to_result, race_all_outcomes, race_all_to_result,
-    Race, Race2Result, RaceAll, RaceAllError, RaceAllResult, RaceError, RaceResult, RaceWinner,
+    Either, Race, Race2Result, RaceAll, RaceAllError, RaceAllResult, RaceError, RaceResult,
+    RaceWinner, Select,
 };
 pub use retry::{
     calculate_deadline as retry_deadline, calculate_delay, make_retry_result, total_delay_budget,
