@@ -352,6 +352,7 @@ mod tests {
     }
 
     #[test]
+    #[allow(clippy::cast_sign_loss)] // i is always non-negative in 0..10000
     fn large_data_works() {
         let key = AuthKey::from_seed(42);
         let data: Vec<u8> = (0..10000).map(|i| (i % 256) as u8).collect();

@@ -471,7 +471,7 @@ mod tests {
         let mut stats = AuthStats::new();
 
         // Empty stats
-        assert_eq!(stats.success_rate(), 0.0);
+        assert!(stats.success_rate().abs() < f64::EPSILON);
 
         // 100% success
         stats.verifications_attempted = 10;

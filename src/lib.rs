@@ -61,7 +61,7 @@ pub mod util;
 // Re-exports for convenient access to core types
 pub use cx::{Cx, Scope};
 pub use error::{
-    AcquireError, BackoffHint, Error, ErrorCategory, ErrorKind, RecoveryAction, Recoverability,
+    AcquireError, BackoffHint, Error, ErrorCategory, ErrorKind, Recoverability, RecoveryAction,
     RecvError, Result, ResultExt, SendError,
 };
 pub use lab::{LabConfig, LabRuntime};

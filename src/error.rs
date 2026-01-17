@@ -1084,10 +1084,7 @@ mod tests {
 
     #[test]
     fn recovery_action_custom() {
-        assert_eq!(
-            ErrorKind::User.recovery_action(),
-            RecoveryAction::Custom
-        );
+        assert_eq!(ErrorKind::User.recovery_action(), RecoveryAction::Custom);
         assert_eq!(
             ErrorKind::DecodingFailed.recovery_action(),
             RecoveryAction::Custom
@@ -1102,14 +1099,17 @@ mod tests {
         assert!(BackoffHint::QUICK.initial_delay_ms < BackoffHint::DEFAULT.initial_delay_ms);
 
         // Default impl works
-        let hint: BackoffHint = Default::default();
+        let hint = BackoffHint::default();
         assert_eq!(hint, BackoffHint::DEFAULT);
     }
 
     #[test]
     fn error_recovery_action_delegates() {
         let err = Error::new(ErrorKind::ConnectionLost);
-        assert_eq!(err.recovery_action(), RecoveryAction::RetryWithNewConnection);
+        assert_eq!(
+            err.recovery_action(),
+            RecoveryAction::RetryWithNewConnection
+        );
 
         let err = Error::new(ErrorKind::Internal);
         assert_eq!(err.recovery_action(), RecoveryAction::Escalate);
