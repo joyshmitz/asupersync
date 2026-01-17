@@ -164,7 +164,11 @@ impl<T> Sender<T> {
     ///
     /// Returns `SendError::Closed(value)` if all receivers have been dropped.
     pub fn send(&self, value: T) -> Result<(), SendError<T>> {
-        let receiver_count = *self.inner.receiver_count.lock().expect("watch lock poisoned");
+        let receiver_count = *self
+            .inner
+            .receiver_count
+            .lock()
+            .expect("watch lock poisoned");
 
         // Check if anyone is listening (receiver_count includes implicit sender subscription)
         if receiver_count == 0 {
@@ -195,7 +199,11 @@ impl<T> Sender<T> {
     where
         F: FnOnce(&mut T),
     {
-        let receiver_count = *self.inner.receiver_count.lock().expect("watch lock poisoned");
+        let receiver_count = *self
+            .inner
+            .receiver_count
+            .lock()
+            .expect("watch lock poisoned");
 
         if receiver_count == 0 {
             return Err(ModifyError);
@@ -228,7 +236,11 @@ impl<T> Sender<T> {
     #[must_use]
     pub fn subscribe(&self) -> Receiver<T> {
         {
-            let mut count = self.inner.receiver_count.lock().expect("watch lock poisoned");
+            let mut count = self
+                .inner
+                .receiver_count
+                .lock()
+                .expect("watch lock poisoned");
             *count += 1;
         }
 
@@ -242,13 +254,22 @@ impl<T> Sender<T> {
     /// Returns the number of active receivers (excluding sender).
     #[must_use]
     pub fn receiver_count(&self) -> usize {
-        *self.inner.receiver_count.lock().expect("watch lock poisoned")
+        *self
+            .inner
+            .receiver_count
+            .lock()
+            .expect("watch lock poisoned")
     }
 
     /// Returns true if all receivers have been dropped.
     #[must_use]
     pub fn is_closed(&self) -> bool {
-        *self.inner.receiver_count.lock().expect("watch lock poisoned") == 0
+        *self
+            .inner
+            .receiver_count
+            .lock()
+            .expect("watch lock poisoned")
+            == 0
     }
 }
 
@@ -373,7 +394,11 @@ impl<T> Receiver<T> {
 impl<T> Clone for Receiver<T> {
     fn clone(&self) -> Self {
         {
-            let mut count = self.inner.receiver_count.lock().expect("watch lock poisoned");
+            let mut count = self
+                .inner
+                .receiver_count
+                .lock()
+                .expect("watch lock poisoned");
             *count += 1;
         }
         Self {
@@ -385,7 +410,11 @@ impl<T> Clone for Receiver<T> {
 
 impl<T> Drop for Receiver<T> {
     fn drop(&mut self) {
-        let mut count = self.inner.receiver_count.lock().expect("watch lock poisoned");
+        let mut count = self
+            .inner
+            .receiver_count
+            .lock()
+            .expect("watch lock poisoned");
         *count = count.saturating_sub(1);
     }
 }
@@ -527,16 +556,18 @@ mod tests {
         let cx = test_cx();
         let (tx, mut rx1) = channel(0);
         let mut rx2 = rx1.clone();
-        let rx3 = tx.subscribe();
 
         tx.send(42).expect("send failed");
 
-        // All receivers see the update
+        // Subscribe AFTER send - rx3 starts at current version (1)
+        let rx3 = tx.subscribe();
+
+        // rx1 and rx2 see the update (they were created before send)
         rx1.changed(&cx).expect("changed failed");
         rx2.changed(&cx).expect("changed failed");
 
         // rx3 was subscribed after send, so it already sees version 1
-        // but its seen_version was set to current (1), so no change
+        // and its seen_version was set to current (1), so no change pending
         assert!(!rx3.has_changed());
 
         assert_eq!(*rx1.borrow(), 42);
