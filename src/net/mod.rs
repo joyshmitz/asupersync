@@ -22,6 +22,10 @@ use std::sync::{Arc, Mutex};
 use std::task::{Context, Poll};
 use std::time::Duration;
 
+mod udp;
+
+pub use udp::{RecvStream, SendSink, UdpSocket};
+
 /// A TCP listener.
 #[derive(Debug)]
 pub struct TcpListener {
@@ -111,11 +115,7 @@ impl TcpStream {
 
     /// Sets the keepalive option for this socket.
     pub fn set_keepalive(&self, keepalive: Option<Duration>) -> io::Result<()> {
-        let _ = keepalive;
-        Err(io::Error::new(
-            io::ErrorKind::Unsupported,
-            "TcpStream::set_keepalive is not supported on this toolchain",
-        ))
+        (&*self.inner).set_keepalive(keepalive)
     }
 
     /// Returns a cancel-safe write permit for this stream.

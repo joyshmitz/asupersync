@@ -23,6 +23,8 @@ thiserror = "1.0"
 crossbeam-deque = "0.8"
 crossbeam-queue = "0.3"
 parking_lot = "0.12"
+polling = "3.3"
+slab = "0.4"
 
 [dev-dependencies]
 proptest = "1.4"
