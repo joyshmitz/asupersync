@@ -4,11 +4,17 @@
 //! across different transport mechanisms (TCP, UDP, in-memory, etc.).
 
 pub mod error;
+pub mod router;
 pub mod sink;
 pub mod stream;
 mod tests;
 
 pub use error::{SinkError, StreamError};
+pub use router::{
+    DispatchConfig, DispatchError, DispatchResult, DispatchStrategy, Endpoint, EndpointId,
+    EndpointState, LoadBalanceStrategy, LoadBalancer, RouteKey, RouteResult, RoutingEntry,
+    RoutingError, RoutingTable, SymbolDispatcher, SymbolRouter,
+};
 pub use sink::{SymbolSink, SymbolSinkExt};
 pub use stream::{SymbolStream, SymbolStreamExt};
 
