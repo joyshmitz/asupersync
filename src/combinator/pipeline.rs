@@ -394,7 +394,7 @@ pub fn stage_outcome_to_result<T, E>(
 /// use asupersync::types::Outcome;
 ///
 /// // Both stages succeed
-/// let result = pipeline2_outcomes(
+/// let result = pipeline2_outcomes::<i32, &str>(
 ///     Outcome::Ok(1),
 ///     Some(Outcome::Ok(2)),
 /// );
@@ -447,7 +447,7 @@ pub fn pipeline2_outcomes<T, E>(
 /// use asupersync::types::Outcome;
 ///
 /// // All stages succeed
-/// let result = pipeline3_outcomes(
+/// let result = pipeline3_outcomes::<i32, &str>(
 ///     Outcome::Ok(1),
 ///     Some(Outcome::Ok(2)),
 ///     Some(Outcome::Ok(3)),
@@ -534,23 +534,47 @@ pub fn pipeline_n_outcomes<T, E>(
     assert!(!outcomes.is_empty(), "outcomes must not be empty");
     assert!(outcomes.len() <= total_stages, "more outcomes than stages");
 
+    let num_provided = outcomes.len();
+    let mut last_ok_value: Option<T> = None;
+
     for (index, outcome) in outcomes.into_iter().enumerate() {
-        if let Some(result) = stage_outcome_to_result(outcome, index, total_stages) {
-            return result;
-        }
-        // If this was the last provided outcome and it succeeded, check if we're done
-        if index + 1 == total_stages {
-            // This was the final stage and it succeeded
-            // But we've already consumed the outcome, so we can't get the value
-            // This function design requires rethinking for the final value case
+        match outcome {
+            Outcome::Ok(v) => {
+                // Track the last Ok value
+                last_ok_value = Some(v);
+            }
+            Outcome::Err(e) => {
+                return PipelineResult::failed(
+                    PipelineError::StageError(e),
+                    FailedStage { index, total_stages },
+                );
+            }
+            Outcome::Cancelled(r) => {
+                return PipelineResult::cancelled(r, FailedStage { index, total_stages });
+            }
+            Outcome::Panicked(p) => {
+                return PipelineResult::panicked(p, FailedStage { index, total_stages });
+            }
         }
     }
 
-    // If we reach here, all provided outcomes were Ok
-    // This is actually a design issue - we've consumed the outcomes
-    // For now, return a completed result with a default stage count
-    // In practice, the caller should track the final value separately
-    unreachable!("pipeline_n_outcomes consumed all Ok outcomes without returning a value - use pipeline_n_with_value instead")
+    // All provided outcomes were Ok
+    // Check if we've covered all stages
+    if num_provided == total_stages {
+        // All stages complete - return with final value
+        PipelineResult::completed(
+            last_ok_value.expect("at least one outcome was provided"),
+            total_stages,
+        )
+    } else {
+        // Partial pipeline - all provided stages succeeded but more remain
+        // This is a valid state: caller may be building incrementally
+        // Return completed with stages_executed showing partial completion
+        PipelineResult::completed(
+            last_ok_value.expect("at least one outcome was provided"),
+            num_provided,
+        )
+    }
 }
 
 /// Creates a pipeline result from a vector of outcomes, with the final value provided separately.

@@ -493,7 +493,7 @@ impl CircuitBreaker {
 
         // Check sliding window after recording success - may trigger open
         // if failure rate threshold is exceeded once minimum_calls is reached
-        let window_triggered = self.sliding_window.as_ref().map_or(false, |window| {
+        let window_triggered = self.sliding_window.as_ref().is_some_and(|window| {
             let mut w = window.write().expect("lock poisoned");
             w.record_success(now_millis);
             w.should_open()
