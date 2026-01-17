@@ -262,7 +262,7 @@ impl Default for ResourceLimits {
 }
 
 /// Current resource usage.
-#[derive(Debug, Clone, Copy, Default)]
+#[derive(Debug, Clone, Copy, Default, PartialEq, Eq)]
 pub struct ResourceUsage {
     pub symbol_memory: usize,
     pub encoding_ops: usize,
@@ -528,5 +528,91 @@ fn notify_limit_exceeded(inner: &ResourceTrackerInner, projected: &ResourceUsage
         for obs in &inner.observers {
             obs.on_limit_exceeded(ResourceKind::SymbolsInFlight);
         }
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[test]
+    fn test_pool_allocate_deallocate() {
+        let mut pool = SymbolPool::new(PoolConfig::default());
+        let buf = pool.allocate().expect("should allocate");
+        assert_eq!(buf.len(), 1024);
+        pool.deallocate(buf);
+        assert_eq!(pool.stats.allocations, 1);
+        assert_eq!(pool.stats.deallocations, 1);
+        assert_eq!(pool.stats.current_usage, 0);
+    }
+
+    #[test]
+    fn test_pool_exhaustion() {
+        let config = PoolConfig {
+            initial_size: 1,
+            max_size: 1,
+            allow_growth: false,
+            ..Default::default()
+        };
+        let mut pool = SymbolPool::new(config);
+        let _buf1 = pool.allocate().expect("should allocate");
+        assert!(pool.allocate().is_err());
+        assert_eq!(pool.stats.pool_misses, 1);
+    }
+
+    #[test]
+    fn test_pool_growth() {
+        let config = PoolConfig {
+            initial_size: 1,
+            max_size: 5,
+            growth_increment: 2,
+            allow_growth: true,
+            ..Default::default()
+        };
+        let mut pool = SymbolPool::new(config);
+        let _buf1 = pool.allocate().expect("1");
+        let _buf2 = pool.allocate().expect("2"); // triggers growth
+        let _buf3 = pool.allocate().expect("3");
+        assert_eq!(pool.stats.growth_events, 1);
+        assert_eq!(pool.stats.current_usage, 3);
+    }
+
+    #[test]
+    fn test_resource_tracker_acquire_release() {
+        let limits = ResourceLimits {
+            max_encoding_ops: 2,
+            ..Default::default()
+        };
+        let tracker = ResourceTracker::new(limits);
+
+        let g1 = tracker.try_acquire_encoding(100).expect("1");
+        assert_eq!(tracker.usage().encoding_ops, 1);
+        
+        let g2 = tracker.try_acquire_encoding(100).expect("2");
+        assert_eq!(tracker.usage().encoding_ops, 2);
+
+        assert!(tracker.try_acquire_encoding(100).is_err());
+
+        drop(g1);
+        assert_eq!(tracker.usage().encoding_ops, 1);
+        
+        let _g3 = tracker.try_acquire_encoding(100).expect("3");
+    }
+
+    #[test]
+    fn test_resource_pressure() {
+        let limits = ResourceLimits {
+            max_symbol_memory: 100,
+            ..Default::default()
+        };
+        let tracker = ResourceTracker::new(limits);
+
+        assert_eq!(tracker.pressure(), 0.0);
+
+        let _g1 = tracker.try_acquire(ResourceUsage { symbol_memory: 50, ..Default::default() }).unwrap();
+        assert_eq!(tracker.pressure(), 0.5);
+
+        let _g2 = tracker.try_acquire(ResourceUsage { symbol_memory: 50, ..Default::default() }).unwrap();
+        assert_eq!(tracker.pressure(), 1.0);
     }
 }
