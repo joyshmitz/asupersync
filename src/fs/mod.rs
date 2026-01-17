@@ -40,11 +40,22 @@
 //! - **Future**: io_uring on Linux for true async I/O
 
 mod file;
+mod metadata;
 mod open_options;
+mod path_ops;
 
 pub use file::File;
+pub use metadata::{FileType, Metadata, Permissions};
 pub use open_options::OpenOptions;
+pub use path_ops::{
+    canonicalize, copy, hard_link, metadata, read, read_link, read_to_string, remove_file, rename,
+    set_permissions, symlink_metadata, write,
+};
 
-// Re-export std types used in the API
-pub use std::fs::{FileType, Metadata, Permissions};
+#[cfg(unix)]
+pub use path_ops::symlink;
+
+#[cfg(windows)]
+pub use path_ops::{symlink_dir, symlink_file};
+
 pub use std::io::SeekFrom;
