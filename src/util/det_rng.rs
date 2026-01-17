@@ -68,6 +68,21 @@ impl DetRng {
             slice.swap(i, j);
         }
     }
+
+    /// Fills a byte slice with pseudo-random data.
+    pub fn fill_bytes(&mut self, dest: &mut [u8]) {
+        let mut chunks = dest.chunks_exact_mut(8);
+        for chunk in &mut chunks {
+            let n = self.next_u64();
+            chunk.copy_from_slice(&n.to_le_bytes());
+        }
+        let remainder = chunks.into_remainder();
+        if !remainder.is_empty() {
+            let n = self.next_u64();
+            let bytes = n.to_le_bytes();
+            remainder.copy_from_slice(&bytes[..remainder.len()]);
+        }
+    }
 }
 
 #[cfg(test)]
