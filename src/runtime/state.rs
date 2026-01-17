@@ -143,6 +143,7 @@ impl RuntimeState {
 
         // Create the task's capability context
         let cx = crate::cx::Cx::new(region, task_id, budget);
+        let cx_weak = std::sync::Arc::downgrade(&cx.inner);
         
         // Link the shared state to the TaskRecord
         if let Some(record) = self.tasks.get_mut(idx) {
@@ -161,7 +162,7 @@ impl RuntimeState {
             .insert(task_id, StoredTask::new(wrapped_future));
 
         // Create the TaskHandle
-        let handle = crate::runtime::TaskHandle::new(task_id, result_rx);
+        let handle = crate::runtime::TaskHandle::new(task_id, result_rx, cx_weak);
 
         (task_id, handle)
     }

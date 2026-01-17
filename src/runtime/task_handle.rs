@@ -5,7 +5,8 @@
 
 use crate::channel::oneshot;
 use crate::cx::Cx;
-use crate::types::{CancelReason, PanicPayload, TaskId};
+use crate::types::{CancelReason, CxInner, PanicPayload, TaskId};
+use std::sync::{RwLock, Weak};
 
 /// Error returned when joining a spawned task fails.
 #[derive(Debug, Clone, PartialEq, Eq)]
@@ -58,12 +59,22 @@ pub struct TaskHandle<T> {
     task_id: TaskId,
     /// Receiver for the task's result.
     receiver: oneshot::Receiver<Result<T, JoinError>>,
+    /// Weak reference to the task's context state for cancellation.
+    inner: Weak<RwLock<CxInner>>,
 }
 
 impl<T> TaskHandle<T> {
     /// Creates a new TaskHandle (internal use).
-    pub(crate) fn new(task_id: TaskId, receiver: oneshot::Receiver<Result<T, JoinError>>) -> Self {
-        Self { task_id, receiver }
+    pub(crate) fn new(
+        task_id: TaskId,
+        receiver: oneshot::Receiver<Result<T, JoinError>>,
+        inner: Weak<RwLock<CxInner>>,
+    ) -> Self {
+        Self {
+            task_id,
+            receiver,
+            inner,
+        }
     }
 
     /// Returns the task ID of the spawned task.
@@ -130,15 +141,12 @@ impl<T> TaskHandle<T> {
     ///
     /// This is a request - the task may not stop immediately. The task
     /// will observe the cancellation at its next checkpoint.
-    ///
-    /// # Note
-    ///
-    /// In Phase 0, this is a placeholder. Full implementation requires
-    /// access to the RuntimeState to request cancellation.
     pub fn abort(&self) {
-        // In full implementation:
-        // state.cancel_request(region_of_task, CancelReason::user("abort"));
-        // For now, this is a no-op placeholder
+        if let Some(inner) = self.inner.upgrade() {
+            if let Ok(mut lock) = inner.write() {
+                lock.cancel_requested = true;
+            }
+        }
     }
 }
 
@@ -180,7 +188,7 @@ mod tests {
         let task_id = TaskId::from_arena(ArenaIndex::new(1, 0));
         let (tx, rx) = oneshot::channel::<Result<i32, JoinError>>();
 
-        let handle = TaskHandle::new(task_id, rx);
+        let handle = TaskHandle::new(task_id, rx, std::sync::Weak::new());
         assert_eq!(handle.task_id(), task_id);
         assert!(!handle.is_finished());
 
@@ -198,7 +206,7 @@ mod tests {
         let task_id = TaskId::from_arena(ArenaIndex::new(1, 0));
         let (tx, rx) = oneshot::channel::<Result<i32, JoinError>>();
 
-        let handle = TaskHandle::new(task_id, rx);
+        let handle = TaskHandle::new(task_id, rx, std::sync::Weak::new());
 
         // Send a cancelled result
         tx.send(
@@ -225,7 +233,7 @@ mod tests {
         let task_id = TaskId::from_arena(ArenaIndex::new(1, 0));
         let (tx, rx) = oneshot::channel::<Result<i32, JoinError>>();
 
-        let handle = TaskHandle::new(task_id, rx);
+        let handle = TaskHandle::new(task_id, rx, std::sync::Weak::new());
 
         tx.send(
             &cx,

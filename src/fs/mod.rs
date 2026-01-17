@@ -39,11 +39,14 @@
 //! - **Phase 1+**: Use `spawn_blocking` for thread pool offload
 //! - **Future**: io_uring on Linux for true async I/O
 
+mod dir;
 mod file;
 mod metadata;
 mod open_options;
 mod path_ops;
+mod read_dir;
 
+pub use dir::{create_dir, create_dir_all, remove_dir, remove_dir_all};
 pub use file::File;
 pub use metadata::{FileType, Metadata, Permissions};
 pub use open_options::OpenOptions;
@@ -51,6 +54,7 @@ pub use path_ops::{
     canonicalize, copy, hard_link, metadata, read, read_link, read_to_string, remove_file, rename,
     set_permissions, symlink_metadata, write,
 };
+pub use read_dir::{read_dir, DirEntry, ReadDir};
 
 #[cfg(unix)]
 pub use path_ops::symlink;

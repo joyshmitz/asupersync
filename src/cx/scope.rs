@@ -12,6 +12,7 @@ use crate::runtime::{RuntimeState, StoredTask};
 use crate::types::{Budget, Policy, RegionId, TaskId};
 use std::future::Future;
 use std::marker::PhantomData;
+use std::sync::Arc;
 
 /// A scope for spawning work within a region.
 ///
@@ -106,11 +107,11 @@ impl<P: Policy> Scope<'_, P> {
         // Create task record
         let task_id = self.create_task_record(state);
 
-        // Create the TaskHandle
-        let handle = TaskHandle::new(task_id, rx);
-
         // Create the child task's capability context
         let child_cx = Cx::new(self.region, task_id, self.budget);
+
+        // Create the TaskHandle
+        let handle = TaskHandle::new(task_id, rx, Arc::downgrade(&child_cx.inner));
 
         // Set the shared inner state in the TaskRecord
         // This links the user-facing Cx to the runtime's TaskRecord
@@ -242,11 +243,11 @@ impl<P: Policy> Scope<'_, P> {
         // Create task record
         let task_id = self.create_task_record(state);
 
-        // Create the TaskHandle
-        let handle = TaskHandle::new(task_id, rx);
-
         // Create the child task's capability context
         let child_cx = Cx::new(self.region, task_id, self.budget);
+
+        // Create the TaskHandle
+        let handle = TaskHandle::new(task_id, rx, Arc::downgrade(&child_cx.inner));
 
         // Set the shared inner state in the TaskRecord
         if let Some(record) = state.tasks.get_mut(task_id.arena_index()) {
@@ -602,6 +603,52 @@ mod tests {
         match join_fut.as_mut().poll(&mut ctx) {
             Poll::Ready(Ok(val)) => assert_eq!(val, 42),
             _ => panic!("Expected Ready(Ok(42))"),
+        }
+    }
+
+    #[test]
+    fn spawn_abort_cancels_task() {
+        use std::task::{Context, Poll, Waker};
+        use std::sync::Arc;
+
+        struct NoopWaker;
+        impl std::task::Wake for NoopWaker {
+            fn wake(self: Arc<Self>) {}
+        }
+
+        let mut state = RuntimeState::new();
+        let cx = test_cx();
+        let region = state.create_root_region(Budget::INFINITE);
+        let scope = test_scope(region, Budget::INFINITE);
+
+        // Spawn a task that checks for cancellation
+        let (handle, mut stored_task) = scope.spawn(&mut state, &cx, |cx| async move {
+            // We expect to be cancelled immediately because abort() is called before we run
+            if cx.checkpoint().is_err() {
+                return "cancelled";
+            }
+            "finished"
+        });
+
+        // Abort the task via handle
+        handle.abort();
+
+        // Drive the task
+        let waker = Waker::from(Arc::new(NoopWaker));
+        let mut ctx = Context::from_waker(&waker);
+
+        // Task should run, see cancellation, and return "cancelled"
+        match stored_task.poll(&mut ctx) {
+            Poll::Ready(()) => {},
+            Poll::Pending => panic!("Task should have completed"),
+        }
+
+        // Check result via handle
+        let mut join_fut = Box::pin(handle.join(&cx));
+        match join_fut.as_mut().poll(&mut ctx) {
+            Poll::Ready(Ok(val)) => assert_eq!(val, "cancelled"),
+            Poll::Ready(Err(e)) => panic!("Task failed unexpectedly: {e}"),
+            Poll::Pending => panic!("Join should be ready"),
         }
     }
 }
