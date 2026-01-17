@@ -444,4 +444,27 @@ mod tests {
         assert!(region_record.task_ids().contains(&handle2.task_id()));
         assert!(region_record.task_ids().contains(&handle3.task_id()));
     }
+
+    #[test]
+    fn spawn_into_closing_region_should_fail() {
+        use crate::types::CancelReason;
+
+        let mut state = RuntimeState::new();
+        let cx = test_cx();
+        let region = state.create_root_region(Budget::INFINITE);
+        let scope = test_scope(region, Budget::INFINITE);
+
+        // Transition region to Closing
+        let region_record = state.regions.get_mut(region.arena_index()).expect("region");
+        region_record.begin_close(None);
+
+        // Attempt to spawn
+        // This currently succeeds but SHOULD fail
+        let (handle, _) = scope.spawn(&mut state, &cx, async { 42 });
+
+        // Verify task was added (proving the bug)
+        let region_record = state.regions.get(region.arena_index()).expect("region");
+        // TODO: This assertion should be inverted once the bug is fixed
+        assert!(region_record.task_ids().contains(&handle.task_id()), "Task should have been added (demonstrating bug)");
+    }
 }
