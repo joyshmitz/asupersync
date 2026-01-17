@@ -350,7 +350,8 @@ fn complete_task<T>(state: &Arc<Mutex<JoinState<T>>>, output: T) {
 }
 
 fn run_future_with_budget<F: Future>(future: F, poll_budget: u32) -> F::Output {
-    let waker = noop_waker();
+    let thread = std::thread::current();
+    let waker = Waker::from(Arc::new(ThreadWaker(thread)));
     let mut cx = Context::from_waker(&waker);
     let mut future = Box::pin(future);
     let mut polls = 0u32;
@@ -362,11 +363,26 @@ fn run_future_with_budget<F: Future>(future: F, poll_budget: u32) -> F::Output {
             Poll::Pending => {
                 polls = polls.saturating_add(1);
                 if polls >= budget {
+                    // Yield to other threads if we exhausted budget (cooperative)
                     std::thread::yield_now();
                     polls = 0;
+                } else {
+                    // Park until woken
+                    std::thread::park();
                 }
             }
         }
+    }
+}
+
+struct ThreadWaker(std::thread::Thread);
+
+impl Wake for ThreadWaker {
+    fn wake(self: Arc<Self>) {
+        self.0.unpark();
+    }
+    fn wake_by_ref(self: &Arc<Self>) {
+        self.0.unpark();
     }
 }
 
