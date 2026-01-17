@@ -32,6 +32,7 @@
 //! - [`security`]: Symbol authentication and security primitives
 //! - [`time`]: Sleep and timeout primitives for time-based operations
 //! - [`io`]: Async I/O traits and adapters
+//! - [`bytes`]: Zero-copy buffer types (Bytes, BytesMut, Buf, BufMut)
 
 #![forbid(unsafe_code)]
 #![warn(missing_docs)]
@@ -46,6 +47,7 @@
 #![allow(clippy::doc_markdown)]
 #![allow(clippy::cast_possible_truncation)]
 
+pub mod bytes;
 pub mod channel;
 pub mod combinator;
 pub mod cx;

@@ -70,6 +70,15 @@ impl RegionState {
         matches!(self, Self::Open)
     }
 
+    /// Returns true if the region can accept new tasks or children.
+    ///
+    /// This is true for Open (normal execution) and Finalizing (cleanup).
+    /// It is false for Closing and Draining phases.
+    #[must_use]
+    pub const fn can_accept_work(self) -> bool {
+        matches!(self, Self::Open | Self::Finalizing)
+    }
+
     /// Returns true if the region is draining (waiting for children to complete).
     #[must_use]
     pub const fn is_draining(self) -> bool {
