@@ -8,6 +8,9 @@
 //! - [`Mutex`]: Mutual exclusion with guard obligations
 //! - [`RwLock`]: Read-write lock with cancel-aware acquisition
 //! - [`Semaphore`]: Counting semaphore with permit obligations
+//! - [`Barrier`]: N-way rendezvous with leader election
+//! - [`Notify`]: Event signaling (one-shot or broadcast)
+//! - [`OnceCell`]: Lazy initialization cell
 //!
 //! # Two-Phase Pattern
 //!
@@ -24,11 +27,17 @@
 //! - Cancellation while holding: Guard dropped, resource released
 //! - Panic while holding: Guard dropped via unwind (unwind safety)
 
+mod barrier;
 mod mutex;
+mod notify;
+mod once_cell;
 mod rwlock;
 mod semaphore;
 
+pub use barrier::{Barrier, BarrierWaitError, BarrierWaitResult};
 pub use mutex::{LockError, Mutex, MutexGuard, OwnedMutexGuard, TryLockError};
+pub use notify::{Notify, Notified};
+pub use once_cell::{OnceCell, OnceCellError};
 pub use rwlock::{
     OwnedRwLockReadGuard, OwnedRwLockWriteGuard, RwLock, RwLockError, RwLockReadGuard,
     RwLockWriteGuard, TryReadError, TryWriteError,

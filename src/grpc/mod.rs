@@ -35,9 +35,13 @@
 //! - [`service`]: Service definition traits
 //! - [`server`]: Server infrastructure
 //! - [`client`]: Client infrastructure
+//! - [`health`]: gRPC Health Checking Protocol
+//! - [`interceptor`]: Interceptor middleware and layers
 
 pub mod client;
 pub mod codec;
+pub mod health;
+pub mod interceptor;
 pub mod server;
 pub mod service;
 pub mod status;
@@ -46,6 +50,16 @@ pub mod streaming;
 // Re-export commonly used types
 pub use client::{Channel, ChannelBuilder, ChannelConfig, GrpcClient, ResponseStream};
 pub use codec::{Codec, FramedCodec, GrpcCodec, GrpcMessage, IdentityCodec};
+pub use health::{
+    HealthCheckRequest, HealthCheckResponse, HealthReporter, HealthService, HealthServiceBuilder,
+    ServingStatus,
+};
+pub use interceptor::{
+    auth_bearer_interceptor, auth_validator, fn_interceptor, logging_interceptor,
+    metadata_propagator, rate_limiter, timeout_interceptor, trace_interceptor, BearerAuthInterceptor,
+    BearerAuthValidator, FnInterceptor, InterceptorLayer, LoggingInterceptor, MetadataPropagator,
+    RateLimitInterceptor, TimeoutInterceptor, TracingInterceptor,
+};
 pub use server::{CallContext, Interceptor, Server, ServerBuilder, ServerConfig};
 pub use service::{
     BidiStreamingMethod, ClientStreamingMethod, MethodDescriptor, NamedService,
