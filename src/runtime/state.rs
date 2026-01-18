@@ -16,6 +16,26 @@ use crate::util::Arena;
 use std::collections::HashMap;
 use std::future::Future;
 
+/// Errors that can occur when spawning a task.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub enum SpawnError {
+    /// The target region does not exist.
+    RegionNotFound(RegionId),
+    /// The target region is closed or draining and cannot accept new tasks.
+    RegionClosed(RegionId),
+}
+
+impl std::fmt::Display for SpawnError {
+    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        match self {
+            Self::RegionNotFound(id) => write!(f, "region not found: {id:?}"),
+            Self::RegionClosed(id) => write!(f, "region closed: {id:?}"),
+        }
+    }
+}
+
+impl std::error::Error for SpawnError {}
+
 /// The global runtime state.
 ///
 /// This is the "Σ" from the formal semantics:
@@ -91,11 +111,11 @@ impl RuntimeState {
     /// * `future` - The future to execute
     ///
     /// # Returns
-    /// A tuple of (TaskId, TaskHandle) where TaskHandle can be used to await the result.
+    /// A Result containing `(TaskId, TaskHandle)` on success, or `SpawnError` on failure.
     ///
     /// # Example
     /// ```ignore
-    /// let (task_id, handle) = state.create_task(region, budget, async { 42 });
+    /// let (task_id, handle) = state.create_task(region, budget, async { 42 })?;
     /// // Later: scheduler.schedule(task_id);
     /// // Even later: let result = handle.join(cx)?;
     /// ```
@@ -104,7 +124,7 @@ impl RuntimeState {
         region: RegionId,
         budget: Budget,
         future: F,
-    ) -> (TaskId, crate::runtime::TaskHandle<T>)
+    ) -> Result<(TaskId, crate::runtime::TaskHandle<T>), SpawnError>
     where
         F: Future<Output = T> + Send + 'static,
         T: Send + 'static,
@@ -133,12 +153,12 @@ impl RuntimeState {
             if !region_record.add_task(task_id) {
                 // Rollback task creation
                 self.tasks.remove(idx);
-                panic!("Attempted to spawn task into closing/draining region {region:?}");
+                return Err(SpawnError::RegionClosed(region));
             }
         } else {
             // Rollback task creation
             self.tasks.remove(idx);
-            panic!("Attempted to spawn task into non-existent region {region:?}");
+            return Err(SpawnError::RegionNotFound(region));
         }
 
         // Create the task's capability context
@@ -164,7 +184,7 @@ impl RuntimeState {
         // Create the TaskHandle
         let handle = crate::runtime::TaskHandle::new(task_id, result_rx, cx_weak);
 
-        (task_id, handle)
+        Ok((task_id, handle))
     }
 
     /// Gets a mutable reference to a stored future for polling.
@@ -391,13 +411,14 @@ impl RuntimeState {
     /// This checks if the owning region can advance its state.
     /// Returns the task's waiters that should be woken.
     pub fn task_completed(&mut self, task_id: TaskId) -> Vec<TaskId> {
-        let Some(task) = self.tasks.get(task_id.arena_index()) else {
+        // Remove the task record to prevent memory leaks
+        let Some(task) = self.tasks.remove(task_id.arena_index()) else {
             return Vec::new();
         };
 
         // Get the owning region and the waiters before we mutate
         let owner = task.owner;
-        let waiters = task.waiters.clone();
+        let waiters = task.waiters;
 
         // Remove task from owning region to prevent memory leak
         if let Some(region) = self.regions.get(owner.arena_index()) {
@@ -1094,6 +1115,9 @@ mod tests {
         assert!(!task_ids.contains(&task2)); // task2 should be removed
         assert!(task_ids.contains(&task3));
 
+        // Verify task2 is removed from the state
+        assert!(state.tasks.get(task2.arena_index()).is_none());
+
         // Complete remaining tasks
         state
             .tasks
@@ -1126,25 +1150,8 @@ mod tests {
         let region_record = state.regions.get(region.arena_index()).expect("region");
         assert_eq!(region_record.state(), crate::record::region::RegionState::Closing);
 
-        // Verify spawning is rejected (panics)
-        let result = std::panic::catch_unwind(std::panic::AssertUnwindSafe(|| {
-            // We need to bypass the borrow checker issue with 'state' being moved into closure
-            // Since we can't easily clone state or move a mutable ref into UnwindSafe closure easily without Mutex,
-            // we will just recreate a similar scenario or accept that we can't easily test the panic
-            // on the exact same 'state' instance inside catch_unwind if 'state' is not UnwindSafe/RefCell.
-            
-            // Actually RuntimeState is not AssertUnwindSafe by default maybe?
-            // But we can wrap the reference.
-        }));
-        
-        // Simpler approach: manual check using internal method if possible.
-        // But create_task is what we want to test.
-        
-        // Let's use internal add_task directly to verify it returns false, avoiding panic in test.
-        // create_task panics because add_task returns false.
-        
-        let dummy_task = TaskId::from_arena(ArenaIndex::new(999, 0));
-        let region_record = state.regions.get(region.arena_index()).expect("region");
-        assert!(!region_record.add_task(dummy_task), "add_task should return false for Closing region");
+        // Verify spawning is rejected with error (not panic)
+        let result = state.create_task(region, Budget::INFINITE, async { 42 });
+        assert!(matches!(result, Err(SpawnError::RegionClosed(_))));
     }
 }

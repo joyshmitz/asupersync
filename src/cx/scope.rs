@@ -8,11 +8,13 @@ use crate::combinator::{Either, Select};
 use crate::cx::Cx;
 use crate::record::TaskRecord;
 use crate::runtime::task_handle::{JoinError, TaskHandle};
-use crate::runtime::{RuntimeState, StoredTask};
-use crate::types::{Budget, Policy, RegionId, TaskId};
+use crate::runtime::{RuntimeState, SpawnError, StoredTask};
+use crate::types::{Budget, PanicPayload, Policy, RegionId, TaskId};
 use std::future::Future;
 use std::marker::PhantomData;
+use std::pin::Pin;
 use std::sync::Arc;
+use std::task::{Context, Poll};
 
 /// A scope for spawning work within a region.
 ///
@@ -28,6 +30,30 @@ pub struct Scope<'r, P: Policy = crate::types::policy::FailFast> {
     pub(crate) budget: Budget,
     /// Phantom data for the policy type.
     pub(crate) _policy: PhantomData<&'r P>,
+}
+
+struct CatchUnwind<F>(Pin<Box<F>>);
+
+impl<F: Future> Future for CatchUnwind<F> {
+    type Output = std::thread::Result<F::Output>;
+
+    fn poll(mut self: Pin<&mut Self>, cx: &mut Context<'_>) -> Poll<Self::Output> {
+        let inner = self.0.as_mut();
+        let result = std::panic::catch_unwind(std::panic::AssertUnwindSafe(|| inner.poll(cx)));
+        match result {
+            Ok(Poll::Pending) => Poll::Pending,
+            Ok(Poll::Ready(v)) => Poll::Ready(Ok(v)),
+            Err(payload) => Poll::Ready(Err(payload)),
+        }
+    }
+}
+
+fn payload_to_string(payload: &Box<dyn std::any::Any + Send>) -> String {
+    payload
+        .downcast_ref::<&str>()
+        .map(ToString::to_string)
+        .or_else(|| payload.downcast_ref::<String>().cloned())
+        .unwrap_or_else(|| "unknown panic".to_string())
 }
 
 impl<P: Policy> Scope<'_, P> {
@@ -95,7 +121,7 @@ impl<P: Policy> Scope<'_, P> {
         state: &mut RuntimeState,
         cx: &Cx,
         f: F,
-    ) -> (TaskHandle<Fut::Output>, StoredTask)
+    ) -> Result<(TaskHandle<Fut::Output>, StoredTask), SpawnError>
     where
         F: FnOnce(Cx) -> Fut + Send + 'static,
         Fut: Future + Send + 'static,
@@ -105,7 +131,7 @@ impl<P: Policy> Scope<'_, P> {
         let (tx, rx) = oneshot::channel::<Result<Fut::Output, JoinError>>();
 
         // Create task record
-        let task_id = self.create_task_record(state);
+        let task_id = self.create_task_record(state)?;
 
         // Create the child task's capability context
         let child_observability = cx.child_observability(self.region, task_id);
@@ -132,16 +158,28 @@ impl<P: Policy> Scope<'_, P> {
         let future = f(child_cx);
 
         // Wrap the future to send its result through the channel
+        // We use CatchUnwind to ensure panics are propagated as JoinError::Panicked
+        // rather than silent channel closure (which looks like cancellation).
         let wrapped = async move {
-            let result = future.await;
-            // Send the result using the child's context
-            let _ = tx.send(&cx_for_send, Ok(result));
+            let result_result = CatchUnwind(Box::pin(future)).await;
+            match result_result {
+                Ok(result) => {
+                    let _ = tx.send(&cx_for_send, Ok(result));
+                }
+                Err(payload) => {
+                    let msg = payload_to_string(&payload);
+                    let _ = tx.send(
+                        &cx_for_send,
+                        Err(JoinError::Panicked(PanicPayload::new(msg))),
+                    );
+                }
+            }
         };
 
         // Create stored task
         let stored = StoredTask::new(wrapped);
 
-        (handle, stored)
+        Ok((handle, stored))
     }
 
     /// Spawns a local (non-Send) task within this scope's region.
@@ -185,7 +223,7 @@ impl<P: Policy> Scope<'_, P> {
         state: &mut RuntimeState,
         cx: &Cx,
         f: F,
-    ) -> (TaskHandle<Fut::Output>, StoredTask)
+    ) -> Result<(TaskHandle<Fut::Output>, StoredTask), SpawnError>
     where
         F: FnOnce(Cx) -> Fut + Send + 'static,
         Fut: Future + Send + 'static,
@@ -238,7 +276,7 @@ impl<P: Policy> Scope<'_, P> {
         state: &mut RuntimeState,
         cx: &Cx, // Parent Cx
         f: F,
-    ) -> (TaskHandle<R>, StoredTask)
+    ) -> Result<(TaskHandle<R>, StoredTask), SpawnError>
     where
         F: FnOnce(Cx) -> R + Send + 'static,
         R: Send + 'static,
@@ -247,7 +285,7 @@ impl<P: Policy> Scope<'_, P> {
         let (tx, rx) = oneshot::channel::<Result<R, JoinError>>();
 
         // Create task record
-        let task_id = self.create_task_record(state);
+        let task_id = self.create_task_record(state)?;
 
         // Create the child task's capability context
         let child_observability = cx.child_observability(self.region, task_id);
@@ -273,14 +311,25 @@ impl<P: Policy> Scope<'_, P> {
         // In Phase 1+, this would spawn on a blocking thread pool
         let wrapped = async move {
             // Execute the blocking closure with child context
-            let result = f(child_cx);
-            // Send the result
-            let _ = tx.send(&cx_for_send, Ok(result));
+            // Catch panics to report them correctly
+            let result = std::panic::catch_unwind(std::panic::AssertUnwindSafe(|| f(child_cx)));
+            match result {
+                Ok(res) => {
+                    let _ = tx.send(&cx_for_send, Ok(res));
+                }
+                Err(payload) => {
+                    let msg = payload_to_string(&payload);
+                    let _ = tx.send(
+                        &cx_for_send,
+                        Err(JoinError::Panicked(PanicPayload::new(msg))),
+                    );
+                }
+            }
         };
 
         let stored = StoredTask::new(wrapped);
 
-        (handle, stored)
+        Ok((handle, stored))
     }
 
     // =========================================================================
@@ -350,7 +399,7 @@ impl<P: Policy> Scope<'_, P> {
     /// Creates a task record in the runtime state.
     ///
     /// This is a helper method used by all spawn variants.
-    fn create_task_record(&self, state: &mut RuntimeState) -> TaskId {
+    fn create_task_record(&self, state: &mut RuntimeState) -> Result<TaskId, SpawnError> {
         use crate::util::ArenaIndex;
 
         // Create placeholder task record
@@ -373,21 +422,15 @@ impl<P: Policy> Scope<'_, P> {
             if !region.add_task(task_id) {
                 // Rollback task creation
                 state.tasks.remove(idx);
-                panic!(
-                    "Attempted to spawn task into closing/draining region {:?}",
-                    self.region
-                );
+                return Err(SpawnError::RegionClosed(self.region));
             }
         } else {
             // Rollback task creation
             state.tasks.remove(idx);
-            panic!(
-                "Attempted to spawn task into non-existent region {:?}",
-                self.region
-            );
+            return Err(SpawnError::RegionNotFound(self.region));
         }
 
-        task_id
+        Ok(task_id)
     }
 
     // =========================================================================
@@ -482,7 +525,7 @@ mod tests {
         let region = state.create_root_region(Budget::INFINITE);
         let scope = test_scope(region, Budget::INFINITE);
 
-        let (handle, _stored) = scope.spawn(&mut state, &cx, |_| async { 42_i32 });
+        let (handle, _stored) = scope.spawn(&mut state, &cx, |_| async { 42_i32 }).unwrap();
 
         // Task should exist in state
         let task = state.tasks.get(handle.task_id().arena_index());
@@ -500,7 +543,7 @@ mod tests {
         let region = state.create_root_region(Budget::INFINITE);
         let scope = test_scope(region, Budget::INFINITE);
 
-        let (handle, _stored) = scope.spawn_blocking(&mut state, &cx, |_| 42_i32);
+        let (handle, _stored) = scope.spawn_blocking(&mut state, &cx, |_| 42_i32).unwrap();
 
         // Task should exist
         let task = state.tasks.get(handle.task_id().arena_index());
@@ -517,7 +560,7 @@ mod tests {
 
         // In Phase 0, spawn_local requires Send bounds
         // In Phase 1+, this will work with !Send futures
-        let (handle, _stored) = scope.spawn_local(&mut state, &cx, |_| async move { 42_i32 });
+        let (handle, _stored) = scope.spawn_local(&mut state, &cx, |_| async move { 42_i32 }).unwrap();
 
         // Task should exist
         let task = state.tasks.get(handle.task_id().arena_index());
@@ -532,7 +575,7 @@ mod tests {
         let region = state.create_root_region(Budget::INFINITE);
         let scope = test_scope(region, Budget::INFINITE);
 
-        let (handle, _stored) = scope.spawn(&mut state, &cx, |_| async { 42_i32 });
+        let (handle, _stored) = scope.spawn(&mut state, &cx, |_| async { 42_i32 }).unwrap();
 
         // Check region has the task
         let region_record = state.regions.get(region.arena_index()).unwrap();
@@ -546,9 +589,9 @@ mod tests {
         let region = state.create_root_region(Budget::INFINITE);
         let scope = test_scope(region, Budget::INFINITE);
 
-        let (handle1, _) = scope.spawn(&mut state, &cx, |_| async { 1_i32 });
-        let (handle2, _) = scope.spawn(&mut state, &cx, |_| async { 2_i32 });
-        let (handle3, _) = scope.spawn(&mut state, &cx, |_| async { 3_i32 });
+        let (handle1, _) = scope.spawn(&mut state, &cx, |_| async { 1_i32 }).unwrap();
+        let (handle2, _) = scope.spawn(&mut state, &cx, |_| async { 2_i32 }).unwrap();
+        let (handle3, _) = scope.spawn(&mut state, &cx, |_| async { 3_i32 }).unwrap();
 
         // All task IDs should be different
         assert_ne!(handle1.task_id(), handle2.task_id());
@@ -563,7 +606,6 @@ mod tests {
     }
 
     #[test]
-    #[should_panic(expected = "Attempted to spawn task into closing/draining region")]
     fn spawn_into_closing_region_should_fail() {
         let mut state = RuntimeState::new();
         let cx = test_cx();
@@ -574,9 +616,9 @@ mod tests {
         let region_record = state.regions.get_mut(region.arena_index()).expect("region");
         region_record.begin_close(None);
 
-        // Attempt to spawn
-        // This should now panic
-        let _ = scope.spawn(&mut state, &cx, |_| async { 42 });
+        // Attempt to spawn should fail
+        let result = scope.spawn(&mut state, &cx, |_| async { 42 });
+        assert!(matches!(result, Err(SpawnError::RegionClosed(_))));
     }
 
     #[test]
@@ -595,7 +637,7 @@ mod tests {
         let scope = test_scope(region, Budget::INFINITE);
 
         // Spawn a task
-        let (handle, mut stored_task) = scope.spawn(&mut state, &cx, |_| async { 42_i32 });
+        let (handle, mut stored_task) = scope.spawn(&mut state, &cx, |_| async { 42_i32 }).unwrap();
         // The stored task is returned directly, not put in state by scope.spawn
 
         // Create join future
@@ -640,7 +682,7 @@ mod tests {
                 return "cancelled";
             }
             "finished"
-        });
+        }).unwrap();
 
         // Abort the task via handle
         handle.abort();
@@ -661,6 +703,45 @@ mod tests {
             Poll::Ready(Ok(val)) => assert_eq!(val, "cancelled"),
             Poll::Ready(Err(e)) => panic!("Task failed unexpectedly: {e}"),
             Poll::Pending => panic!("Join should be ready"),
+        }
+    }
+
+    #[test]
+    fn spawn_panic_propagates_as_panicked_error() {
+        use std::sync::Arc;
+        use std::task::{Context, Poll, Waker};
+
+        struct NoopWaker;
+        impl std::task::Wake for NoopWaker {
+            fn wake(self: Arc<Self>) {}
+        }
+
+        let mut state = RuntimeState::new();
+        let cx = test_cx();
+        let region = state.create_root_region(Budget::INFINITE);
+        let scope = test_scope(region, Budget::INFINITE);
+
+        let (handle, mut stored_task) = scope.spawn(&mut state, &cx, |_| async {
+            panic!("oops");
+        }).unwrap();
+
+        // Drive the task
+        let waker = Waker::from(Arc::new(NoopWaker));
+        let mut ctx = Context::from_waker(&waker);
+
+        // Polling stored task should return Ready(()) even if it panics (caught inside)
+        match stored_task.poll(&mut ctx) {
+            Poll::Ready(()) => {}
+            Poll::Pending => panic!("Task should have completed"),
+        }
+
+        // Check result via handle
+        let mut join_fut = Box::pin(handle.join(&cx));
+        match join_fut.as_mut().poll(&mut ctx) {
+            Poll::Ready(Err(JoinError::Panicked(p))) => {
+                assert_eq!(p.message(), "oops");
+            }
+            res => panic!("Expected Panicked, got {:?}", res),
         }
     }
 }
