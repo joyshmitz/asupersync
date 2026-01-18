@@ -571,4 +571,73 @@ mod tests {
         assert_eq!(stats.registrations, 0);
         assert_eq!(stats.deregistrations, 0);
     }
+
+    /// Integration test verifying IoDriver works with EpollReactor for real I/O.
+    #[cfg(target_os = "linux")]
+    mod epoll_integration {
+        use super::*;
+        use crate::runtime::reactor::EpollReactor;
+        use std::io::Write;
+        use std::os::unix::net::UnixStream;
+
+        #[test]
+        fn io_driver_with_epoll_reactor_dispatches_waker() {
+            let reactor = Arc::new(EpollReactor::new().expect("create reactor"));
+            let mut driver = IoDriver::new(reactor.clone());
+
+            // Create a unix socket pair
+            let (sock_read, mut sock_write) =
+                UnixStream::pair().expect("create socket pair");
+
+            // Register with IoDriver (full flow)
+            let (waker, waker_state) = create_test_waker();
+            let token = driver
+                .register(&sock_read, Interest::READABLE, waker)
+                .expect("register should succeed");
+
+            // Waker should not be woken yet
+            assert!(!waker_state.flag.load(Ordering::SeqCst));
+
+            // Write data to make sock_read readable
+            sock_write.write_all(b"hello").expect("write failed");
+
+            // Turn should poll epoll and dispatch waker
+            let count = driver
+                .turn(Some(Duration::from_millis(100)))
+                .expect("turn should succeed");
+
+            // Should have received the readable event and woken the waker
+            assert!(count >= 1);
+            assert!(waker_state.flag.load(Ordering::SeqCst));
+            assert_eq!(waker_state.count.load(Ordering::SeqCst), 1);
+
+            // Cleanup
+            driver.deregister(token).expect("deregister should succeed");
+        }
+
+        #[test]
+        fn io_driver_with_epoll_reactor_writable() {
+            let reactor = Arc::new(EpollReactor::new().expect("create reactor"));
+            let mut driver = IoDriver::new(reactor);
+
+            // Create a unix socket pair
+            let (sock1, _sock2) = UnixStream::pair().expect("create socket pair");
+
+            // Register for writable
+            let (waker, waker_state) = create_test_waker();
+            let token = driver
+                .register(&sock1, Interest::WRITABLE, waker)
+                .expect("register should succeed");
+
+            // Turn should immediately see writable event
+            let count = driver
+                .turn(Some(Duration::from_millis(100)))
+                .expect("turn should succeed");
+
+            assert!(count >= 1);
+            assert!(waker_state.flag.load(Ordering::SeqCst));
+
+            driver.deregister(token).expect("deregister should succeed");
+        }
+    }
 }
