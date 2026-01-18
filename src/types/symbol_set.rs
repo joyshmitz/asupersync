@@ -148,23 +148,18 @@ impl SymbolSet {
 
         let sbn = id.sbn();
         let config = self.threshold_config;
-        
+
         // Scope the mutable borrow of block_counts
         let (limit_reached, progress_copy) = {
-            let progress = self
-                .block_counts
-                .entry(sbn)
-                .or_insert(BlockProgress {
-                    sbn,
-                    source_symbols: 0,
-                    repair_symbols: 0,
-                    k: None,
-                    threshold_reached: false,
-                });
+            let progress = self.block_counts.entry(sbn).or_insert(BlockProgress {
+                sbn,
+                source_symbols: 0,
+                repair_symbols: 0,
+                k: None,
+                threshold_reached: false,
+            });
 
-            if config.max_per_block != 0
-                && progress.total() >= config.max_per_block
-            {
+            if config.max_per_block != 0 && progress.total() >= config.max_per_block {
                 (true, *progress)
             } else {
                 match symbol.kind() {
@@ -192,10 +187,7 @@ impl SymbolSet {
     }
 
     /// Inserts multiple symbols into the set.
-    pub fn insert_batch(
-        &mut self,
-        symbols: impl Iterator<Item = Symbol>,
-    ) -> Vec<InsertResult> {
+    pub fn insert_batch(&mut self, symbols: impl Iterator<Item = Symbol>) -> Vec<InsertResult> {
         symbols.map(|symbol| self.insert(symbol)).collect()
     }
 
@@ -204,16 +196,13 @@ impl SymbolSet {
     /// Returns true if the threshold is now reached for that block.
     pub fn set_block_k(&mut self, sbn: u8, k: u16) -> bool {
         let config = self.threshold_config;
-        let progress = self
-            .block_counts
-            .entry(sbn)
-            .or_insert(BlockProgress {
-                sbn,
-                source_symbols: 0,
-                repair_symbols: 0,
-                k: None,
-                threshold_reached: false,
-            });
+        let progress = self.block_counts.entry(sbn).or_insert(BlockProgress {
+            sbn,
+            source_symbols: 0,
+            repair_symbols: 0,
+            k: None,
+            threshold_reached: false,
+        });
         progress.k = Some(k);
         progress.threshold_reached = Self::calculate_threshold(progress, &config);
         progress.threshold_reached
@@ -247,7 +236,8 @@ impl SymbolSet {
                     progress.repair_symbols = progress.repair_symbols.saturating_sub(1);
                 }
             }
-            progress.threshold_reached = Self::calculate_threshold(progress, &self.threshold_config);
+            progress.threshold_reached =
+                Self::calculate_threshold(progress, &self.threshold_config);
             if progress.total() == 0 && progress.k.is_none() {
                 self.block_counts.remove(&sbn);
             }
@@ -258,7 +248,9 @@ impl SymbolSet {
 
     /// Returns an iterator over all symbols for a block.
     pub fn symbols_for_block(&self, sbn: u8) -> impl Iterator<Item = &Symbol> {
-        self.symbols.values().filter(move |symbol| symbol.sbn() == sbn)
+        self.symbols
+            .values()
+            .filter(move |symbol| symbol.sbn() == sbn)
     }
 
     /// Returns block progress for a given block.
@@ -272,7 +264,7 @@ impl SymbolSet {
     pub fn threshold_reached(&self, sbn: u8) -> bool {
         self.block_counts
             .get(&sbn)
-            .map_or(false, |progress| progress.threshold_reached)
+            .is_some_and(|progress| progress.threshold_reached)
     }
 
     /// Returns all blocks that have reached the threshold.
@@ -319,20 +311,36 @@ impl SymbolSet {
         }
     }
 
-    // ... (skipped some methods)
+    /// Iterates over all symbols in the set.
+    pub fn iter(&self) -> impl Iterator<Item = (&SymbolId, &Symbol)> {
+        self.symbols.iter()
+    }
+
+    /// Drains all symbols from the set.
+    pub fn drain(&mut self) -> impl Iterator<Item = (SymbolId, Symbol)> + '_ {
+        self.block_counts.clear();
+        self.total_count = 0;
+        self.total_bytes = 0;
+        if let Some(budget) = self.memory_budget {
+            self.memory_remaining = budget;
+        }
+        self.symbols.drain()
+    }
 
     /// Clears symbols for a specific block.
     pub fn clear_block(&mut self, sbn: u8) {
         let ids: Vec<SymbolId> = self
             .symbols
             .iter()
-            .filter_map(|(id, symbol)| {
-                if symbol.sbn() == sbn {
-                    Some(*id)
-                } else {
-                    None
-                }
-            })
+            .filter_map(
+                |(id, symbol)| {
+                    if symbol.sbn() == sbn {
+                        Some(*id)
+                    } else {
+                        None
+                    }
+                },
+            )
             .collect();
 
         for id in ids {
@@ -342,25 +350,25 @@ impl SymbolSet {
         if let Some(progress) = self.block_counts.get_mut(&sbn) {
             progress.source_symbols = 0;
             progress.repair_symbols = 0;
-            progress.threshold_reached = Self::calculate_threshold(progress, &self.threshold_config);
+            progress.threshold_reached =
+                Self::calculate_threshold(progress, &self.threshold_config);
             if progress.k.is_none() {
                 self.block_counts.remove(&sbn);
             }
         }
     }
 
-    // ...
-
     fn calculate_threshold(progress: &BlockProgress, config: &ThresholdConfig) -> bool {
-        match progress.k {
-            Some(k) => {
-                let total = progress.total();
-                let threshold = ((k as f64) * config.overhead_factor).ceil() as usize
-                    + config.min_overhead;
-                total >= threshold
+        progress.k.is_some_and(|k| {
+            let total = progress.total();
+            let raw = (f64::from(k) * config.overhead_factor).ceil();
+            if raw.is_sign_negative() {
+                return false;
             }
-            None => false,
-        }
+            #[allow(clippy::cast_sign_loss)]
+            let threshold = raw as usize + config.min_overhead;
+            total >= threshold
+        })
     }
 
     fn check_threshold(&self, progress: &BlockProgress) -> bool {
@@ -372,7 +380,7 @@ impl SymbolSet {
     }
 
     fn try_allocate(&mut self, size: usize) -> bool {
-        if let Some(_) = self.memory_budget {
+        if self.memory_budget.is_some() {
             if size <= self.memory_remaining {
                 self.memory_remaining -= size;
             } else {
@@ -419,7 +427,10 @@ impl ConcurrentSymbolSet {
 
     /// Sets the block K value.
     pub fn set_block_k(&self, sbn: u8, k: u16) -> bool {
-        self.inner.write().expect("lock poisoned").set_block_k(sbn, k)
+        self.inner
+            .write()
+            .expect("lock poisoned")
+            .set_block_k(sbn, k)
     }
 
     /// Returns true if a block has reached threshold.
@@ -445,7 +456,10 @@ mod tests {
     fn insert_and_duplicate() {
         let mut set = SymbolSet::new();
         let symbol = test_symbol(0, 0, 4);
-        assert!(matches!(set.insert(symbol.clone()), InsertResult::Inserted { .. }));
+        assert!(matches!(
+            set.insert(symbol.clone()),
+            InsertResult::Inserted { .. }
+        ));
         assert!(matches!(set.insert(symbol), InsertResult::Duplicate));
         assert_eq!(set.len(), 1);
     }
@@ -467,7 +481,10 @@ mod tests {
     fn block_limit_enforced() {
         let config = ThresholdConfig::new(1.0, 0, 1);
         let mut set = SymbolSet::with_config(config);
-        assert!(matches!(set.insert(test_symbol(1, 0, 1)), InsertResult::Inserted { .. }));
+        assert!(matches!(
+            set.insert(test_symbol(1, 0, 1)),
+            InsertResult::Inserted { .. }
+        ));
         assert!(matches!(
             set.insert(test_symbol(1, 1, 1)),
             InsertResult::BlockLimitReached { sbn: 1 }
@@ -479,7 +496,10 @@ mod tests {
         let config = ThresholdConfig::new(1.0, 0, 0);
         let mut set = SymbolSet::with_memory_budget(config, 8);
         let large = test_symbol(0, 0, 128);
-        assert!(matches!(set.insert(large), InsertResult::MemoryLimitReached));
+        assert!(matches!(
+            set.insert(large),
+            InsertResult::MemoryLimitReached
+        ));
     }
 
     #[test]
@@ -493,5 +513,20 @@ mod tests {
         assert_eq!(set.len(), 1);
         assert!(set.symbols_for_block(0).next().is_none());
         assert!(set.symbols_for_block(1).next().is_some());
+    }
+
+    #[test]
+    fn iter_and_drain_symbols() {
+        let mut set = SymbolSet::new();
+        let _ = set.insert(test_symbol(0, 0, 4));
+        let _ = set.insert(test_symbol(0, 1, 4));
+
+        assert_eq!(set.iter().count(), 2);
+        assert_eq!(set.len(), 2);
+
+        let drained = set.drain().count();
+        assert_eq!(drained, 2);
+        assert!(set.is_empty());
+        assert_eq!(set.memory_usage(), 0);
     }
 }
