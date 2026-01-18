@@ -1,23 +1,21 @@
-//! Linux epoll-based reactor implementation (bookkeeping stub).
+//! Linux epoll-based reactor implementation.
 //!
-//! This module provides [`EpollReactor`], a reactor implementation that provides
-//! the API shape for Linux epoll-based I/O event notification.
+//! This module provides [`EpollReactor`], a reactor implementation that uses
+//! Linux epoll for efficient I/O event notification with edge-triggered mode.
 //!
-//! # Current Limitations
+//! # Safety
 //!
-//! **Note**: This implementation is currently a bookkeeping-only stub due to the
-//! project's `unsafe_code = "forbid"` constraint. The `polling` crate's
-//! `Poller::add()` method is `unsafe` because it cannot verify at compile time
-//! that file descriptors remain valid for the duration of registration.
+//! This module uses `unsafe` code to interface with the `polling` crate's
+//! low-level epoll operations. The unsafe operations are:
 //!
-//! The current implementation:
-//! - Tracks registrations in a `HashMap` for bookkeeping
-//! - Provides working `poll()` and `wake()` via the `polling` crate's safe APIs
-//! - Does **not** actually register sources with epoll (register is bookkeeping-only)
+//! - `Poller::add()`: Registers a file descriptor with epoll
+//! - `Poller::modify()`: Modifies interest flags for a registered fd
+//! - `Poller::delete()`: Removes a file descriptor from epoll
 //!
-//! For actual I/O event notification during testing, use [`LabReactor`] with
-//! injected events. A future version may allow scoped unsafe code for reactor
-//! internals if the project policy changes.
+//! These are unsafe because the compiler cannot verify that file descriptors
+//! remain valid for the duration of their registration. The `EpollReactor`
+//! maintains this invariant through careful bookkeeping and expects callers
+//! to properly manage source lifetimes.
 //!
 //! # Architecture
 //!
@@ -28,8 +26,6 @@
 //! │  │   Poller    │  │  notify()   │  │    registration map     │  │
 //! │  │  (polling)  │  │  (builtin)  │  │   HashMap<Token, info>  │  │
 //! │  └─────────────┘  └─────────────┘  └─────────────────────────┘  │
-//! │                                                                   │
-//! │  Bookkeeping only - actual epoll registration requires unsafe    │
 //! └─────────────────────────────────────────────────────────────────┘
 //! ```
 //!
@@ -48,20 +44,25 @@
 //! let reactor = EpollReactor::new()?;
 //! let listener = TcpListener::bind("127.0.0.1:0")?;
 //!
-//! // Register the listener (bookkeeping only - no actual epoll registration)
+//! // Register the listener with epoll (edge-triggered mode)
 //! reactor.register(&listener, Token::new(1), Interest::READABLE)?;
 //!
-//! // Poll and wake work via the polling crate's safe APIs
+//! // Poll for events
 //! let mut events = Events::with_capacity(64);
 //! let count = reactor.poll(&mut events, Some(Duration::from_secs(1)))?;
 //! ```
+
+// Allow unsafe code for epoll FFI operations via the polling crate.
+// The unsafe operations (add, modify, delete) are necessary because the
+// compiler cannot verify file descriptor validity at compile time.
+#![allow(unsafe_code)]
 
 use super::{Event, Events, Interest, Reactor, Source, Token};
 use parking_lot::Mutex;
 use polling::{Event as PollEvent, Poller};
 use std::collections::HashMap;
 use std::io;
-
+use std::os::fd::BorrowedFd;
 use std::time::Duration;
 
 /// Registration state for a source.
@@ -73,21 +74,24 @@ struct RegistrationInfo {
     interest: Interest,
 }
 
-/// Linux epoll-based reactor (bookkeeping stub).
+/// Linux epoll-based reactor with edge-triggered mode.
 ///
-/// This reactor provides the correct API shape for Linux epoll-based I/O, but
-/// currently only performs bookkeeping due to the project's `unsafe_code = "forbid"`
-/// constraint. The `polling` crate's `add()` method is unsafe.
+/// This reactor uses the `polling` crate to interface with Linux epoll,
+/// providing efficient I/O event notification for async operations.
 ///
-/// Working features:
-/// - `poll()`: Waits for events (will only see wake notifications)
-/// - `wake()`: Interrupts a blocking poll
-/// - Registration bookkeeping: Tracks tokens and interest
+/// # Features
 ///
-/// Non-functional (bookkeeping only):
-/// - `register()`: Does not actually add fd to epoll
-/// - `modify()`: Updates bookkeeping only
-/// - `deregister()`: Removes from bookkeeping only
+/// - `register()`: Adds fd to epoll with EPOLLET (edge-triggered)
+/// - `modify()`: Updates interest flags for a registered fd
+/// - `deregister()`: Removes fd from epoll
+/// - `poll()`: Waits for and collects ready events
+/// - `wake()`: Interrupts a blocking poll from another thread
+///
+/// # Edge-Triggered Mode
+///
+/// This reactor uses edge-triggered mode (`EPOLLET`) for efficiency.
+/// Events fire when state *changes*, not while the condition persists.
+/// Applications must read/write until `EAGAIN` before the next event.
 pub struct EpollReactor {
     /// The polling instance (wraps epoll on Linux).
     poller: Poller,
@@ -153,18 +157,7 @@ impl Reactor for EpollReactor {
     fn register(&self, source: &dyn Source, token: Token, interest: Interest) -> io::Result<()> {
         let raw_fd = source.as_raw_fd();
 
-        // NOTE: Due to the project's `unsafe_code = "forbid"` constraint, we cannot
-        // actually register with epoll. The polling crate's `Poller::add()` is unsafe
-        // because it cannot verify at compile time that the fd remains valid.
-        //
-        // This implementation only performs bookkeeping. For actual I/O event
-        // notification during testing, use LabReactor with injected events.
-        //
-        // The following would be the actual registration if unsafe were allowed:
-        // let event = Self::interest_to_poll_event(token, interest);
-        // unsafe { self.poller.add(&raw_fd, event)?; }
-
-        // Track the registration (bookkeeping only)
+        // Check for duplicate registration first
         let mut regs = self.registrations.lock();
         if regs.contains_key(&token) {
             return Err(io::Error::new(
@@ -172,6 +165,19 @@ impl Reactor for EpollReactor {
                 "token already registered",
             ));
         }
+
+        // Create the polling event with the token as the key
+        let event = Self::interest_to_poll_event(token, interest);
+
+        // SAFETY: We trust that the caller maintains the invariant that the
+        // source (and its file descriptor) remains valid until deregistered.
+        // The BorrowedFd is only used for the duration of this call.
+        let borrowed_fd = unsafe { BorrowedFd::borrow_raw(raw_fd) };
+
+        // Add to epoll via the polling crate
+        self.poller.add(&borrowed_fd, event)?;
+
+        // Track the registration for modify/deregister
         regs.insert(token, RegistrationInfo { raw_fd, interest });
 
         Ok(())
@@ -183,19 +189,18 @@ impl Reactor for EpollReactor {
             .get_mut(&token)
             .ok_or_else(|| io::Error::new(io::ErrorKind::NotFound, "token not registered"))?;
 
+        // Create the new polling event
+        let event = Self::interest_to_poll_event(token, interest);
+
+        // SAFETY: We stored the raw_fd during registration and trust it's still valid.
+        // The caller is responsible for ensuring the fd remains valid until deregistered.
+        let borrowed_fd = unsafe { BorrowedFd::borrow_raw(info.raw_fd) };
+
+        // Modify the epoll registration
+        self.poller.modify(&borrowed_fd, event)?;
+
         // Update our bookkeeping
         info.interest = interest;
-
-        // Note: The polling crate's modify requires the source reference.
-        // Since we only have the token, we cannot actually modify via the poller.
-        // This is a limitation of the safe API - full modify support would require
-        // either storing source references or using unsafe code.
-        //
-        // For now, we update our bookkeeping but the actual epoll interest
-        // isn't modified. Users should deregister and re-register to change interest.
-        //
-        // TODO: Consider redesigning the Reactor trait to pass source on modify,
-        // or accept this limitation for safe-code-only implementations.
 
         Ok(())
     }
@@ -206,15 +211,12 @@ impl Reactor for EpollReactor {
             .remove(&token)
             .ok_or_else(|| io::Error::new(io::ErrorKind::NotFound, "token not registered"))?;
 
-        // Similar limitation as modify - we'd need the source to call poller.delete().
-        // However, the epoll kernel interface allows EPOLL_CTL_DEL with just the fd.
-        // The polling crate requires the source for safety guarantees.
-        //
-        // When the source is dropped, epoll automatically removes it. So in practice,
-        // this works if the caller properly manages source lifetimes.
-        //
-        // We still track deregistration in our bookkeeping.
-        let _ = info.raw_fd; // Acknowledge we have the fd but can't use it safely
+        // SAFETY: We stored the raw_fd during registration and trust it's still valid.
+        // The caller is responsible for ensuring the fd remains valid until deregistered.
+        let borrowed_fd = unsafe { BorrowedFd::borrow_raw(info.raw_fd) };
+
+        // Remove from epoll
+        self.poller.delete(&borrowed_fd)?;
 
         Ok(())
     }
@@ -387,9 +389,70 @@ mod tests {
         assert_eq!(count, 0);
     }
 
-    // NOTE: poll_readable and poll_writable tests removed because they require
-    // actual epoll registration which is not possible without unsafe code.
-    // For I/O testing, use LabReactor with injected events.
+    #[test]
+    fn poll_writable() {
+        let reactor = EpollReactor::new().expect("failed to create reactor");
+        let (sock1, _sock2) = UnixStream::pair().expect("failed to create unix stream pair");
+
+        let token = Token::new(1);
+        reactor
+            .register(&sock1, token, Interest::WRITABLE)
+            .expect("register failed");
+
+        let mut events = Events::with_capacity(64);
+        let count = reactor
+            .poll(&mut events, Some(Duration::from_millis(100)))
+            .expect("poll failed");
+
+        // Socket should be immediately writable
+        assert!(count >= 1);
+
+        let mut found = false;
+        for event in events.iter() {
+            if event.token == token && event.is_writable() {
+                found = true;
+                break;
+            }
+        }
+        assert!(found, "expected writable event for token");
+
+        reactor.deregister(token).expect("deregister failed");
+    }
+
+    #[test]
+    fn poll_readable() {
+        use std::io::Write;
+
+        let reactor = EpollReactor::new().expect("failed to create reactor");
+        let (sock1, mut sock2) = UnixStream::pair().expect("failed to create unix stream pair");
+
+        let token = Token::new(1);
+        reactor
+            .register(&sock1, token, Interest::READABLE)
+            .expect("register failed");
+
+        // Write some data to make sock1 readable
+        sock2.write_all(b"hello").expect("write failed");
+
+        let mut events = Events::with_capacity(64);
+        let count = reactor
+            .poll(&mut events, Some(Duration::from_millis(100)))
+            .expect("poll failed");
+
+        // Socket should be readable now
+        assert!(count >= 1);
+
+        let mut found = false;
+        for event in events.iter() {
+            if event.token == token && event.is_readable() {
+                found = true;
+                break;
+            }
+        }
+        assert!(found, "expected readable event for token");
+
+        reactor.deregister(token).expect("deregister failed");
+    }
 
     #[test]
     fn duplicate_register_fails() {
