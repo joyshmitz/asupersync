@@ -96,7 +96,7 @@ pub use count::Count;
 pub use enumerate::Enumerate;
 pub use filter::{Filter, FilterMap};
 pub use fold::Fold;
-pub use for_each::ForEach;
+pub use for_each::{ForEach, ForEachAsync};
 pub use fuse::Fuse;
 pub use inspect::Inspect;
 pub use iter::{iter, Iter};
@@ -297,6 +297,16 @@ pub trait StreamExt: Stream {
         F: FnMut(Self::Item),
     {
         ForEach::new(self, f)
+    }
+
+    /// Executes an async closure for each item.
+    fn for_each_async<F, Fut>(self, f: F) -> ForEachAsync<Self, F, Fut>
+    where
+        Self: Sized,
+        F: FnMut(Self::Item) -> Fut,
+        Fut: Future<Output = ()>,
+    {
+        ForEachAsync::new(self, f)
     }
 
     /// Counts the number of items in the stream.

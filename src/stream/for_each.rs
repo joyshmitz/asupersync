@@ -46,6 +46,61 @@ where
     }
 }
 
+/// A future that executes an async closure for each item in a stream.
+///
+/// Created by [`StreamExt::for_each_async`](super::StreamExt::for_each_async).
+#[derive(Debug)]
+#[must_use = "futures do nothing unless polled"]
+pub struct ForEachAsync<S, F, Fut> {
+    stream: S,
+    f: F,
+    pending: Option<Fut>,
+}
+
+impl<S, F, Fut> ForEachAsync<S, F, Fut> {
+    pub(crate) fn new(stream: S, f: F) -> Self {
+        Self {
+            stream,
+            f,
+            pending: None,
+        }
+    }
+}
+
+impl<S: Unpin, F, Fut: Unpin> Unpin for ForEachAsync<S, F, Fut> {}
+
+impl<S, F, Fut> Future for ForEachAsync<S, F, Fut>
+where
+    S: Stream + Unpin,
+    F: FnMut(S::Item) -> Fut,
+    Fut: Future<Output = ()> + Unpin,
+{
+    type Output = ();
+
+    fn poll(mut self: Pin<&mut Self>, cx: &mut Context<'_>) -> Poll<()> {
+        loop {
+            // Complete pending future first
+            if let Some(fut) = &mut self.pending {
+                match Pin::new(fut).poll(cx) {
+                    Poll::Ready(()) => {
+                        self.pending = None;
+                    }
+                    Poll::Pending => return Poll::Pending,
+                }
+            }
+
+            // Get next item
+            match Pin::new(&mut self.stream).poll_next(cx) {
+                Poll::Ready(Some(item)) => {
+                    self.pending = Some((self.f)(item));
+                }
+                Poll::Ready(None) => return Poll::Ready(()),
+                Poll::Pending => return Poll::Pending,
+            }
+        }
+    }
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
@@ -96,5 +151,32 @@ mod tests {
             }
             Poll::Pending => panic!("expected Ready"),
         }
+    }
+
+    #[test]
+    fn for_each_async() {
+        let results = RefCell::new(Vec::new());
+        let mut future = ForEachAsync::new(iter(vec![1i32, 2, 3]), |x| {
+            let res = &results;
+            Box::pin(async move {
+                res.borrow_mut().push(x);
+            })
+        });
+        let waker = noop_waker();
+        let mut cx = Context::from_waker(&waker);
+
+        // This test requires re-polling because async block yields? 
+        // No, Box::pin(async { ... }) is ready immediately if no await.
+        // But ForEachAsync needs to poll the future.
+        
+        // We simulate polling loop
+        loop {
+            match Pin::new(&mut future).poll(&mut cx) {
+                Poll::Ready(()) => break,
+                Poll::Pending => continue, // Should not happen for immediate futures but safe
+            }
+        }
+        
+        assert_eq!(*results.borrow(), vec![1, 2, 3]);
     }
 }
