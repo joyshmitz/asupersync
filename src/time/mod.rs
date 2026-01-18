@@ -41,12 +41,17 @@
 //! }
 //! ```
 
+mod budget_ext;
+mod deadline;
 mod driver;
 mod elapsed;
 mod interval;
 mod sleep;
 mod timeout_future;
+mod wheel;
 
+pub use budget_ext::{budget_sleep, budget_timeout, BudgetTimeExt};
+pub use deadline::{with_deadline, with_timeout};
 pub use driver::{TimeSource, TimerDriver, TimerHandle, VirtualClock, WallClock};
 pub use elapsed::Elapsed;
 pub use interval::{interval, interval_at, Interval, MissedTickBehavior};
