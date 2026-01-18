@@ -181,21 +181,17 @@ impl<F: Future + Unpin> Future for TimeoutFuture<F> {
     type Output = Result<F::Output, Elapsed>;
 
     fn poll(mut self: Pin<&mut Self>, cx: &mut Context<'_>) -> Poll<Self::Output> {
-        // Use the sleep's time getter (which defaults to Time::MAX without a source)
-        // In practice, callers should use poll_with_time or integrate with a runtime
-        let now = if let Some(getter) = self.sleep.time_getter {
-            getter()
-        } else {
-            // Without a time source, we can't implement timeout properly
-            // Just poll the inner future
-            // This is a limitation of standalone use; runtime integration fixes this
-            return match Pin::new(&mut self.future).poll(cx) {
-                Poll::Ready(output) => Poll::Ready(Ok(output)),
-                Poll::Pending => Poll::Pending,
-            };
-        };
+        // Poll the sleep future to register wakeup (e.g. background thread in standalone mode)
+        match Pin::new(&mut self.sleep).poll(cx) {
+            Poll::Ready(()) => return Poll::Ready(Err(Elapsed::new(self.sleep.deadline()))),
+            Poll::Pending => {}
+        }
 
-        self.poll_with_time(now, cx)
+        // Poll the inner future
+        match Pin::new(&mut self.future).poll(cx) {
+            Poll::Ready(output) => Poll::Ready(Ok(output)),
+            Poll::Pending => Poll::Pending,
+        }
     }
 }
 
