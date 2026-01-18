@@ -100,12 +100,19 @@ mod registration;
 pub mod source;
 pub mod token;
 
+#[cfg(target_os = "linux")]
+pub mod epoll;
+
 pub use interest::Interest;
 pub use lab::LabReactor;
 pub use registration::Registration;
+#[allow(unused_imports)]
 pub(crate) use registration::ReactorHandle;
 pub use source::{next_source_id, Source, SourceId, SourceWrapper};
 pub use token::{SlabToken, TokenSlab};
+
+#[cfg(target_os = "linux")]
+pub use epoll::EpollReactor;
 
 use std::io;
 use std::time::Duration;

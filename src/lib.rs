@@ -36,7 +36,9 @@
 //! - [`net`]: Async networking primitives (Phase 0: synchronous wrappers)
 //! - [`bytes`]: Zero-copy buffer types (Bytes, BytesMut, Buf, BufMut)
 
-#![forbid(unsafe_code)]
+// Default to deny for unsafe code - specific modules (like epoll reactor) can use #[allow(unsafe_code)]
+// when they need to interface with FFI or low-level system APIs
+#![deny(unsafe_code)]
 #![warn(missing_docs)]
 #![warn(clippy::pedantic)]
 #![warn(clippy::nursery)]
