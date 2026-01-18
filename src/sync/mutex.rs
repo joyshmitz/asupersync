@@ -199,12 +199,13 @@ impl<T> Mutex<T> {
         // Wait loop
         loop {
             // Check cancellation
-            if let Err(e) = cx.checkpoint() {
+            if let Err(_e) = cx.checkpoint() {
                 // Remove ourselves from queue
                 let mut state = self.state.lock().expect("mutex state lock poisoned");
                 if let Some(pos) = state.waiters.iter().position(|&x| x == waiter_id) {
                     state.waiters.remove(pos);
                 }
+                drop(state);
                 cx.trace("mutex::lock cancelled while waiting");
                 return Err(LockError::Cancelled);
             }
@@ -215,6 +216,7 @@ impl<T> Mutex<T> {
                 if let Some(pos) = state.waiters.iter().position(|&x| x == waiter_id) {
                     state.waiters.remove(pos);
                 }
+                drop(state);
                 return Err(LockError::Poisoned);
             }
 
@@ -225,6 +227,7 @@ impl<T> Mutex<T> {
                     // Success!
                     state.locked = true;
                     state.waiters.pop_front();
+                    drop(state);
                     break; // Exit loop, drop state lock
                 }
             }
@@ -421,11 +424,12 @@ impl<T> OwnedMutexGuard<T> {
         };
 
         loop {
-            if let Err(e) = cx.checkpoint() {
+            if let Err(_e) = cx.checkpoint() {
                 let mut state = mutex.state.lock().expect("mutex state lock poisoned");
                 if let Some(pos) = state.waiters.iter().position(|&x| x == waiter_id) {
                     state.waiters.remove(pos);
                 }
+                drop(state);
                 return Err(LockError::Cancelled);
             }
 
@@ -434,6 +438,7 @@ impl<T> OwnedMutexGuard<T> {
                 if let Some(pos) = state.waiters.iter().position(|&x| x == waiter_id) {
                     state.waiters.remove(pos);
                 }
+                drop(state);
                 return Err(LockError::Poisoned);
             }
 
@@ -442,6 +447,7 @@ impl<T> OwnedMutexGuard<T> {
                 if !state.locked && state.waiters.front() == Some(&waiter_id) {
                     state.locked = true;
                     state.waiters.pop_front();
+                    drop(state);
                     break;
                 }
             }

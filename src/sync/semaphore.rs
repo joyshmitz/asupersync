@@ -209,6 +209,7 @@ impl Semaphore {
                 if let Some(pos) = state.waiters.iter().position(|&x| x == waiter_id) {
                     state.waiters.remove(pos);
                 }
+                drop(state);
                 cx.trace("semaphore::acquire cancelled while waiting");
                 return Err(AcquireError::Cancelled);
             }
@@ -216,11 +217,12 @@ impl Semaphore {
             // Check acquire
             {
                 let mut state = self.state.lock().expect("semaphore lock poisoned");
-                
+
                 if state.closed {
                     if let Some(pos) = state.waiters.iter().position(|&x| x == waiter_id) {
                         state.waiters.remove(pos);
                     }
+                    drop(state);
                     return Err(AcquireError::Closed);
                 }
 
@@ -228,6 +230,7 @@ impl Semaphore {
                     // Success!
                     state.permits -= count;
                     state.waiters.pop_front();
+                    drop(state);
                     cx.trace("semaphore::acquire succeeded");
                     return Ok(SemaphorePermit {
                         semaphore: self,
@@ -258,21 +261,25 @@ impl Semaphore {
 
         let mut state = self.state.lock().expect("semaphore lock poisoned");
         if state.closed {
+            drop(state);
             return Err(TryAcquireError);
         }
 
         // Strict FIFO: fail if anyone is waiting ahead of us
         if !state.waiters.is_empty() {
+            drop(state);
             return Err(TryAcquireError);
         }
 
         if state.permits >= count {
             state.permits -= count;
+            drop(state);
             Ok(SemaphorePermit {
                 semaphore: self,
                 count,
             })
         } else {
+            drop(state);
             Err(TryAcquireError)
         }
     }
@@ -383,6 +390,7 @@ impl OwnedSemaphorePermit {
                 if let Some(pos) = state.waiters.iter().position(|&x| x == waiter_id) {
                     state.waiters.remove(pos);
                 }
+                drop(state);
                 return Err(AcquireError::Cancelled);
             }
 
