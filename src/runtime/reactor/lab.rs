@@ -40,9 +40,16 @@ use std::sync::Mutex;
 use std::time::Duration;
 
 /// A timed event in the lab reactor.
+///
+/// Events are ordered by delivery time, with sequence numbers breaking ties
+/// for deterministic ordering when events occur at the same time.
 #[derive(Debug, PartialEq, Eq)]
 struct TimedEvent {
+    /// When to deliver this event (virtual time).
     time: Time,
+    /// Sequence number for deterministic ordering of same-time events.
+    sequence: u64,
+    /// The actual event to deliver.
     event: Event,
 }
 
@@ -54,8 +61,11 @@ impl PartialOrd for TimedEvent {
 
 impl Ord for TimedEvent {
     fn cmp(&self, other: &Self) -> std::cmp::Ordering {
-        // Min-heap: earliest time first
-        other.time.cmp(&self.time)
+        // Min-heap: earliest time first, then by sequence for determinism
+        other
+            .time
+            .cmp(&self.time)
+            .then_with(|| other.sequence.cmp(&self.sequence))
     }
 }
 
@@ -82,6 +92,8 @@ struct LabInner {
     sockets: HashMap<Token, VirtualSocket>,
     pending: BinaryHeap<TimedEvent>,
     time: Time,
+    /// Monotonic sequence counter for deterministic same-time event ordering.
+    next_sequence: u64,
 }
 
 impl LabReactor {
@@ -93,6 +105,7 @@ impl LabReactor {
                 sockets: HashMap::new(),
                 pending: BinaryHeap::new(),
                 time: Time::ZERO,
+                next_sequence: 0,
             }),
             woken: AtomicBool::new(false),
         }
@@ -102,17 +115,48 @@ impl LabReactor {
     ///
     /// The event will be delivered when virtual time advances past the delay.
     /// This is the primary mechanism for testing I/O-dependent code.
+    /// Events scheduled at the same time are delivered in insertion order.
     ///
     /// # Arguments
     ///
     /// * `token` - The token to associate with the event
     /// * `event` - The event to inject
     /// * `delay` - How far in the future to deliver the event
+    ///
+    /// # Aliases
+    ///
+    /// This method is also known as `schedule_event()` in the spec.
     pub fn inject_event(&self, token: Token, mut event: Event, delay: Duration) {
         let mut inner = self.inner.lock().unwrap();
         let time = inner.time.saturating_add_nanos(delay.as_nanos() as u64);
+        let sequence = inner.next_sequence;
+        inner.next_sequence += 1;
         event.token = token;
-        inner.pending.push(TimedEvent { time, event });
+        inner.pending.push(TimedEvent {
+            time,
+            sequence,
+            event,
+        });
+    }
+
+    /// Alias for `inject_event` to match the spec terminology.
+    ///
+    /// Schedules an event for future delivery at a specific delay from now.
+    pub fn schedule_event(&self, token: Token, event: Event, delay: Duration) {
+        self.inject_event(token, event, delay);
+    }
+
+    /// Makes a source immediately ready for the specified event type.
+    ///
+    /// The event will be delivered on the next call to `poll()`.
+    /// Multiple calls to `set_ready()` for the same token append events.
+    ///
+    /// # Arguments
+    ///
+    /// * `token` - The token to make ready
+    /// * `event` - The event type (readable, writable, etc.)
+    pub fn set_ready(&self, token: Token, event: Event) {
+        self.inject_event(token, event, Duration::ZERO);
     }
 
     /// Returns the current virtual time.
@@ -127,6 +171,22 @@ impl LabReactor {
     pub fn advance_time(&self, duration: Duration) {
         let mut inner = self.inner.lock().unwrap();
         inner.time = inner.time.saturating_add_nanos(duration.as_nanos() as u64);
+    }
+
+    /// Advances virtual time to a specific target time.
+    ///
+    /// If the target time is before the current time, this is a no-op.
+    /// Events scheduled between the current time and target time will be
+    /// delivered on the next `poll()` call.
+    ///
+    /// # Arguments
+    ///
+    /// * `target` - The target virtual time to advance to
+    pub fn advance_time_to(&self, target: Time) {
+        let mut inner = self.inner.lock().unwrap();
+        if target > inner.time {
+            inner.time = target;
+        }
     }
 
     /// Checks if the reactor has been woken.
@@ -364,5 +424,150 @@ mod tests {
             .poll(&mut events, Some(Duration::from_millis(500)))
             .unwrap();
         assert_eq!(reactor.now().as_nanos(), 1_500_000_000);
+    }
+
+    #[test]
+    fn advance_time_to_target() {
+        let reactor = LabReactor::new();
+
+        assert_eq!(reactor.now(), Time::ZERO);
+
+        // Advance to 1 second
+        reactor.advance_time_to(Time::from_nanos(1_000_000_000));
+        assert_eq!(reactor.now().as_nanos(), 1_000_000_000);
+
+        // Advancing to past time is a no-op
+        reactor.advance_time_to(Time::from_nanos(500_000_000));
+        assert_eq!(reactor.now().as_nanos(), 1_000_000_000);
+
+        // Advance further
+        reactor.advance_time_to(Time::from_nanos(2_000_000_000));
+        assert_eq!(reactor.now().as_nanos(), 2_000_000_000);
+    }
+
+    #[test]
+    fn set_ready_delivers_immediately() {
+        let reactor = LabReactor::new();
+        let token = Token::new(1);
+        let source = MockSource;
+
+        reactor
+            .register(&source, token, Interest::READABLE)
+            .unwrap();
+
+        // Set ready immediately
+        reactor.set_ready(token, Event::readable(token));
+
+        let mut events = crate::runtime::reactor::Events::with_capacity(10);
+
+        // Poll with zero timeout should still deliver the event
+        reactor
+            .poll(&mut events, Some(Duration::ZERO))
+            .unwrap();
+        assert_eq!(events.iter().count(), 1);
+    }
+
+    #[test]
+    fn same_time_events_delivered_in_order() {
+        let reactor = LabReactor::new();
+        let source = MockSource;
+
+        // Register multiple tokens
+        let token1 = Token::new(1);
+        let token2 = Token::new(2);
+        let token3 = Token::new(3);
+
+        reactor.register(&source, token1, Interest::READABLE).unwrap();
+        reactor.register(&source, token2, Interest::READABLE).unwrap();
+        reactor.register(&source, token3, Interest::READABLE).unwrap();
+
+        // Schedule all at the same time (10ms from now)
+        // They should be delivered in insertion order: 1, 2, 3
+        reactor.schedule_event(token1, Event::readable(token1), Duration::from_millis(10));
+        reactor.schedule_event(token2, Event::readable(token2), Duration::from_millis(10));
+        reactor.schedule_event(token3, Event::readable(token3), Duration::from_millis(10));
+
+        let mut events = crate::runtime::reactor::Events::with_capacity(10);
+
+        // Advance time past the scheduled time
+        reactor.poll(&mut events, Some(Duration::from_millis(15))).unwrap();
+
+        // Should have 3 events in order
+        let collected: Vec<_> = events.iter().collect();
+        assert_eq!(collected.len(), 3);
+        assert_eq!(collected[0].token, token1);
+        assert_eq!(collected[1].token, token2);
+        assert_eq!(collected[2].token, token3);
+    }
+
+    #[test]
+    fn different_time_events_delivered_in_time_order() {
+        let reactor = LabReactor::new();
+        let source = MockSource;
+
+        let token1 = Token::new(1);
+        let token2 = Token::new(2);
+        let token3 = Token::new(3);
+
+        reactor.register(&source, token1, Interest::READABLE).unwrap();
+        reactor.register(&source, token2, Interest::READABLE).unwrap();
+        reactor.register(&source, token3, Interest::READABLE).unwrap();
+
+        // Schedule in reverse order of delivery time
+        // token3 at 5ms, token1 at 10ms, token2 at 15ms
+        reactor.schedule_event(token3, Event::readable(token3), Duration::from_millis(5));
+        reactor.schedule_event(token1, Event::readable(token1), Duration::from_millis(10));
+        reactor.schedule_event(token2, Event::readable(token2), Duration::from_millis(15));
+
+        let mut events = crate::runtime::reactor::Events::with_capacity(10);
+
+        // Poll to 20ms - all events should be delivered
+        reactor.poll(&mut events, Some(Duration::from_millis(20))).unwrap();
+
+        // Should be in time order: token3, token1, token2
+        let collected: Vec<_> = events.iter().collect();
+        assert_eq!(collected.len(), 3);
+        assert_eq!(collected[0].token, token3);
+        assert_eq!(collected[1].token, token1);
+        assert_eq!(collected[2].token, token2);
+    }
+
+    #[test]
+    fn schedule_event_alias_works() {
+        let reactor = LabReactor::new();
+        let token = Token::new(1);
+        let source = MockSource;
+
+        reactor.register(&source, token, Interest::READABLE).unwrap();
+
+        // Use schedule_event (alias for inject_event)
+        reactor.schedule_event(token, Event::readable(token), Duration::from_millis(10));
+
+        let mut events = crate::runtime::reactor::Events::with_capacity(10);
+        reactor.poll(&mut events, Some(Duration::from_millis(15))).unwrap();
+
+        assert_eq!(events.iter().count(), 1);
+    }
+
+    #[test]
+    fn events_before_current_time_delivered_immediately() {
+        let reactor = LabReactor::new();
+        let source = MockSource;
+        let token = Token::new(1);
+
+        reactor.register(&source, token, Interest::READABLE).unwrap();
+
+        // First advance time
+        reactor.advance_time(Duration::from_millis(100));
+
+        // Schedule event at current time (delay = 0)
+        reactor.schedule_event(token, Event::readable(token), Duration::ZERO);
+
+        let mut events = crate::runtime::reactor::Events::with_capacity(10);
+
+        // Poll with zero timeout should deliver
+        reactor.poll(&mut events, Some(Duration::ZERO)).unwrap();
+
+        assert_eq!(events.iter().count(), 1);
     }
 }
