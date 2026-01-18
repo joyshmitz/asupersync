@@ -194,7 +194,7 @@ impl std::fmt::Debug for Registration {
             .field("token", &self.token)
             .field("interest", &self.interest.get())
             .field("active", &self.is_active())
-            .finish()
+            .finish_non_exhaustive()
     }
 }
 
