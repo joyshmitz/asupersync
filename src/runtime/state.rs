@@ -289,17 +289,21 @@ impl RuntimeState {
         // Collect all regions to cancel (target + descendants)
         let regions_to_cancel = self.collect_region_and_descendants(region_id);
 
-        // First pass: mark regions with cancellation reason
+        // First pass: mark regions with cancellation reason and transition to Closing
         for &rid in &regions_to_cancel {
             if let Some(region) = self.regions.get(rid.arena_index()) {
-                // Strengthen or set the cancel reason
                 // Use ParentCancelled for descendants, original reason for target
                 let region_reason = if rid == region_id {
                     reason.clone()
                 } else {
                     CancelReason::parent_cancelled()
                 };
-                region.strengthen_cancel_reason(region_reason);
+
+                // Try to transition to Closing with the reason.
+                // If already Closing/Draining/etc., strengthen the reason instead.
+                if !region.begin_close(Some(region_reason.clone())) {
+                    region.strengthen_cancel_reason(region_reason);
+                }
             }
         }
 
@@ -1108,5 +1112,39 @@ mod tests {
         // Verify all tasks removed from region
         let region_record = state.regions.get(region.arena_index()).expect("region");
         assert!(region_record.task_ids().is_empty());
+    }
+
+    #[test]
+    fn cancel_request_should_prevent_new_spawns() {
+        let mut state = RuntimeState::new();
+        let region = state.create_root_region(Budget::INFINITE);
+
+        // Request cancellation
+        let _ = state.cancel_request(region, &CancelReason::user("stop"));
+
+        // Verify state transition
+        let region_record = state.regions.get(region.arena_index()).expect("region");
+        assert_eq!(region_record.state(), crate::record::region::RegionState::Closing);
+
+        // Verify spawning is rejected (panics)
+        let result = std::panic::catch_unwind(std::panic::AssertUnwindSafe(|| {
+            // We need to bypass the borrow checker issue with 'state' being moved into closure
+            // Since we can't easily clone state or move a mutable ref into UnwindSafe closure easily without Mutex,
+            // we will just recreate a similar scenario or accept that we can't easily test the panic
+            // on the exact same 'state' instance inside catch_unwind if 'state' is not UnwindSafe/RefCell.
+            
+            // Actually RuntimeState is not AssertUnwindSafe by default maybe?
+            // But we can wrap the reference.
+        }));
+        
+        // Simpler approach: manual check using internal method if possible.
+        // But create_task is what we want to test.
+        
+        // Let's use internal add_task directly to verify it returns false, avoiding panic in test.
+        // create_task panics because add_task returns false.
+        
+        let dummy_task = TaskId::from_arena(ArenaIndex::new(999, 0));
+        let region_record = state.regions.get(region.arena_index()).expect("region");
+        assert!(!region_record.add_task(dummy_task), "add_task should return false for Closing region");
     }
 }

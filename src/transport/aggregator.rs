@@ -124,6 +124,7 @@ impl PathCharacteristics {
 
     /// Calculates an overall quality score (higher = better).
     #[must_use]
+    #[allow(clippy::cast_precision_loss)]
     pub fn quality_score(&self) -> f64 {
         let latency_score = 1000.0 / (f64::from(self.latency_ms) + 1.0);
         let bandwidth_score = (self.bandwidth_bps as f64).log10();
@@ -211,6 +212,7 @@ impl TransportPath {
 
     /// Returns the effective loss rate.
     #[must_use]
+    #[allow(clippy::cast_precision_loss)]
     pub fn effective_loss_rate(&self) -> f64 {
         let received = self.symbols_received.load(Ordering::Relaxed);
         let lost = self.symbols_lost.load(Ordering::Relaxed);
@@ -224,6 +226,7 @@ impl TransportPath {
 
     /// Returns the duplicate rate.
     #[must_use]
+    #[allow(clippy::cast_precision_loss)]
     pub fn duplicate_rate(&self) -> f64 {
         let received = self.symbols_received.load(Ordering::Relaxed);
         let duplicates = self.duplicates_received.load(Ordering::Relaxed);
@@ -240,9 +243,10 @@ impl TransportPath {
 // ============================================================================
 
 /// Policy for path selection.
-#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Default)]
 pub enum PathSelectionPolicy {
     /// Use all available paths.
+    #[default]
     UseAll,
 
     /// Use only primary paths.
@@ -262,12 +266,6 @@ pub enum PathSelectionPolicy {
 
     /// Round-robin across paths.
     RoundRobin,
-}
-
-impl Default for PathSelectionPolicy {
-    fn default() -> Self {
-        Self::UseAll
-    }
 }
 
 /// Manages a set of paths to a destination.
@@ -332,12 +330,14 @@ impl PathSet {
     /// Returns all usable paths based on the selection policy.
     #[must_use]
     pub fn select_paths(&self) -> Vec<Arc<TransportPath>> {
-        let paths = self.paths.read().expect("lock poisoned");
-        let usable: Vec<_> = paths
-            .values()
-            .filter(|p| p.state.is_usable())
-            .cloned()
-            .collect();
+        let usable: Vec<_> = {
+            let paths = self.paths.read().expect("lock poisoned");
+            paths
+                .values()
+                .filter(|p| p.state.is_usable())
+                .cloned()
+                .collect()
+        };
 
         match self.policy {
             PathSelectionPolicy::UseAll => usable,
@@ -376,12 +376,7 @@ impl PathSet {
 
     /// Updates path state.
     pub fn set_state(&self, id: PathId, _state: PathState) -> bool {
-        if let Some(_path) = self.paths.read().expect("lock poisoned").get(&id) {
-            // Note: In real impl, path.state would need interior mutability
-            true
-        } else {
-            false
-        }
+        self.paths.read().expect("lock poisoned").contains_key(&id)
     }
 
     /// Returns the number of paths.
@@ -556,6 +551,7 @@ impl SymbolDeduplicator {
 
         // Check if already seen
         if state.seen.contains(&symbol_id) {
+            drop(objects);
             self.duplicates_detected.fetch_add(1, Ordering::Relaxed);
             return false;
         }
@@ -568,6 +564,7 @@ impl SymbolDeduplicator {
         }
         state.last_activity = now;
 
+        drop(objects);
         self.unique_symbols.fetch_add(1, Ordering::Relaxed);
         true
     }

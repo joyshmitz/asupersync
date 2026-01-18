@@ -263,9 +263,21 @@ impl TimerWheel {
         }
 
         let delta = entry.deadline.as_nanos().saturating_sub(current.as_nanos());
-        for level in &mut self.levels {
+        for (idx, level) in self.levels.iter_mut().enumerate() {
             if delta < level.range_ns() {
-                let tick = ceil_div(entry.deadline.as_nanos(), level.resolution_ns);
+                let tick = entry.deadline.as_nanos() / level.resolution_ns;
+
+                // For Level 0, if the calculated tick matches the current tick (or is older),
+                // it means the deadline is within the current millisecond window.
+                // We treat this as ready because slot 'current % 256' has already been processed/passed.
+                if idx == 0 {
+                    let current_tick_l0 = current.as_nanos() / level.resolution_ns;
+                    if tick <= current_tick_l0 {
+                        self.ready.push(entry);
+                        return;
+                    }
+                }
+
                 let slot = (tick as usize) % SLOTS_PER_LEVEL;
                 level.slots[slot].push(entry);
                 return;
@@ -280,10 +292,63 @@ impl TimerWheel {
 
     fn advance_to(&mut self, target_tick: u64) {
         while self.current_tick < target_tick {
+            // Optimization: Skip empty ticks
+            let next_tick = self.next_skip_tick(target_tick);
+            if next_tick > self.current_tick + 1 {
+                let skip = next_tick - self.current_tick - 1;
+                self.current_tick += skip;
+                self.levels[0].cursor = (self.levels[0].cursor + skip as usize) % SLOTS_PER_LEVEL;
+            }
+
             self.current_tick = self.current_tick.saturating_add(1);
             self.tick_level0();
             self.refill_overflow();
         }
+    }
+
+    fn next_skip_tick(&self, limit: u64) -> u64 {
+        let l0 = &self.levels[0];
+        let mut next_l0 = limit;
+
+        // 1. Check Level 0 for next occupied slot
+        for i in 1..=SLOTS_PER_LEVEL {
+            let slot_idx = (l0.cursor + i) % SLOTS_PER_LEVEL;
+            if slot_idx == 0 {
+                // Cascade point (wrap around).
+                // The tick that causes the wrap (cursor -> 0) corresponds to `current_tick + i`.
+                let wrap_tick = self.current_tick + i as u64;
+                if wrap_tick < next_l0 {
+                    next_l0 = wrap_tick;
+                }
+                break;
+            }
+            if !l0.slots[slot_idx].is_empty() {
+                // Found item
+                let item_tick = self.current_tick + i as u64;
+                if item_tick < next_l0 {
+                    next_l0 = item_tick;
+                }
+                break;
+            }
+        }
+
+        // 2. Check overflow
+        if let Some(entry) = self.overflow.peek() {
+            let max_range = self.max_range_ns();
+            let entry_ns = entry.deadline.as_nanos();
+            let min_enter_ns = entry_ns.saturating_sub(max_range);
+            let min_enter_tick = min_enter_ns / LEVEL0_RESOLUTION_NS;
+
+            if min_enter_tick < next_l0 {
+                if min_enter_tick > self.current_tick {
+                    next_l0 = min_enter_tick;
+                } else {
+                    return self.current_tick;
+                }
+            }
+        }
+
+        next_l0
     }
 
     fn tick_level0(&mut self) {
@@ -387,16 +452,7 @@ impl TimerWheel {
     }
 }
 
-fn ceil_div(value: u64, divisor: u64) -> u64 {
-    if divisor == 0 {
-        return 0;
-    }
-    if value == 0 {
-        0
-    } else {
-        ((value - 1) / divisor) + 1
-    }
-}
+
 
 #[cfg(test)]
 mod tests {
@@ -467,5 +523,27 @@ mod tests {
 
     fn counter_waker(counter: Arc<AtomicU64>) -> Waker {
         Arc::new(CounterWaker { counter }).into()
+    }
+
+    #[test]
+    fn wheel_advance_large_jump() {
+        let mut wheel = TimerWheel::new();
+        let counter = Arc::new(AtomicU64::new(0));
+        let waker = counter_waker(counter.clone());
+
+        // Register a timer 1 hour in the future (3,600,000 ticks)
+        let one_hour = Time::from_secs(3600);
+        wheel.register(one_hour, waker);
+
+        // Advance time
+        let wakers = wheel.collect_expired(one_hour);
+        
+        // Should fire
+        assert_eq!(wakers.len(), 1);
+        for waker in wakers {
+            waker.wake();
+        }
+        assert_eq!(counter.load(Ordering::SeqCst), 1);
+        assert!(wheel.is_empty());
     }
 }

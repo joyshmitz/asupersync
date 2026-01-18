@@ -1,3 +1,5 @@
+#![allow(missing_docs)]
+
 #[path = "security/authenticated_tests.rs"]
 mod authenticated_tests;
 #[path = "security/context_tests.rs"]

@@ -49,6 +49,12 @@ impl LengthDelimitedCodec {
     }
 }
 
+impl Default for LengthDelimitedCodec {
+    fn default() -> Self {
+        Self::new()
+    }
+}
+
 impl LengthDelimitedCodecBuilder {
     /// Sets the length field offset.
     #[must_use]

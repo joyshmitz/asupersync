@@ -62,6 +62,12 @@ impl LinesCodec {
     }
 }
 
+impl Default for LinesCodec {
+    fn default() -> Self {
+        Self::new()
+    }
+}
+
 impl Decoder for LinesCodec {
     type Item = String;
     type Error = LinesCodecError;
@@ -73,31 +79,28 @@ impl Decoder for LinesCodec {
             .iter()
             .position(|b| *b == b'\n');
 
-        match newline_offset {
-            Some(offset) => {
-                let newline_index = self.next_index + offset;
-                self.next_index = 0;
+        if let Some(offset) = newline_offset {
+            let newline_index = self.next_index + offset;
+            self.next_index = 0;
 
-                let mut line = src.split_to(newline_index + 1);
-                // Drop trailing '\n'
+            let mut line = src.split_to(newline_index + 1);
+            // Drop trailing '\n'
+            line.truncate(line.len().saturating_sub(1));
+
+            // Handle CRLF
+            if line.last() == Some(&b'\r') {
                 line.truncate(line.len().saturating_sub(1));
-
-                // Handle CRLF
-                if line.last() == Some(&b'\r') {
-                    line.truncate(line.len().saturating_sub(1));
-                }
-
-                let s =
-                    String::from_utf8(line.to_vec()).map_err(|_| LinesCodecError::InvalidUtf8)?;
-                Ok(Some(s))
             }
-            None => {
-                if src.len() > self.max_length {
-                    return Err(LinesCodecError::MaxLineLengthExceeded);
-                }
-                self.next_index = read_to;
-                Ok(None)
+
+            let s =
+                String::from_utf8(line.to_vec()).map_err(|_| LinesCodecError::InvalidUtf8)?;
+            Ok(Some(s))
+        } else {
+            if src.len() > self.max_length {
+                return Err(LinesCodecError::MaxLineLengthExceeded);
             }
+            self.next_index = read_to;
+            Ok(None)
         }
     }
 }

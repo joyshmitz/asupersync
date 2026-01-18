@@ -165,18 +165,18 @@ mod tests {
         let waker = noop_waker();
         let mut cx = Context::from_waker(&waker);
 
-        // This test requires re-polling because async block yields? 
+        // This test requires re-polling because async block yields?
         // No, Box::pin(async { ... }) is ready immediately if no await.
         // But ForEachAsync needs to poll the future.
-        
+
         // We simulate polling loop
         loop {
             match Pin::new(&mut future).poll(&mut cx) {
                 Poll::Ready(()) => break,
-                Poll::Pending => continue, // Should not happen for immediate futures but safe
+                Poll::Pending => {} // Should not happen for immediate futures but safe
             }
         }
-        
+
         assert_eq!(*results.borrow(), vec![1, 2, 3]);
     }
 }

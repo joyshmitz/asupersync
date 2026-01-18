@@ -13,14 +13,13 @@ use asupersync::lab::{LabConfig, LabRuntime};
 use asupersync::record::task::TaskState;
 use asupersync::trace::{TraceData, TraceEvent, TraceEventKind};
 use asupersync::types::{Budget, CancelReason, Outcome, RegionId, TaskId, Time};
-use asupersync::util::ArenaIndex;
 
 fn region(n: u32) -> RegionId {
-    RegionId::from_arena(ArenaIndex::new(n, 0))
+    RegionId::new_for_test(n, 0)
 }
 
 fn task(n: u32) -> TaskId {
-    TaskId::from_arena(ArenaIndex::new(n, 0))
+    TaskId::new_for_test(n, 0)
 }
 
 fn t(nanos: u64) -> Time {
@@ -85,7 +84,7 @@ fn e2e_cancellation_protocol_sequence() {
     oracle.on_region_create(root, None);
     oracle.on_region_create(child, Some(root));
     oracle.on_region_cancel(root, CancelReason::shutdown(), t(5));
-    oracle.on_region_cancel(child, CancelReason::parent(), t(6));
+    oracle.on_region_cancel(child, CancelReason::parent_cancelled(), t(6));
 
     oracle.on_task_create(worker, child);
 
@@ -272,7 +271,7 @@ fn determinism_two_phase_obligation_trace() {
     assert_deterministic(LabConfig::new(3), |runtime| {
         let region_id = region(0);
         let worker = task(1);
-        let obligation = asupersync::types::ObligationId::from_arena(ArenaIndex::new(0, 0));
+        let obligation = asupersync::types::ObligationId::new_for_test(0, 0);
 
         push_trace(
             runtime,

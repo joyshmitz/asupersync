@@ -56,31 +56,31 @@ pub struct EncodedSymbol {
 #[derive(Debug, Clone)]
 pub enum EncodingError {
     /// Data too large for parameters.
-    DataTooLarge { 
+    DataTooLarge {
         /// Size of the data that exceeded the limit.
-        size: usize 
+        size: usize,
     },
     /// Symbol pool exhausted.
     PoolExhausted,
     /// Invalid configuration.
-    InvalidConfig { 
+    InvalidConfig {
         /// Reason for invalid configuration.
-        reason: String 
+        reason: String,
     },
     /// Computation failed.
-    ComputationFailed { 
+    ComputationFailed {
         /// Details of the failure.
-        details: String 
+        details: String,
     },
 }
 
 impl std::fmt::Display for EncodingError {
     fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
         match self {
-            Self::DataTooLarge { size } => write!(f, "data too large: {} bytes", size),
+            Self::DataTooLarge { size } => write!(f, "data too large: {size} bytes"),
             Self::PoolExhausted => write!(f, "symbol pool exhausted"),
-            Self::InvalidConfig { reason } => write!(f, "invalid config: {}", reason),
-            Self::ComputationFailed { details } => write!(f, "computation failed: {}", details),
+            Self::InvalidConfig { reason } => write!(f, "invalid config: {reason}"),
+            Self::ComputationFailed { details } => write!(f, "computation failed: {details}"),
         }
     }
 }
@@ -91,16 +91,16 @@ impl From<EncodingError> for Error {
     fn from(e: EncodingError) -> Self {
         match e {
             EncodingError::DataTooLarge { .. } => {
-                Error::new(ErrorKind::DataTooLarge).with_message(e.to_string())
+                Self::new(ErrorKind::DataTooLarge).with_message(e.to_string())
             }
             EncodingError::PoolExhausted => {
-                Error::new(ErrorKind::Internal).with_message(e.to_string())
+                Self::new(ErrorKind::Internal).with_message(e.to_string())
             }
             EncodingError::InvalidConfig { .. } => {
-                Error::new(ErrorKind::InvalidEncodingParams).with_message(e.to_string())
+                Self::new(ErrorKind::InvalidEncodingParams).with_message(e.to_string())
             }
             EncodingError::ComputationFailed { .. } => {
-                Error::new(ErrorKind::EncodingFailed).with_message(e.to_string())
+                Self::new(ErrorKind::EncodingFailed).with_message(e.to_string())
             }
         }
     }
@@ -222,38 +222,37 @@ impl EncodingPipeline {
             let block_data = &data[offset..offset + block_len];
 
             // Calculate K
-            let k = (block_len + symbol_size - 1) / symbol_size;
+            let k = block_len.div_ceil(symbol_size);
             if k > 65535 {
                 return Err(EncodingError::DataTooLarge { size: data.len() });
             }
 
             let mut symbols = Vec::with_capacity(k);
-            let mut pool = self.pool.lock().expect("lock poisoned");
+            {
+                let mut pool = self.pool.lock().expect("lock poisoned");
 
-            for i in 0..k {
-                let start = i * symbol_size;
-                let end = (start + symbol_size).min(block_len);
-                let slice = &block_data[start..end];
+                for i in 0..k {
+                    let start = i * symbol_size;
+                    let end = (start + symbol_size).min(block_len);
+                    let slice = &block_data[start..end];
 
-                let mut buf = match pool.allocate() {
-                    Ok(b) => b,
-                    Err(_) => {
+                    let Ok(mut buf) = pool.allocate() else {
                         // Cleanup allocated so far
-                        for b in symbols {
+                        for b in symbols.drain(..) {
                             pool.deallocate(b);
                         }
                         return Err(EncodingError::PoolExhausted);
+                    };
+
+                    // Copy data and pad with zeros
+                    let dest = buf.as_mut_slice();
+                    dest[..slice.len()].copy_from_slice(slice);
+                    if slice.len() < symbol_size {
+                        dest[slice.len()..symbol_size].fill(0);
                     }
-                };
 
-                // Copy data and pad with zeros
-                let dest = buf.as_mut_slice();
-                dest[..slice.len()].copy_from_slice(slice);
-                if slice.len() < symbol_size {
-                    dest[slice.len()..symbol_size].fill(0);
+                    symbols.push(buf);
                 }
-
-                symbols.push(buf);
             }
 
             self.blocks.push(SourceBlock {
@@ -263,11 +262,11 @@ impl EncodingPipeline {
             });
 
             offset += block_len;
-            sbn += 1;
-            if sbn > 255 {
+            if sbn == u8::MAX {
                 // Too many blocks
                 return Err(EncodingError::DataTooLarge { size: data.len() });
             }
+            sbn = sbn.saturating_add(1);
         }
 
         self.state = EncodingState::Generating {
@@ -278,7 +277,7 @@ impl EncodingPipeline {
     }
 
     fn generate_symbol(&self, block: &SourceBlock, esi: u32) -> Symbol {
-        let k = block.k as u32;
+        let k = u32::from(block.k);
         let object_id = ObjectId::NIL; // Placeholder, overridden by iterator
         let symbol_id = SymbolId::new(object_id, block.sbn, esi);
 
@@ -296,7 +295,7 @@ impl EncodingPipeline {
             let mut data = vec![0u8; self.config.symbol_size as usize];
             for i in 0..k {
                 // Simple mixing function
-                if (esi + i) % 2 == 0 {
+                if (esi + i).is_multiple_of(2) {
                     // Dummy logic
                     let src = block.symbols[i as usize].as_slice();
                     for (d, s) in data.iter_mut().zip(src.iter()) {
@@ -318,7 +317,7 @@ pub struct EncodingIterator<'a> {
     repair_remaining: usize,
 }
 
-impl<'a> Iterator for EncodingIterator<'a> {
+impl Iterator for EncodingIterator<'_> {
     type Item = Result<EncodedSymbol, EncodingError>;
 
     fn next(&mut self) -> Option<Self::Item> {
@@ -327,14 +326,17 @@ impl<'a> Iterator for EncodingIterator<'a> {
         }
 
         let block = &self.pipeline.blocks[self.current_block_idx];
-        let k = block.k as u32;
+        let k = u32::from(block.k);
 
         // Determine how many repair symbols to generate
         // Default overhead or override
         let repair_target = if self.repair_remaining > 0 {
             self.repair_remaining
         } else {
-            ((k as f64) * (self.pipeline.config.repair_overhead - 1.0)).ceil() as usize
+            #[allow(clippy::cast_precision_loss, clippy::cast_sign_loss)]
+            {
+                (f64::from(k) * (self.pipeline.config.repair_overhead - 1.0)).ceil() as usize
+            }
         };
 
         let max_esi = k + repair_target as u32;
@@ -390,13 +392,13 @@ mod tests {
         let config = EncodingConfig::default();
         let pool = test_pool(config.symbol_size);
         let mut pipeline = EncodingPipeline::new(config, pool);
-        
+
         let data = vec![1, 2, 3, 4];
         let object_id = ObjectId::new_for_test(1);
-        
+
         let iter = pipeline.encode(object_id, &data).unwrap();
         let symbols: Vec<_> = iter.collect();
-        
+
         // 1 source symbol + repair
         // Default symbol size 1280. 4 bytes fits in 1.
         // Repair overhead 1.05 -> ceil(1 * 0.05) = 1 repair.
@@ -415,11 +417,11 @@ mod tests {
         };
         let pool = test_pool(config.symbol_size);
         let mut pipeline = EncodingPipeline::new(config, pool);
-        
+
         let data = vec![0u8; 20]; // Exactly 2 symbols
         let iter = pipeline.encode(ObjectId::new_for_test(1), &data).unwrap();
         let symbols: Vec<_> = iter.collect();
-        
+
         assert_eq!(symbols.len(), 2);
         assert!(symbols[0].as_ref().unwrap().kind.is_source());
         assert!(symbols[1].as_ref().unwrap().kind.is_source());

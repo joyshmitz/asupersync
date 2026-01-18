@@ -65,6 +65,7 @@
 //! ```
 
 mod any_all;
+mod broadcast_stream;
 mod buffered;
 mod chain;
 mod chunks;
@@ -74,20 +75,24 @@ mod enumerate;
 mod filter;
 mod fold;
 mod for_each;
+mod forward;
 mod fuse;
 mod inspect;
 mod iter;
 mod map;
 mod merge;
 mod next;
+mod receiver_stream;
 mod skip;
 mod stream;
 mod take;
 mod then;
 mod try_stream;
+mod watch_stream;
 mod zip;
 
 pub use any_all::{All, Any};
+pub use broadcast_stream::{BroadcastStream, BroadcastStreamRecvError};
 pub use buffered::{BufferUnordered, Buffered};
 pub use chain::Chain;
 pub use chunks::{Chunks, ReadyChunks};
@@ -97,17 +102,20 @@ pub use enumerate::Enumerate;
 pub use filter::{Filter, FilterMap};
 pub use fold::Fold;
 pub use for_each::{ForEach, ForEachAsync};
+pub use forward::{forward, into_sink, SinkStream};
 pub use fuse::Fuse;
 pub use inspect::Inspect;
 pub use iter::{iter, Iter};
 pub use map::Map;
 pub use merge::{merge, Merge};
 pub use next::Next;
+pub use receiver_stream::ReceiverStream;
 pub use skip::{Skip, SkipWhile};
 pub use stream::Stream;
 pub use take::{Take, TakeWhile};
 pub use then::Then;
 pub use try_stream::{TryCollect, TryFold, TryForEach};
+pub use watch_stream::WatchStream;
 pub use zip::Zip;
 
 use std::future::Future;
@@ -605,7 +613,7 @@ mod tests {
                 // So it should be Ready immediately.
                 panic!("Should be ready");
             }
-            Poll::Ready(Some(val)) => panic!("Expected 10, got {}", val),
+            Poll::Ready(Some(val)) => panic!("Expected 10, got {val}"),
             Poll::Ready(None) => panic!("Expected Some"),
         }
 
@@ -647,6 +655,120 @@ mod tests {
 
         assert_eq!(
             Pin::new(&mut inspected).poll_next(&mut cx),
+            Poll::Ready(None)
+        );
+    }
+
+    #[test]
+    fn test_receiver_stream() {
+        use crate::channel::mpsc;
+        use crate::cx::Cx;
+
+        let cx = Cx::for_testing();
+        let (tx, rx) = mpsc::channel(10);
+        let mut stream = ReceiverStream::new(cx.clone(), rx);
+
+        tx.send(&cx, 1).unwrap();
+        tx.send(&cx, 2).unwrap();
+        drop(tx);
+
+        let waker = noop_waker();
+        let mut cx_task = Context::from_waker(&waker);
+
+        assert_eq!(
+            Pin::new(&mut stream).poll_next(&mut cx_task),
+            Poll::Ready(Some(1))
+        );
+        assert_eq!(
+            Pin::new(&mut stream).poll_next(&mut cx_task),
+            Poll::Ready(Some(2))
+        );
+        assert_eq!(
+            Pin::new(&mut stream).poll_next(&mut cx_task),
+            Poll::Ready(None)
+        );
+    }
+
+    #[test]
+    fn test_watch_stream() {
+        use crate::channel::watch;
+        use crate::cx::Cx;
+
+        let cx = Cx::for_testing();
+        let (tx, rx) = watch::channel(0);
+        let mut stream = WatchStream::new(cx, rx);
+        let waker = noop_waker();
+        let mut cx_task = Context::from_waker(&waker);
+
+        // Initial value
+        assert_eq!(
+            Pin::new(&mut stream).poll_next(&mut cx_task),
+            Poll::Ready(Some(0))
+        );
+
+        // Update value
+        tx.send(1).unwrap();
+        assert_eq!(
+            Pin::new(&mut stream).poll_next(&mut cx_task),
+            Poll::Ready(Some(1))
+        );
+    }
+
+    #[test]
+    fn test_broadcast_stream() {
+        use crate::channel::broadcast;
+        use crate::cx::Cx;
+
+        let cx = Cx::for_testing();
+        let (tx, rx) = broadcast::channel(10);
+        let mut stream = BroadcastStream::new(cx.clone(), rx);
+        let waker = noop_waker();
+        let mut cx_task = Context::from_waker(&waker);
+
+        tx.send(&cx, 1).unwrap();
+        tx.send(&cx, 2).unwrap();
+
+        assert_eq!(
+            Pin::new(&mut stream).poll_next(&mut cx_task),
+            Poll::Ready(Some(Ok(1)))
+        );
+        assert_eq!(
+            Pin::new(&mut stream).poll_next(&mut cx_task),
+            Poll::Ready(Some(Ok(2)))
+        );
+    }
+
+    #[test]
+    fn test_forward() {
+        use crate::channel::mpsc;
+        use crate::cx::Cx;
+
+        let cx = Cx::for_testing();
+        let (tx_out, rx_out) = mpsc::channel(10);
+        let input = iter(vec![1, 2, 3]);
+
+        futures_lite::future::block_on(async {
+            forward(&cx, input, tx_out).await.unwrap();
+        });
+
+        let mut output = ReceiverStream::new(cx, rx_out);
+        let waker = noop_waker();
+        let mut cx_task = Context::from_waker(&waker);
+
+        assert_eq!(
+            Pin::new(&mut output).poll_next(&mut cx_task),
+            Poll::Ready(Some(1))
+        );
+        assert_eq!(
+            Pin::new(&mut output).poll_next(&mut cx_task),
+            Poll::Ready(Some(2))
+        );
+        assert_eq!(
+            Pin::new(&mut output).poll_next(&mut cx_task),
+            Poll::Ready(Some(3))
+        );
+        assert_eq!(
+            Pin::new(&mut output).poll_next(&mut cx_task),
             Poll::Ready(None)
         );
     }

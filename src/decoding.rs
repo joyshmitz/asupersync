@@ -444,7 +444,7 @@ impl DecodingPipeline {
     }
 
     /// Consumes the pipeline and returns decoded data if complete.
-    pub fn into_data(mut self) -> Result<Vec<u8>, DecodingError> {
+    pub fn into_data(self) -> Result<Vec<u8>, DecodingError> {
         let Some(plans) = &self.block_plans else {
             return Err(DecodingError::InconsistentMetadata {
                 sbn: 0,
@@ -507,7 +507,7 @@ impl DecodingPipeline {
             | Err(DecodingError::InsufficientSymbols { .. }) => {
                 return None;
             }
-            Err(err) => {
+            Err(_err) => {
                 let block = self.blocks.get_mut(&sbn);
                 if let Some(block) = block {
                     block.state = BlockDecodingState::Failed;
@@ -761,6 +761,36 @@ mod tests {
         }
     }
 
+    fn decoder_with_params(
+        config: &crate::config::EncodingConfig,
+        object_id: ObjectId,
+        data_len: usize,
+        repair_overhead: f64,
+        min_overhead: usize,
+    ) -> DecodingPipeline {
+        let mut decoder = DecodingPipeline::new(DecodingConfig {
+            symbol_size: config.symbol_size,
+            max_block_size: config.max_block_size,
+            repair_overhead,
+            min_overhead,
+            max_buffered_symbols: 0,
+            block_timeout: Duration::from_secs(30),
+            verify_auth: false,
+        });
+        let symbols_per_block =
+            (data_len.div_ceil(usize::from(config.symbol_size))) as u16;
+        decoder
+            .set_object_params(ObjectParams::new(
+                object_id,
+                data_len as u64,
+                config.symbol_size,
+                1,
+                symbols_per_block,
+            ))
+            .expect("params");
+        decoder
+    }
+
     #[test]
     fn decode_roundtrip_sources_only() {
         let config = encoding_config();
@@ -772,24 +802,8 @@ mod tests {
             .map(|res| res.unwrap().into_symbol())
             .collect();
 
-        let mut decoder = DecodingPipeline::new(DecodingConfig {
-            symbol_size: config.symbol_size,
-            max_block_size: config.max_block_size,
-            repair_overhead: config.repair_overhead,
-            min_overhead: 0,
-            max_buffered_symbols: 0,
-            block_timeout: Duration::from_secs(30),
-            verify_auth: false,
-        });
-        decoder
-            .set_object_params(ObjectParams::new(
-                object_id,
-                data.len() as u64,
-                config.symbol_size,
-                1,
-                (data.len().div_ceil(usize::from(config.symbol_size))) as u16,
-            ))
-            .expect("params");
+        let mut decoder =
+            decoder_with_params(&config, object_id, data.len(), 1.0, 0);
 
         for symbol in symbols {
             let auth = AuthenticatedSymbol::from_parts(
@@ -801,5 +815,158 @@ mod tests {
 
         let decoded = decoder.into_data().expect("decoded");
         assert_eq!(decoded, data);
+    }
+
+    #[test]
+    fn decode_roundtrip_out_of_order() {
+        let config = encoding_config();
+        let mut encoder = EncodingPipeline::new(config.clone(), pool());
+        let object_id = ObjectId::new_for_test(2);
+        let data = vec![7u8; 768];
+        let mut symbols: Vec<Symbol> = encoder
+            .encode_with_repair(object_id, &data, 2)
+            .map(|res| res.expect("encode").into_symbol())
+            .collect();
+
+        symbols.reverse();
+
+        let mut decoder =
+            decoder_with_params(&config, object_id, data.len(), config.repair_overhead, 0);
+
+        for symbol in symbols {
+            let auth = AuthenticatedSymbol::from_parts(
+                symbol,
+                crate::security::tag::AuthenticationTag::zero(),
+            );
+            let _ = decoder.feed(auth).expect("feed");
+        }
+
+        let decoded = decoder.into_data().expect("decoded");
+        assert_eq!(decoded, data);
+    }
+
+    #[test]
+    fn reject_wrong_object_id() {
+        let config = encoding_config();
+        let mut encoder = EncodingPipeline::new(config.clone(), pool());
+        let object_id_a = ObjectId::new_for_test(10);
+        let object_id_b = ObjectId::new_for_test(11);
+        let data = vec![1u8; 128];
+
+        let mut decoder =
+            decoder_with_params(&config, object_id_a, data.len(), config.repair_overhead, 0);
+
+        let symbol_b = encoder
+            .encode_with_repair(object_id_b, &data, 0)
+            .next()
+            .expect("symbol")
+            .expect("encode")
+            .into_symbol();
+        let auth = AuthenticatedSymbol::from_parts(
+            symbol_b,
+            crate::security::tag::AuthenticationTag::zero(),
+        );
+
+        let result = decoder.feed(auth).expect("feed");
+        assert_eq!(
+            result,
+            SymbolAcceptResult::Rejected(RejectReason::WrongObjectId)
+        );
+    }
+
+    #[test]
+    fn reject_symbol_size_mismatch() {
+        let config = encoding_config();
+        let mut decoder = DecodingPipeline::new(DecodingConfig {
+            symbol_size: config.symbol_size,
+            max_block_size: config.max_block_size,
+            repair_overhead: config.repair_overhead,
+            min_overhead: 0,
+            max_buffered_symbols: 0,
+            block_timeout: Duration::from_secs(30),
+            verify_auth: false,
+        });
+
+        let symbol = Symbol::new(
+            SymbolId::new(ObjectId::new_for_test(20), 0, 0),
+            vec![0u8; 8],
+            SymbolKind::Source,
+        );
+        let auth = AuthenticatedSymbol::from_parts(
+            symbol,
+            crate::security::tag::AuthenticationTag::zero(),
+        );
+        let result = decoder.feed(auth).expect("feed");
+        assert_eq!(
+            result,
+            SymbolAcceptResult::Rejected(RejectReason::SymbolSizeMismatch)
+        );
+    }
+
+    #[test]
+    fn duplicate_symbol_before_decode() {
+        let config = encoding_config();
+        let mut encoder = EncodingPipeline::new(config.clone(), pool());
+        let object_id = ObjectId::new_for_test(30);
+        let data = vec![9u8; 64];
+
+        let symbol = encoder
+            .encode_with_repair(object_id, &data, 0)
+            .next()
+            .expect("symbol")
+            .expect("encode")
+            .into_symbol();
+
+        let mut decoder = decoder_with_params(&config, object_id, data.len(), 1.5, 1);
+
+        let first = decoder
+            .feed(AuthenticatedSymbol::from_parts(
+                symbol.clone(),
+                crate::security::tag::AuthenticationTag::zero(),
+            ))
+            .expect("feed");
+        assert!(matches!(
+            first,
+            SymbolAcceptResult::Accepted { .. }
+                | SymbolAcceptResult::DecodingStarted { .. }
+                | SymbolAcceptResult::BlockComplete { .. }
+        ));
+
+        let second = decoder
+            .feed(AuthenticatedSymbol::from_parts(
+                symbol,
+                crate::security::tag::AuthenticationTag::zero(),
+            ))
+            .expect("feed");
+        assert_eq!(second, SymbolAcceptResult::Duplicate);
+    }
+
+    #[test]
+    fn into_data_reports_insufficient_symbols() {
+        let config = encoding_config();
+        let mut encoder = EncodingPipeline::new(config.clone(), pool());
+        let object_id = ObjectId::new_for_test(40);
+        let data = vec![5u8; 512];
+
+        let mut decoder =
+            decoder_with_params(&config, object_id, data.len(), config.repair_overhead, 0);
+
+        let symbol = encoder
+            .encode_with_repair(object_id, &data, 0)
+            .next()
+            .expect("symbol")
+            .expect("encode")
+            .into_symbol();
+        let auth = AuthenticatedSymbol::from_parts(
+            symbol,
+            crate::security::tag::AuthenticationTag::zero(),
+        );
+        let _ = decoder.feed(auth).expect("feed");
+
+        let err = decoder.into_data().expect_err("expected insufficient symbols");
+        assert!(matches!(
+            err,
+            DecodingError::InsufficientSymbols { .. }
+        ));
     }
 }

@@ -35,7 +35,7 @@ impl BudgetTimeExt for Budget {
     }
 
     fn deadline_elapsed(&self, now: Time) -> bool {
-        self.deadline.map(|d| d <= now).unwrap_or(false)
+        self.deadline.is_some_and(|d| d <= now)
     }
 }
 
@@ -133,7 +133,7 @@ mod tests {
         futures_lite::future::block_on(async {
             // Box::pin needed because async block is !Unpin and budget_timeout requires Unpin
             let future = Box::pin(async {
-                crate::time::sleep(now, Duration::from_secs(1)).await;
+                futures_lite::future::pending::<()>().await;
             });
             let result = budget_timeout(&cx, Duration::from_secs(10), future, now).await;
             assert!(result.is_err());

@@ -28,6 +28,7 @@
 //! - [`util`]: Internal utilities (deterministic RNG, arenas)
 //! - [`error`]: Error types
 //! - [`channel`]: Two-phase channel primitives (MPSC, etc.)
+//! - [`encoding`]: RaptorQ encoding pipeline
 //! - [`observability`]: Structured logging, metrics, and diagnostic context
 //! - [`security`]: Symbol authentication and security primitives
 //! - [`time`]: Sleep and timeout primitives for time-based operations
@@ -54,6 +55,9 @@ pub mod codec;
 pub mod combinator;
 pub mod config;
 pub mod cx;
+pub mod decoding;
+pub mod encoding;
+pub mod epoch;
 pub mod error;
 pub mod fs;
 pub mod io;
@@ -78,6 +82,18 @@ pub use config::{
     TimeoutConfig, TransportConfig,
 };
 pub use cx::{Cx, Scope};
+pub use decoding::{
+    DecodingConfig, DecodingError, DecodingPipeline, DecodingProgress, RejectReason,
+    SymbolAcceptResult,
+};
+pub use encoding::{EncodedSymbol, EncodingError, EncodingPipeline, EncodingStats};
+pub use epoch::{
+    bulkhead_call_in_epoch, bulkhead_call_weighted_in_epoch, circuit_breaker_call_in_epoch,
+    epoch_join2, epoch_race2, epoch_select, BarrierResult, BarrierTrigger, Epoch, EpochBarrier,
+    EpochBulkheadError, EpochCircuitBreakerError, EpochClock, EpochConfig, EpochContext,
+    EpochError, EpochId, EpochJoin2, EpochPolicy, EpochRace2, EpochScoped, EpochSelect,
+    EpochSource, EpochState, EpochTransitionBehavior, SymbolValidityWindow,
+};
 pub use error::{
     AcquireError, BackoffHint, Error, ErrorCategory, ErrorKind, Recoverability, RecoveryAction,
     RecvError, Result, ResultExt, SendError,
