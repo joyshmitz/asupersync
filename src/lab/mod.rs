@@ -8,14 +8,20 @@
 //! - Schedule exploration (DPOR-style)
 //! - Test oracles for invariant verification
 //! - Await point tracking for cancellation injection
+//! - Integrated cancellation injection with oracle verification
 
 pub mod config;
+pub mod injection;
 pub mod instrumented_future;
 pub mod oracle;
 pub mod replay;
 pub mod runtime;
 
 pub use config::LabConfig;
+pub use injection::{
+    lab, LabBuilder, LabInjectionConfig, LabInjectionReport, LabInjectionResult,
+    LabInjectionRunner,
+};
 pub use instrumented_future::{
     AwaitPoint, CancellationInjector, InjectionMode, InjectionOutcome, InjectionReport,
     InjectionResult, InjectionRunner, InjectionStrategy, InstrumentedFuture, InstrumentedPollResult,
