@@ -5,6 +5,8 @@
 
 #![allow(clippy::unused_async)]
 
+/// DNS resolution with caching and Happy Eyeballs support.
+pub mod dns;
 pub mod sys;
 /// TCP networking primitives.
 pub mod tcp;
