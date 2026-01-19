@@ -9,6 +9,7 @@ use crate::cx::Cx;
 use crate::record::TaskRecord;
 use crate::runtime::task_handle::{JoinError, TaskHandle};
 use crate::runtime::{RuntimeState, SpawnError, StoredTask};
+use crate::tracing_compat::{debug, debug_span};
 use crate::types::{Budget, PanicPayload, Policy, RegionId, TaskId};
 use std::future::Future;
 use std::marker::PhantomData;
@@ -132,6 +133,22 @@ impl<P: Policy> Scope<'_, P> {
 
         // Create task record
         let task_id = self.create_task_record(state)?;
+
+        // Trace task spawn event
+        let _span = debug_span!(
+            "task_spawn",
+            task_id = ?task_id,
+            region_id = ?self.region,
+            initial_state = "Created",
+            poll_quota = self.budget.poll_quota
+        );
+        debug!(
+            task_id = ?task_id,
+            region_id = ?self.region,
+            initial_state = "Created",
+            poll_quota = self.budget.poll_quota,
+            "task spawned"
+        );
 
         // Create the child task's capability context
         let child_observability = cx.child_observability(self.region, task_id);
@@ -286,6 +303,16 @@ impl<P: Policy> Scope<'_, P> {
 
         // Create task record
         let task_id = self.create_task_record(state)?;
+
+        // Trace task spawn event
+        debug!(
+            task_id = ?task_id,
+            region_id = ?self.region,
+            initial_state = "Created",
+            poll_quota = self.budget.poll_quota,
+            spawn_kind = "blocking",
+            "blocking task spawned"
+        );
 
         // Create the child task's capability context
         let child_observability = cx.child_observability(self.region, task_id);

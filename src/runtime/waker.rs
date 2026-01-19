@@ -5,6 +5,7 @@
 //!
 //! Note: This implementation uses safe Rust only (no unsafe).
 
+use crate::tracing_compat::trace;
 use crate::types::TaskId;
 use std::sync::{Arc, Mutex};
 use std::task::{Wake, Waker};
@@ -48,6 +49,10 @@ impl WakerState {
     fn wake(&self, task: TaskId) {
         let mut woken = self.woken.lock().expect("lock poisoned");
         if !woken.contains(&task) {
+            trace!(
+                task_id = ?task,
+                "task woken"
+            );
             woken.push(task);
         }
     }

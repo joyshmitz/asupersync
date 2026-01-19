@@ -3,6 +3,7 @@
 //! A task is a unit of concurrent execution owned by a region.
 //! This module defines the internal record structure for tracking task state.
 
+use crate::tracing_compat::{debug, trace};
 use crate::types::{Budget, CancelReason, CxInner, Outcome, RegionId, TaskId};
 use std::sync::{Arc, RwLock};
 
@@ -124,6 +125,19 @@ impl TaskRecord {
         matches!(&self.state, TaskState::Created | TaskState::Running) || self.state.can_be_polled()
     }
 
+    /// Returns a string name for the current state (for tracing).
+    #[must_use]
+    pub fn state_name(&self) -> &'static str {
+        match &self.state {
+            TaskState::Created => "Created",
+            TaskState::Running => "Running",
+            TaskState::CancelRequested { .. } => "CancelRequested",
+            TaskState::Cancelling { .. } => "Cancelling",
+            TaskState::Finalizing { .. } => "Finalizing",
+            TaskState::Completed(_) => "Completed",
+        }
+    }
+
     /// Requests cancellation of this task.
     ///
     /// Returns true if the request was new (not already pending).
@@ -162,6 +176,12 @@ impl TaskRecord {
                 reason: existing_reason,
                 cleanup_budget: existing_budget,
             } => {
+                trace!(
+                    task_id = ?self.id,
+                    region_id = ?self.owner,
+                    cancel_kind = ?reason.kind,
+                    "cancel reason strengthened (already CancelRequested)"
+                );
                 existing_reason.strengthen(&reason);
                 *existing_budget = existing_budget.combine(cleanup_budget);
                 false
@@ -174,6 +194,12 @@ impl TaskRecord {
                 reason: existing_reason,
                 cleanup_budget: b,
             } => {
+                trace!(
+                    task_id = ?self.id,
+                    region_id = ?self.owner,
+                    cancel_kind = ?reason.kind,
+                    "cancel reason strengthened (in cleanup)"
+                );
                 existing_reason.strengthen(&reason);
                 let new_budget = b.combine(cleanup_budget);
                 *b = new_budget;
@@ -190,6 +216,16 @@ impl TaskRecord {
                 false
             }
             TaskState::Created | TaskState::Running => {
+                let _old_state = self.state_name();
+                debug!(
+                    task_id = ?self.id,
+                    region_id = ?self.owner,
+                    old_state = _old_state,
+                    new_state = "CancelRequested",
+                    cancel_kind = ?reason.kind,
+                    cleanup_poll_quota = cleanup_budget.poll_quota,
+                    "task cancel requested"
+                );
                 self.state = TaskState::CancelRequested {
                     reason,
                     cleanup_budget,
@@ -206,6 +242,13 @@ impl TaskRecord {
     pub fn start_running(&mut self) -> bool {
         match self.state {
             TaskState::Created => {
+                trace!(
+                    task_id = ?self.id,
+                    region_id = ?self.owner,
+                    old_state = "Created",
+                    new_state = "Running",
+                    "task state transition"
+                );
                 self.state = TaskState::Running;
                 true
             }
@@ -220,6 +263,21 @@ impl TaskRecord {
         if self.state.is_terminal() {
             return false;
         }
+        let _old_state = self.state_name();
+        let _outcome_kind = match &outcome {
+            Outcome::Ok(()) => "Ok",
+            Outcome::Err(_) => "Err",
+            Outcome::Cancelled(_) => "Cancelled",
+            Outcome::Panicked(_) => "Panicked",
+        };
+        debug!(
+            task_id = ?self.id,
+            region_id = ?self.owner,
+            old_state = _old_state,
+            new_state = "Completed",
+            outcome_kind = _outcome_kind,
+            "task completed"
+        );
         self.state = TaskState::Completed(outcome);
         true
     }
@@ -248,6 +306,15 @@ impl TaskRecord {
             } => {
                 let reason = reason.clone();
                 let budget = *cleanup_budget;
+
+                trace!(
+                    task_id = ?self.id,
+                    region_id = ?self.owner,
+                    old_state = "CancelRequested",
+                    new_state = "Cancelling",
+                    cancel_kind = ?reason.kind,
+                    "task acknowledged cancellation"
+                );
 
                 // Apply cleanup budget now that we are entering cleanup phase
                 if let Some(inner) = &self.cx_inner {
@@ -283,6 +350,14 @@ impl TaskRecord {
             } => {
                 let reason = reason.clone();
                 let budget = *cleanup_budget;
+                trace!(
+                    task_id = ?self.id,
+                    region_id = ?self.owner,
+                    old_state = "Cancelling",
+                    new_state = "Finalizing",
+                    cancel_kind = ?reason.kind,
+                    "task cleanup done, entering finalization"
+                );
                 self.state = TaskState::Finalizing {
                     reason,
                     cleanup_budget: budget,
@@ -306,6 +381,15 @@ impl TaskRecord {
             return false;
         };
         let reason = reason.clone();
+        debug!(
+            task_id = ?self.id,
+            region_id = ?self.owner,
+            old_state = "Finalizing",
+            new_state = "Completed",
+            outcome_kind = "Cancelled",
+            cancel_kind = ?reason.kind,
+            "task finalization done"
+        );
         self.state = TaskState::Completed(Outcome::Cancelled(reason));
         true
     }

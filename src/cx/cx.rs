@@ -504,6 +504,49 @@ impl Cx {
         let mut inner = self.inner.write().expect("lock poisoned");
         inner.cancel_requested = value;
     }
+
+    /// Creates a [`Scope`] bound to this context's region.
+    ///
+    /// The returned `Scope` can be used to spawn tasks, create child regions,
+    /// and register finalizers. All spawned tasks will be owned by this
+    /// context's region.
+    ///
+    /// # Example
+    ///
+    /// ```ignore
+    /// // Using the scope! macro (recommended):
+    /// scope!(cx, {
+    ///     let handle = scope.spawn(|cx| async { 42 });
+    ///     handle.await
+    /// });
+    ///
+    /// // Manual scope creation:
+    /// let scope = cx.scope();
+    /// // Use scope for spawning...
+    /// ```
+    ///
+    /// # Note
+    ///
+    /// In Phase 0, this creates a scope bound to the current region. In later
+    /// phases, the `scope!` macro will create child regions with proper
+    /// quiescence guarantees.
+    #[must_use]
+    pub fn scope(&self) -> crate::cx::Scope<'static> {
+        crate::cx::Scope::new(self.region_id(), self.budget())
+    }
+
+    /// Creates a [`Scope`] bound to this context's region with a custom budget.
+    ///
+    /// This is used by the `scope!` macro when a budget is specified:
+    /// ```ignore
+    /// scope!(cx, budget: Budget::deadline(Duration::from_secs(5)), {
+    ///     // body
+    /// })
+    /// ```
+    #[must_use]
+    pub fn scope_with_budget(&self, budget: Budget) -> crate::cx::Scope<'static> {
+        crate::cx::Scope::new(self.region_id(), budget)
+    }
 }
 
 #[cfg(test)]

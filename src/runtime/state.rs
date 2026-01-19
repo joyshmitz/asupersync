@@ -12,6 +12,7 @@ use crate::runtime::io_driver::IoDriver;
 use crate::runtime::reactor::Reactor;
 use crate::runtime::stored_task::StoredTask;
 use crate::trace::TraceBuffer;
+use crate::tracing_compat::{debug, trace};
 use crate::types::policy::PolicyAction;
 use crate::types::{Budget, CancelReason, Outcome, Policy, RegionId, TaskId, Time};
 use crate::util::Arena;
@@ -255,6 +256,15 @@ impl RuntimeState {
         // Store the wrapped future
         self.stored_futures
             .insert(task_id, StoredTask::new(wrapped_future));
+
+        // Trace task creation
+        debug!(
+            task_id = ?task_id,
+            region_id = ?region,
+            initial_state = "Created",
+            poll_quota = budget.poll_quota,
+            "task created via RuntimeState::create_task"
+        );
 
         // Create the TaskHandle
         let handle = crate::runtime::TaskHandle::new(task_id, result_rx, cx_weak);
@@ -514,12 +524,35 @@ impl RuntimeState {
     pub fn task_completed(&mut self, task_id: TaskId) -> Vec<TaskId> {
         // Remove the task record to prevent memory leaks
         let Some(task) = self.tasks.remove(task_id.arena_index()) else {
+            trace!(
+                task_id = ?task_id,
+                "task_completed called for unknown task"
+            );
             return Vec::new();
         };
 
         // Get the owning region and the waiters before we mutate
         let owner = task.owner;
-        let waiters = task.waiters;
+        let waiters = task.waiters.clone();
+        let _waiter_count = waiters.len();
+
+        // Trace task completion
+        let _outcome_kind = match &task.state {
+            crate::record::task::TaskState::Completed(outcome) => match outcome {
+                Outcome::Ok(()) => "Ok",
+                Outcome::Err(_) => "Err",
+                Outcome::Cancelled(_) => "Cancelled",
+                Outcome::Panicked(_) => "Panicked",
+            },
+            _ => "Unknown",
+        };
+        debug!(
+            task_id = ?task_id,
+            region_id = ?owner,
+            outcome_kind = _outcome_kind,
+            waiter_count = _waiter_count,
+            "task cleanup from runtime state"
+        );
 
         // Remove task from owning region to prevent memory leak
         if let Some(region) = self.regions.get(owner.arena_index()) {

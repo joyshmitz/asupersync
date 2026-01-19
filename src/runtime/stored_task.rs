@@ -3,6 +3,8 @@
 //! `StoredTask` wraps a type-erased future that can be polled by the executor.
 //! Each stored task is associated with a `TaskId` and can be polled to completion.
 
+use crate::tracing_compat::trace;
+use crate::types::TaskId;
 use std::future::Future;
 use std::pin::Pin;
 use std::task::{Context, Poll};
@@ -15,6 +17,10 @@ use std::task::{Context, Poll};
 pub struct StoredTask {
     /// The pinned, boxed future to poll.
     future: Pin<Box<dyn Future<Output = ()> + Send>>,
+    /// The task ID (for tracing).
+    task_id: Option<TaskId>,
+    /// Poll counter (for tracing).
+    poll_count: u64,
 }
 
 impl StoredTask {
@@ -28,7 +34,28 @@ impl StoredTask {
     {
         Self {
             future: Box::pin(future),
+            task_id: None,
+            poll_count: 0,
         }
+    }
+
+    /// Creates a new stored task from a future with a task ID.
+    ///
+    /// The task ID is used for tracing poll events.
+    pub fn new_with_id<F>(future: F, task_id: TaskId) -> Self
+    where
+        F: Future<Output = ()> + Send + 'static,
+    {
+        Self {
+            future: Box::pin(future),
+            task_id: Some(task_id),
+            poll_count: 0,
+        }
+    }
+
+    /// Sets the task ID for tracing.
+    pub fn set_task_id(&mut self, task_id: TaskId) {
+        self.task_id = Some(task_id);
     }
 
     /// Polls the stored task.
@@ -36,7 +63,39 @@ impl StoredTask {
     /// Returns `Poll::Ready(())` when the task is complete, or `Poll::Pending`
     /// if it needs to be polled again.
     pub fn poll(&mut self, cx: &mut Context<'_>) -> Poll<()> {
-        self.future.as_mut().poll(cx)
+        self.poll_count += 1;
+        let _poll_number = self.poll_count;
+
+        if let Some(_task_id) = self.task_id {
+            trace!(
+                task_id = ?_task_id,
+                poll_number = _poll_number,
+                "task poll started"
+            );
+        }
+
+        let result = self.future.as_mut().poll(cx);
+
+        if let Some(_task_id) = self.task_id {
+            let _poll_result = match &result {
+                Poll::Ready(()) => "Ready",
+                Poll::Pending => "Pending",
+            };
+            trace!(
+                task_id = ?_task_id,
+                poll_number = _poll_number,
+                poll_result = _poll_result,
+                "task poll completed"
+            );
+        }
+
+        result
+    }
+
+    /// Returns the number of times this task has been polled.
+    #[must_use]
+    pub fn poll_count(&self) -> u64 {
+        self.poll_count
     }
 }
 
