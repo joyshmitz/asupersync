@@ -1,0 +1,30 @@
+[package]
+name = "asupersync-macros"
+version = "0.1.0"
+edition = "2021"
+license = "MIT"
+description = "Proc macros for asupersync structured concurrency runtime"
+repository = "https://github.com/Dicklesworthstone/asupersync"
+keywords = ["async", "structured-concurrency", "macros", "proc-macro"]
+categories = ["asynchronous", "concurrency"]
+
+[lib]
+proc-macro = true
+
+[dependencies]
+syn = { version = "2.0", features = ["full", "parsing"] }
+quote = "1.0"
+proc-macro2 = "1.0"
+
+[dev-dependencies]
+asupersync = { path = ".." }
+
+[lints.rust]
+unsafe_code = "deny"
+missing_docs = "warn"
+
+[lints.clippy]
+pedantic = { level = "warn", priority = -1 }
+nursery = { level = "warn", priority = -1 }
+module_name_repetitions = "allow"
+must_use_candidate = "allow"
