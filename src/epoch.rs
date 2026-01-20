@@ -1723,6 +1723,11 @@ mod tests {
     use std::sync::atomic::{AtomicU64, Ordering};
     use std::sync::Arc;
 
+    fn init_test(name: &str) {
+        crate::test_utils::init_test_logging();
+        crate::test_phase!(name);
+    }
+
     #[derive(Debug)]
     struct TestEpochSource {
         current: AtomicU64,
@@ -1749,69 +1754,115 @@ mod tests {
     // Test 1: EpochId ordering and arithmetic
     #[test]
     fn test_epoch_id_ordering() {
+        init_test("test_epoch_id_ordering");
         let e1 = EpochId(5);
         let e2 = EpochId(10);
 
-        assert!(e1.is_before(e2));
-        assert!(e2.is_after(e1));
-        assert!(!e1.is_before(e1));
-        assert_eq!(e1.distance(e2), 5);
-        assert_eq!(e2.distance(e1), 5);
+        let before = e1.is_before(e2);
+        crate::assert_with_log!(before, "e1 before e2", true, before);
+        let after = e2.is_after(e1);
+        crate::assert_with_log!(after, "e2 after e1", true, after);
+        let same_before = e1.is_before(e1);
+        crate::assert_with_log!(!same_before, "e1 before e1", false, same_before);
+        let dist12 = e1.distance(e2);
+        crate::assert_with_log!(dist12 == 5, "distance 1->2", 5, dist12);
+        let dist21 = e2.distance(e1);
+        crate::assert_with_log!(dist21 == 5, "distance 2->1", 5, dist21);
+        crate::test_complete!("test_epoch_id_ordering");
     }
 
     // Test 2: EpochId next/prev
     #[test]
     fn test_epoch_id_navigation() {
+        init_test("test_epoch_id_navigation");
         let e = EpochId(5);
 
-        assert_eq!(e.next(), EpochId(6));
-        assert_eq!(e.prev(), Some(EpochId(4)));
-        assert_eq!(EpochId::GENESIS.prev(), None);
-        assert_eq!(EpochId::MAX.saturating_next(), EpochId::MAX);
+        crate::assert_with_log!(e.next() == EpochId(6), "next", EpochId(6), e.next());
+        crate::assert_with_log!(
+            e.prev() == Some(EpochId(4)),
+            "prev",
+            Some(EpochId(4)),
+            e.prev()
+        );
+        let genesis_prev_none = EpochId::GENESIS.prev().is_none();
+        crate::assert_with_log!(genesis_prev_none, "genesis prev none", true, genesis_prev_none);
+        crate::assert_with_log!(
+            EpochId::MAX.saturating_next() == EpochId::MAX,
+            "max saturating_next",
+            EpochId::MAX,
+            EpochId::MAX.saturating_next()
+        );
+        crate::test_complete!("test_epoch_id_navigation");
     }
 
     // Test 3: EpochConfig validation
     #[test]
     fn test_epoch_config_validation() {
+        init_test("test_epoch_config_validation");
         let valid = EpochConfig::default();
-        assert!(valid.validate().is_ok());
+        let valid_ok = valid.validate().is_ok();
+        crate::assert_with_log!(valid_ok, "valid ok", true, valid_ok);
 
         let invalid_min = EpochConfig {
             min_duration: Time::from_secs(100),
             target_duration: Time::from_secs(60),
             ..EpochConfig::default()
         };
-        assert!(invalid_min.validate().is_err());
+        let invalid_min_err = invalid_min.validate().is_err();
+        crate::assert_with_log!(invalid_min_err, "invalid min err", true, invalid_min_err);
 
         let invalid_quorum = EpochConfig {
             require_quorum: true,
             quorum_size: 0,
             ..EpochConfig::default()
         };
-        assert!(invalid_quorum.validate().is_err());
+        let invalid_quorum_err = invalid_quorum.validate().is_err();
+        crate::assert_with_log!(invalid_quorum_err, "invalid quorum err", true, invalid_quorum_err);
+        crate::test_complete!("test_epoch_config_validation");
     }
 
     // Test 4: Epoch lifecycle
     #[test]
     fn test_epoch_lifecycle() {
+        init_test("test_epoch_lifecycle");
         let config = EpochConfig::default();
         let mut epoch = Epoch::new(EpochId(1), Time::from_millis(0), config);
 
-        assert_eq!(epoch.state, EpochState::Active);
-        assert!(epoch.state.is_active());
+        crate::assert_with_log!(
+            epoch.state == EpochState::Active,
+            "state active",
+            EpochState::Active,
+            epoch.state
+        );
+        let active = epoch.state.is_active();
+        crate::assert_with_log!(active, "is_active", true, active);
 
         epoch.begin_ending(Time::from_secs(60)).unwrap();
-        assert_eq!(epoch.state, EpochState::Ending);
-        assert!(epoch.state.allows_completion());
+        crate::assert_with_log!(
+            epoch.state == EpochState::Ending,
+            "state ending",
+            EpochState::Ending,
+            epoch.state
+        );
+        let allows = epoch.state.allows_completion();
+        crate::assert_with_log!(allows, "allows completion", true, allows);
 
         epoch.complete(Time::from_secs(70)).unwrap();
-        assert_eq!(epoch.state, EpochState::Ended);
-        assert!(epoch.state.is_terminal());
+        crate::assert_with_log!(
+            epoch.state == EpochState::Ended,
+            "state ended",
+            EpochState::Ended,
+            epoch.state
+        );
+        let terminal = epoch.state.is_terminal();
+        crate::assert_with_log!(terminal, "terminal", true, terminal);
+        crate::test_complete!("test_epoch_lifecycle");
     }
 
     // Test 5: Epoch transition timing
     #[test]
     fn test_epoch_transition_timing() {
+        init_test("test_epoch_transition_timing");
         let config = EpochConfig {
             min_duration: Time::from_secs(30),
             target_duration: Time::from_secs(60),
@@ -1821,102 +1872,150 @@ mod tests {
         let epoch = Epoch::new(EpochId(1), Time::from_secs(0), config);
 
         // Before min duration
-        assert!(!epoch.can_transition(Time::from_secs(20)));
+        let can = epoch.can_transition(Time::from_secs(20));
+        crate::assert_with_log!(!can, "before min", false, can);
 
         // After min duration
-        assert!(epoch.can_transition(Time::from_secs(40)));
+        let can = epoch.can_transition(Time::from_secs(40));
+        crate::assert_with_log!(can, "after min", true, can);
 
         // Not overdue yet
-        assert!(!epoch.is_overdue(Time::from_secs(100)));
+        let overdue = epoch.is_overdue(Time::from_secs(100));
+        crate::assert_with_log!(!overdue, "not overdue", false, overdue);
 
         // Overdue
-        assert!(epoch.is_overdue(Time::from_secs(130)));
+        let overdue = epoch.is_overdue(Time::from_secs(130));
+        crate::assert_with_log!(overdue, "overdue", true, overdue);
+        crate::test_complete!("test_epoch_transition_timing");
     }
 
     // Test 6: SymbolValidityWindow contains
     #[test]
     fn test_validity_window_contains() {
+        init_test("test_validity_window_contains");
         let window = SymbolValidityWindow::new(EpochId(5), EpochId(10));
 
-        assert!(!window.contains(EpochId(4)));
-        assert!(window.contains(EpochId(5)));
-        assert!(window.contains(EpochId(7)));
-        assert!(window.contains(EpochId(10)));
-        assert!(!window.contains(EpochId(11)));
+        let contains4 = window.contains(EpochId(4));
+        crate::assert_with_log!(!contains4, "contains 4", false, contains4);
+        let contains5 = window.contains(EpochId(5));
+        crate::assert_with_log!(contains5, "contains 5", true, contains5);
+        let contains7 = window.contains(EpochId(7));
+        crate::assert_with_log!(contains7, "contains 7", true, contains7);
+        let contains10 = window.contains(EpochId(10));
+        crate::assert_with_log!(contains10, "contains 10", true, contains10);
+        let contains11 = window.contains(EpochId(11));
+        crate::assert_with_log!(!contains11, "contains 11", false, contains11);
+        crate::test_complete!("test_validity_window_contains");
     }
 
     // Test 7: SymbolValidityWindow overlap
     #[test]
     fn test_validity_window_overlap() {
+        init_test("test_validity_window_overlap");
         let w1 = SymbolValidityWindow::new(EpochId(1), EpochId(5));
         let w2 = SymbolValidityWindow::new(EpochId(4), EpochId(8));
         let w3 = SymbolValidityWindow::new(EpochId(6), EpochId(10));
 
-        assert!(w1.overlaps(&w2));
-        assert!(w2.overlaps(&w1));
-        assert!(!w1.overlaps(&w3));
+        let w1_w2 = w1.overlaps(&w2);
+        crate::assert_with_log!(w1_w2, "w1 overlaps w2", true, w1_w2);
+        let w2_w1 = w2.overlaps(&w1);
+        crate::assert_with_log!(w2_w1, "w2 overlaps w1", true, w2_w1);
+        let w1_w3 = w1.overlaps(&w3);
+        crate::assert_with_log!(!w1_w3, "w1 overlaps w3", false, w1_w3);
 
         let intersection = w1.intersection(&w2);
-        assert_eq!(
-            intersection,
-            Some(SymbolValidityWindow::new(EpochId(4), EpochId(5)))
+        crate::assert_with_log!(
+            intersection == Some(SymbolValidityWindow::new(EpochId(4), EpochId(5))),
+            "intersection",
+            Some(SymbolValidityWindow::new(EpochId(4), EpochId(5))),
+            intersection
         );
+        crate::test_complete!("test_validity_window_overlap");
     }
 
     // Test 8: SymbolValidityWindow special constructors
     #[test]
     fn test_validity_window_constructors() {
+        init_test("test_validity_window_constructors");
         let single = SymbolValidityWindow::single(EpochId(5));
-        assert_eq!(single.span(), 1);
-        assert!(single.contains(EpochId(5)));
-        assert!(!single.contains(EpochId(4)));
+        let span = single.span();
+        crate::assert_with_log!(span == 1, "single span", 1, span);
+        let contains5 = single.contains(EpochId(5));
+        crate::assert_with_log!(contains5, "contains 5", true, contains5);
+        let contains4 = single.contains(EpochId(4));
+        crate::assert_with_log!(!contains4, "contains 4", false, contains4);
 
         let infinite = SymbolValidityWindow::infinite();
-        assert!(infinite.contains(EpochId::GENESIS));
-        assert!(infinite.contains(EpochId::MAX));
+        let contains_genesis = infinite.contains(EpochId::GENESIS);
+        crate::assert_with_log!(contains_genesis, "contains genesis", true, contains_genesis);
+        let contains_max = infinite.contains(EpochId::MAX);
+        crate::assert_with_log!(contains_max, "contains max", true, contains_max);
 
         let from = SymbolValidityWindow::from_epoch(EpochId(5));
-        assert!(!from.contains(EpochId(4)));
-        assert!(from.contains(EpochId(5)));
-        assert!(from.contains(EpochId::MAX));
+        let contains4 = from.contains(EpochId(4));
+        crate::assert_with_log!(!contains4, "from contains 4", false, contains4);
+        let contains5 = from.contains(EpochId(5));
+        crate::assert_with_log!(contains5, "from contains 5", true, contains5);
+        let contains_max = from.contains(EpochId::MAX);
+        crate::assert_with_log!(contains_max, "from contains max", true, contains_max);
+        crate::test_complete!("test_validity_window_constructors");
     }
 
     // Test 9: EpochBarrier basic operation
     #[test]
     fn test_epoch_barrier_basic() {
+        init_test("test_epoch_barrier_basic");
         let barrier = EpochBarrier::new(EpochId(1), 3, Time::ZERO);
 
-        assert_eq!(barrier.remaining(), 3);
-        assert!(!barrier.is_triggered());
+        let remaining = barrier.remaining();
+        crate::assert_with_log!(remaining == 3, "remaining", 3, remaining);
+        let triggered = barrier.is_triggered();
+        crate::assert_with_log!(!triggered, "triggered", false, triggered);
 
         barrier.arrive("node1", Time::from_secs(1)).unwrap();
-        assert_eq!(barrier.arrived(), 1);
-        assert_eq!(barrier.remaining(), 2);
+        let arrived = barrier.arrived();
+        crate::assert_with_log!(arrived == 1, "arrived", 1, arrived);
+        let remaining = barrier.remaining();
+        crate::assert_with_log!(remaining == 2, "remaining", 2, remaining);
 
         barrier.arrive("node2", Time::from_secs(2)).unwrap();
-        assert_eq!(barrier.arrived(), 2);
+        let arrived = barrier.arrived();
+        crate::assert_with_log!(arrived == 2, "arrived", 2, arrived);
 
         let result = barrier.arrive("node3", Time::from_secs(3)).unwrap();
-        assert!(result.is_some());
-        assert_eq!(result.unwrap().trigger, BarrierTrigger::AllArrived);
-        assert!(barrier.is_triggered());
+        let some = result.is_some();
+        crate::assert_with_log!(some, "result some", true, some);
+        let trigger = result.unwrap().trigger;
+        crate::assert_with_log!(
+            trigger == BarrierTrigger::AllArrived,
+            "trigger",
+            BarrierTrigger::AllArrived,
+            trigger
+        );
+        let triggered = barrier.is_triggered();
+        crate::assert_with_log!(triggered, "triggered", true, triggered);
+        crate::test_complete!("test_epoch_barrier_basic");
     }
 
     // Test 10: EpochBarrier duplicate arrival
     #[test]
     fn test_epoch_barrier_duplicate() {
+        init_test("test_epoch_barrier_duplicate");
         let barrier = EpochBarrier::new(EpochId(1), 2, Time::ZERO);
 
         barrier.arrive("node1", Time::from_secs(1)).unwrap();
 
         // Duplicate arrival should fail
         let result = barrier.arrive("node1", Time::from_secs(2));
-        assert!(result.is_err());
+        let err = result.is_err();
+        crate::assert_with_log!(err, "duplicate err", true, err);
+        crate::test_complete!("test_epoch_barrier_duplicate");
     }
 
     // Test 11: EpochBarrier timeout
     #[test]
     fn test_epoch_barrier_timeout() {
+        init_test("test_epoch_barrier_timeout");
         let barrier =
             EpochBarrier::new(EpochId(1), 3, Time::ZERO).with_timeout(Time::from_secs(10));
 
@@ -1924,28 +2023,49 @@ mod tests {
 
         // Arrival after timeout
         let result = barrier.arrive("node2", Time::from_secs(15)).unwrap();
-        assert!(result.is_some());
-        assert_eq!(result.unwrap().trigger, BarrierTrigger::Timeout);
+        let some = result.is_some();
+        crate::assert_with_log!(some, "result some", true, some);
+        let trigger = result.unwrap().trigger;
+        crate::assert_with_log!(
+            trigger == BarrierTrigger::Timeout,
+            "trigger",
+            BarrierTrigger::Timeout,
+            trigger
+        );
+        crate::test_complete!("test_epoch_barrier_timeout");
     }
 
     // Test 12: EpochClock advance
     #[test]
     fn test_epoch_clock_advance() {
+        init_test("test_epoch_clock_advance");
         let config = EpochConfig::short_lived();
         let clock = EpochClock::new(config);
         clock.initialize(Time::ZERO);
 
-        assert_eq!(clock.current(), EpochId::GENESIS);
+        crate::assert_with_log!(
+            clock.current() == EpochId::GENESIS,
+            "current genesis",
+            EpochId::GENESIS,
+            clock.current()
+        );
 
         // Advance after minimum duration
         let new_epoch = clock.advance(Time::from_millis(100)).unwrap();
-        assert_eq!(new_epoch, EpochId(1));
-        assert_eq!(clock.current(), EpochId(1));
+        crate::assert_with_log!(new_epoch == EpochId(1), "new epoch", EpochId(1), new_epoch);
+        crate::assert_with_log!(
+            clock.current() == EpochId(1),
+            "current",
+            EpochId(1),
+            clock.current()
+        );
+        crate::test_complete!("test_epoch_clock_advance");
     }
 
     // Test 13: EpochClock history retention
     #[test]
     fn test_epoch_clock_history() {
+        init_test("test_epoch_clock_history");
         let config = EpochConfig {
             min_duration: Time::from_millis(10),
             target_duration: Time::from_millis(50),
@@ -1962,50 +2082,82 @@ mod tests {
         }
 
         let history = clock.history();
-        assert!(history.len() <= 3);
+        let within = history.len() <= 3;
+        crate::assert_with_log!(within, "history len <= 3", true, within);
+        crate::test_complete!("test_epoch_clock_history");
     }
 
     // Test 14: EpochError display
     #[test]
     fn test_epoch_error_display() {
+        init_test("test_epoch_error_display");
         let expired = EpochError::Expired { epoch: EpochId(5) };
-        assert!(expired.to_string().contains('5'));
-        assert!(expired.to_string().contains("expired"));
+        let expired_str = expired.to_string();
+        let has_num = expired_str.contains('5');
+        crate::assert_with_log!(has_num, "contains 5", true, has_num);
+        let has_expired = expired_str.contains("expired");
+        crate::assert_with_log!(has_expired, "contains expired", true, has_expired);
 
         let transition = EpochError::TransitionOccurred {
             from: EpochId(1),
             to: EpochId(2),
         };
-        assert!(transition.to_string().contains("transition"));
+        let transition_str = transition.to_string();
+        let has_transition = transition_str.contains("transition");
+        crate::assert_with_log!(has_transition, "contains transition", true, has_transition);
+        crate::test_complete!("test_epoch_error_display");
     }
 
     // Test 15: Epoch metadata
     #[test]
     fn test_epoch_metadata() {
+        init_test("test_epoch_metadata");
         let config = EpochConfig::default();
         let mut epoch = Epoch::new(EpochId(1), Time::ZERO, config);
 
         epoch.set_metadata("version", "1.0.0");
         epoch.set_metadata("leader", "node-1");
 
-        assert_eq!(epoch.metadata.get("version"), Some(&"1.0.0".to_string()));
-        assert_eq!(epoch.metadata.get("leader"), Some(&"node-1".to_string()));
+        let expected_version = "1.0.0".to_string();
+        let expected_leader = "node-1".to_string();
+        let version = epoch.metadata.get("version");
+        crate::assert_with_log!(
+            version == Some(&expected_version),
+            "version",
+            Some(&expected_version),
+            version
+        );
+        let leader = epoch.metadata.get("leader");
+        crate::assert_with_log!(
+            leader == Some(&expected_leader),
+            "leader",
+            Some(&expected_leader),
+            leader
+        );
+        crate::test_complete!("test_epoch_metadata");
     }
 
     // Test 16: EpochContext budget tracking
     #[test]
     fn test_epoch_context_budget() {
+        init_test("test_epoch_context_budget");
         let ctx =
             EpochContext::new(EpochId(1), Time::ZERO, Time::from_secs(10)).with_operation_budget(1);
-        assert!(ctx.record_operation());
-        assert!(!ctx.record_operation());
-        assert!(ctx.is_budget_exhausted());
-        assert_eq!(ctx.operations_used(), 1);
+        let first = ctx.record_operation();
+        crate::assert_with_log!(first, "first record", true, first);
+        let second = ctx.record_operation();
+        crate::assert_with_log!(!second, "second record", false, second);
+        let exhausted = ctx.is_budget_exhausted();
+        crate::assert_with_log!(exhausted, "exhausted", true, exhausted);
+        let used = ctx.operations_used();
+        crate::assert_with_log!(used == 1, "operations used", 1, used);
+        crate::test_complete!("test_epoch_context_budget");
     }
 
     // Test 17: EpochScoped expires when past deadline
     #[test]
     fn test_epoch_scoped_expired() {
+        init_test("test_epoch_scoped_expired");
         let clock = Arc::new(VirtualClock::starting_at(Time::from_secs(5)));
         let epoch = EpochContext::new(EpochId(1), Time::ZERO, Time::from_secs(1));
         let source = Arc::new(EpochId(1));
@@ -2013,12 +2165,15 @@ mod tests {
 
         let fut = EpochScoped::new(Box::pin(async { 42u32 }), epoch, policy, clock, source);
         let result = block_on(fut);
-        assert!(matches!(result, Err(EpochError::Expired { .. })));
+        let expired = matches!(result, Err(EpochError::Expired { .. }));
+        crate::assert_with_log!(expired, "expired", true, expired);
+        crate::test_complete!("test_epoch_scoped_expired");
     }
 
     // Test 18: EpochScoped detects transitions
     #[test]
     fn test_epoch_scoped_transition() {
+        init_test("test_epoch_scoped_transition");
         let clock = Arc::new(VirtualClock::starting_at(Time::ZERO));
         let source = Arc::new(TestEpochSource::new(EpochId(1)));
         source.set(EpochId(2));
@@ -2027,12 +2182,15 @@ mod tests {
         let policy = EpochPolicy::strict();
         let fut = EpochScoped::new(Box::pin(async { 7u8 }), epoch, policy, clock, source);
         let result = block_on(fut);
-        assert!(matches!(result, Err(EpochError::TransitionOccurred { .. })));
+        let transitioned = matches!(result, Err(EpochError::TransitionOccurred { .. }));
+        crate::assert_with_log!(transitioned, "transitioned", true, transitioned);
+        crate::test_complete!("test_epoch_scoped_transition");
     }
 
     // Test 19: Epoch-select completes left branch
     #[test]
     fn test_epoch_select_left() {
+        init_test("test_epoch_select_left");
         let clock = Arc::new(VirtualClock::starting_at(Time::ZERO));
         let source = Arc::new(EpochId(1));
         let epoch = EpochContext::new(EpochId(1), Time::ZERO, Time::from_secs(10));
@@ -2048,14 +2206,18 @@ mod tests {
         );
         let result = block_on(fut);
         match result {
-            Either::Left(Ok(v)) => assert_eq!(v, 1),
+            Either::Left(Ok(v)) => {
+                crate::assert_with_log!(v == 1, "left result", 1, v);
+            }
             _ => panic!("unexpected select result"),
         }
+        crate::test_complete!("test_epoch_select_left");
     }
 
     // Test 20: Bulkhead/CircuitBreaker epoch wrappers
     #[test]
     fn test_epoch_wrapped_bulkhead_and_circuit_breaker() {
+        init_test("test_epoch_wrapped_bulkhead_and_circuit_breaker");
         let bulkhead = Bulkhead::new(BulkheadPolicy::default());
         let breaker = CircuitBreaker::new(CircuitBreakerPolicy::default());
 
@@ -2069,13 +2231,493 @@ mod tests {
                 Ok::<_, &str>(5u32)
             })
             .expect("bulkhead call should succeed");
-        assert_eq!(bulkhead_result, 5);
+        crate::assert_with_log!(bulkhead_result == 5, "bulkhead result", 5, bulkhead_result);
 
         let breaker_result =
             circuit_breaker_call_in_epoch(&breaker, &epoch, &policy, &clock, &epoch_source, || {
                 Ok::<_, &str>(9u32)
             })
             .expect("circuit breaker call should succeed");
-        assert_eq!(breaker_result, 9);
+        crate::assert_with_log!(breaker_result == 9, "breaker result", 9, breaker_result);
+        crate::test_complete!("test_epoch_wrapped_bulkhead_and_circuit_breaker");
+    }
+
+    // ============================================================================
+    // Additional Epoch Tests (asupersync-ups)
+    // ============================================================================
+
+    // Test 21: EpochId overflow handling (saturating at MAX)
+    #[test]
+    fn test_epoch_id_overflow_saturation() {
+        init_test("test_epoch_id_overflow_saturation");
+        let max_epoch = EpochId::MAX;
+
+        // saturating_next should stay at MAX
+        let saturated = max_epoch.saturating_next();
+        crate::assert_with_log!(
+            saturated == EpochId::MAX,
+            "saturating_next at MAX",
+            EpochId::MAX,
+            saturated
+        );
+
+        // Multiple saturating_next calls should all return MAX
+        let double_saturated = saturated.saturating_next();
+        crate::assert_with_log!(
+            double_saturated == EpochId::MAX,
+            "double saturating_next",
+            EpochId::MAX,
+            double_saturated
+        );
+
+        crate::test_complete!("test_epoch_id_overflow_saturation");
+    }
+
+    // Test 22: EpochId next overflow panic
+    #[test]
+    #[should_panic]
+    fn test_epoch_id_next_overflow_panics() {
+        init_test("test_epoch_id_next_overflow_panics");
+        let max_epoch = EpochId::MAX;
+        // This should panic due to overflow
+        let _ = max_epoch.next();
+    }
+
+    // Test 23: EpochBarrier force trigger
+    #[test]
+    fn test_epoch_barrier_force_trigger() {
+        init_test("test_epoch_barrier_force_trigger");
+        let barrier = EpochBarrier::new(EpochId(1), 5, Time::ZERO);
+
+        // Only one participant arrived
+        barrier.arrive("node1", Time::from_secs(1)).unwrap();
+        let arrived = barrier.arrived();
+        crate::assert_with_log!(arrived == 1, "arrived before force", 1, arrived);
+
+        // Force trigger before all arrive
+        let result = barrier.force_trigger(Time::from_secs(2));
+        crate::assert_with_log!(
+            result.trigger == BarrierTrigger::Forced,
+            "trigger type",
+            BarrierTrigger::Forced,
+            result.trigger
+        );
+        crate::assert_with_log!(result.arrived == 1, "arrived in result", 1, result.arrived);
+        crate::assert_with_log!(result.expected == 5, "expected in result", 5, result.expected);
+
+        // Barrier should now be triggered
+        let triggered = barrier.is_triggered();
+        crate::assert_with_log!(triggered, "is_triggered", true, triggered);
+
+        crate::test_complete!("test_epoch_barrier_force_trigger");
+    }
+
+    // Test 24: EpochBarrier cancel
+    #[test]
+    fn test_epoch_barrier_cancel() {
+        init_test("test_epoch_barrier_cancel");
+        let barrier = EpochBarrier::new(EpochId(2), 3, Time::ZERO);
+
+        barrier.arrive("node1", Time::from_secs(1)).unwrap();
+        barrier.arrive("node2", Time::from_secs(2)).unwrap();
+
+        // Cancel before all arrive
+        let result = barrier.cancel(Time::from_secs(3));
+        crate::assert_with_log!(
+            result.trigger == BarrierTrigger::Cancelled,
+            "trigger type",
+            BarrierTrigger::Cancelled,
+            result.trigger
+        );
+        crate::assert_with_log!(result.arrived == 2, "arrived", 2, result.arrived);
+
+        // Further arrivals should fail since barrier is triggered
+        let late_arrival = barrier.arrive("node3", Time::from_secs(4));
+        let err = late_arrival.is_err();
+        crate::assert_with_log!(err, "late arrival err", true, err);
+
+        crate::test_complete!("test_epoch_barrier_cancel");
+    }
+
+    // Test 25: EpochClock advance before minimum duration fails
+    #[test]
+    fn test_epoch_clock_advance_too_early() {
+        init_test("test_epoch_clock_advance_too_early");
+        let config = EpochConfig {
+            min_duration: Time::from_secs(30),
+            target_duration: Time::from_secs(60),
+            max_duration: Time::from_secs(120),
+            ..EpochConfig::default()
+        };
+        let clock = EpochClock::new(config);
+        clock.initialize(Time::ZERO);
+
+        // Try to advance before minimum duration
+        let result = clock.advance(Time::from_secs(10));
+        let err = result.is_err();
+        crate::assert_with_log!(err, "advance too early err", true, err);
+
+        // Epoch should still be GENESIS
+        crate::assert_with_log!(
+            clock.current() == EpochId::GENESIS,
+            "still genesis",
+            EpochId::GENESIS,
+            clock.current()
+        );
+
+        crate::test_complete!("test_epoch_clock_advance_too_early");
+    }
+
+    // Test 26: EpochClock advance when overdue
+    #[test]
+    fn test_epoch_clock_advance_overdue() {
+        init_test("test_epoch_clock_advance_overdue");
+        let config = EpochConfig {
+            min_duration: Time::from_secs(30),
+            target_duration: Time::from_secs(60),
+            max_duration: Time::from_secs(120),
+            ..EpochConfig::default()
+        };
+        let clock = EpochClock::new(config);
+        clock.initialize(Time::ZERO);
+
+        // Advance when overdue (past max_duration) - should succeed
+        let result = clock.advance(Time::from_secs(150));
+        let ok = result.is_ok();
+        crate::assert_with_log!(ok, "advance when overdue ok", true, ok);
+        crate::assert_with_log!(
+            clock.current() == EpochId(1),
+            "advanced to epoch 1",
+            EpochId(1),
+            clock.current()
+        );
+
+        crate::test_complete!("test_epoch_clock_advance_overdue");
+    }
+
+    // Test 27: EpochContext expiry check
+    #[test]
+    fn test_epoch_context_expiry() {
+        init_test("test_epoch_context_expiry");
+        let ctx = EpochContext::new(EpochId(1), Time::ZERO, Time::from_secs(10));
+
+        // Not expired before deadline
+        let expired_before = ctx.is_expired(Time::from_secs(5));
+        crate::assert_with_log!(!expired_before, "not expired at t=5", false, expired_before);
+
+        // Expired at deadline
+        let expired_at = ctx.is_expired(Time::from_secs(10));
+        crate::assert_with_log!(expired_at, "expired at t=10", true, expired_at);
+
+        // Expired after deadline
+        let expired_after = ctx.is_expired(Time::from_secs(15));
+        crate::assert_with_log!(expired_after, "expired at t=15", true, expired_after);
+
+        // Check remaining time
+        let remaining = ctx.remaining_time(Time::from_secs(3));
+        crate::assert_with_log!(
+            remaining == Some(Time::from_secs(7)),
+            "remaining at t=3",
+            Some(Time::from_secs(7)),
+            remaining
+        );
+
+        let no_remaining = ctx.remaining_time(Time::from_secs(12));
+        crate::assert_with_log!(no_remaining.is_none(), "no remaining at t=12", true, no_remaining.is_none());
+
+        crate::test_complete!("test_epoch_context_expiry");
+    }
+
+    // Test 28: SymbolValidityWindow extend_to
+    #[test]
+    fn test_validity_window_extend() {
+        init_test("test_validity_window_extend");
+        let window = SymbolValidityWindow::new(EpochId(5), EpochId(10));
+
+        // Extend to include earlier epoch
+        let extended_earlier = window.extend_to(EpochId(2));
+        crate::assert_with_log!(
+            extended_earlier.start == EpochId(2),
+            "extended start",
+            EpochId(2),
+            extended_earlier.start
+        );
+        crate::assert_with_log!(
+            extended_earlier.end == EpochId(10),
+            "extended end unchanged",
+            EpochId(10),
+            extended_earlier.end
+        );
+
+        // Extend to include later epoch
+        let extended_later = window.extend_to(EpochId(15));
+        crate::assert_with_log!(
+            extended_later.start == EpochId(5),
+            "extended start unchanged",
+            EpochId(5),
+            extended_later.start
+        );
+        crate::assert_with_log!(
+            extended_later.end == EpochId(15),
+            "extended end",
+            EpochId(15),
+            extended_later.end
+        );
+
+        // Extend to epoch already in window (no change)
+        let no_change = window.extend_to(EpochId(7));
+        crate::assert_with_log!(
+            no_change == window,
+            "no change for contained epoch",
+            window,
+            no_change
+        );
+
+        crate::test_complete!("test_validity_window_extend");
+    }
+
+    // Test 29: Epoch state predicates comprehensive
+    #[test]
+    fn test_epoch_state_predicates_comprehensive() {
+        init_test("test_epoch_state_predicates_comprehensive");
+
+        // Preparing state
+        let preparing = EpochState::Preparing;
+        crate::assert_with_log!(!preparing.is_active(), "preparing not active", false, preparing.is_active());
+        crate::assert_with_log!(!preparing.is_terminal(), "preparing not terminal", false, preparing.is_terminal());
+        crate::assert_with_log!(!preparing.allows_completion(), "preparing not allows_completion", false, preparing.allows_completion());
+
+        // Active state
+        let active = EpochState::Active;
+        crate::assert_with_log!(active.is_active(), "active is_active", true, active.is_active());
+        crate::assert_with_log!(!active.is_terminal(), "active not terminal", false, active.is_terminal());
+        crate::assert_with_log!(active.allows_completion(), "active allows_completion", true, active.allows_completion());
+
+        // Ending state
+        let ending = EpochState::Ending;
+        crate::assert_with_log!(!ending.is_active(), "ending not active", false, ending.is_active());
+        crate::assert_with_log!(!ending.is_terminal(), "ending not terminal", false, ending.is_terminal());
+        crate::assert_with_log!(ending.allows_completion(), "ending allows_completion", true, ending.allows_completion());
+
+        // Ended state
+        let ended = EpochState::Ended;
+        crate::assert_with_log!(!ended.is_active(), "ended not active", false, ended.is_active());
+        crate::assert_with_log!(ended.is_terminal(), "ended is_terminal", true, ended.is_terminal());
+        crate::assert_with_log!(!ended.allows_completion(), "ended not allows_completion", false, ended.allows_completion());
+
+        crate::test_complete!("test_epoch_state_predicates_comprehensive");
+    }
+
+    // Test 30: Epoch operation counting
+    #[test]
+    fn test_epoch_operation_counting() {
+        init_test("test_epoch_operation_counting");
+        let config = EpochConfig::default();
+        let mut epoch = Epoch::new(EpochId(1), Time::ZERO, config);
+
+        crate::assert_with_log!(epoch.operation_count == 0, "initial count", 0, epoch.operation_count);
+
+        epoch.record_operation();
+        crate::assert_with_log!(epoch.operation_count == 1, "after first", 1, epoch.operation_count);
+
+        epoch.record_operation();
+        epoch.record_operation();
+        crate::assert_with_log!(epoch.operation_count == 3, "after three", 3, epoch.operation_count);
+
+        crate::test_complete!("test_epoch_operation_counting");
+    }
+
+    // Test 31: Epoch remaining time calculation
+    #[test]
+    fn test_epoch_remaining_time() {
+        init_test("test_epoch_remaining_time");
+        let config = EpochConfig {
+            target_duration: Time::from_secs(100),
+            ..EpochConfig::default()
+        };
+        let epoch = Epoch::new(EpochId(1), Time::from_secs(0), config);
+
+        // Expected end is at 100 seconds
+        let remaining = epoch.remaining(Time::from_secs(30));
+        crate::assert_with_log!(
+            remaining == Some(Time::from_secs(70)),
+            "remaining at t=30",
+            Some(Time::from_secs(70)),
+            remaining
+        );
+
+        let no_remaining = epoch.remaining(Time::from_secs(150));
+        crate::assert_with_log!(no_remaining.is_none(), "no remaining at t=150", true, no_remaining.is_none());
+
+        crate::test_complete!("test_epoch_remaining_time");
+    }
+
+    // Test 32: EpochClock get_epoch
+    #[test]
+    fn test_epoch_clock_get_epoch() {
+        init_test("test_epoch_clock_get_epoch");
+        let config = EpochConfig {
+            min_duration: Time::from_millis(10),
+            target_duration: Time::from_millis(50),
+            max_duration: Time::from_millis(100),
+            retention_epochs: 5,
+            ..EpochConfig::default()
+        };
+        let clock = EpochClock::new(config);
+        clock.initialize(Time::ZERO);
+
+        // Get genesis epoch (active)
+        let genesis = clock.get_epoch(EpochId::GENESIS);
+        crate::assert_with_log!(genesis.is_some(), "genesis found", true, genesis.is_some());
+        crate::assert_with_log!(
+            genesis.as_ref().map(|e| e.id) == Some(EpochId::GENESIS),
+            "genesis id",
+            Some(EpochId::GENESIS),
+            genesis.as_ref().map(|e| e.id)
+        );
+
+        // Advance and get historical epoch
+        clock.advance(Time::from_millis(20)).unwrap();
+        let historical_genesis = clock.get_epoch(EpochId::GENESIS);
+        crate::assert_with_log!(historical_genesis.is_some(), "historical genesis found", true, historical_genesis.is_some());
+
+        // Get non-existent epoch
+        let non_existent = clock.get_epoch(EpochId(999));
+        crate::assert_with_log!(non_existent.is_none(), "non-existent not found", true, non_existent.is_none());
+
+        crate::test_complete!("test_epoch_clock_get_epoch");
+    }
+
+    // Test 33: EpochBarrier participants list
+    #[test]
+    fn test_epoch_barrier_participants() {
+        init_test("test_epoch_barrier_participants");
+        let barrier = EpochBarrier::new(EpochId(1), 3, Time::ZERO);
+
+        let initial_participants = barrier.participants();
+        crate::assert_with_log!(initial_participants.is_empty(), "initial empty", true, initial_participants.is_empty());
+
+        barrier.arrive("alice", Time::from_secs(1)).unwrap();
+        barrier.arrive("bob", Time::from_secs(2)).unwrap();
+
+        let participants = barrier.participants();
+        crate::assert_with_log!(participants.len() == 2, "two participants", 2, participants.len());
+        let has_alice = participants.contains(&"alice".to_string());
+        crate::assert_with_log!(has_alice, "has alice", true, has_alice);
+        let has_bob = participants.contains(&"bob".to_string());
+        crate::assert_with_log!(has_bob, "has bob", true, has_bob);
+
+        crate::test_complete!("test_epoch_barrier_participants");
+    }
+
+    // Test 34: EpochError conversions to Error
+    #[test]
+    fn test_epoch_error_to_error_conversion() {
+        init_test("test_epoch_error_to_error_conversion");
+        use crate::error::ErrorKind;
+
+        let expired = EpochError::Expired { epoch: EpochId(1) };
+        let expired_err: crate::error::Error = expired.into();
+        crate::assert_with_log!(
+            expired_err.kind() == ErrorKind::LeaseExpired,
+            "expired kind",
+            ErrorKind::LeaseExpired,
+            expired_err.kind()
+        );
+
+        let budget = EpochError::BudgetExhausted {
+            epoch: EpochId(1),
+            budget: 10,
+            used: 10,
+        };
+        let budget_err: crate::error::Error = budget.into();
+        crate::assert_with_log!(
+            budget_err.kind() == ErrorKind::PollQuotaExhausted,
+            "budget kind",
+            ErrorKind::PollQuotaExhausted,
+            budget_err.kind()
+        );
+
+        let transition = EpochError::TransitionOccurred {
+            from: EpochId(1),
+            to: EpochId(2),
+        };
+        let transition_err: crate::error::Error = transition.into();
+        crate::assert_with_log!(
+            transition_err.kind() == ErrorKind::Cancelled,
+            "transition kind",
+            ErrorKind::Cancelled,
+            transition_err.kind()
+        );
+
+        crate::test_complete!("test_epoch_error_to_error_conversion");
+    }
+
+    // Test 35: Epoch duration calculation
+    #[test]
+    fn test_epoch_duration_calculation() {
+        init_test("test_epoch_duration_calculation");
+        let config = EpochConfig::default();
+        let mut epoch = Epoch::new(EpochId(1), Time::from_secs(10), config);
+
+        // Active epoch - duration is elapsed time
+        let duration_active = epoch.duration(Time::from_secs(25));
+        crate::assert_with_log!(
+            duration_active == Time::from_secs(15),
+            "active duration",
+            Time::from_secs(15),
+            duration_active
+        );
+
+        // Complete the epoch
+        epoch.begin_ending(Time::from_secs(50)).unwrap();
+        epoch.complete(Time::from_secs(60)).unwrap();
+
+        // Completed epoch - duration is fixed
+        let duration_ended = epoch.duration(Time::from_secs(100));
+        crate::assert_with_log!(
+            duration_ended == Time::from_secs(50),
+            "ended duration",
+            Time::from_secs(50),
+            duration_ended
+        );
+
+        crate::test_complete!("test_epoch_duration_calculation");
+    }
+
+    // Test 36: EpochPolicy variants
+    #[test]
+    fn test_epoch_policy_variants() {
+        init_test("test_epoch_policy_variants");
+
+        let strict = EpochPolicy::strict();
+        crate::assert_with_log!(
+            strict.on_transition == EpochTransitionBehavior::AbortAll,
+            "strict aborts",
+            EpochTransitionBehavior::AbortAll,
+            strict.on_transition
+        );
+        crate::assert_with_log!(strict.check_on_poll, "strict checks", true, strict.check_on_poll);
+
+        let lenient = EpochPolicy::lenient();
+        crate::assert_with_log!(
+            lenient.on_transition == EpochTransitionBehavior::DrainExecuting,
+            "lenient drains",
+            EpochTransitionBehavior::DrainExecuting,
+            lenient.on_transition
+        );
+        crate::assert_with_log!(!lenient.check_on_poll, "lenient no check", false, lenient.check_on_poll);
+        crate::assert_with_log!(lenient.grace_period.is_some(), "lenient has grace", true, lenient.grace_period.is_some());
+
+        let ignore = EpochPolicy::ignore();
+        crate::assert_with_log!(
+            ignore.on_transition == EpochTransitionBehavior::Ignore,
+            "ignore ignores",
+            EpochTransitionBehavior::Ignore,
+            ignore.on_transition
+        );
+        crate::assert_with_log!(!ignore.propagate_to_children, "ignore no propagate", false, ignore.propagate_to_children);
+
+        crate::test_complete!("test_epoch_policy_variants");
     }
 }

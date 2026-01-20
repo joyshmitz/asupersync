@@ -763,6 +763,11 @@ mod tests {
     use crate::encoding::EncodingPipeline;
     use crate::types::resource::{PoolConfig, SymbolPool};
 
+    fn init_test(name: &str) {
+        crate::test_utils::init_test_logging();
+        crate::test_phase!(name);
+    }
+
     fn pool() -> SymbolPool {
         SymbolPool::new(PoolConfig {
             symbol_size: 256,
@@ -814,6 +819,7 @@ mod tests {
 
     #[test]
     fn decode_roundtrip_sources_only() {
+        init_test("decode_roundtrip_sources_only");
         let config = encoding_config();
         let mut encoder = EncodingPipeline::new(config.clone(), pool());
         let object_id = ObjectId::new_for_test(1);
@@ -834,11 +840,14 @@ mod tests {
         }
 
         let decoded_data = decoder.into_data().expect("decoded");
-        assert_eq!(decoded_data, data);
+        let ok = decoded_data == data;
+        crate::assert_with_log!(ok, "decoded data", data, decoded_data);
+        crate::test_complete!("decode_roundtrip_sources_only");
     }
 
     #[test]
     fn decode_roundtrip_out_of_order() {
+        init_test("decode_roundtrip_out_of_order");
         let config = encoding_config();
         let mut encoder = EncodingPipeline::new(config.clone(), pool());
         let object_id = ObjectId::new_for_test(2);
@@ -862,11 +871,14 @@ mod tests {
         }
 
         let decoded_data = decoder.into_data().expect("decoded");
-        assert_eq!(decoded_data, data);
+        let ok = decoded_data == data;
+        crate::assert_with_log!(ok, "decoded data", data, decoded_data);
+        crate::test_complete!("decode_roundtrip_out_of_order");
     }
 
     #[test]
     fn reject_wrong_object_id() {
+        init_test("reject_wrong_object_id");
         let config = encoding_config();
         let mut encoder = EncodingPipeline::new(config.clone(), pool());
         let object_id_a = ObjectId::new_for_test(10);
@@ -888,14 +900,15 @@ mod tests {
         );
 
         let result = decoder.feed(auth).expect("feed");
-        assert_eq!(
-            result,
-            SymbolAcceptResult::Rejected(RejectReason::WrongObjectId)
-        );
+        let expected = SymbolAcceptResult::Rejected(RejectReason::WrongObjectId);
+        let ok = result == expected;
+        crate::assert_with_log!(ok, "wrong object id", expected, result);
+        crate::test_complete!("reject_wrong_object_id");
     }
 
     #[test]
     fn reject_symbol_size_mismatch() {
+        init_test("reject_symbol_size_mismatch");
         let config = encoding_config();
         let mut decoder = DecodingPipeline::new(DecodingConfig {
             symbol_size: config.symbol_size,
@@ -917,14 +930,15 @@ mod tests {
             crate::security::tag::AuthenticationTag::zero(),
         );
         let result = decoder.feed(auth).expect("feed");
-        assert_eq!(
-            result,
-            SymbolAcceptResult::Rejected(RejectReason::SymbolSizeMismatch)
-        );
+        let expected = SymbolAcceptResult::Rejected(RejectReason::SymbolSizeMismatch);
+        let ok = result == expected;
+        crate::assert_with_log!(ok, "symbol size mismatch", expected, result);
+        crate::test_complete!("reject_symbol_size_mismatch");
     }
 
     #[test]
     fn duplicate_symbol_before_decode() {
+        init_test("duplicate_symbol_before_decode");
         let config = encoding_config();
         let mut encoder = EncodingPipeline::new(config.clone(), pool());
         let object_id = ObjectId::new_for_test(30);
@@ -945,12 +959,13 @@ mod tests {
                 crate::security::tag::AuthenticationTag::zero(),
             ))
             .expect("feed");
-        assert!(matches!(
+        let accepted = matches!(
             first,
             SymbolAcceptResult::Accepted { .. }
                 | SymbolAcceptResult::DecodingStarted { .. }
                 | SymbolAcceptResult::BlockComplete { .. }
-        ));
+        );
+        crate::assert_with_log!(accepted, "first accepted", true, accepted);
 
         let second = decoder
             .feed(AuthenticatedSymbol::from_parts(
@@ -958,11 +973,15 @@ mod tests {
                 crate::security::tag::AuthenticationTag::zero(),
             ))
             .expect("feed");
-        assert_eq!(second, SymbolAcceptResult::Duplicate);
+        let expected = SymbolAcceptResult::Duplicate;
+        let ok = second == expected;
+        crate::assert_with_log!(ok, "second duplicate", expected, second);
+        crate::test_complete!("duplicate_symbol_before_decode");
     }
 
     #[test]
     fn into_data_reports_insufficient_symbols() {
+        init_test("into_data_reports_insufficient_symbols");
         let config = encoding_config();
         let mut encoder = EncodingPipeline::new(config.clone(), pool());
         let object_id = ObjectId::new_for_test(40);
@@ -986,6 +1005,8 @@ mod tests {
         let err = decoder
             .into_data()
             .expect_err("expected insufficient symbols");
-        assert!(matches!(err, DecodingError::InsufficientSymbols { .. }));
+        let insufficient = matches!(err, DecodingError::InsufficientSymbols { .. });
+        crate::assert_with_log!(insufficient, "insufficient symbols", true, insufficient);
+        crate::test_complete!("into_data_reports_insufficient_symbols");
     }
 }

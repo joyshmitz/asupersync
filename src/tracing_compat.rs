@@ -255,9 +255,16 @@ impl<T> Instrument for T {}
 #[cfg(test)]
 mod tests {
     use super::*;
+    use crate::test_utils::init_test_logging;
+
+    fn init_test(test_name: &str) {
+        init_test_logging();
+        crate::test_phase!(test_name);
+    }
 
     #[test]
     fn test_noop_macros_compile() {
+        init_test("test_noop_macros_compile");
         // These should all compile and do nothing
         trace!("trace message");
         debug!("debug message");
@@ -268,10 +275,12 @@ mod tests {
         trace!(field = "value", "trace with field");
         debug!(count = 42, "debug with field");
         info!(name = "test", "info with field");
+        crate::test_complete!("test_noop_macros_compile");
     }
 
     #[test]
     fn test_noop_span_compile() {
+        init_test("test_noop_span_compile");
         let span = span!(Level::INFO, "test_span");
         let _guard = span.enter();
 
@@ -280,10 +289,12 @@ mod tests {
 
         let span3 = debug_span!("debug_span", task_id = 42);
         span3.record("field", "value");
+        crate::test_complete!("test_noop_span_compile");
     }
 
     #[test]
     fn test_noop_level_constants() {
+        init_test("test_noop_level_constants");
         #[cfg(not(feature = "tracing-integration"))]
         {
             let _ = Level::TRACE;
@@ -292,19 +303,28 @@ mod tests {
             let _ = Level::WARN;
             let _ = Level::ERROR;
         }
+        crate::test_complete!("test_noop_level_constants");
     }
 
     #[test]
     fn test_noop_span_methods() {
+        init_test("test_noop_span_methods");
         #[cfg(not(feature = "tracing-integration"))]
         {
             let span = NoopSpan;
-            assert!(span.is_disabled());
+            let disabled = span.is_disabled();
+            crate::assert_with_log!(
+                disabled,
+                "noop span should be disabled",
+                true,
+                disabled
+            );
 
             let current = NoopSpan::current();
             let none = NoopSpan::none();
             let _ = current.or_current();
             none.follows_from(&span);
         }
+        crate::test_complete!("test_noop_span_methods");
     }
 }

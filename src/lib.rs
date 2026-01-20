@@ -121,7 +121,7 @@ pub use types::{
 // existing macro_rules! definitions in combinator/. The proc macro versions
 // will replace those in future tasks (asupersync-mwff, asupersync-hcpl).
 #[cfg(feature = "proc-macros")]
-pub use asupersync_macros::{scope, spawn};
+pub use asupersync_macros::{join_all, scope, spawn};
 
 // Proc macro versions available with explicit path when needed
 #[cfg(feature = "proc-macros")]
@@ -130,5 +130,5 @@ pub mod proc_macros {
     //!
     //! These are provided for explicit access when the macro_rules! versions
     //! are also in scope.
-    pub use asupersync_macros::{join, race, scope, spawn};
+    pub use asupersync_macros::{join, join_all, race, scope, spawn};
 }

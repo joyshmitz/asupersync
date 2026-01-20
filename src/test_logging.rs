@@ -980,13 +980,13 @@ macro_rules! test_warn {
 macro_rules! assert_log {
     ($logger:expr, $cond:expr) => {
         if !$cond {
-            eprintln!("{}", $logger.report());
+            tracing::error!(report = %$logger.report(), "assertion failed: {}", stringify!($cond));
             panic!("assertion failed: {}", stringify!($cond));
         }
     };
     ($logger:expr, $cond:expr, $($arg:tt)*) => {
         if !$cond {
-            eprintln!("{}", $logger.report());
+            tracing::error!(report = %$logger.report(), "assertion failed: {}", format_args!($($arg)*));
             panic!($($arg)*);
         }
     };
@@ -1003,7 +1003,7 @@ macro_rules! assert_log {
 macro_rules! assert_eq_log {
     ($logger:expr, $left:expr, $right:expr) => {
         if $left != $right {
-            eprintln!("{}", $logger.report());
+            tracing::error!(report = %$logger.report(), "assertion failed: left == right");
             panic!(
                 "assertion failed: `(left == right)`\n  left: {:?}\n right: {:?}",
                 $left, $right
@@ -1012,7 +1012,7 @@ macro_rules! assert_eq_log {
     };
     ($logger:expr, $left:expr, $right:expr, $($arg:tt)*) => {
         if $left != $right {
-            eprintln!("{}", $logger.report());
+            tracing::error!(report = %$logger.report(), "assertion failed: {}", format_args!($($arg)*));
             panic!(
                 "assertion failed: `(left == right)`\n  left: {:?}\n right: {:?}\n{}",
                 $left, $right, format!($($arg)*)
@@ -1029,28 +1029,58 @@ macro_rules! assert_eq_log {
 mod tests {
     use super::*;
 
+    fn init_test(name: &str) {
+        crate::test_utils::init_test_logging();
+        crate::test_phase!(name);
+    }
+
     #[test]
     fn test_log_level_ordering() {
-        assert!(TestLogLevel::Error < TestLogLevel::Warn);
-        assert!(TestLogLevel::Warn < TestLogLevel::Info);
-        assert!(TestLogLevel::Info < TestLogLevel::Debug);
-        assert!(TestLogLevel::Debug < TestLogLevel::Trace);
+        init_test("test_log_level_ordering");
+        let error_warn = TestLogLevel::Error < TestLogLevel::Warn;
+        crate::assert_with_log!(error_warn, "error < warn", true, error_warn);
+        let warn_info = TestLogLevel::Warn < TestLogLevel::Info;
+        crate::assert_with_log!(warn_info, "warn < info", true, warn_info);
+        let info_debug = TestLogLevel::Info < TestLogLevel::Debug;
+        crate::assert_with_log!(info_debug, "info < debug", true, info_debug);
+        let debug_trace = TestLogLevel::Debug < TestLogLevel::Trace;
+        crate::assert_with_log!(debug_trace, "debug < trace", true, debug_trace);
+        crate::test_complete!("test_log_level_ordering");
     }
 
     #[test]
     fn test_log_level_from_str() {
-        assert_eq!("error".parse(), Ok(TestLogLevel::Error));
-        assert_eq!("ERROR".parse(), Ok(TestLogLevel::Error));
-        assert_eq!("warn".parse(), Ok(TestLogLevel::Warn));
-        assert_eq!("warning".parse(), Ok(TestLogLevel::Warn));
-        assert_eq!("info".parse(), Ok(TestLogLevel::Info));
-        assert_eq!("debug".parse(), Ok(TestLogLevel::Debug));
-        assert_eq!("trace".parse(), Ok(TestLogLevel::Trace));
-        assert_eq!("invalid".parse::<TestLogLevel>(), Err(()));
+        init_test("test_log_level_from_str");
+        let error = "error".parse();
+        let ok = matches!(error, Ok(TestLogLevel::Error));
+        crate::assert_with_log!(ok, "parse error", true, ok);
+        let error_upper = "ERROR".parse();
+        let ok = matches!(error_upper, Ok(TestLogLevel::Error));
+        crate::assert_with_log!(ok, "parse ERROR", true, ok);
+        let warn = "warn".parse();
+        let ok = matches!(warn, Ok(TestLogLevel::Warn));
+        crate::assert_with_log!(ok, "parse warn", true, ok);
+        let warning = "warning".parse();
+        let ok = matches!(warning, Ok(TestLogLevel::Warn));
+        crate::assert_with_log!(ok, "parse warning", true, ok);
+        let info = "info".parse();
+        let ok = matches!(info, Ok(TestLogLevel::Info));
+        crate::assert_with_log!(ok, "parse info", true, ok);
+        let debug_level = "debug".parse();
+        let ok = matches!(debug_level, Ok(TestLogLevel::Debug));
+        crate::assert_with_log!(ok, "parse debug", true, ok);
+        let trace = "trace".parse();
+        let ok = matches!(trace, Ok(TestLogLevel::Trace));
+        crate::assert_with_log!(ok, "parse trace", true, ok);
+        let invalid: Result<TestLogLevel, ()> = "invalid".parse();
+        let ok = invalid.is_err();
+        crate::assert_with_log!(ok, "parse invalid", true, ok);
+        crate::test_complete!("test_log_level_from_str");
     }
 
     #[test]
     fn test_logger_captures_events() {
+        init_test("test_logger_captures_events");
         let logger = TestLogger::new(TestLogLevel::Trace);
 
         logger.log(TestEvent::TaskSpawn {
@@ -1066,11 +1096,14 @@ mod tests {
             outcome: "ok",
         });
 
-        assert_eq!(logger.event_count(), 3);
+        let count = logger.event_count();
+        crate::assert_with_log!(count == 3, "event_count", 3, count);
+        crate::test_complete!("test_logger_captures_events");
     }
 
     #[test]
     fn test_logger_filters_by_level() {
+        init_test("test_logger_filters_by_level");
         let logger = TestLogger::new(TestLogLevel::Info);
 
         // This should be captured (Info level)
@@ -1085,11 +1118,14 @@ mod tests {
             result: "pending",
         });
 
-        assert_eq!(logger.event_count(), 1);
+        let count = logger.event_count();
+        crate::assert_with_log!(count == 1, "event_count", 1, count);
+        crate::test_complete!("test_logger_filters_by_level");
     }
 
     #[test]
     fn test_logger_report_includes_statistics() {
+        init_test("test_logger_report_includes_statistics");
         let logger = TestLogger::new(TestLogLevel::Trace);
 
         logger.log(TestEvent::TaskSpawn {
@@ -1106,13 +1142,26 @@ mod tests {
         });
 
         let report = logger.report();
-
-        assert!(report.contains("Task spawns: 2"));
-        assert!(report.contains("3 events"));
+        let has_spawns = report.contains("Task spawns: 2");
+        crate::assert_with_log!(
+            has_spawns,
+            "report contains task spawns",
+            true,
+            has_spawns
+        );
+        let has_events = report.contains("3 events");
+        crate::assert_with_log!(
+            has_events,
+            "report contains events count",
+            true,
+            has_events
+        );
+        crate::test_complete!("test_logger_report_includes_statistics");
     }
 
     #[test]
     fn test_busy_loop_detection() {
+        init_test("test_busy_loop_detection");
         let logger = TestLogger::new(TestLogLevel::Trace);
 
         // Log some empty polls
@@ -1126,11 +1175,13 @@ mod tests {
 
         // This should pass (3 <= 5)
         logger.assert_no_busy_loop(5);
+        crate::test_complete!("test_busy_loop_detection");
     }
 
     #[test]
     #[should_panic(expected = "Busy loop detected")]
     fn test_busy_loop_detection_fails() {
+        init_test("test_busy_loop_detection_fails");
         let logger = TestLogger::new(TestLogLevel::Trace);
 
         // Log too many empty polls
@@ -1148,6 +1199,7 @@ mod tests {
 
     #[test]
     fn test_task_completion_check() {
+        init_test("test_task_completion_check");
         let logger = TestLogger::new(TestLogLevel::Trace);
 
         logger.log(TestEvent::TaskSpawn {
@@ -1161,11 +1213,13 @@ mod tests {
 
         // Should pass
         logger.assert_all_tasks_completed();
+        crate::test_complete!("test_task_completion_check");
     }
 
     #[test]
     #[should_panic(expected = "Task leak detected")]
     fn test_task_completion_check_fails() {
+        init_test("test_task_completion_check_fails");
         let logger = TestLogger::new(TestLogLevel::Trace);
 
         logger.log(TestEvent::TaskSpawn {
@@ -1179,29 +1233,42 @@ mod tests {
 
     #[test]
     fn test_macros() {
+        init_test("test_macros");
         let logger = TestLogger::new(TestLogLevel::Debug);
 
         test_log!(logger, "test", "Message with arg: {}", 42);
         test_error!(logger, "io", "Error message");
         test_warn!(logger, "perf", "Warning message");
 
-        assert_eq!(logger.event_count(), 3);
+        let count = logger.event_count();
+        crate::assert_with_log!(count == 3, "event_count", 3, count);
+        crate::test_complete!("test_macros");
     }
 
     #[test]
     fn test_interest_display() {
-        assert_eq!(format!("{}", Interest::READABLE), "R");
-        assert_eq!(format!("{}", Interest::WRITABLE), "W");
-        assert_eq!(format!("{}", Interest::BOTH), "RW");
+        init_test("test_interest_display");
+        let readable = format!("{}", Interest::READABLE);
+        crate::assert_with_log!(readable == "R", "readable display", "R", readable);
+        let writable = format!("{}", Interest::WRITABLE);
+        crate::assert_with_log!(writable == "W", "writable display", "W", writable);
+        let both = format!("{}", Interest::BOTH);
+        crate::assert_with_log!(both == "RW", "both display", "RW", both);
+        crate::test_complete!("test_interest_display");
     }
 
     #[test]
     fn test_event_display() {
+        init_test("test_event_display");
         let event = TestEvent::TaskSpawn {
             task_id: 42,
             name: Some("worker".into()),
         };
-        assert!(format!("{event}").contains("task=42"));
-        assert!(format!("{event}").contains("worker"));
+        let rendered = format!("{event}");
+        let has_task = rendered.contains("task=42");
+        crate::assert_with_log!(has_task, "rendered task id", true, has_task);
+        let has_worker = rendered.contains("worker");
+        crate::assert_with_log!(has_worker, "rendered worker name", true, has_worker);
+        crate::test_complete!("test_event_display");
     }
 }
