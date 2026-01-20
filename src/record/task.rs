@@ -171,7 +171,9 @@ impl TaskRecord {
             }
         }
 
-        match &mut self.state {
+        let mut updated_reason_for_inner = None;
+
+        let result = match &mut self.state {
             TaskState::CancelRequested {
                 reason: existing_reason,
                 cleanup_budget: existing_budget,
@@ -184,6 +186,7 @@ impl TaskRecord {
                 );
                 existing_reason.strengthen(&reason);
                 *existing_budget = existing_budget.combine(cleanup_budget);
+                updated_reason_for_inner = Some(existing_reason.clone());
                 false
             }
             TaskState::Cancelling {
@@ -203,6 +206,7 @@ impl TaskRecord {
                 existing_reason.strengthen(&reason);
                 let new_budget = b.combine(cleanup_budget);
                 *b = new_budget;
+                updated_reason_for_inner = Some(existing_reason.clone());
 
                 // Update shared state so user code sees tighter budget immediately
                 if let Some(inner) = &self.cx_inner {
@@ -217,6 +221,7 @@ impl TaskRecord {
             }
             TaskState::Created | TaskState::Running => {
                 let _old_state = self.state_name();
+                let requested_reason = reason.clone();
                 debug!(
                     task_id = ?self.id,
                     region_id = ?self.owner,
@@ -230,10 +235,19 @@ impl TaskRecord {
                     reason,
                     cleanup_budget,
                 };
+                updated_reason_for_inner = Some(requested_reason);
                 true
             }
             TaskState::Completed(_) => false,
+        };
+        if let Some(reason) = updated_reason_for_inner {
+            if let Some(inner) = &self.cx_inner {
+                if let Ok(mut guard) = inner.write() {
+                    guard.cancel_reason = Some(reason);
+                }
+            }
         }
+        result
     }
 
     /// Marks the task as running (Created → Running).
@@ -313,6 +327,8 @@ impl TaskRecord {
                     old_state = "CancelRequested",
                     new_state = "Cancelling",
                     cancel_kind = ?reason.kind,
+                    cleanup_poll_quota = budget.poll_quota,
+                    cleanup_priority = budget.priority,
                     "task acknowledged cancellation"
                 );
 
@@ -356,6 +372,8 @@ impl TaskRecord {
                     old_state = "Cancelling",
                     new_state = "Finalizing",
                     cancel_kind = ?reason.kind,
+                    finalizer_budget_poll_quota = budget.poll_quota,
+                    finalizer_budget_priority = budget.priority,
                     "task cleanup done, entering finalization"
                 );
                 self.state = TaskState::Finalizing {
@@ -377,10 +395,15 @@ impl TaskRecord {
     /// Finalizing { .. } → Completed(Cancelled(reason))
     /// ```
     pub fn finalize_done(&mut self) -> bool {
-        let TaskState::Finalizing { reason, .. } = &self.state else {
+        let TaskState::Finalizing {
+            reason,
+            cleanup_budget,
+        } = &self.state
+        else {
             return false;
         };
         let reason = reason.clone();
+        let _budget = *cleanup_budget;
         debug!(
             task_id = ?self.id,
             region_id = ?self.owner,
@@ -388,6 +411,8 @@ impl TaskRecord {
             new_state = "Completed",
             outcome_kind = "Cancelled",
             cancel_kind = ?reason.kind,
+            finalizer_budget_poll_quota = _budget.poll_quota,
+            finalizer_budget_priority = _budget.priority,
             "task finalization done"
         );
         self.state = TaskState::Completed(Outcome::Cancelled(reason));
@@ -666,10 +691,15 @@ mod tests {
         t.set_cx_inner(inner.clone());
 
         assert!(!inner.read().unwrap().cancel_requested);
+        assert!(inner.read().unwrap().cancel_reason.is_none());
 
         t.request_cancel(CancelReason::timeout());
 
         assert!(inner.read().unwrap().cancel_requested);
+        assert_eq!(
+            inner.read().unwrap().cancel_reason.as_ref(),
+            Some(&CancelReason::timeout())
+        );
         assert!(matches!(t.state, TaskState::CancelRequested { .. }));
     }
 }

@@ -52,6 +52,7 @@
 //! - All capabilities flow through the wrapped Cx
 
 use crate::observability::{DiagnosticContext, LogCollector, LogEntry, SpanId};
+use crate::tracing_compat::trace;
 use crate::types::{Budget, CxInner, RegionId, TaskId};
 use std::sync::Arc;
 
@@ -342,9 +343,44 @@ impl Cx {
     /// ```
     #[allow(clippy::result_large_err)]
     pub fn checkpoint(&self) -> Result<(), crate::error::Error> {
-        let inner = self.inner.read().expect("lock poisoned");
-        if inner.cancel_requested && inner.mask_depth == 0 {
-            Err(crate::error::Error::new(crate::error::ErrorKind::Cancelled))
+        let (cancel_requested, mask_depth, _task, _region, _budget, _cancel_reason) = {
+            let inner = self.inner.read().expect("lock poisoned");
+            (
+                inner.cancel_requested,
+                inner.mask_depth,
+                inner.task,
+                inner.region,
+                inner.budget,
+                inner.cancel_reason.clone(),
+            )
+        };
+
+        if cancel_requested {
+            if mask_depth == 0 {
+                trace!(
+                    task_id = ?_task,
+                    region_id = ?_region,
+                    cancel_reason = ?_cancel_reason,
+                    cancel_kind = ?_cancel_reason.as_ref().map(|r| r.kind),
+                    mask_depth,
+                    budget_deadline = ?_budget.deadline,
+                    budget_poll_quota = _budget.poll_quota,
+                    budget_cost_quota = ?_budget.cost_quota,
+                    budget_priority = _budget.priority,
+                    "cancel observed at checkpoint"
+                );
+                Err(crate::error::Error::new(crate::error::ErrorKind::Cancelled))
+            } else {
+                trace!(
+                    task_id = ?_task,
+                    region_id = ?_region,
+                    cancel_reason = ?_cancel_reason,
+                    cancel_kind = ?_cancel_reason.as_ref().map(|r| r.kind),
+                    mask_depth,
+                    "cancel observed but masked"
+                );
+                Ok(())
+            }
         } else {
             Ok(())
         }
@@ -476,6 +512,9 @@ impl Cx {
     pub(crate) fn set_cancel_internal(&self, value: bool) {
         let mut inner = self.inner.write().expect("lock poisoned");
         inner.cancel_requested = value;
+        if !value {
+            inner.cancel_reason = None;
+        }
     }
 
     /// Sets the cancellation flag for testing purposes.
@@ -503,6 +542,9 @@ impl Cx {
     pub fn set_cancel_requested(&self, value: bool) {
         let mut inner = self.inner.write().expect("lock poisoned");
         inner.cancel_requested = value;
+        if !value {
+            inner.cancel_reason = None;
+        }
     }
 
     /// Creates a [`Scope`] bound to this context's region.

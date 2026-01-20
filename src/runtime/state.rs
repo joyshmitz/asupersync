@@ -12,7 +12,7 @@ use crate::runtime::io_driver::IoDriver;
 use crate::runtime::reactor::Reactor;
 use crate::runtime::stored_task::StoredTask;
 use crate::trace::TraceBuffer;
-use crate::tracing_compat::{debug, trace};
+use crate::tracing_compat::{debug, debug_span, trace, trace_span};
 use crate::types::policy::PolicyAction;
 use crate::types::{Budget, CancelReason, Outcome, Policy, RegionId, TaskId, Time};
 use crate::util::Arena;
@@ -39,6 +39,13 @@ impl std::fmt::Display for SpawnError {
 }
 
 impl std::error::Error for SpawnError {}
+
+#[derive(Debug, Clone, Copy)]
+struct CancelRegionNode {
+    id: RegionId,
+    parent: Option<RegionId>,
+    depth: usize,
+}
 
 /// The global runtime state.
 ///
@@ -401,10 +408,11 @@ impl RuntimeState {
     /// # Arguments
     /// * `region_id` - The region to cancel
     /// * `reason` - The reason for cancellation
+    /// * `source_task` - The task that initiated cancellation, if known
     ///
     /// # Example
     /// ```ignore
-    /// let tasks_to_schedule = state.cancel_request(region, CancelReason::timeout());
+    /// let tasks_to_schedule = state.cancel_request(region, &CancelReason::timeout(), None);
     /// for (task_id, priority) in tasks_to_schedule {
     ///     scheduler.move_to_cancel_lane(task_id, priority);
     /// }
@@ -413,23 +421,71 @@ impl RuntimeState {
         &mut self,
         region_id: RegionId,
         reason: &CancelReason,
+        _source_task: Option<TaskId>,
     ) -> Vec<(TaskId, u8)> {
         let mut tasks_to_cancel = Vec::new();
         let cleanup_budget = reason.cleanup_budget();
+        let root_span = debug_span!(
+            "cancel_request",
+            target_region = ?region_id,
+            cancel_kind = ?reason.kind,
+            cancel_message = ?reason.message,
+            cleanup_poll_quota = cleanup_budget.poll_quota,
+            cleanup_priority = cleanup_budget.priority,
+            source_task = ?_source_task
+        );
+        let _root_guard = root_span.enter();
 
-        // Collect all regions to cancel (target + descendants)
-        let regions_to_cancel = self.collect_region_and_descendants(region_id);
+        debug!(
+            target_region = ?region_id,
+            cancel_kind = ?reason.kind,
+            cancel_message = ?reason.message,
+            cleanup_poll_quota = cleanup_budget.poll_quota,
+            cleanup_priority = cleanup_budget.priority,
+            source_task = ?_source_task,
+            "cancel request initiated"
+        );
+
+        // Collect all regions to cancel (target + descendants) with depth information
+        let regions_to_cancel = self.collect_region_and_descendants_with_depth(region_id);
 
         // First pass: mark regions with cancellation reason and transition to Closing
-        for &rid in &regions_to_cancel {
+        for node in &regions_to_cancel {
+            let rid = node.id;
+            let region_reason = if rid == region_id {
+                reason.clone()
+            } else {
+                CancelReason::parent_cancelled()
+            };
+
+            if let Some(_parent) = node.parent {
+                let span = trace_span!(
+                    "cancel_propagate_region",
+                    from_region = ?_parent,
+                    to_region = ?rid,
+                    depth = node.depth,
+                    cancel_kind = ?region_reason.kind
+                );
+                span.follows_from(&root_span);
+                let _guard = span.enter();
+                trace!(
+                    from_region = ?_parent,
+                    to_region = ?rid,
+                    depth = node.depth,
+                    cancel_kind = ?region_reason.kind,
+                    "cancel propagated to region"
+                );
+            } else {
+                trace!(
+                    target_region = ?rid,
+                    depth = node.depth,
+                    cancel_kind = ?region_reason.kind,
+                    "cancel target region"
+                );
+            }
+
             if let Some(region) = self.regions.get(rid.arena_index()) {
                 // Use ParentCancelled for descendants, original reason for target
-                let region_reason = if rid == region_id {
-                    reason.clone()
-                } else {
-                    CancelReason::parent_cancelled()
-                };
-
                 // Try to transition to Closing with the reason.
                 // If already Closing/Draining/etc., strengthen the reason instead.
                 if !region.begin_close(Some(region_reason.clone())) {
@@ -439,7 +495,8 @@ impl RuntimeState {
         }
 
         // Second pass: mark tasks for cancellation
-        for &rid in &regions_to_cancel {
+        for node in &regions_to_cancel {
+            let rid = node.id;
             // Need to get tasks list first to avoid borrow conflict
             let task_ids: Vec<TaskId> = self
                 .regions
@@ -457,10 +514,32 @@ impl RuntimeState {
                     };
 
                     let task_budget = task_reason.cleanup_budget();
-                    if task.request_cancel_with_budget(task_reason, task_budget) {
+                    let newly_cancelled = task.request_cancel_with_budget(task_reason, task_budget);
+                    let already_cancelling = task.state.is_cancelling();
+                    let span = trace_span!(
+                        "cancel_propagate_task",
+                        from_region = ?rid,
+                        to_task = ?task_id,
+                        depth = node.depth,
+                        cancel_kind = ?task.cancel_reason().map(|r| r.kind)
+                    );
+                    span.follows_from(&root_span);
+                    let _guard = span.enter();
+                    trace!(
+                        from_region = ?rid,
+                        to_task = ?task_id,
+                        depth = node.depth,
+                        newly_cancelled,
+                        already_cancelling,
+                        cleanup_poll_quota = task_budget.poll_quota,
+                        cleanup_priority = task_budget.priority,
+                        "cancel propagated to task"
+                    );
+
+                    if newly_cancelled {
                         // Task was newly cancelled, add to list
                         tasks_to_cancel.push((task_id, cleanup_budget.priority));
-                    } else if task.state.is_cancelling() {
+                    } else if already_cancelling {
                         // Task already cancelling, but still needs scheduling priority
                         tasks_to_cancel.push((task_id, cleanup_budget.priority));
                     }
@@ -474,15 +553,23 @@ impl RuntimeState {
     /// Collects a region and all its descendants (recursive).
     ///
     /// Returns a Vec containing the region and all nested child regions.
-    fn collect_region_and_descendants(&self, region_id: RegionId) -> Vec<RegionId> {
-        let mut result = vec![region_id];
-        let mut stack = vec![region_id];
+    fn collect_region_and_descendants_with_depth(
+        &self,
+        region_id: RegionId,
+    ) -> Vec<CancelRegionNode> {
+        let mut result = Vec::new();
+        let mut stack = vec![(region_id, None, 0usize)];
 
-        while let Some(rid) = stack.pop() {
+        while let Some((rid, parent, depth)) = stack.pop() {
+            result.push(CancelRegionNode {
+                id: rid,
+                parent,
+                depth,
+            });
+
             if let Some(region) = self.regions.get(rid.arena_index()) {
                 for child_id in region.child_ids() {
-                    result.push(child_id);
-                    stack.push(child_id);
+                    stack.push((child_id, Some(rid), depth + 1));
                 }
             }
         }
@@ -876,7 +963,7 @@ mod tests {
         let mut state = RuntimeState::new();
         let region = state.create_root_region(Budget::INFINITE);
 
-        let _tasks = state.cancel_request(region, &CancelReason::timeout());
+        let _tasks = state.cancel_request(region, &CancelReason::timeout(), None);
 
         let region_record = state
             .regions
@@ -896,7 +983,7 @@ mod tests {
         let task1 = insert_task(&mut state, region);
         let task2 = insert_task(&mut state, region);
 
-        let tasks_to_schedule = state.cancel_request(region, &CancelReason::timeout());
+        let tasks_to_schedule = state.cancel_request(region, &CancelReason::timeout(), None);
 
         // Both tasks should be returned for scheduling
         assert_eq!(tasks_to_schedule.len(), 2);
@@ -925,7 +1012,7 @@ mod tests {
         let child_task = insert_task(&mut state, child);
         let grandchild_task = insert_task(&mut state, grandchild);
 
-        let tasks_to_schedule = state.cancel_request(root, &CancelReason::user("stop"));
+        let tasks_to_schedule = state.cancel_request(root, &CancelReason::user("stop"), None);
 
         // All 3 tasks should be scheduled
         assert_eq!(tasks_to_schedule.len(), 3);
@@ -998,10 +1085,10 @@ mod tests {
         let task = insert_task(&mut state, region);
 
         // First cancel with User
-        let _ = state.cancel_request(region, &CancelReason::user("stop"));
+        let _ = state.cancel_request(region, &CancelReason::user("stop"), None);
 
         // Second cancel with Shutdown (higher severity)
-        let _ = state.cancel_request(region, &CancelReason::shutdown());
+        let _ = state.cancel_request(region, &CancelReason::shutdown(), None);
 
         // Region should have Shutdown reason
         let region_record = state
@@ -1279,7 +1366,7 @@ mod tests {
         let region = state.create_root_region(Budget::INFINITE);
 
         // Request cancellation
-        let _ = state.cancel_request(region, &CancelReason::user("stop"));
+        let _ = state.cancel_request(region, &CancelReason::user("stop"), None);
 
         // Verify state transition
         let region_record = state.regions.get(region.arena_index()).expect("region");
