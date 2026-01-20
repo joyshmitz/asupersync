@@ -450,6 +450,11 @@ mod tests {
     use std::future::Future;
     use std::task::{Context, Poll, Waker};
 
+    fn init_test(name: &str) {
+        crate::test_utils::init_test_logging();
+        crate::test_phase!(name);
+    }
+
     fn test_cx() -> Cx {
         Cx::new(
             RegionId::from_arena(ArenaIndex::new(0, 0)),
@@ -476,16 +481,19 @@ mod tests {
 
     #[test]
     fn basic_send_recv() {
+        init_test("basic_send_recv");
         let cx = test_cx();
         let (tx, rx) = channel::<i32>();
 
         tx.send(&cx, 42).expect("send should succeed");
         let value = block_on(rx.recv(&cx)).expect("recv should succeed");
-        assert_eq!(value, 42);
+        crate::assert_with_log!(value == 42, "recv value", 42, value);
+        crate::test_complete!("basic_send_recv");
     }
 
     #[test]
     fn reserve_then_send() {
+        init_test("reserve_then_send");
         let cx = test_cx();
         let (tx, rx) = channel::<i32>();
 
@@ -493,11 +501,13 @@ mod tests {
         permit.send(42).expect("send should succeed");
 
         let value = block_on(rx.recv(&cx)).expect("recv should succeed");
-        assert_eq!(value, 42);
+        crate::assert_with_log!(value == 42, "recv value", 42, value);
+        crate::test_complete!("reserve_then_send");
     }
 
     #[test]
     fn reserve_then_abort() {
+        init_test("reserve_then_abort");
         let cx = test_cx();
         let (tx, rx) = channel::<i32>();
 
@@ -505,11 +515,18 @@ mod tests {
         permit.abort();
 
         let err = rx.try_recv();
-        assert!(matches!(err, Err(TryRecvError::Closed)));
+        crate::assert_with_log!(
+            matches!(err, Err(TryRecvError::Closed)),
+            "try_recv closed",
+            "Err(Closed)",
+            format!("{:?}", err)
+        );
+        crate::test_complete!("reserve_then_abort");
     }
 
     #[test]
     fn permit_drop_is_abort() {
+        init_test("permit_drop_is_abort");
         let cx = test_cx();
         let (tx, rx) = channel::<i32>();
 
@@ -519,21 +536,35 @@ mod tests {
         }
 
         let err = rx.try_recv();
-        assert!(matches!(err, Err(TryRecvError::Closed)));
+        crate::assert_with_log!(
+            matches!(err, Err(TryRecvError::Closed)),
+            "try_recv closed",
+            "Err(Closed)",
+            format!("{:?}", err)
+        );
+        crate::test_complete!("permit_drop_is_abort");
     }
 
     #[test]
     fn sender_dropped_without_send() {
+        init_test("sender_dropped_without_send");
         let (tx, rx) = channel::<i32>();
         // Explicitly drop sender without sending
         drop(tx);
 
         let err = rx.try_recv();
-        assert!(matches!(err, Err(TryRecvError::Closed)));
+        crate::assert_with_log!(
+            matches!(err, Err(TryRecvError::Closed)),
+            "try_recv closed",
+            "Err(Closed)",
+            format!("{:?}", err)
+        );
+        crate::test_complete!("sender_dropped_without_send");
     }
 
     #[test]
     fn receiver_dropped_before_send() {
+        init_test("receiver_dropped_before_send");
         let cx = test_cx();
         let (tx, rx) = channel::<i32>();
 
@@ -541,84 +572,135 @@ mod tests {
         drop(rx);
 
         // Sender should detect disconnection
-        assert!(tx.is_closed());
+        let closed = tx.is_closed();
+        crate::assert_with_log!(closed, "sender closed", true, closed);
 
         // Send should fail with value returned
         let err = tx.send(&cx, 42);
-        assert!(matches!(err, Err(SendError::Disconnected(42))));
+        crate::assert_with_log!(
+            matches!(err, Err(SendError::Disconnected(42))),
+            "send disconnected",
+            "Err(Disconnected(42))",
+            format!("{:?}", err)
+        );
+        crate::test_complete!("receiver_dropped_before_send");
     }
 
     #[test]
     fn try_recv_empty() {
+        init_test("try_recv_empty");
         let (tx, rx) = channel::<i32>();
 
         // Nothing sent yet
         let err = rx.try_recv();
-        assert!(matches!(err, Err(TryRecvError::Empty)));
+        crate::assert_with_log!(
+            matches!(err, Err(TryRecvError::Empty)),
+            "try_recv empty",
+            "Err(Empty)",
+            format!("{:?}", err)
+        );
 
         // Now we don't have receiver, drop sender
         drop(tx);
+        crate::test_complete!("try_recv_empty");
     }
 
     #[test]
     fn try_recv_ready() {
+        init_test("try_recv_ready");
         let cx = test_cx();
         let (tx, rx) = channel::<i32>();
 
         tx.send(&cx, 42).expect("send should succeed");
 
         let value = rx.try_recv().expect("try_recv should succeed");
-        assert_eq!(value, 42);
+        crate::assert_with_log!(value == 42, "try_recv value", 42, value);
+        crate::test_complete!("try_recv_ready");
     }
 
     #[test]
     fn is_ready_and_is_closed() {
+        init_test("is_ready_and_is_closed");
         let cx = test_cx();
         let (tx, rx) = channel::<i32>();
 
-        assert!(!rx.is_ready());
-        assert!(!rx.is_closed());
+        let ready = rx.is_ready();
+        crate::assert_with_log!(!ready, "not ready", false, ready);
+        let closed = rx.is_closed();
+        crate::assert_with_log!(!closed, "not closed", false, closed);
 
         tx.send(&cx, 42).expect("send should succeed");
 
-        assert!(rx.is_ready());
-        assert!(!rx.is_closed());
+        let ready = rx.is_ready();
+        crate::assert_with_log!(ready, "ready after send", true, ready);
+        let closed = rx.is_closed();
+        crate::assert_with_log!(!closed, "still open", false, closed);
+        crate::test_complete!("is_ready_and_is_closed");
     }
 
     #[test]
     fn sender_is_closed() {
+        init_test("sender_is_closed");
         let (tx, rx) = channel::<i32>();
 
-        assert!(!tx.is_closed());
+        let closed = tx.is_closed();
+        crate::assert_with_log!(!closed, "tx open", false, closed);
         drop(rx);
-        assert!(tx.is_closed());
+        let closed = tx.is_closed();
+        crate::assert_with_log!(closed, "tx closed", true, closed);
+        crate::test_complete!("sender_is_closed");
     }
 
     #[test]
     fn send_error_display() {
+        init_test("send_error_display");
         let err = SendError::Disconnected(42);
-        assert_eq!(err.to_string(), "sending on a closed oneshot channel");
+        let text = err.to_string();
+        crate::assert_with_log!(
+            text == "sending on a closed oneshot channel",
+            "display",
+            "sending on a closed oneshot channel",
+            text
+        );
+        crate::test_complete!("send_error_display");
     }
 
     #[test]
     fn recv_error_display() {
-        assert_eq!(
-            RecvError::Closed.to_string(),
-            "receiving on a closed oneshot channel"
+        init_test("recv_error_display");
+        let text = RecvError::Closed.to_string();
+        crate::assert_with_log!(
+            text == "receiving on a closed oneshot channel",
+            "display",
+            "receiving on a closed oneshot channel",
+            text
         );
+        crate::test_complete!("recv_error_display");
     }
 
     #[test]
     fn try_recv_error_display() {
-        assert_eq!(TryRecvError::Empty.to_string(), "oneshot channel is empty");
-        assert_eq!(
-            TryRecvError::Closed.to_string(),
-            "oneshot channel is closed"
+        init_test("try_recv_error_display");
+        let empty = TryRecvError::Empty.to_string();
+        crate::assert_with_log!(
+            empty == "oneshot channel is empty",
+            "empty display",
+            "oneshot channel is empty",
+            empty
         );
+        let closed = TryRecvError::Closed.to_string();
+        crate::assert_with_log!(
+            closed == "oneshot channel is closed",
+            "closed display",
+            "oneshot channel is closed",
+            closed
+        );
+        crate::test_complete!("try_recv_error_display");
     }
 
     #[test]
     fn value_is_moved_not_cloned() {
+        init_test("value_is_moved_not_cloned");
         // Test that non-Clone types work
         #[derive(Debug)]
         struct NonClone(i32);
@@ -628,11 +710,13 @@ mod tests {
 
         tx.send(&cx, NonClone(42)).expect("send should succeed");
         let value = block_on(rx.recv(&cx)).expect("recv should succeed");
-        assert_eq!(value.0, 42);
+        crate::assert_with_log!(value.0 == 42, "value", 42, value.0);
+        crate::test_complete!("value_is_moved_not_cloned");
     }
 
     #[test]
     fn permit_send_returns_error_with_value() {
+        init_test("permit_send_returns_error_with_value");
         let cx = test_cx();
         let (tx, rx) = channel::<i32>();
 
@@ -640,11 +724,18 @@ mod tests {
 
         let permit = tx.reserve(&cx);
         let err = permit.send(42);
-        assert!(matches!(err, Err(SendError::Disconnected(42))));
+        crate::assert_with_log!(
+            matches!(err, Err(SendError::Disconnected(42))),
+            "permit send disconnected",
+            "Err(Disconnected(42))",
+            format!("{:?}", err)
+        );
+        crate::test_complete!("permit_send_returns_error_with_value");
     }
 
     #[test]
     fn recv_with_cancel_pending() {
+        init_test("recv_with_cancel_pending");
         let cx = test_cx();
         cx.set_cancel_requested(true);
 
@@ -659,12 +750,15 @@ mod tests {
 
         // First iteration finds the value
         let result = block_on(rx.recv(&cx));
-        assert!(result.is_ok());
-        assert_eq!(result.unwrap(), 42);
+        crate::assert_with_log!(result.is_ok(), "recv ok", true, result.is_ok());
+        let value = result.unwrap();
+        crate::assert_with_log!(value == 42, "recv value", 42, value);
+        crate::test_complete!("recv_with_cancel_pending");
     }
 
     #[test]
     fn recv_cancel_during_wait() {
+        init_test("recv_cancel_during_wait");
         let cx = test_cx();
 
         let (tx, rx) = channel::<i32>();
@@ -674,9 +768,15 @@ mod tests {
 
         // Don't send anything, so recv will hit checkpoint
         let err = block_on(rx.recv(&cx));
-        assert!(matches!(err, Err(RecvError::Cancelled)));
+        crate::assert_with_log!(
+            matches!(err, Err(RecvError::Cancelled)),
+            "recv cancelled",
+            "Err(Cancelled)",
+            format!("{:?}", err)
+        );
 
         // Sender should still be usable
         drop(tx);
+        crate::test_complete!("recv_cancel_during_wait");
     }
 }

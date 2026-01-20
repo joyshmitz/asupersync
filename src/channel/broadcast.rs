@@ -364,6 +364,11 @@ mod tests {
     use crate::util::ArenaIndex;
     use crate::{RegionId, TaskId};
 
+    fn init_test(name: &str) {
+        crate::test_utils::init_test_logging();
+        crate::test_phase!(name);
+    }
+
     fn test_cx() -> Cx {
         Cx::new(
             RegionId::from_arena(ArenaIndex::new(0, 0)),
@@ -374,6 +379,7 @@ mod tests {
 
     #[test]
     fn basic_send_recv() {
+        init_test("basic_send_recv");
         let cx = test_cx();
         let (tx, mut rx1) = channel(10);
         let mut rx2 = tx.subscribe();
@@ -381,15 +387,21 @@ mod tests {
         tx.send(&cx, 10).expect("send failed");
         tx.send(&cx, 20).expect("send failed");
 
-        assert_eq!(rx1.recv(&cx).unwrap(), 10);
-        assert_eq!(rx1.recv(&cx).unwrap(), 20);
+        let rx1_first = rx1.recv(&cx).unwrap();
+        crate::assert_with_log!(rx1_first == 10, "rx1 first", 10, rx1_first);
+        let rx1_second = rx1.recv(&cx).unwrap();
+        crate::assert_with_log!(rx1_second == 20, "rx1 second", 20, rx1_second);
 
-        assert_eq!(rx2.recv(&cx).unwrap(), 10);
-        assert_eq!(rx2.recv(&cx).unwrap(), 20);
+        let rx2_first = rx2.recv(&cx).unwrap();
+        crate::assert_with_log!(rx2_first == 10, "rx2 first", 10, rx2_first);
+        let rx2_second = rx2.recv(&cx).unwrap();
+        crate::assert_with_log!(rx2_second == 20, "rx2 second", 20, rx2_second);
+        crate::test_complete!("basic_send_recv");
     }
 
     #[test]
     fn lag_detection() {
+        init_test("lag_detection");
         let cx = test_cx();
         let (tx, mut rx) = channel(2);
 
@@ -398,34 +410,57 @@ mod tests {
         tx.send(&cx, 3).unwrap(); // overwrites 1
 
         // rx expected 1 (index 0), but earliest is 2 (index 1)
-        match rx.recv(&cx) {
-            Err(RecvError::Lagged(n)) => assert_eq!(n, 1),
-            _ => panic!("expected lagged"),
+        let result = rx.recv(&cx);
+        match result {
+            Err(RecvError::Lagged(n)) => {
+                crate::assert_with_log!(n == 1, "lagged count", 1, n);
+            }
+            other => panic!("expected lagged, got {:?}", other),
         }
 
         // next should be 2
-        assert_eq!(rx.recv(&cx).unwrap(), 2);
-        assert_eq!(rx.recv(&cx).unwrap(), 3);
+        let second = rx.recv(&cx).unwrap();
+        crate::assert_with_log!(second == 2, "second", 2, second);
+        let third = rx.recv(&cx).unwrap();
+        crate::assert_with_log!(third == 3, "third", 3, third);
+        crate::test_complete!("lag_detection");
     }
 
     #[test]
     fn closed_send() {
+        init_test("closed_send");
         let cx = test_cx();
         let (tx, rx) = channel::<i32>(10);
         drop(rx);
-        assert!(matches!(tx.send(&cx, 1), Err(SendError::Closed(1))));
+        let result = tx.send(&cx, 1);
+        crate::assert_with_log!(
+            matches!(result, Err(SendError::Closed(1))),
+            "send after close",
+            "Err(Closed(1))",
+            format!("{:?}", result)
+        );
+        crate::test_complete!("closed_send");
     }
 
     #[test]
     fn closed_recv() {
+        init_test("closed_recv");
         let cx = test_cx();
         let (tx, mut rx) = channel::<i32>(10);
         drop(tx);
-        assert!(matches!(rx.recv(&cx), Err(RecvError::Closed)));
+        let result = rx.recv(&cx);
+        crate::assert_with_log!(
+            matches!(result, Err(RecvError::Closed)),
+            "recv after close",
+            "Err(Closed)",
+            format!("{:?}", result)
+        );
+        crate::test_complete!("closed_recv");
     }
 
     #[test]
     fn subscribe_sees_future() {
+        init_test("subscribe_sees_future");
         let cx = test_cx();
         let (tx, mut rx1) = channel(10);
 
@@ -435,10 +470,14 @@ mod tests {
 
         tx.send(&cx, 2).unwrap();
 
-        assert_eq!(rx1.recv(&cx).unwrap(), 1);
-        assert_eq!(rx1.recv(&cx).unwrap(), 2);
+        let rx1_first = rx1.recv(&cx).unwrap();
+        crate::assert_with_log!(rx1_first == 1, "rx1 first", 1, rx1_first);
+        let rx1_second = rx1.recv(&cx).unwrap();
+        crate::assert_with_log!(rx1_second == 2, "rx1 second", 2, rx1_second);
 
         // rx2 should skip 1
-        assert_eq!(rx2.recv(&cx).unwrap(), 2);
+        let rx2_first = rx2.recv(&cx).unwrap();
+        crate::assert_with_log!(rx2_first == 2, "rx2 first", 2, rx2_first);
+        crate::test_complete!("subscribe_sees_future");
     }
 }

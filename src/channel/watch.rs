@@ -485,6 +485,11 @@ mod tests {
     use crate::util::ArenaIndex;
     use crate::{RegionId, TaskId};
 
+    fn init_test(name: &str) {
+        crate::test_utils::init_test_logging();
+        crate::test_phase!(name);
+    }
+
     fn test_cx() -> Cx {
         Cx::new(
             RegionId::from_arena(ArenaIndex::new(0, 0)),
@@ -495,35 +500,46 @@ mod tests {
 
     #[test]
     fn basic_send_recv() {
+        init_test("basic_send_recv");
         let cx = test_cx();
         let (tx, mut rx) = channel(0);
 
         tx.send(42).expect("send failed");
         rx.changed(&cx).expect("changed failed");
-        assert_eq!(*rx.borrow(), 42);
+        let value = *rx.borrow();
+        crate::assert_with_log!(value == 42, "recv value", 42, value);
+        crate::test_complete!("basic_send_recv");
     }
 
     #[test]
     fn initial_value_visible() {
+        init_test("initial_value_visible");
         let (tx, rx) = channel(42);
-        assert_eq!(*rx.borrow(), 42);
-        assert_eq!(*tx.borrow(), 42);
+        let rx_value = *rx.borrow();
+        crate::assert_with_log!(rx_value == 42, "rx initial", 42, rx_value);
+        let tx_value = *tx.borrow();
+        crate::assert_with_log!(tx_value == 42, "tx initial", 42, tx_value);
+        crate::test_complete!("initial_value_visible");
     }
 
     #[test]
     fn multiple_updates() {
+        init_test("multiple_updates");
         let cx = test_cx();
         let (tx, mut rx) = channel(0);
 
         for i in 1..=10 {
             tx.send(i).expect("send failed");
             rx.changed(&cx).expect("changed failed");
-            assert_eq!(*rx.borrow(), i);
+            let value = *rx.borrow();
+            crate::assert_with_log!(value == i, "rx value", i, value);
         }
+        crate::test_complete!("multiple_updates");
     }
 
     #[test]
     fn latest_value_wins() {
+        init_test("latest_value_wins");
         let (tx, rx) = channel(0);
 
         for i in 1..=100 {
@@ -531,51 +547,65 @@ mod tests {
         }
 
         // Watch holds only the latest value, not a queue.
-        assert_eq!(*rx.borrow(), 100);
+        let value = *rx.borrow();
+        crate::assert_with_log!(value == 100, "latest value", 100, value);
+        crate::test_complete!("latest_value_wins");
     }
 
     #[test]
     fn send_modify() {
+        init_test("send_modify");
         let cx = test_cx();
         let (tx, mut rx) = channel(0);
 
         tx.send_modify(|v| *v = 42).expect("send_modify failed");
         rx.changed(&cx).expect("changed failed");
-        assert_eq!(*rx.borrow(), 42);
+        let first = *rx.borrow();
+        crate::assert_with_log!(first == 42, "after first modify", 42, first);
 
         tx.send_modify(|v| *v += 10).expect("send_modify failed");
         rx.changed(&cx).expect("changed failed");
-        assert_eq!(*rx.borrow(), 52);
+        let second = *rx.borrow();
+        crate::assert_with_log!(second == 52, "after second modify", 52, second);
+        crate::test_complete!("send_modify");
     }
 
     #[test]
     fn borrow_and_clone() {
+        init_test("borrow_and_clone");
         let (_tx, rx) = channel(42);
         let value: i32 = rx.borrow_and_clone();
-        assert_eq!(value, 42);
+        crate::assert_with_log!(value == 42, "borrow_and_clone", 42, value);
+        crate::test_complete!("borrow_and_clone");
     }
 
     #[test]
     fn mark_seen() {
+        init_test("mark_seen");
         let cx = test_cx();
         let (tx, mut rx) = channel(0);
 
         // Send value
         tx.send(1).expect("send failed");
-        assert!(rx.has_changed());
+        let changed = rx.has_changed();
+        crate::assert_with_log!(changed, "has_changed after send", true, changed);
 
         // Mark seen without calling changed()
         rx.mark_seen();
-        assert!(!rx.has_changed());
+        let changed = rx.has_changed();
+        crate::assert_with_log!(!changed, "has_changed after mark", false, changed);
 
         // Need new value for changed() to return
         tx.send(2).expect("send failed");
         rx.changed(&cx).expect("changed failed");
-        assert_eq!(*rx.borrow(), 2);
+        let value = *rx.borrow();
+        crate::assert_with_log!(value == 2, "after second send", 2, value);
+        crate::test_complete!("mark_seen");
     }
 
     #[test]
     fn changed_returns_only_on_new_value() {
+        init_test("changed_returns_only_on_new_value");
         let cx = test_cx();
         let (tx, mut rx) = channel(0);
 
@@ -588,17 +618,22 @@ mod tests {
 
         // Now version=1, seen_version=1
         // has_changed should be false
-        assert!(!rx.has_changed());
+        let changed = rx.has_changed();
+        crate::assert_with_log!(!changed, "has_changed false", false, changed);
 
         // Send another
         tx.send(2).expect("send failed");
-        assert!(rx.has_changed());
+        let changed = rx.has_changed();
+        crate::assert_with_log!(changed, "has_changed true", true, changed);
         rx.changed(&cx).expect("changed failed");
-        assert_eq!(*rx.borrow(), 2);
+        let value = *rx.borrow();
+        crate::assert_with_log!(value == 2, "value", 2, value);
+        crate::test_complete!("changed_returns_only_on_new_value");
     }
 
     #[test]
     fn multiple_receivers() {
+        init_test("multiple_receivers");
         let cx = test_cx();
         let (tx, mut rx1) = channel(0);
         let mut rx2 = rx1.clone();
@@ -614,35 +649,49 @@ mod tests {
 
         // rx3 was subscribed after send, so it already sees version 1
         // and its seen_version was set to current (1), so no change pending
-        assert!(!rx3.has_changed());
+        let changed = rx3.has_changed();
+        crate::assert_with_log!(!changed, "rx3 has_changed", false, changed);
 
-        assert_eq!(*rx1.borrow(), 42);
-        assert_eq!(*rx2.borrow(), 42);
-        assert_eq!(*rx3.borrow(), 42);
+        let v1 = *rx1.borrow();
+        crate::assert_with_log!(v1 == 42, "rx1 value", 42, v1);
+        let v2 = *rx2.borrow();
+        crate::assert_with_log!(v2 == 42, "rx2 value", 42, v2);
+        let v3 = *rx3.borrow();
+        crate::assert_with_log!(v3 == 42, "rx3 value", 42, v3);
+        crate::test_complete!("multiple_receivers");
     }
 
     #[test]
     fn receiver_count() {
+        init_test("receiver_count");
         let (tx, rx1) = channel::<i32>(0);
-        assert_eq!(tx.receiver_count(), 1);
+        let count = tx.receiver_count();
+        crate::assert_with_log!(count == 1, "count 1", 1, count);
 
         let rx2 = rx1.clone();
-        assert_eq!(tx.receiver_count(), 2);
+        let count = tx.receiver_count();
+        crate::assert_with_log!(count == 2, "count 2", 2, count);
 
         let rx3 = tx.subscribe();
-        assert_eq!(tx.receiver_count(), 3);
+        let count = tx.receiver_count();
+        crate::assert_with_log!(count == 3, "count 3", 3, count);
 
         drop(rx1);
-        assert_eq!(tx.receiver_count(), 2);
+        let count = tx.receiver_count();
+        crate::assert_with_log!(count == 2, "count 2 after drop", 2, count);
 
         drop(rx2);
         drop(rx3);
-        assert_eq!(tx.receiver_count(), 0);
-        assert!(tx.is_closed());
+        let count = tx.receiver_count();
+        crate::assert_with_log!(count == 0, "count 0", 0, count);
+        let closed = tx.is_closed();
+        crate::assert_with_log!(closed, "tx closed", true, closed);
+        crate::test_complete!("receiver_count");
     }
 
     #[test]
     fn sender_dropped() {
+        init_test("sender_dropped");
         let cx = test_cx();
         let (tx, mut rx) = channel(0);
 
@@ -651,43 +700,68 @@ mod tests {
         drop(tx);
 
         // Receiver should still see the value
-        assert!(rx.is_closed());
+        let closed = rx.is_closed();
+        crate::assert_with_log!(closed, "rx closed", true, closed);
         rx.changed(&cx).expect("should see final update");
-        assert_eq!(*rx.borrow(), 42);
+        let value = *rx.borrow();
+        crate::assert_with_log!(value == 42, "borrow value", 42, value);
 
         // Now changed() should return error
-        assert!(rx.changed(&cx).is_err());
+        let result = rx.changed(&cx);
+        crate::assert_with_log!(
+            result.is_err(),
+            "changed returns error",
+            true,
+            result.is_err()
+        );
+        crate::test_complete!("sender_dropped");
     }
 
     #[test]
     fn send_error_when_no_receivers() {
+        init_test("send_error_when_no_receivers");
         let (tx, rx) = channel(0);
         drop(rx);
 
-        assert!(tx.is_closed());
+        let closed = tx.is_closed();
+        crate::assert_with_log!(closed, "tx closed", true, closed);
         let err = tx.send(42);
-        assert!(matches!(err, Err(SendError::Closed(42))));
+        crate::assert_with_log!(
+            matches!(err, Err(SendError::Closed(42))),
+            "send closed",
+            "Err(Closed(42))",
+            format!("{:?}", err)
+        );
+        crate::test_complete!("send_error_when_no_receivers");
     }
 
     #[test]
     fn version_tracking() {
+        init_test("version_tracking");
         let (_tx, rx) = channel(0);
-        assert_eq!(rx.seen_version(), 0);
+        let version = rx.seen_version();
+        crate::assert_with_log!(version == 0, "seen_version", 0, version);
+        crate::test_complete!("version_tracking");
     }
 
     #[test]
     fn has_changed_reflects_state() {
+        init_test("has_changed_reflects_state");
         let (tx, rx) = channel(0);
 
         // Initial: no change since initial value
-        assert!(!rx.has_changed());
+        let changed = rx.has_changed();
+        crate::assert_with_log!(!changed, "initial has_changed", false, changed);
 
         tx.send(1).expect("send failed");
-        assert!(rx.has_changed());
+        let changed = rx.has_changed();
+        crate::assert_with_log!(changed, "has_changed after send", true, changed);
+        crate::test_complete!("has_changed_reflects_state");
     }
 
     #[test]
     fn cloned_receiver_inherits_version() {
+        init_test("cloned_receiver_inherits_version");
         let cx = test_cx();
         let (tx, mut rx1) = channel(0);
 
@@ -698,11 +772,19 @@ mod tests {
         let rx2 = rx1.clone();
 
         // rx2 inherits seen_version from rx1, so no pending change
-        assert!(!rx2.has_changed());
+        let changed = rx2.has_changed();
+        crate::assert_with_log!(
+            !changed,
+            "rx2 inherits version",
+            false,
+            changed
+        );
+        crate::test_complete!("cloned_receiver_inherits_version");
     }
 
     #[test]
     fn subscribe_gets_current_version() {
+        init_test("subscribe_gets_current_version");
         let (tx, _rx) = channel(0);
 
         tx.send(1).expect("send failed");
@@ -712,42 +794,64 @@ mod tests {
         let rx2 = tx.subscribe();
 
         // rx2 starts with current version, so no pending change
-        assert!(!rx2.has_changed());
-        assert_eq!(*rx2.borrow(), 2);
+        let changed = rx2.has_changed();
+        crate::assert_with_log!(!changed, "rx2 no change", false, changed);
+        let value = *rx2.borrow();
+        crate::assert_with_log!(value == 2, "rx2 value", 2, value);
+        crate::test_complete!("subscribe_gets_current_version");
     }
 
     #[test]
     fn send_error_display() {
+        init_test("send_error_display");
         let err = SendError::Closed(42);
-        assert_eq!(err.to_string(), "sending on a closed watch channel");
+        let text = err.to_string();
+        crate::assert_with_log!(
+            text == "sending on a closed watch channel",
+            "display",
+            "sending on a closed watch channel",
+            text
+        );
+        crate::test_complete!("send_error_display");
     }
 
     #[test]
     fn recv_error_display() {
-        assert_eq!(
-            RecvError::Closed.to_string(),
-            "watch channel sender was dropped"
+        init_test("recv_error_display");
+        let text = RecvError::Closed.to_string();
+        crate::assert_with_log!(
+            text == "watch channel sender was dropped",
+            "display",
+            "watch channel sender was dropped",
+            text
         );
+        crate::test_complete!("recv_error_display");
     }
 
     #[test]
     fn ref_deref() {
+        init_test("ref_deref");
         let (_tx, rx) = channel(42);
         let r = rx.borrow();
         let _: &i32 = &r;
-        assert_eq!(*r, 42);
+        let value = *r;
+        crate::assert_with_log!(value == 42, "deref", 42, value);
         drop(r);
+        crate::test_complete!("ref_deref");
     }
 
     #[test]
     fn ref_clone_inner() {
+        init_test("ref_clone_inner");
         let (_tx, rx) = channel(String::from("hello"));
         let cloned: String = rx.borrow().clone_inner();
-        assert_eq!(cloned, "hello");
+        crate::assert_with_log!(cloned == "hello", "clone_inner", "hello", cloned);
+        crate::test_complete!("ref_clone_inner");
     }
 
     #[test]
     fn cancel_during_wait_preserves_version() {
+        init_test("cancel_during_wait_preserves_version");
         let cx = test_cx();
         cx.set_cancel_requested(true);
 
@@ -755,31 +859,43 @@ mod tests {
 
         // changed() should return error due to cancellation
         let result = rx.changed(&cx);
-        assert!(result.is_err());
+        crate::assert_with_log!(
+            result.is_err(),
+            "changed error on cancel",
+            true,
+            result.is_err()
+        );
 
         // seen_version should be unchanged (still 0)
-        assert_eq!(rx.seen_version(), 0);
+        let version = rx.seen_version();
+        crate::assert_with_log!(version == 0, "seen_version", 0, version);
 
         // After cancellation cleared, should see the update
         cx.set_cancel_requested(false);
         tx.send(1).expect("send failed");
         rx.changed(&cx).expect("changed failed");
-        assert_eq!(rx.seen_version(), 1);
+        let version = rx.seen_version();
+        crate::assert_with_log!(version == 1, "seen_version after", 1, version);
+        crate::test_complete!("cancel_during_wait_preserves_version");
     }
 
     #[test]
     fn shutdown_signal_pattern() {
+        init_test("shutdown_signal_pattern");
         let cx = test_cx();
         let (shutdown_tx, mut shutdown_rx) = channel(false);
 
         // Check initial state
-        assert!(!*shutdown_rx.borrow());
+        let initial = *shutdown_rx.borrow();
+        crate::assert_with_log!(!initial, "initial false", false, initial);
 
         // Trigger shutdown
         shutdown_tx.send(true).expect("send failed");
         shutdown_rx.changed(&cx).expect("changed failed");
 
         // Worker would check this
-        assert!(*shutdown_rx.borrow());
+        let value = *shutdown_rx.borrow();
+        crate::assert_with_log!(value, "shutdown true", true, value);
+        crate::test_complete!("shutdown_signal_pattern");
     }
 }

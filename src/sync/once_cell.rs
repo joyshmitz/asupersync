@@ -447,42 +447,95 @@ impl<T> Future for WaitInit<'_, T> {
 #[cfg(test)]
 mod tests {
     use super::*;
+    use crate::test_utils::init_test_logging;
     use std::sync::atomic::AtomicUsize;
     use std::sync::Arc;
     use std::thread;
 
+    fn init_test(name: &str) {
+        init_test_logging();
+        crate::test_phase!(name);
+    }
+
     #[test]
     fn new_cell_is_uninitialized() {
+        init_test("new_cell_is_uninitialized");
         let cell: OnceCell<i32> = OnceCell::new();
-        assert!(!cell.is_initialized());
-        assert!(cell.get().is_none());
+        crate::assert_with_log!(
+            !cell.is_initialized(),
+            "not initialized",
+            false,
+            cell.is_initialized()
+        );
+        crate::assert_with_log!(
+            cell.get().is_none(),
+            "get none",
+            true,
+            cell.get().is_none()
+        );
+        crate::test_complete!("new_cell_is_uninitialized");
     }
 
     #[test]
     fn with_value_is_initialized() {
+        init_test("with_value_is_initialized");
         let cell = OnceCell::with_value(42);
-        assert!(cell.is_initialized());
-        assert_eq!(cell.get(), Some(&42));
+        crate::assert_with_log!(
+            cell.is_initialized(),
+            "initialized",
+            true,
+            cell.is_initialized()
+        );
+        crate::assert_with_log!(
+            cell.get() == Some(&42),
+            "get value",
+            Some(&42),
+            cell.get()
+        );
+        crate::test_complete!("with_value_is_initialized");
     }
 
     #[test]
     fn set_initializes_cell() {
+        init_test("set_initializes_cell");
         let cell: OnceCell<i32> = OnceCell::new();
-        assert!(cell.set(42).is_ok());
-        assert!(cell.is_initialized());
-        assert_eq!(cell.get(), Some(&42));
+        let set_ok = cell.set(42).is_ok();
+        crate::assert_with_log!(set_ok, "set ok", true, set_ok);
+        crate::assert_with_log!(
+            cell.is_initialized(),
+            "initialized",
+            true,
+            cell.is_initialized()
+        );
+        crate::assert_with_log!(
+            cell.get() == Some(&42),
+            "get value",
+            Some(&42),
+            cell.get()
+        );
+        crate::test_complete!("set_initializes_cell");
     }
 
     #[test]
     fn set_twice_fails() {
+        init_test("set_twice_fails");
         let cell = OnceCell::new();
-        assert!(cell.set(1).is_ok());
-        assert!(cell.set(2).is_err());
-        assert_eq!(cell.get(), Some(&1));
+        let first_ok = cell.set(1).is_ok();
+        let second_err = cell.set(2).is_err();
+        crate::assert_with_log!(first_ok, "first set ok", true, first_ok);
+        crate::assert_with_log!(second_err, "second set err", true, second_err);
+        crate::assert_with_log!(
+            cell.get() == Some(&1),
+            "value unchanged",
+            Some(&1),
+            cell.get()
+        );
+        crate::test_complete!("set_twice_fails");
     }
 
     #[test]
     fn get_or_init_blocking_initializes_once() {
+        init_test("get_or_init_blocking_initializes_once");
         let cell: OnceCell<i32> = OnceCell::new();
         let counter = AtomicUsize::new(0);
 
@@ -490,20 +543,32 @@ mod tests {
             counter.fetch_add(1, Ordering::SeqCst);
             42
         });
-        assert_eq!(*result, 42);
-        assert_eq!(counter.load(Ordering::SeqCst), 1);
+        crate::assert_with_log!(*result == 42, "first result", 42, *result);
+        crate::assert_with_log!(
+            counter.load(Ordering::SeqCst) == 1,
+            "counter",
+            1usize,
+            counter.load(Ordering::SeqCst)
+        );
 
         // Second call should return cached value.
         let result = cell.get_or_init_blocking(|| {
             counter.fetch_add(1, Ordering::SeqCst);
             100
         });
-        assert_eq!(*result, 42);
-        assert_eq!(counter.load(Ordering::SeqCst), 1);
+        crate::assert_with_log!(*result == 42, "cached result", 42, *result);
+        crate::assert_with_log!(
+            counter.load(Ordering::SeqCst) == 1,
+            "counter",
+            1usize,
+            counter.load(Ordering::SeqCst)
+        );
+        crate::test_complete!("get_or_init_blocking_initializes_once");
     }
 
     #[test]
     fn concurrent_init_only_runs_once() {
+        init_test("concurrent_init_only_runs_once");
         let cell = Arc::new(OnceCell::<i32>::new());
         let counter = Arc::new(AtomicUsize::new(0));
         let mut handles = Vec::new();
@@ -517,7 +582,7 @@ mod tests {
                     thread::sleep(std::time::Duration::from_millis(10));
                     42
                 });
-                assert_eq!(*result, 42);
+                crate::assert_with_log!(*result == 42, "result", 42, *result);
             }));
         }
 
@@ -525,34 +590,70 @@ mod tests {
             handle.join().expect("thread panicked");
         }
 
-        assert_eq!(counter.load(Ordering::SeqCst), 1);
+        crate::assert_with_log!(
+            counter.load(Ordering::SeqCst) == 1,
+            "counter",
+            1usize,
+            counter.load(Ordering::SeqCst)
+        );
+        crate::test_complete!("concurrent_init_only_runs_once");
     }
 
     #[test]
     fn take_resets_cell() {
+        init_test("take_resets_cell");
         let mut cell = OnceCell::with_value(42);
-        assert_eq!(cell.take(), Some(42));
-        assert!(!cell.is_initialized());
-        assert!(cell.get().is_none());
+        let taken = cell.take();
+        crate::assert_with_log!(taken == Some(42), "take value", Some(42), taken);
+        crate::assert_with_log!(
+            !cell.is_initialized(),
+            "not initialized",
+            false,
+            cell.is_initialized()
+        );
+        crate::assert_with_log!(
+            cell.get().is_none(),
+            "get none",
+            true,
+            cell.get().is_none()
+        );
+        crate::test_complete!("take_resets_cell");
     }
 
     #[test]
     fn into_inner_extracts_value() {
+        init_test("into_inner_extracts_value");
         let cell = OnceCell::with_value(42);
-        assert_eq!(cell.into_inner(), Some(42));
+        let inner = cell.into_inner();
+        crate::assert_with_log!(inner == Some(42), "into_inner", Some(42), inner);
+        crate::test_complete!("into_inner_extracts_value");
     }
 
     #[test]
     fn clone_copies_value() {
+        init_test("clone_copies_value");
         let cell = OnceCell::with_value(42);
         let cloned = cell.clone();
-        assert_eq!(cloned.get(), Some(&42));
+        crate::assert_with_log!(
+            cloned.get() == Some(&42),
+            "cloned value",
+            Some(&42),
+            cloned.get()
+        );
+        crate::test_complete!("clone_copies_value");
     }
 
     #[test]
     fn debug_shows_value() {
+        init_test("debug_shows_value");
         let cell = OnceCell::with_value(42);
-        let debug = format!("{:?}", cell);
-        assert!(debug.contains("42"));
+        let debug_text = format!("{:?}", cell);
+        crate::assert_with_log!(
+            debug_text.contains("42"),
+            "debug shows value",
+            true,
+            debug_text.contains("42")
+        );
+        crate::test_complete!("debug_shows_value");
     }
 }

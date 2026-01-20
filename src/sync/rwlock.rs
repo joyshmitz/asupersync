@@ -474,10 +474,16 @@ impl<T> Drop for OwnedRwLockWriteGuard<T> {
 #[allow(clippy::significant_drop_tightening)]
 mod tests {
     use super::*;
+    use crate::test_utils::init_test_logging;
     use crate::util::ArenaIndex;
     use std::sync::atomic::{AtomicBool, Ordering as AtomicOrdering};
     use std::sync::Arc as StdArc;
     use std::thread;
+
+    fn init_test(name: &str) {
+        init_test_logging();
+        crate::test_phase!(name);
+    }
 
     fn test_cx() -> Cx {
         Cx::new(
@@ -489,35 +495,42 @@ mod tests {
 
     #[test]
     fn multiple_readers_allowed() {
+        init_test("multiple_readers_allowed");
         let cx = test_cx();
         let lock = RwLock::new(42_u32);
 
         let guard1 = lock.read(&cx).expect("read 1");
         let guard2 = lock.read(&cx).expect("read 2");
 
-        assert_eq!(*guard1, 42);
-        assert_eq!(*guard2, 42);
+        crate::assert_with_log!(*guard1 == 42, "guard1 value", 42u32, *guard1);
+        crate::assert_with_log!(*guard2 == 42, "guard2 value", 42u32, *guard2);
+        crate::test_complete!("multiple_readers_allowed");
     }
 
     #[test]
     fn write_excludes_readers_and_writers() {
+        init_test("write_excludes_readers_and_writers");
         let cx = test_cx();
         let lock = RwLock::new(5_u32);
 
         let mut write = lock.write(&cx).expect("write");
         *write = 7;
 
-        assert!(matches!(lock.try_read(), Err(TryReadError::Locked)));
-        assert!(matches!(lock.try_write(), Err(TryWriteError::Locked)));
+        let read_locked = matches!(lock.try_read(), Err(TryReadError::Locked));
+        crate::assert_with_log!(read_locked, "read locked", true, read_locked);
+        let write_locked = matches!(lock.try_write(), Err(TryWriteError::Locked));
+        crate::assert_with_log!(write_locked, "write locked", true, write_locked);
 
         drop(write);
 
         let read = lock.read(&cx).expect("read after write");
-        assert_eq!(*read, 7);
+        crate::assert_with_log!(*read == 7, "read after write", 7u32, *read);
+        crate::test_complete!("write_excludes_readers_and_writers");
     }
 
     #[test]
     fn writer_waiting_blocks_new_readers() {
+        init_test("writer_waiting_blocks_new_readers");
         let cx = test_cx();
         let lock = StdArc::new(RwLock::new(1_u32));
         let read_guard = lock.read(&cx).expect("read");
@@ -549,20 +562,24 @@ mod tests {
             std::thread::yield_now();
             std::thread::sleep(std::time::Duration::from_millis(1));
         }
-        assert!(success, "writer did not block new readers");
+        crate::assert_with_log!(success, "writer blocked readers", true, success);
 
         drop(read_guard);
         let _ = handle.join();
+        crate::test_complete!("writer_waiting_blocks_new_readers");
     }
 
     #[test]
     fn cancel_during_read_wait() {
+        init_test("cancel_during_read_wait");
         let cx = test_cx();
         let lock = RwLock::new(0_u32);
 
         let _write = lock.write(&cx).expect("write");
         cx.set_cancel_requested(true);
 
-        assert!(matches!(lock.read(&cx), Err(RwLockError::Cancelled)));
+        let cancelled = matches!(lock.read(&cx), Err(RwLockError::Cancelled));
+        crate::assert_with_log!(cancelled, "read cancelled", true, cancelled);
+        crate::test_complete!("cancel_during_read_wait");
     }
 }

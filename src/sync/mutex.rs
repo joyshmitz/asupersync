@@ -361,6 +361,7 @@ impl<T> Drop for OwnedMutexGuard<T> {
 #[cfg(test)]
 mod tests {
     use super::*;
+    use crate::test_utils::init_test_logging;
     use crate::types::Budget;
     use crate::util::ArenaIndex;
     use crate::{RegionId, TaskId};
@@ -375,7 +376,12 @@ mod tests {
 
     // Adapt synchronous tests to async (using block_on or similar)
     // For unit tests here, we can use a simple poll helper.
-    
+
+    fn init_test(test_name: &str) {
+        init_test_logging();
+        crate::test_phase!(test_name);
+    }
+
     fn poll_once<T>(future: &mut impl Future<Output = T>) -> Option<T> {
         let waker = Waker::noop();
         let mut cx = Context::from_waker(&waker);
@@ -387,18 +393,23 @@ mod tests {
 
     #[test]
     fn new_mutex_is_unlocked() {
+        init_test("new_mutex_is_unlocked");
         let mutex = Mutex::new(42);
-        assert!(!mutex.try_lock().is_err());
+        let ok = mutex.try_lock().is_ok();
+        crate::assert_with_log!(ok, "mutex should start unlocked", true, ok);
+        crate::test_complete!("new_mutex_is_unlocked");
     }
 
     #[test]
     fn lock_acquires_mutex() {
+        init_test("lock_acquires_mutex");
         let cx = test_cx();
         let mutex = Mutex::new(42);
-        
+
         let mut future = mutex.lock(&cx);
         let guard = poll_once(&mut future).expect("should complete immediately").expect("lock failed");
-        assert_eq!(*guard, 42);
+        crate::assert_with_log!(*guard == 42, "guard should read value", 42, *guard);
+        crate::test_complete!("lock_acquires_mutex");
     }
 
     // ... Need to port other tests to async ...

@@ -134,11 +134,18 @@ impl BarrierWaitResult {
 #[cfg(test)]
 mod tests {
     use super::*;
+    use crate::test_utils::init_test_logging;
     use std::sync::atomic::{AtomicUsize, Ordering};
     use std::sync::Arc;
 
+    fn init_test(name: &str) {
+        init_test_logging();
+        crate::test_phase!(name);
+    }
+
     #[test]
     fn barrier_trips_and_leader_elected() {
+        init_test("barrier_trips_and_leader_elected");
         let barrier = Arc::new(Barrier::new(3));
         let leaders = Arc::new(AtomicUsize::new(0));
 
@@ -165,17 +172,25 @@ mod tests {
             handle.join().expect("thread failed");
         }
 
-        assert_eq!(leaders.load(Ordering::SeqCst), 1);
+        let leader_count = leaders.load(Ordering::SeqCst);
+        crate::assert_with_log!(leader_count == 1, "leader count", 1usize, leader_count);
+        crate::test_complete!("barrier_trips_and_leader_elected");
     }
 
     #[test]
     fn barrier_cancel_removes_arrival() {
+        init_test("barrier_cancel_removes_arrival");
         let barrier = Barrier::new(2);
         let cx = Cx::for_testing();
         cx.set_cancel_requested(true);
 
         let err = barrier.wait(&cx).expect_err("expected cancellation");
-        assert_eq!(err, BarrierWaitError::Cancelled);
+        crate::assert_with_log!(
+            err == BarrierWaitError::Cancelled,
+            "cancelled error",
+            BarrierWaitError::Cancelled,
+            err
+        );
 
         // Ensure barrier can still trip after a cancelled waiter.
         let barrier = Arc::new(barrier);
@@ -199,6 +214,8 @@ mod tests {
 
         handle.join().expect("thread failed");
 
-        assert_eq!(leaders.load(Ordering::SeqCst), 1);
+        let leader_count = leaders.load(Ordering::SeqCst);
+        crate::assert_with_log!(leader_count == 1, "leader count", 1usize, leader_count);
+        crate::test_complete!("barrier_cancel_removes_arrival");
     }
 }

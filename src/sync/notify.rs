@@ -299,6 +299,7 @@ impl Drop for Notified<'_> {
 #[cfg(test)]
 mod tests {
     use super::*;
+    use crate::test_utils::init_test_logging;
     use std::sync::Arc;
     use std::task::Wake;
     use std::thread;
@@ -324,8 +325,14 @@ mod tests {
         Pin::new(fut).poll(&mut cx)
     }
 
+    fn init_test(name: &str) {
+        init_test_logging();
+        crate::test_phase!(name);
+    }
+
     #[test]
     fn notify_one_wakes_waiter() {
+        init_test("notify_one_wakes_waiter");
         let notify = Arc::new(Notify::new());
         let notify2 = Arc::clone(&notify);
 
@@ -337,17 +344,21 @@ mod tests {
         let mut fut = notify.notified();
 
         // First poll should be Pending.
-        assert!(poll_once(&mut fut).is_pending());
+        let pending = poll_once(&mut fut).is_pending();
+        crate::assert_with_log!(pending, "first poll pending", true, pending);
 
         // Wait for notification.
         handle.join().expect("thread panicked");
 
         // Now it should be Ready.
-        assert!(poll_once(&mut fut).is_ready());
+        let ready = poll_once(&mut fut).is_ready();
+        crate::assert_with_log!(ready, "ready after notify", true, ready);
+        crate::test_complete!("notify_one_wakes_waiter");
     }
 
     #[test]
     fn notify_before_wait_is_consumed() {
+        init_test("notify_before_wait_is_consumed");
         let notify = Notify::new();
 
         // Notify before anyone is waiting.
@@ -355,11 +366,14 @@ mod tests {
 
         // Now wait - should complete immediately.
         let mut fut = notify.notified();
-        assert!(poll_once(&mut fut).is_ready());
+        let ready = poll_once(&mut fut).is_ready();
+        crate::assert_with_log!(ready, "ready immediately", true, ready);
+        crate::test_complete!("notify_before_wait_is_consumed");
     }
 
     #[test]
     fn notify_waiters_wakes_all() {
+        init_test("notify_waiters_wakes_all");
         let notify = Arc::new(Notify::new());
         let completed = Arc::new(std::sync::atomic::AtomicUsize::new(0));
 
@@ -392,6 +406,8 @@ mod tests {
             handle.join().expect("thread panicked");
         }
 
-        assert_eq!(completed.load(Ordering::SeqCst), 3);
+        let count = completed.load(Ordering::SeqCst);
+        crate::assert_with_log!(count == 3, "completed count", 3usize, count);
+        crate::test_complete!("notify_waiters_wakes_all");
     }
 }

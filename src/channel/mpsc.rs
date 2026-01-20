@@ -616,6 +616,11 @@ mod tests {
     use std::sync::atomic::{AtomicBool, Ordering};
     use std::sync::Arc;
 
+    fn init_test(name: &str) {
+        crate::test_utils::init_test_logging();
+        crate::test_phase!(name);
+    }
+
     fn test_cx() -> Cx {
         Cx::new(
             crate::types::RegionId::from_arena(ArenaIndex::new(0, 0)),
@@ -626,22 +631,32 @@ mod tests {
 
     #[test]
     fn channel_capacity_must_be_nonzero() {
+        init_test("channel_capacity_must_be_nonzero");
         let result = std::panic::catch_unwind(|| channel::<i32>(0));
-        assert!(result.is_err());
+        crate::assert_with_log!(
+            result.is_err(),
+            "capacity 0 panics",
+            true,
+            result.is_err()
+        );
+        crate::test_complete!("channel_capacity_must_be_nonzero");
     }
 
     #[test]
     fn basic_send_recv() {
+        init_test("basic_send_recv");
         let cx = test_cx();
         let (tx, rx) = channel::<i32>(10);
 
         tx.send(&cx, 42).expect("send failed");
         let value = rx.recv(&cx).expect("recv failed");
-        assert_eq!(value, 42);
+        crate::assert_with_log!(value == 42, "recv value", 42, value);
+        crate::test_complete!("basic_send_recv");
     }
 
     #[test]
     fn fifo_ordering_single_sender() {
+        init_test("fifo_ordering_single_sender");
         let cx = test_cx();
         let (tx, rx) = channel::<usize>(128);
 
@@ -660,11 +675,13 @@ mod tests {
         }
 
         let expected: Vec<_> = (0..100).collect();
-        assert_eq!(received, expected);
+        crate::assert_with_log!(received == expected, "fifo order", expected, received);
+        crate::test_complete!("fifo_ordering_single_sender");
     }
 
     #[test]
     fn multi_producer_all_messages_received() {
+        init_test("multi_producer_all_messages_received");
         let cx = test_cx();
         let (tx, rx) = channel::<usize>(512);
 
@@ -694,7 +711,12 @@ mod tests {
             }
         }
 
-        assert_eq!(received.len(), 400);
+        crate::assert_with_log!(
+            received.len() == 400,
+            "received length",
+            400,
+            received.len()
+        );
         received.sort_unstable();
 
         let mut expected = Vec::new();
@@ -704,11 +726,18 @@ mod tests {
             }
         }
         expected.sort_unstable();
-        assert_eq!(received, expected);
+        crate::assert_with_log!(
+            received == expected,
+            "received matches expected",
+            expected,
+            received
+        );
+        crate::test_complete!("multi_producer_all_messages_received");
     }
 
     #[test]
     fn backpressure_blocks_until_recv() {
+        init_test("backpressure_blocks_until_recv");
         let cx = test_cx();
         let (tx, rx) = channel::<i32>(1);
 
@@ -727,12 +756,16 @@ mod tests {
         for _ in 0..1_000 {
             std::thread::yield_now();
         }
-        assert!(
-            !finished.load(Ordering::SeqCst),
-            "send completed despite full channel"
+        let finished_now = finished.load(Ordering::SeqCst);
+        crate::assert_with_log!(
+            !finished_now,
+            "send completed despite full channel",
+            false,
+            finished_now
         );
 
-        assert_eq!(rx.recv(&cx).expect("recv failed"), 1);
+        let first = rx.recv(&cx).expect("recv failed");
+        crate::assert_with_log!(first == 1, "first recv", 1, first);
 
         for _ in 0..10_000 {
             if finished.load(Ordering::SeqCst) {
@@ -740,14 +773,18 @@ mod tests {
             }
             std::thread::yield_now();
         }
-        assert!(finished.load(Ordering::SeqCst));
-        assert_eq!(rx.recv(&cx).expect("recv failed"), 2);
+        let finished_now = finished.load(Ordering::SeqCst);
+        crate::assert_with_log!(finished_now, "worker finished", true, finished_now);
+        let second = rx.recv(&cx).expect("recv failed");
+        crate::assert_with_log!(second == 2, "second recv", 2, second);
 
         handle.join().expect("sender thread panicked");
+        crate::test_complete!("backpressure_blocks_until_recv");
     }
 
     #[test]
     fn two_phase_send_recv() {
+        init_test("two_phase_send_recv");
         let cx = test_cx();
         let (tx, rx) = channel::<i32>(10);
 
@@ -755,17 +792,20 @@ mod tests {
         let permit = tx.reserve(&cx).expect("reserve failed");
 
         // Permit is held - capacity is reserved
-        assert_eq!(tx.capacity(), 10);
+        let capacity = tx.capacity();
+        crate::assert_with_log!(capacity == 10, "capacity", 10, capacity);
 
         // Phase 2: commit
         permit.send(42);
 
         let value = rx.recv(&cx).expect("recv failed");
-        assert_eq!(value, 42);
+        crate::assert_with_log!(value == 42, "recv value", 42, value);
+        crate::test_complete!("two_phase_send_recv");
     }
 
     #[test]
     fn permit_abort_releases_slot() {
+        init_test("permit_abort_releases_slot");
         let (tx, _rx) = channel::<i32>(1);
         let cx = test_cx();
 
@@ -773,17 +813,31 @@ mod tests {
         let permit = tx.reserve(&cx).expect("reserve failed");
 
         // Can't reserve another (capacity 1)
-        assert!(matches!(tx.try_reserve(), Err(SendError::Full(()))));
+        let try_reserve = tx.try_reserve();
+        crate::assert_with_log!(
+            matches!(try_reserve, Err(SendError::Full(()))),
+            "try_reserve full",
+            "Err(Full(()))",
+            format!("{:?}", try_reserve)
+        );
 
         // Abort releases the slot
         permit.abort();
 
         // Now we can reserve again
-        let _permit2 = tx.reserve(&cx).expect("reserve after abort failed");
+        let permit2 = tx.reserve(&cx);
+        crate::assert_with_log!(
+            permit2.is_ok(),
+            "reserve after abort",
+            true,
+            permit2.is_ok()
+        );
+        crate::test_complete!("permit_abort_releases_slot");
     }
 
     #[test]
     fn permit_drop_releases_slot() {
+        init_test("permit_drop_releases_slot");
         let (tx, _rx) = channel::<i32>(1);
         let cx = test_cx();
 
@@ -793,11 +847,19 @@ mod tests {
         }
 
         // Slot should be released
-        let _permit = tx.reserve(&cx).expect("reserve after drop failed");
+        let permit = tx.reserve(&cx);
+        crate::assert_with_log!(
+            permit.is_ok(),
+            "reserve after drop",
+            true,
+            permit.is_ok()
+        );
+        crate::test_complete!("permit_drop_releases_slot");
     }
 
     #[test]
     fn try_send_when_full() {
+        init_test("try_send_when_full");
         let (tx, _rx) = channel::<i32>(1);
         let cx = test_cx();
 
@@ -805,44 +867,70 @@ mod tests {
         tx.send(&cx, 1).expect("send failed");
 
         // Try to send should fail with Full
-        assert!(matches!(tx.try_send(2), Err(SendError::Full(2))));
+        let result = tx.try_send(2);
+        crate::assert_with_log!(
+            matches!(result, Err(SendError::Full(2))),
+            "try_send full",
+            "Err(Full(2))",
+            format!("{:?}", result)
+        );
+        crate::test_complete!("try_send_when_full");
     }
 
     #[test]
     fn try_recv_when_empty() {
+        init_test("try_recv_when_empty");
         let (tx, rx) = channel::<i32>(10);
 
         // Channel is empty but sender exists
-        assert!(matches!(rx.try_recv(), Err(RecvError::Empty)));
+        let empty = rx.try_recv();
+        crate::assert_with_log!(
+            matches!(empty, Err(RecvError::Empty)),
+            "try_recv empty",
+            "Err(Empty)",
+            format!("{:?}", empty)
+        );
 
         // Send something
         let cx = test_cx();
         tx.send(&cx, 42).expect("send failed");
 
         // Now should succeed
-        assert_eq!(rx.try_recv(), Ok(42));
+        let value = rx.try_recv();
+        let ok = matches!(value, Ok(42));
+        crate::assert_with_log!(ok, "try_recv value", true, ok);
+        crate::test_complete!("try_recv_when_empty");
     }
 
     #[test]
     fn sender_close_detected_by_receiver() {
+        init_test("sender_close_detected_by_receiver");
         let (tx, rx) = channel::<i32>(10);
 
-        assert!(!rx.is_closed());
+        let closed_before = rx.is_closed();
+        crate::assert_with_log!(!closed_before, "receiver open", false, closed_before);
         drop(tx);
-        assert!(rx.is_closed());
+        let closed_after = rx.is_closed();
+        crate::assert_with_log!(closed_after, "receiver closed", true, closed_after);
+        crate::test_complete!("sender_close_detected_by_receiver");
     }
 
     #[test]
     fn receiver_close_detected_by_sender() {
+        init_test("receiver_close_detected_by_sender");
         let (tx, rx) = channel::<i32>(10);
 
-        assert!(!tx.is_closed());
+        let closed_before = tx.is_closed();
+        crate::assert_with_log!(!closed_before, "sender open", false, closed_before);
         drop(rx);
-        assert!(tx.is_closed());
+        let closed_after = tx.is_closed();
+        crate::assert_with_log!(closed_after, "sender closed", true, closed_after);
+        crate::test_complete!("receiver_close_detected_by_sender");
     }
 
     #[test]
     fn recv_after_sender_dropped_drains_queue() {
+        init_test("recv_after_sender_dropped_drains_queue");
         let (tx, rx) = channel::<i32>(10);
         let cx = test_cx();
 
@@ -851,37 +939,66 @@ mod tests {
         drop(tx);
 
         // Should still receive the queued messages
-        assert_eq!(rx.recv(&cx), Ok(1));
-        assert_eq!(rx.recv(&cx), Ok(2));
+        let first = rx.recv(&cx);
+        let first_ok = matches!(first, Ok(1));
+        crate::assert_with_log!(first_ok, "recv first", true, first_ok);
+        let second = rx.recv(&cx);
+        let second_ok = matches!(second, Ok(2));
+        crate::assert_with_log!(second_ok, "recv second", true, second_ok);
 
         // Now should get Disconnected
-        assert_eq!(rx.try_recv(), Err(RecvError::Disconnected));
+        let disconnected = rx.try_recv();
+        let is_disconnected = matches!(disconnected, Err(RecvError::Disconnected));
+        crate::assert_with_log!(
+            is_disconnected,
+            "recv disconnected",
+            true,
+            is_disconnected
+        );
+        crate::test_complete!("recv_after_sender_dropped_drains_queue");
     }
 
     #[test]
     fn send_after_receiver_dropped() {
+        init_test("send_after_receiver_dropped");
         let (tx, rx) = channel::<i32>(10);
         let cx = test_cx();
 
         drop(rx);
 
         // Send should fail
-        assert!(matches!(tx.send(&cx, 42), Err(SendError::Disconnected(42))));
+        let result = tx.send(&cx, 42);
+        crate::assert_with_log!(
+            matches!(result, Err(SendError::Disconnected(42))),
+            "send disconnected",
+            "Err(Disconnected(42))",
+            format!("{:?}", result)
+        );
+        crate::test_complete!("send_after_receiver_dropped");
     }
 
     #[test]
     fn reserve_after_receiver_dropped() {
+        init_test("reserve_after_receiver_dropped");
         let (tx, rx) = channel::<i32>(10);
         let cx = test_cx();
 
         drop(rx);
 
         // Reserve should fail
-        assert!(matches!(tx.reserve(&cx), Err(SendError::Disconnected(()))));
+        let result = tx.reserve(&cx);
+        crate::assert_with_log!(
+            matches!(result, Err(SendError::Disconnected(()))),
+            "reserve disconnected",
+            "Err(Disconnected(()))",
+            format!("{:?}", result)
+        );
+        crate::test_complete!("reserve_after_receiver_dropped");
     }
 
     #[test]
     fn multiple_senders() {
+        init_test("multiple_senders");
         let (tx1, rx) = channel::<i32>(10);
         let tx2 = tx1.clone();
         let cx = test_cx();
@@ -894,32 +1011,42 @@ mod tests {
         let v2 = rx.recv(&cx).expect("recv2 failed");
 
         // Both messages received (order depends on send order)
-        assert!((v1 == 1 && v2 == 2) || (v1 == 2 && v2 == 1));
+        let ok = (v1 == 1 && v2 == 2) || (v1 == 2 && v2 == 1);
+        crate::assert_with_log!(ok, "both messages received", true, (v1, v2));
+        crate::test_complete!("multiple_senders");
     }
 
     #[test]
     fn sender_count_tracking() {
+        init_test("sender_count_tracking");
         let (tx1, rx) = channel::<i32>(10);
 
-        assert!(!rx.is_closed());
+        let closed = rx.is_closed();
+        crate::assert_with_log!(!closed, "rx open", false, closed);
 
         let tx2 = tx1.clone();
-        assert!(!rx.is_closed());
+        let closed = rx.is_closed();
+        crate::assert_with_log!(!closed, "rx still open", false, closed);
 
         drop(tx1);
-        assert!(!rx.is_closed()); // tx2 still alive
+        let closed = rx.is_closed();
+        crate::assert_with_log!(!closed, "rx open with tx2", false, closed);
 
         drop(tx2);
-        assert!(rx.is_closed()); // all senders gone
+        let closed = rx.is_closed();
+        crate::assert_with_log!(closed, "rx closed", true, closed);
+        crate::test_complete!("sender_count_tracking");
     }
 
     #[test]
     fn weak_sender_upgrade() {
+        init_test("weak_sender_upgrade");
         let (tx, rx) = channel::<i32>(10);
         let weak = tx.downgrade();
 
         // Can upgrade while sender exists
-        assert!(weak.upgrade().is_some());
+        let upgraded = weak.upgrade().is_some();
+        crate::assert_with_log!(upgraded, "upgrade while sender exists", true, upgraded);
 
         drop(tx);
 
@@ -928,10 +1055,12 @@ mod tests {
 
         drop(rx);
         // After rx dropped, inner is gone
+        crate::test_complete!("weak_sender_upgrade");
     }
 
     #[test]
     fn fifo_ordering() {
+        init_test("fifo_ordering");
         let (tx, rx) = channel::<i32>(100);
         let cx = test_cx();
 
@@ -940,48 +1069,73 @@ mod tests {
         }
 
         for i in 0..50 {
-            assert_eq!(rx.recv(&cx), Ok(i));
+            let value = rx.recv(&cx);
+            let ok = matches!(value, Ok(v) if v == i);
+            crate::assert_with_log!(ok, "fifo recv", true, ok);
         }
+        crate::test_complete!("fifo_ordering");
     }
 
     #[test]
     fn capacity_query() {
+        init_test("capacity_query");
         let (tx, rx) = channel::<i32>(42);
-        assert_eq!(tx.capacity(), 42);
-        assert_eq!(rx.capacity(), 42);
+        let tx_cap = tx.capacity();
+        crate::assert_with_log!(tx_cap == 42, "tx capacity", 42, tx_cap);
+        let rx_cap = rx.capacity();
+        crate::assert_with_log!(rx_cap == 42, "rx capacity", 42, rx_cap);
+        crate::test_complete!("capacity_query");
     }
 
     #[test]
     fn len_and_is_empty() {
+        init_test("len_and_is_empty");
         let (tx, rx) = channel::<i32>(10);
         let cx = test_cx();
 
-        assert!(rx.is_empty());
-        assert_eq!(rx.len(), 0);
+        let empty = rx.is_empty();
+        crate::assert_with_log!(empty, "rx empty", true, empty);
+        let len = rx.len();
+        crate::assert_with_log!(len == 0, "len 0", 0, len);
 
         tx.send(&cx, 1).expect("send failed");
-        assert!(!rx.is_empty());
-        assert_eq!(rx.len(), 1);
+        let empty = rx.is_empty();
+        crate::assert_with_log!(!empty, "rx not empty", false, empty);
+        let len = rx.len();
+        crate::assert_with_log!(len == 1, "len 1", 1, len);
 
         tx.send(&cx, 2).expect("send failed");
-        assert_eq!(rx.len(), 2);
+        let len = rx.len();
+        crate::assert_with_log!(len == 2, "len 2", 2, len);
 
         rx.try_recv().expect("recv failed");
-        assert_eq!(rx.len(), 1);
+        let len = rx.len();
+        crate::assert_with_log!(len == 1, "len 1 after recv", 1, len);
+        crate::test_complete!("len_and_is_empty");
     }
 
     #[test]
     fn has_messages() {
+        init_test("has_messages");
         let (tx, rx) = channel::<i32>(10);
         let cx = test_cx();
 
-        assert!(!rx.has_messages());
+        let has_messages = rx.has_messages();
+        crate::assert_with_log!(
+            !has_messages,
+            "no messages",
+            false,
+            has_messages
+        );
         tx.send(&cx, 1).expect("send failed");
-        assert!(rx.has_messages());
+        let has_messages = rx.has_messages();
+        crate::assert_with_log!(has_messages, "has messages", true, has_messages);
+        crate::test_complete!("has_messages");
     }
 
     #[test]
     fn permit_consumed_only_once() {
+        init_test("permit_consumed_only_once");
         let (tx, rx) = channel::<i32>(10);
         let cx = test_cx();
 
@@ -990,11 +1144,15 @@ mod tests {
         // Permit is consumed - cannot call send() or abort() again
         // (This is enforced by taking `self` not `&self`)
 
-        assert_eq!(rx.recv(&cx), Ok(42));
+        let value = rx.recv(&cx);
+        let ok = matches!(value, Ok(42));
+        crate::assert_with_log!(ok, "recv value", true, ok);
+        crate::test_complete!("permit_consumed_only_once");
     }
 
     #[test]
     fn reserved_slot_counts_against_capacity() {
+        init_test("reserved_slot_counts_against_capacity");
         let (tx, _rx) = channel::<i32>(2);
         let cx = test_cx();
 
@@ -1005,30 +1163,58 @@ mod tests {
         tx.send(&cx, 1).expect("send failed");
 
         // Now at capacity (1 reserved + 1 queued = 2)
-        assert!(matches!(tx.try_reserve(), Err(SendError::Full(()))));
+        let full = tx.try_reserve();
+        crate::assert_with_log!(
+            matches!(full, Err(SendError::Full(()))),
+            "full after reserve + send",
+            "Err(Full(()))",
+            format!("{:?}", full)
+        );
 
         // Use the permit
         permit1.send(2);
 
         // Still at capacity (2 queued)
-        assert!(matches!(tx.try_reserve(), Err(SendError::Full(()))));
+        let full_again = tx.try_reserve();
+        crate::assert_with_log!(
+            matches!(full_again, Err(SendError::Full(()))),
+            "full after permit send",
+            "Err(Full(()))",
+            format!("{:?}", full_again)
+        );
+        crate::test_complete!("reserved_slot_counts_against_capacity");
     }
 
     #[test]
     fn test_channel_resurrection() {
+        init_test("test_channel_resurrection");
         let (tx, rx) = channel::<i32>(10);
         let weak = tx.downgrade();
         let cx = test_cx();
 
         drop(tx);
         // Now sender_count is 0. Channel is closed.
-        assert!(rx.is_closed());
-        assert_eq!(rx.recv(&cx), Err(RecvError::Disconnected));
+        let closed = rx.is_closed();
+        crate::assert_with_log!(closed, "rx closed", true, closed);
+        let disconnected = rx.recv(&cx);
+        let is_disconnected = matches!(disconnected, Err(RecvError::Disconnected));
+        crate::assert_with_log!(
+            is_disconnected,
+            "recv disconnected",
+            true,
+            is_disconnected
+        );
 
         // Upgrade weak sender
         if let Some(tx2) = weak.upgrade() {
             // If upgrade succeeds, we resurrected the channel
-            assert!(!rx.is_closed(), "Channel should be open if sender exists");
+            let closed = rx.is_closed();
+            crate::assert_with_log!(
+                !closed,
+                "channel open if sender exists",
+                false,
+                closed
+            );
             tx2.send(&cx, 99).unwrap();
 
             // Receiver sees message after Disconnected?
@@ -1039,7 +1225,8 @@ mod tests {
             }
         } else {
             // Upgrade failed - this is good behavior (if intended)
-            println!("Weak sender upgrade failed as expected");
+            tracing::info!("Weak sender upgrade failed as expected");
         }
+        crate::test_complete!("test_channel_resurrection");
     }
 }
