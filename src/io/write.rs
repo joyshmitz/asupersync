@@ -255,62 +255,83 @@ mod tests {
         Waker::from(Arc::new(NoopWaker))
     }
 
+    fn init_test(name: &str) {
+        crate::test_utils::init_test_logging();
+        crate::test_phase!(name);
+    }
+
     #[test]
     fn write_to_vec() {
+        init_test("write_to_vec");
         let mut output = Vec::new();
         let waker = noop_waker();
         let mut cx = Context::from_waker(&waker);
 
         let poll = Pin::new(&mut output).poll_write(&mut cx, b"hello");
-        assert!(matches!(poll, Poll::Ready(Ok(5))));
-        assert_eq!(output, b"hello");
+        let ready = matches!(poll, Poll::Ready(Ok(5)));
+        crate::assert_with_log!(ready, "write 5", true, ready);
+        crate::assert_with_log!(output == b"hello", "output", b"hello", output);
+        crate::test_complete!("write_to_vec");
     }
 
     #[test]
     fn write_to_cursor() {
+        init_test("write_to_cursor");
         let mut buf = [0u8; 8];
         let mut cursor = std::io::Cursor::new(&mut buf[..]);
         let waker = noop_waker();
         let mut cx = Context::from_waker(&waker);
 
         let poll = Pin::new(&mut cursor).poll_write(&mut cx, b"test");
-        assert!(matches!(poll, Poll::Ready(Ok(4))));
-        assert_eq!(&buf[..4], b"test");
+        let ready = matches!(poll, Poll::Ready(Ok(4)));
+        crate::assert_with_log!(ready, "write 4", true, ready);
+        crate::assert_with_log!(&buf[..4] == b"test", "buf", b"test", &buf[..4]);
+        crate::test_complete!("write_to_cursor");
     }
 
     #[test]
     fn flush_and_shutdown_vec() {
+        init_test("flush_and_shutdown_vec");
         let mut output = Vec::new();
         let waker = noop_waker();
         let mut cx = Context::from_waker(&waker);
 
         let poll = Pin::new(&mut output).poll_flush(&mut cx);
-        assert!(matches!(poll, Poll::Ready(Ok(()))));
+        let ready = matches!(poll, Poll::Ready(Ok(())));
+        crate::assert_with_log!(ready, "flush ready", true, ready);
 
         let poll = Pin::new(&mut output).poll_shutdown(&mut cx);
-        assert!(matches!(poll, Poll::Ready(Ok(()))));
+        let ready = matches!(poll, Poll::Ready(Ok(())));
+        crate::assert_with_log!(ready, "shutdown ready", true, ready);
+        crate::test_complete!("flush_and_shutdown_vec");
     }
 
     #[test]
     fn write_via_ref() {
+        init_test("write_via_ref");
         let mut output = Vec::new();
         let mut writer = &mut output;
         let waker = noop_waker();
         let mut cx = Context::from_waker(&waker);
 
         let poll = Pin::new(&mut writer).poll_write(&mut cx, b"via ref");
-        assert!(matches!(poll, Poll::Ready(Ok(7))));
-        assert_eq!(output, b"via ref");
+        let ready = matches!(poll, Poll::Ready(Ok(7)));
+        crate::assert_with_log!(ready, "write 7", true, ready);
+        crate::assert_with_log!(output == b"via ref", "output", b"via ref", output);
+        crate::test_complete!("write_via_ref");
     }
 
     #[test]
     fn write_via_box() {
+        init_test("write_via_box");
         let mut output: Box<Vec<u8>> = Box::default();
         let waker = noop_waker();
         let mut cx = Context::from_waker(&waker);
 
         let poll = Pin::new(&mut output).poll_write(&mut cx, b"boxed");
-        assert!(matches!(poll, Poll::Ready(Ok(5))));
-        assert_eq!(*output, b"boxed");
+        let ready = matches!(poll, Poll::Ready(Ok(5)));
+        crate::assert_with_log!(ready, "write 5", true, ready);
+        crate::assert_with_log!(*output == b"boxed", "output", b"boxed", *output);
+        crate::test_complete!("write_via_box");
     }
 }

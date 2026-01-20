@@ -150,71 +150,102 @@ mod tests {
         panic!("future did not resolve");
     }
 
+    fn init_test(name: &str) {
+        crate::test_utils::init_test_logging();
+        crate::test_phase!(name);
+    }
+
     #[test]
     fn commit_writes_data() {
+        init_test("commit_writes_data");
         let mut output = Vec::new();
         let result = {
             let mut permit = WritePermit::new(&mut output);
             permit.stage(b"hello ");
             permit.stage(b"world");
 
-            assert_eq!(permit.staged_len(), 11);
-            assert!(!permit.is_empty());
+            let staged_len = permit.staged_len();
+            crate::assert_with_log!(staged_len == 11, "staged_len", 11, staged_len);
+            let empty = permit.is_empty();
+            crate::assert_with_log!(!empty, "not empty", false, empty);
 
             let mut fut = Box::pin(permit.commit());
             poll_ready(fut.as_mut())
         };
 
-        assert!(result.is_ok());
-        assert_eq!(output, b"hello world");
+        let ok = result.is_ok();
+        crate::assert_with_log!(ok, "commit ok", true, ok);
+        crate::assert_with_log!(
+            output == b"hello world",
+            "output",
+            b"hello world",
+            output
+        );
+        crate::test_complete!("commit_writes_data");
     }
 
     #[test]
     fn abort_discards_data() {
+        init_test("abort_discards_data");
         let mut output = Vec::new();
         {
             let mut permit = WritePermit::new(&mut output);
             permit.stage(b"this should be discarded");
             permit.abort();
         }
-        assert!(output.is_empty());
+        let empty = output.is_empty();
+        crate::assert_with_log!(empty, "output empty", true, empty);
+        crate::test_complete!("abort_discards_data");
     }
 
     #[test]
     fn drop_discards_data() {
+        init_test("drop_discards_data");
         let mut output = Vec::new();
         {
             let mut permit = WritePermit::new(&mut output);
             permit.stage(b"this should be discarded");
             // permit is dropped here
         }
-        assert!(output.is_empty());
+        let empty = output.is_empty();
+        crate::assert_with_log!(empty, "output empty", true, empty);
+        crate::test_complete!("drop_discards_data");
     }
 
     #[test]
     fn clear_removes_staged_data() {
+        init_test("clear_removes_staged_data");
         let mut output = Vec::new();
         let result = {
             let mut permit = WritePermit::new(&mut output);
             permit.stage(b"hello");
-            assert_eq!(permit.staged_len(), 5);
+            let staged_len = permit.staged_len();
+            crate::assert_with_log!(staged_len == 5, "staged_len", 5, staged_len);
 
             permit.clear();
-            assert!(permit.is_empty());
-            assert_eq!(permit.staged_len(), 0);
+            let empty = permit.is_empty();
+            crate::assert_with_log!(empty, "empty", true, empty);
+            let staged_len = permit.staged_len();
+            crate::assert_with_log!(staged_len == 0, "staged_len", 0, staged_len);
 
             let mut fut = Box::pin(permit.commit());
             poll_ready(fut.as_mut())
         };
 
-        assert!(result.is_ok());
-        assert!(output.is_empty());
+        let ok = result.is_ok();
+        crate::assert_with_log!(ok, "commit ok", true, ok);
+        let empty = output.is_empty();
+        crate::assert_with_log!(empty, "output empty", true, empty);
+        crate::test_complete!("clear_removes_staged_data");
     }
 
     #[test]
     fn with_capacity_preallocates() {
+        init_test("with_capacity_preallocates");
         let mut output = Vec::new();
         let permit = WritePermit::with_capacity(&mut output, 1024);
-        assert!(permit.is_empty());
+        let empty = permit.is_empty();
+        crate::assert_with_log!(empty, "empty", true, empty);
+        crate::test_complete!("with_capacity_preallocates");
     }
 }

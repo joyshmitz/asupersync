@@ -277,38 +277,61 @@ mod tests {
         Waker::from(Arc::new(NoopWaker))
     }
 
+    fn init_test(name: &str) {
+        crate::test_utils::init_test_logging();
+        crate::test_phase!(name);
+    }
+
     #[test]
     fn buf_writer_new() {
+        init_test("buf_writer_new");
         let writer: Vec<u8> = Vec::new();
         let buf_writer = BufWriter::new(writer);
-        assert_eq!(buf_writer.capacity(), DEFAULT_BUF_CAPACITY);
-        assert!(buf_writer.buffer().is_empty());
+        let capacity = buf_writer.capacity();
+        crate::assert_with_log!(
+            capacity == DEFAULT_BUF_CAPACITY,
+            "capacity",
+            DEFAULT_BUF_CAPACITY,
+            capacity
+        );
+        let empty = buf_writer.buffer().is_empty();
+        crate::assert_with_log!(empty, "buffer empty", true, empty);
+        crate::test_complete!("buf_writer_new");
     }
 
     #[test]
     fn buf_writer_with_capacity() {
+        init_test("buf_writer_with_capacity");
         let writer: Vec<u8> = Vec::new();
         let buf_writer = BufWriter::with_capacity(256, writer);
-        assert_eq!(buf_writer.capacity(), 256);
+        let capacity = buf_writer.capacity();
+        crate::assert_with_log!(capacity == 256, "capacity", 256, capacity);
+        crate::test_complete!("buf_writer_with_capacity");
     }
 
     #[test]
     fn buf_writer_get_ref() {
+        init_test("buf_writer_get_ref");
         let writer = vec![42];
         let buf_writer = BufWriter::new(writer);
-        assert_eq!(buf_writer.get_ref(), &[42]);
+        let inner = buf_writer.get_ref();
+        crate::assert_with_log!(inner == &[42], "get_ref", &[42], inner);
+        crate::test_complete!("buf_writer_get_ref");
     }
 
     #[test]
     fn buf_writer_into_inner() {
+        init_test("buf_writer_into_inner");
         let writer = vec![42];
         let buf_writer = BufWriter::new(writer);
         let inner = buf_writer.into_inner();
-        assert_eq!(inner, vec![42]);
+        crate::assert_with_log!(inner == vec![42], "into_inner", vec![42], inner);
+        crate::test_complete!("buf_writer_into_inner");
     }
 
     #[test]
     fn buf_writer_small_write_buffered() {
+        init_test("buf_writer_small_write_buffered");
         let writer = Vec::new();
         let mut buf_writer = BufWriter::with_capacity(16, writer);
         let waker = noop_waker();
@@ -316,15 +339,20 @@ mod tests {
 
         // Write small data - should be buffered
         let poll = Pin::new(&mut buf_writer).poll_write(&mut cx, b"hello");
-        assert!(matches!(poll, Poll::Ready(Ok(5))));
+        let ready = matches!(poll, Poll::Ready(Ok(5)));
+        crate::assert_with_log!(ready, "write 5", true, ready);
 
         // Data should be in buffer, not in inner writer
-        assert_eq!(buf_writer.buffer(), b"hello");
-        assert!(buf_writer.get_ref().is_empty());
+        let buffer = buf_writer.buffer();
+        crate::assert_with_log!(buffer == b"hello", "buffer", b"hello", buffer);
+        let inner_empty = buf_writer.get_ref().is_empty();
+        crate::assert_with_log!(inner_empty, "inner empty", true, inner_empty);
+        crate::test_complete!("buf_writer_small_write_buffered");
     }
 
     #[test]
     fn buf_writer_flush_writes_to_inner() {
+        init_test("buf_writer_flush_writes_to_inner");
         let writer = Vec::new();
         let mut buf_writer = BufWriter::with_capacity(16, writer);
         let waker = noop_waker();
@@ -332,19 +360,25 @@ mod tests {
 
         // Write data
         let _ = Pin::new(&mut buf_writer).poll_write(&mut cx, b"hello");
-        assert!(!buf_writer.buffer().is_empty());
+        let empty = buf_writer.buffer().is_empty();
+        crate::assert_with_log!(!empty, "buffer not empty", false, empty);
 
         // Flush
         let poll = Pin::new(&mut buf_writer).poll_flush(&mut cx);
-        assert!(matches!(poll, Poll::Ready(Ok(()))));
+        let ready = matches!(poll, Poll::Ready(Ok(())));
+        crate::assert_with_log!(ready, "flush ready", true, ready);
 
         // Buffer should be empty, data in inner
-        assert!(buf_writer.buffer().is_empty());
-        assert_eq!(buf_writer.get_ref(), b"hello");
+        let empty = buf_writer.buffer().is_empty();
+        crate::assert_with_log!(empty, "buffer empty", true, empty);
+        let inner = buf_writer.get_ref();
+        crate::assert_with_log!(inner == b"hello", "inner", b"hello", inner);
+        crate::test_complete!("buf_writer_flush_writes_to_inner");
     }
 
     #[test]
     fn buf_writer_buffer_full_auto_flush() {
+        init_test("buf_writer_buffer_full_auto_flush");
         let writer = Vec::new();
         let mut buf_writer = BufWriter::with_capacity(8, writer);
         let waker = noop_waker();
@@ -352,19 +386,25 @@ mod tests {
 
         // Write data that fills buffer
         let _ = Pin::new(&mut buf_writer).poll_write(&mut cx, b"12345678");
-        assert_eq!(buf_writer.buffer(), b"12345678");
-        assert!(buf_writer.get_ref().is_empty());
+        let buffer = buf_writer.buffer();
+        crate::assert_with_log!(buffer == b"12345678", "buffer", b"12345678", buffer);
+        let inner_empty = buf_writer.get_ref().is_empty();
+        crate::assert_with_log!(inner_empty, "inner empty", true, inner_empty);
 
         // Write more data - should trigger flush
         let _ = Pin::new(&mut buf_writer).poll_write(&mut cx, b"9ABC");
 
         // First buffer should have been flushed
-        assert_eq!(buf_writer.get_ref(), b"12345678");
-        assert_eq!(buf_writer.buffer(), b"9ABC");
+        let inner = buf_writer.get_ref();
+        crate::assert_with_log!(inner == b"12345678", "inner", b"12345678", inner);
+        let buffer = buf_writer.buffer();
+        crate::assert_with_log!(buffer == b"9ABC", "buffer", b"9ABC", buffer);
+        crate::test_complete!("buf_writer_buffer_full_auto_flush");
     }
 
     #[test]
     fn buf_writer_large_write_bypasses_buffer() {
+        init_test("buf_writer_large_write_bypasses_buffer");
         let writer = Vec::new();
         let mut buf_writer = BufWriter::with_capacity(8, writer);
         let waker = noop_waker();
@@ -372,15 +412,25 @@ mod tests {
 
         // Write data larger than buffer capacity
         let poll = Pin::new(&mut buf_writer).poll_write(&mut cx, b"this is large data");
-        assert!(matches!(poll, Poll::Ready(Ok(18))));
+        let ready = matches!(poll, Poll::Ready(Ok(18)));
+        crate::assert_with_log!(ready, "write 18", true, ready);
 
         // Data should go directly to inner writer
-        assert_eq!(buf_writer.get_ref(), b"this is large data");
-        assert!(buf_writer.buffer().is_empty());
+        let inner = buf_writer.get_ref();
+        crate::assert_with_log!(
+            inner == b"this is large data",
+            "inner",
+            b"this is large data",
+            inner
+        );
+        let empty = buf_writer.buffer().is_empty();
+        crate::assert_with_log!(empty, "buffer empty", true, empty);
+        crate::test_complete!("buf_writer_large_write_bypasses_buffer");
     }
 
     #[test]
     fn buf_writer_multiple_writes() {
+        init_test("buf_writer_multiple_writes");
         let writer = Vec::new();
         let mut buf_writer = BufWriter::with_capacity(32, writer);
         let waker = noop_waker();
@@ -389,16 +439,31 @@ mod tests {
         // Multiple small writes
         let _ = Pin::new(&mut buf_writer).poll_write(&mut cx, b"hello ");
         let _ = Pin::new(&mut buf_writer).poll_write(&mut cx, b"world");
-        assert_eq!(buf_writer.buffer(), b"hello world");
-        assert!(buf_writer.get_ref().is_empty());
+        let buffer = buf_writer.buffer();
+        crate::assert_with_log!(
+            buffer == b"hello world",
+            "buffer",
+            b"hello world",
+            buffer
+        );
+        let inner_empty = buf_writer.get_ref().is_empty();
+        crate::assert_with_log!(inner_empty, "inner empty", true, inner_empty);
 
         // Flush
         let _ = Pin::new(&mut buf_writer).poll_flush(&mut cx);
-        assert_eq!(buf_writer.get_ref(), b"hello world");
+        let inner = buf_writer.get_ref();
+        crate::assert_with_log!(
+            inner == b"hello world",
+            "inner",
+            b"hello world",
+            inner
+        );
+        crate::test_complete!("buf_writer_multiple_writes");
     }
 
     #[test]
     fn buf_writer_shutdown_flushes() {
+        init_test("buf_writer_shutdown_flushes");
         let writer = Vec::new();
         let mut buf_writer = BufWriter::with_capacity(32, writer);
         let waker = noop_waker();
@@ -409,12 +474,16 @@ mod tests {
 
         // Shutdown should flush
         let poll = Pin::new(&mut buf_writer).poll_shutdown(&mut cx);
-        assert!(matches!(poll, Poll::Ready(Ok(()))));
-        assert_eq!(buf_writer.get_ref(), b"pending data");
+        let ready = matches!(poll, Poll::Ready(Ok(())));
+        crate::assert_with_log!(ready, "shutdown ready", true, ready);
+        let inner = buf_writer.get_ref();
+        crate::assert_with_log!(inner == b"pending data", "inner", b"pending data", inner);
+        crate::test_complete!("buf_writer_shutdown_flushes");
     }
 
     #[test]
     fn buf_writer_vectored_write_buffered() {
+        init_test("buf_writer_vectored_write_buffered");
         let writer = Vec::new();
         let mut buf_writer = BufWriter::with_capacity(32, writer);
         let waker = noop_waker();
@@ -422,12 +491,21 @@ mod tests {
 
         let bufs = [IoSlice::new(b"hello "), IoSlice::new(b"world")];
         let poll = Pin::new(&mut buf_writer).poll_write_vectored(&mut cx, &bufs);
-        assert!(matches!(poll, Poll::Ready(Ok(11))));
-        assert_eq!(buf_writer.buffer(), b"hello world");
+        let ready = matches!(poll, Poll::Ready(Ok(11)));
+        crate::assert_with_log!(ready, "write 11", true, ready);
+        let buffer = buf_writer.buffer();
+        crate::assert_with_log!(
+            buffer == b"hello world",
+            "buffer",
+            b"hello world",
+            buffer
+        );
+        crate::test_complete!("buf_writer_vectored_write_buffered");
     }
 
     #[test]
     fn buf_writer_vectored_write_large_direct() {
+        init_test("buf_writer_vectored_write_large_direct");
         let writer = Vec::new();
         let mut buf_writer = BufWriter::with_capacity(8, writer);
         let waker = noop_waker();
@@ -435,21 +513,27 @@ mod tests {
 
         let bufs = [IoSlice::new(b"this is "), IoSlice::new(b"large data")];
         let poll = Pin::new(&mut buf_writer).poll_write_vectored(&mut cx, &bufs);
-        assert!(matches!(poll, Poll::Ready(Ok(_))));
+        let ready = matches!(poll, Poll::Ready(Ok(_)));
+        crate::assert_with_log!(ready, "write ready", true, ready);
 
         // Should write directly to inner (bypassing buffer)
         // Note: The exact behavior depends on the underlying writer's vectored support
+        crate::test_complete!("buf_writer_vectored_write_large_direct");
     }
 
     #[test]
     fn buf_writer_empty_write() {
+        init_test("buf_writer_empty_write");
         let writer = Vec::new();
         let mut buf_writer = BufWriter::new(writer);
         let waker = noop_waker();
         let mut cx = Context::from_waker(&waker);
 
         let poll = Pin::new(&mut buf_writer).poll_write(&mut cx, b"");
-        assert!(matches!(poll, Poll::Ready(Ok(0))));
-        assert!(buf_writer.buffer().is_empty());
+        let ready = matches!(poll, Poll::Ready(Ok(0)));
+        crate::assert_with_log!(ready, "write 0", true, ready);
+        let empty = buf_writer.buffer().is_empty();
+        crate::assert_with_log!(empty, "buffer empty", true, empty);
+        crate::test_complete!("buf_writer_empty_write");
     }
 }

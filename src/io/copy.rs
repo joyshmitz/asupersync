@@ -556,8 +556,14 @@ mod tests {
         None
     }
 
+    fn init_test(name: &str) {
+        crate::test_utils::init_test_logging();
+        crate::test_phase!(name);
+    }
+
     #[test]
     fn copy_small_data() {
+        init_test("copy_small_data");
         let mut reader: &[u8] = b"hello world";
         let mut writer = Vec::new();
         let mut fut = copy(&mut reader, &mut writer);
@@ -565,12 +571,14 @@ mod tests {
         let n = poll_ready(&mut fut)
             .expect("future did not resolve")
             .unwrap();
-        assert_eq!(n, 11);
-        assert_eq!(writer, b"hello world");
+        crate::assert_with_log!(n == 11, "bytes", 11, n);
+        crate::assert_with_log!(writer == b"hello world", "writer", b"hello world", writer);
+        crate::test_complete!("copy_small_data");
     }
 
     #[test]
     fn copy_empty_data() {
+        init_test("copy_empty_data");
         let mut reader: &[u8] = b"";
         let mut writer = Vec::new();
         let mut fut = copy(&mut reader, &mut writer);
@@ -578,12 +586,15 @@ mod tests {
         let n = poll_ready(&mut fut)
             .expect("future did not resolve")
             .unwrap();
-        assert_eq!(n, 0);
-        assert!(writer.is_empty());
+        crate::assert_with_log!(n == 0, "bytes", 0, n);
+        let empty = writer.is_empty();
+        crate::assert_with_log!(empty, "writer empty", true, empty);
+        crate::test_complete!("copy_empty_data");
     }
 
     #[test]
     fn copy_large_data() {
+        init_test("copy_large_data");
         let data: Vec<u8> = (0u32..32768).map(|i| (i % 256) as u8).collect();
         let mut reader: &[u8] = &data;
         let mut writer = Vec::new();
@@ -592,12 +603,14 @@ mod tests {
         let n = poll_ready(&mut fut)
             .expect("future did not resolve")
             .unwrap();
-        assert_eq!(n, 32768);
-        assert_eq!(writer, data);
+        crate::assert_with_log!(n == 32768, "bytes", 32768, n);
+        crate::assert_with_log!(writer == data, "writer", data, writer);
+        crate::test_complete!("copy_large_data");
     }
 
     #[test]
     fn copy_with_progress_tracks_bytes() {
+        init_test("copy_with_progress_tracks_bytes");
         let mut reader: &[u8] = b"hello world";
         let mut writer = Vec::new();
         let mut progress_calls = Vec::new();
@@ -608,15 +621,19 @@ mod tests {
         let n = poll_ready(&mut fut)
             .expect("future did not resolve")
             .unwrap();
-        assert_eq!(n, 11);
-        assert_eq!(writer, b"hello world");
+        crate::assert_with_log!(n == 11, "bytes", 11, n);
+        crate::assert_with_log!(writer == b"hello world", "writer", b"hello world", writer);
         // Progress should be called with increasing values
-        assert!(!progress_calls.is_empty());
-        assert_eq!(*progress_calls.last().unwrap(), 11);
+        let empty = progress_calls.is_empty();
+        crate::assert_with_log!(!empty, "progress calls", false, empty);
+        let last = *progress_calls.last().unwrap();
+        crate::assert_with_log!(last == 11, "last progress", 11, last);
+        crate::test_complete!("copy_with_progress_tracks_bytes");
     }
 
     #[test]
     fn copy_buf_reads_from_slice() {
+        init_test("copy_buf_reads_from_slice");
         let mut reader: &[u8] = b"hello buffer";
         let mut writer = Vec::new();
         let mut fut = copy_buf(&mut reader, &mut writer);
@@ -624,13 +641,21 @@ mod tests {
         let n = poll_ready(&mut fut)
             .expect("future did not resolve")
             .unwrap();
-        assert_eq!(n, 12);
-        assert_eq!(writer, b"hello buffer");
-        assert!(reader.is_empty());
+        crate::assert_with_log!(n == 12, "bytes", 12, n);
+        crate::assert_with_log!(
+            writer == b"hello buffer",
+            "writer",
+            b"hello buffer",
+            writer
+        );
+        let empty = reader.is_empty();
+        crate::assert_with_log!(empty, "reader empty", true, empty);
+        crate::test_complete!("copy_buf_reads_from_slice");
     }
 
     #[test]
     fn copy_buf_reads_from_cursor() {
+        init_test("copy_buf_reads_from_cursor");
         let data = b"cursor data";
         let mut reader = std::io::Cursor::new(data);
         let mut writer = Vec::new();
@@ -639,8 +664,9 @@ mod tests {
         let n = poll_ready(&mut fut)
             .expect("future did not resolve")
             .unwrap();
-        assert_eq!(n, 11);
-        assert_eq!(writer, data);
+        crate::assert_with_log!(n == 11, "bytes", 11, n);
+        crate::assert_with_log!(writer == data, "writer", data, writer);
+        crate::test_complete!("copy_buf_reads_from_cursor");
     }
 
     /// A simple duplex stream for testing bidirectional copy.
@@ -699,6 +725,7 @@ mod tests {
 
     #[test]
     fn copy_bidirectional_basic() {
+        init_test("copy_bidirectional_basic");
         let mut a = TestDuplex::new(b"from A");
         let mut b = TestDuplex::new(b"from B");
         let mut fut = copy_bidirectional(&mut a, &mut b);
@@ -706,14 +733,16 @@ mod tests {
         let (a_to_b, b_to_a) = poll_ready(&mut fut)
             .expect("future did not resolve")
             .unwrap();
-        assert_eq!(a_to_b, 6);
-        assert_eq!(b_to_a, 6);
-        assert_eq!(b.written, b"from A");
-        assert_eq!(a.written, b"from B");
+        crate::assert_with_log!(a_to_b == 6, "a_to_b", 6, a_to_b);
+        crate::assert_with_log!(b_to_a == 6, "b_to_a", 6, b_to_a);
+        crate::assert_with_log!(b.written == b"from A", "b written", b"from A", b.written);
+        crate::assert_with_log!(a.written == b"from B", "a written", b"from B", a.written);
+        crate::test_complete!("copy_bidirectional_basic");
     }
 
     #[test]
     fn copy_bidirectional_asymmetric() {
+        init_test("copy_bidirectional_asymmetric");
         let mut a = TestDuplex::new(b"short");
         let mut b = TestDuplex::new(b"this is a longer message");
         let mut fut = copy_bidirectional(&mut a, &mut b);
@@ -721,14 +750,21 @@ mod tests {
         let (a_to_b, b_to_a) = poll_ready(&mut fut)
             .expect("future did not resolve")
             .unwrap();
-        assert_eq!(a_to_b, 5);
-        assert_eq!(b_to_a, 24);
-        assert_eq!(b.written, b"short");
-        assert_eq!(a.written, b"this is a longer message");
+        crate::assert_with_log!(a_to_b == 5, "a_to_b", 5, a_to_b);
+        crate::assert_with_log!(b_to_a == 24, "b_to_a", 24, b_to_a);
+        crate::assert_with_log!(b.written == b"short", "b written", b"short", b.written);
+        crate::assert_with_log!(
+            a.written == b"this is a longer message",
+            "a written",
+            b"this is a longer message",
+            a.written
+        );
+        crate::test_complete!("copy_bidirectional_asymmetric");
     }
 
     #[test]
     fn copy_bidirectional_empty() {
+        init_test("copy_bidirectional_empty");
         let mut a = TestDuplex::new(b"");
         let mut b = TestDuplex::new(b"");
         let mut fut = copy_bidirectional(&mut a, &mut b);
@@ -736,7 +772,8 @@ mod tests {
         let (a_to_b, b_to_a) = poll_ready(&mut fut)
             .expect("future did not resolve")
             .unwrap();
-        assert_eq!(a_to_b, 0);
-        assert_eq!(b_to_a, 0);
+        crate::assert_with_log!(a_to_b == 0, "a_to_b", 0, a_to_b);
+        crate::assert_with_log!(b_to_a == 0, "b_to_a", 0, b_to_a);
+        crate::test_complete!("copy_bidirectional_empty");
     }
 }

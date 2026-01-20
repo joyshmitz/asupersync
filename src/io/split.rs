@@ -231,13 +231,19 @@ mod tests {
             Poll::Ready(Ok(()))
         }
 
-        fn poll_shutdown(self: Pin<&mut Self>, _cx: &mut Context<'_>) -> Poll<io::Result<()>> {
-            Poll::Ready(Ok(()))
-        }
+    fn poll_shutdown(self: Pin<&mut Self>, _cx: &mut Context<'_>) -> Poll<io::Result<()>> {
+        Poll::Ready(Ok(()))
+    }
+}
+
+    fn init_test(name: &str) {
+        crate::test_utils::init_test_logging();
+        crate::test_phase!(name);
     }
 
     #[test]
     fn split_stream_creates_halves() {
+        init_test("split_stream_creates_halves");
         let stream = TestStream::new(b"hello");
         let wrapper = SplitStream::new(stream);
         let (read_half, write_half) = wrapper.split();
@@ -248,12 +254,15 @@ mod tests {
 
         // Access the underlying stream
         let inner = wrapper.get_ref();
-        assert_eq!(inner.read_pos, 0);
-        assert!(inner.written.is_empty());
+        crate::assert_with_log!(inner.read_pos == 0, "read_pos", 0, inner.read_pos);
+        let empty = inner.written.is_empty();
+        crate::assert_with_log!(empty, "written empty", true, empty);
+        crate::test_complete!("split_stream_creates_halves");
     }
 
     #[test]
     fn read_half_reads() {
+        init_test("read_half_reads");
         let stream = TestStream::new(b"hello");
         let wrapper = SplitStream::new(stream);
         let (mut read_half, _write_half) = wrapper.split();
@@ -264,12 +273,16 @@ mod tests {
         let mut read_buf = ReadBuf::new(&mut buf);
 
         let poll = Pin::new(&mut read_half).poll_read(&mut cx, &mut read_buf);
-        assert!(matches!(poll, Poll::Ready(Ok(()))));
-        assert_eq!(read_buf.filled(), b"hello");
+        let ready = matches!(poll, Poll::Ready(Ok(())));
+        crate::assert_with_log!(ready, "poll ready", true, ready);
+        let filled = read_buf.filled();
+        crate::assert_with_log!(filled == b"hello", "filled", b"hello", filled);
+        crate::test_complete!("read_half_reads");
     }
 
     #[test]
     fn write_half_writes() {
+        init_test("write_half_writes");
         let stream = TestStream::new(b"");
         let wrapper = SplitStream::new(stream);
         let (_read_half, mut write_half) = wrapper.split();
@@ -278,16 +291,19 @@ mod tests {
         let mut cx = Context::from_waker(&waker);
 
         let poll = Pin::new(&mut write_half).poll_write(&mut cx, b"world");
-        assert!(matches!(poll, Poll::Ready(Ok(5))));
+        let ready = matches!(poll, Poll::Ready(Ok(5)));
+        crate::assert_with_log!(ready, "write 5", true, ready);
 
         // Check the underlying stream - use _ = to drop without triggering clippy
         let _ = write_half;
         let inner = wrapper.get_ref();
-        assert_eq!(inner.written, b"world");
+        crate::assert_with_log!(inner.written == b"world", "written", b"world", inner.written);
+        crate::test_complete!("write_half_writes");
     }
 
     #[test]
     fn write_half_flush_and_shutdown() {
+        init_test("write_half_flush_and_shutdown");
         let stream = TestStream::new(b"");
         let wrapper = SplitStream::new(stream);
         let (_read_half, mut write_half) = wrapper.split();
@@ -296,17 +312,22 @@ mod tests {
         let mut cx = Context::from_waker(&waker);
 
         let poll = Pin::new(&mut write_half).poll_flush(&mut cx);
-        assert!(matches!(poll, Poll::Ready(Ok(()))));
+        let ready = matches!(poll, Poll::Ready(Ok(())));
+        crate::assert_with_log!(ready, "flush ready", true, ready);
 
         let poll = Pin::new(&mut write_half).poll_shutdown(&mut cx);
-        assert!(matches!(poll, Poll::Ready(Ok(()))));
+        let ready = matches!(poll, Poll::Ready(Ok(())));
+        crate::assert_with_log!(ready, "shutdown ready", true, ready);
+        crate::test_complete!("write_half_flush_and_shutdown");
     }
 
     #[test]
     fn into_inner_works() {
+        init_test("into_inner_works");
         let stream = TestStream::new(b"test");
         let wrapper = SplitStream::new(stream);
         let stream = wrapper.into_inner();
-        assert_eq!(stream.read_data, b"test");
+        crate::assert_with_log!(stream.read_data == b"test", "read_data", b"test", stream.read_data);
+        crate::test_complete!("into_inner_works");
     }
 }

@@ -114,46 +114,70 @@ mod tests {
         Pin::new(stream).poll_next(&mut cx)
     }
 
+    fn init_test(name: &str) {
+        crate::test_utils::init_test_logging();
+        crate::test_phase!(name);
+    }
+
     #[test]
     fn lines_basic() {
+        init_test("lines_basic");
         let data: &[u8] = b"line 1\nline 2\nline 3";
         let reader = BufReader::new(data);
         let mut lines = Lines::new(reader);
 
-        assert!(matches!(poll_next(&mut lines), Poll::Ready(Some(Ok(s))) if s == "line 1"));
-        assert!(matches!(poll_next(&mut lines), Poll::Ready(Some(Ok(s))) if s == "line 2"));
-        assert!(matches!(poll_next(&mut lines), Poll::Ready(Some(Ok(s))) if s == "line 3"));
+        let first = matches!(poll_next(&mut lines), Poll::Ready(Some(Ok(s))) if s == "line 1");
+        crate::assert_with_log!(first, "line 1", true, first);
+        let second = matches!(poll_next(&mut lines), Poll::Ready(Some(Ok(s))) if s == "line 2");
+        crate::assert_with_log!(second, "line 2", true, second);
+        let third = matches!(poll_next(&mut lines), Poll::Ready(Some(Ok(s))) if s == "line 3");
+        crate::assert_with_log!(third, "line 3", true, third);
         // No newline at end of file logic check: "line 3" should return then None.
-        assert!(matches!(poll_next(&mut lines), Poll::Ready(None)));
+        let done = matches!(poll_next(&mut lines), Poll::Ready(None));
+        crate::assert_with_log!(done, "done", true, done);
+        crate::test_complete!("lines_basic");
     }
 
     #[test]
     fn lines_crlf() {
+        init_test("lines_crlf");
         let data: &[u8] = b"line 1\r\nline 2\r\n";
         let reader = BufReader::new(data);
         let mut lines = Lines::new(reader);
 
-        assert!(matches!(poll_next(&mut lines), Poll::Ready(Some(Ok(s))) if s == "line 1"));
-        assert!(matches!(poll_next(&mut lines), Poll::Ready(Some(Ok(s))) if s == "line 2"));
-        assert!(matches!(poll_next(&mut lines), Poll::Ready(None)));
+        let first = matches!(poll_next(&mut lines), Poll::Ready(Some(Ok(s))) if s == "line 1");
+        crate::assert_with_log!(first, "line 1", true, first);
+        let second = matches!(poll_next(&mut lines), Poll::Ready(Some(Ok(s))) if s == "line 2");
+        crate::assert_with_log!(second, "line 2", true, second);
+        let done = matches!(poll_next(&mut lines), Poll::Ready(None));
+        crate::assert_with_log!(done, "done", true, done);
+        crate::test_complete!("lines_crlf");
     }
 
     #[test]
     fn lines_empty() {
+        init_test("lines_empty");
         let data: &[u8] = b"";
         let reader = BufReader::new(data);
         let mut lines = Lines::new(reader);
-        assert!(matches!(poll_next(&mut lines), Poll::Ready(None)));
+        let done = matches!(poll_next(&mut lines), Poll::Ready(None));
+        crate::assert_with_log!(done, "done", true, done);
+        crate::test_complete!("lines_empty");
     }
 
     #[test]
     fn lines_incomplete_last() {
+        init_test("lines_incomplete_last");
         let data: &[u8] = b"foo\nbar";
         let reader = BufReader::new(data);
         let mut lines = Lines::new(reader);
 
-        assert!(matches!(poll_next(&mut lines), Poll::Ready(Some(Ok(s))) if s == "foo"));
-        assert!(matches!(poll_next(&mut lines), Poll::Ready(Some(Ok(s))) if s == "bar"));
-        assert!(matches!(poll_next(&mut lines), Poll::Ready(None)));
+        let first = matches!(poll_next(&mut lines), Poll::Ready(Some(Ok(s))) if s == "foo");
+        crate::assert_with_log!(first, "foo", true, first);
+        let second = matches!(poll_next(&mut lines), Poll::Ready(Some(Ok(s))) if s == "bar");
+        crate::assert_with_log!(second, "bar", true, second);
+        let done = matches!(poll_next(&mut lines), Poll::Ready(None));
+        crate::assert_with_log!(done, "done", true, done);
+        crate::test_complete!("lines_incomplete_last");
     }
 }

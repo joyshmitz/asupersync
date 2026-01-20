@@ -193,38 +193,61 @@ mod tests {
         Waker::from(Arc::new(NoopWaker))
     }
 
+    fn init_test(name: &str) {
+        crate::test_utils::init_test_logging();
+        crate::test_phase!(name);
+    }
+
     #[test]
     fn buf_reader_new() {
+        init_test("buf_reader_new");
         let data: &[u8] = b"hello world";
         let reader = BufReader::new(data);
-        assert_eq!(reader.capacity(), DEFAULT_BUF_CAPACITY);
-        assert!(reader.buffer().is_empty());
+        let capacity = reader.capacity();
+        crate::assert_with_log!(
+            capacity == DEFAULT_BUF_CAPACITY,
+            "capacity",
+            DEFAULT_BUF_CAPACITY,
+            capacity
+        );
+        let empty = reader.buffer().is_empty();
+        crate::assert_with_log!(empty, "buffer empty", true, empty);
+        crate::test_complete!("buf_reader_new");
     }
 
     #[test]
     fn buf_reader_with_capacity() {
+        init_test("buf_reader_with_capacity");
         let data: &[u8] = b"test";
         let reader = BufReader::with_capacity(256, data);
-        assert_eq!(reader.capacity(), 256);
+        let capacity = reader.capacity();
+        crate::assert_with_log!(capacity == 256, "capacity", 256, capacity);
+        crate::test_complete!("buf_reader_with_capacity");
     }
 
     #[test]
     fn buf_reader_get_ref() {
+        init_test("buf_reader_get_ref");
         let data: &[u8] = b"hello";
         let reader = BufReader::new(data);
-        assert_eq!(*reader.get_ref(), b"hello");
+        let inner = *reader.get_ref();
+        crate::assert_with_log!(inner == b"hello", "get_ref", b"hello", inner);
+        crate::test_complete!("buf_reader_get_ref");
     }
 
     #[test]
     fn buf_reader_into_inner() {
+        init_test("buf_reader_into_inner");
         let data: &[u8] = b"hello";
         let reader = BufReader::new(data);
         let inner = reader.into_inner();
-        assert_eq!(inner, b"hello");
+        crate::assert_with_log!(inner == b"hello", "into_inner", b"hello", inner);
+        crate::test_complete!("buf_reader_into_inner");
     }
 
     #[test]
     fn buf_reader_read_small() {
+        init_test("buf_reader_read_small");
         let data: &[u8] = b"hello world";
         let mut reader = BufReader::with_capacity(16, data);
         let waker = noop_waker();
@@ -234,15 +257,20 @@ mod tests {
         let mut read_buf = ReadBuf::new(&mut buf);
 
         let poll = Pin::new(&mut reader).poll_read(&mut cx, &mut read_buf);
-        assert!(matches!(poll, Poll::Ready(Ok(()))));
-        assert_eq!(read_buf.filled(), b"hello");
+        let ready = matches!(poll, Poll::Ready(Ok(())));
+        crate::assert_with_log!(ready, "poll ready", true, ready);
+        let filled = read_buf.filled();
+        crate::assert_with_log!(filled == b"hello", "filled", b"hello", filled);
 
         // Buffer should now contain " world"
-        assert_eq!(reader.buffer(), b" world");
+        let buffer = reader.buffer();
+        crate::assert_with_log!(buffer == b" world", "buffer", b" world", buffer);
+        crate::test_complete!("buf_reader_read_small");
     }
 
     #[test]
     fn buf_reader_read_exact_buffer_size() {
+        init_test("buf_reader_read_exact_buffer_size");
         let data: &[u8] = b"exactly sixteen!";
         let mut reader = BufReader::with_capacity(16, data);
         let waker = noop_waker();
@@ -252,12 +280,21 @@ mod tests {
         let mut read_buf = ReadBuf::new(&mut buf);
 
         let poll = Pin::new(&mut reader).poll_read(&mut cx, &mut read_buf);
-        assert!(matches!(poll, Poll::Ready(Ok(()))));
-        assert_eq!(read_buf.filled(), b"exactly sixteen!");
+        let ready = matches!(poll, Poll::Ready(Ok(())));
+        crate::assert_with_log!(ready, "poll ready", true, ready);
+        let filled = read_buf.filled();
+        crate::assert_with_log!(
+            filled == b"exactly sixteen!",
+            "filled",
+            b"exactly sixteen!",
+            filled
+        );
+        crate::test_complete!("buf_reader_read_exact_buffer_size");
     }
 
     #[test]
     fn buf_reader_large_read_bypasses_buffer() {
+        init_test("buf_reader_large_read_bypasses_buffer");
         let data: &[u8] = b"large data that exceeds buffer capacity easily";
         let mut reader = BufReader::with_capacity(8, data);
         let waker = noop_waker();
@@ -268,27 +305,35 @@ mod tests {
         let mut read_buf = ReadBuf::new(&mut buf);
 
         let poll = Pin::new(&mut reader).poll_read(&mut cx, &mut read_buf);
-        assert!(matches!(poll, Poll::Ready(Ok(()))));
+        let ready = matches!(poll, Poll::Ready(Ok(())));
+        crate::assert_with_log!(ready, "poll ready", true, ready);
         // Should read directly without going through internal buffer
-        assert!(read_buf.filled().len() <= 32);
+        let len = read_buf.filled().len();
+        let within = len <= 32;
+        crate::assert_with_log!(within, "len <= 32", true, within);
+        crate::test_complete!("buf_reader_large_read_bypasses_buffer");
     }
 
     #[test]
     fn buf_reader_poll_fill_buf() {
+        init_test("buf_reader_poll_fill_buf");
         let data: &[u8] = b"buffered content";
         let mut reader = BufReader::with_capacity(32, data);
         let waker = noop_waker();
         let mut cx = Context::from_waker(&waker);
 
         let poll = Pin::new(&mut reader).poll_fill_buf(&mut cx);
-        assert!(matches!(poll, Poll::Ready(Ok(_))));
+        let ready = matches!(&poll, Poll::Ready(Ok(_)));
+        crate::assert_with_log!(ready, "poll ready", true, ready);
         if let Poll::Ready(Ok(buf)) = poll {
-            assert_eq!(buf, b"buffered content");
+            crate::assert_with_log!(buf == b"buffered content", "buffer", b"buffered content", buf);
         }
+        crate::test_complete!("buf_reader_poll_fill_buf");
     }
 
     #[test]
     fn buf_reader_consume() {
+        init_test("buf_reader_consume");
         let data: &[u8] = b"consume me";
         let mut reader = BufReader::with_capacity(32, data);
         let waker = noop_waker();
@@ -296,19 +341,24 @@ mod tests {
 
         // Fill buffer
         let _ = Pin::new(&mut reader).poll_fill_buf(&mut cx);
-        assert_eq!(reader.buffer(), b"consume me");
+        let buffer = reader.buffer();
+        crate::assert_with_log!(buffer == b"consume me", "buffer", b"consume me", buffer);
 
         // Consume 8 bytes
         Pin::new(&mut reader).consume(8);
-        assert_eq!(reader.buffer(), b"me");
+        let buffer = reader.buffer();
+        crate::assert_with_log!(buffer == b"me", "buffer after consume", b"me", buffer);
 
         // Consume rest
         Pin::new(&mut reader).consume(2);
-        assert!(reader.buffer().is_empty());
+        let empty = reader.buffer().is_empty();
+        crate::assert_with_log!(empty, "buffer empty", true, empty);
+        crate::test_complete!("buf_reader_consume");
     }
 
     #[test]
     fn buf_reader_discard_buffer() {
+        init_test("buf_reader_discard_buffer");
         let data: &[u8] = b"discard this";
         let mut reader = BufReader::with_capacity(32, data);
         let waker = noop_waker();
@@ -316,26 +366,33 @@ mod tests {
 
         // Fill buffer
         let _ = Pin::new(&mut reader).poll_fill_buf(&mut cx);
-        assert!(!reader.buffer().is_empty());
+        let empty = reader.buffer().is_empty();
+        crate::assert_with_log!(!empty, "buffer not empty", false, empty);
 
         // Discard
         reader.discard_buffer();
-        assert!(reader.buffer().is_empty());
+        let empty = reader.buffer().is_empty();
+        crate::assert_with_log!(empty, "buffer empty", true, empty);
+        crate::test_complete!("buf_reader_discard_buffer");
     }
 
     #[test]
     fn buf_reader_empty_source() {
+        init_test("buf_reader_empty_source");
         let data: &[u8] = b"";
         let mut reader = BufReader::new(data);
         let waker = noop_waker();
         let mut cx = Context::from_waker(&waker);
 
         let poll = Pin::new(&mut reader).poll_fill_buf(&mut cx);
-        assert!(matches!(poll, Poll::Ready(Ok(buf)) if buf.is_empty()));
+        let ready = matches!(poll, Poll::Ready(Ok(buf)) if buf.is_empty());
+        crate::assert_with_log!(ready, "empty buf ready", true, ready);
+        crate::test_complete!("buf_reader_empty_source");
     }
 
     #[test]
     fn buf_reader_multiple_reads() {
+        init_test("buf_reader_multiple_reads");
         let data: &[u8] = b"first second third";
         let mut reader = BufReader::with_capacity(8, data);
         let waker = noop_waker();
@@ -345,21 +402,27 @@ mod tests {
         let mut buf1 = [0u8; 6];
         let mut read_buf1 = ReadBuf::new(&mut buf1);
         let poll = Pin::new(&mut reader).poll_read(&mut cx, &mut read_buf1);
-        assert!(matches!(poll, Poll::Ready(Ok(()))));
-        assert_eq!(read_buf1.filled(), b"first ");
+        let ready = matches!(poll, Poll::Ready(Ok(())));
+        crate::assert_with_log!(ready, "poll ready 1", true, ready);
+        let filled1 = read_buf1.filled();
+        crate::assert_with_log!(filled1 == b"first ", "filled1", b"first ", filled1);
 
         // Second read (from buffer)
         let mut buf2 = [0u8; 6];
         let mut read_buf2 = ReadBuf::new(&mut buf2);
         let poll = Pin::new(&mut reader).poll_read(&mut cx, &mut read_buf2);
-        assert!(matches!(poll, Poll::Ready(Ok(()))));
-        assert_eq!(read_buf2.filled(), b"se");
+        let ready = matches!(poll, Poll::Ready(Ok(())));
+        crate::assert_with_log!(ready, "poll ready 2", true, ready);
+        let filled2 = read_buf2.filled();
+        crate::assert_with_log!(filled2 == b"se", "filled2", b"se", filled2);
 
         // Third read (needs refill)
         let mut buf3 = [0u8; 10];
         let mut read_buf3 = ReadBuf::new(&mut buf3);
         let poll = Pin::new(&mut reader).poll_read(&mut cx, &mut read_buf3);
-        assert!(matches!(poll, Poll::Ready(Ok(()))));
+        let ready = matches!(poll, Poll::Ready(Ok(())));
+        crate::assert_with_log!(ready, "poll ready 3", true, ready);
         // Result depends on buffer state
+        crate::test_complete!("buf_reader_multiple_reads");
     }
 }

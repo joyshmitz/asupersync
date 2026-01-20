@@ -252,6 +252,11 @@ mod tests {
     use std::sync::Arc;
     use std::task::{Context, Wake, Waker};
 
+    fn init_test(name: &str) {
+        crate::test_utils::init_test_logging();
+        crate::test_phase!(name);
+    }
+
     struct NoopWaker;
 
     impl Wake for NoopWaker {
@@ -275,17 +280,25 @@ mod tests {
 
     #[test]
     fn read_exact_ok() {
+        init_test("read_exact_ok");
         let mut reader: &[u8] = b"abcd";
         let mut buf = [0u8; 4];
         let mut fut = reader.read_exact(&mut buf);
         let mut fut = Pin::new(&mut fut);
         let result = poll_ready(&mut fut).expect("future did not resolve");
-        assert!(result.is_ok());
-        assert_eq!(&buf, b"abcd");
+        crate::assert_with_log!(
+            result.is_ok(),
+            "result ok",
+            true,
+            result.is_ok()
+        );
+        crate::assert_with_log!(&buf == b"abcd", "buf", b"abcd", buf);
+        crate::test_complete!("read_exact_ok");
     }
 
     #[test]
     fn read_exact_eof() {
+        init_test("read_exact_eof");
         let mut reader: &[u8] = b"ab";
         let mut buf = [0u8; 4];
         let mut fut = reader.read_exact(&mut buf);
@@ -293,11 +306,19 @@ mod tests {
         let err = poll_ready(&mut fut)
             .expect("future did not resolve")
             .unwrap_err();
-        assert_eq!(err.kind(), io::ErrorKind::UnexpectedEof);
+        let kind = err.kind();
+        crate::assert_with_log!(
+            kind == io::ErrorKind::UnexpectedEof,
+            "error kind",
+            io::ErrorKind::UnexpectedEof,
+            kind
+        );
+        crate::test_complete!("read_exact_eof");
     }
 
     #[test]
     fn read_to_end_reads_all() {
+        init_test("read_to_end_reads_all");
         let mut reader: &[u8] = b"hello";
         let mut buf = Vec::new();
         let mut fut = reader.read_to_end(&mut buf);
@@ -305,12 +326,14 @@ mod tests {
         let n = poll_ready(&mut fut)
             .expect("future did not resolve")
             .unwrap();
-        assert_eq!(n, 5);
-        assert_eq!(buf, b"hello");
+        crate::assert_with_log!(n == 5, "bytes read", 5, n);
+        crate::assert_with_log!(buf == b"hello", "buf", b"hello", buf);
+        crate::test_complete!("read_to_end_reads_all");
     }
 
     #[test]
     fn read_to_string_reads_all() {
+        init_test("read_to_string_reads_all");
         let mut reader: &[u8] = b"hi";
         let mut buf = String::new();
         let mut fut = reader.read_to_string(&mut buf);
@@ -318,12 +341,14 @@ mod tests {
         let n = poll_ready(&mut fut)
             .expect("future did not resolve")
             .unwrap();
-        assert_eq!(n, 2);
-        assert_eq!(buf, "hi");
+        crate::assert_with_log!(n == 2, "bytes read", 2, n);
+        crate::assert_with_log!(buf == "hi", "buf", "hi", buf);
+        crate::test_complete!("read_to_string_reads_all");
     }
 
     #[test]
     fn read_to_string_invalid_utf8_errors() {
+        init_test("read_to_string_invalid_utf8_errors");
         let mut reader: &[u8] = &[0xff, 0xfe];
         let mut buf = String::new();
         let mut fut = reader.read_to_string(&mut buf);
@@ -331,12 +356,21 @@ mod tests {
         let err = poll_ready(&mut fut)
             .expect("future did not resolve")
             .unwrap_err();
-        assert_eq!(err.kind(), io::ErrorKind::InvalidData);
-        assert!(buf.is_empty());
+        let kind = err.kind();
+        crate::assert_with_log!(
+            kind == io::ErrorKind::InvalidData,
+            "error kind",
+            io::ErrorKind::InvalidData,
+            kind
+        );
+        let empty = buf.is_empty();
+        crate::assert_with_log!(empty, "buf empty", true, empty);
+        crate::test_complete!("read_to_string_invalid_utf8_errors");
     }
 
     #[test]
     fn read_to_string_incomplete_utf8_errors() {
+        init_test("read_to_string_incomplete_utf8_errors");
         // 4-byte UTF-8 sequence, missing the final byte.
         let mut reader: &[u8] = &[0xF0, 0x9F, 0x92];
         let mut buf = String::new();
@@ -345,19 +379,29 @@ mod tests {
         let err = poll_ready(&mut fut)
             .expect("future did not resolve")
             .unwrap_err();
-        assert_eq!(err.kind(), io::ErrorKind::InvalidData);
-        assert!(buf.is_empty());
+        let kind = err.kind();
+        crate::assert_with_log!(
+            kind == io::ErrorKind::InvalidData,
+            "error kind",
+            io::ErrorKind::InvalidData,
+            kind
+        );
+        let empty = buf.is_empty();
+        crate::assert_with_log!(empty, "buf empty", true, empty);
+        crate::test_complete!("read_to_string_incomplete_utf8_errors");
     }
 
     #[test]
     fn read_u8_reads_byte() {
+        init_test("read_u8_reads_byte");
         let mut reader: &[u8] = b"z";
         let mut fut = reader.read_u8();
         let mut fut = Pin::new(&mut fut);
         let byte = poll_ready(&mut fut)
             .expect("future did not resolve")
             .unwrap();
-        assert_eq!(byte, b'z');
+        crate::assert_with_log!(byte == b'z', "byte", b'z', byte);
+        crate::test_complete!("read_u8_reads_byte");
     }
 
     #[derive(Debug)]
@@ -406,6 +450,7 @@ mod tests {
 
     #[test]
     fn cancel_safety_read_exact_is_not_cancel_safe() {
+        init_test("cancel_safety_read_exact_is_not_cancel_safe");
         let mut reader = YieldingReader::new(b"abc");
         let mut buf = [0u8; 3];
         let waker = noop_waker();
@@ -416,12 +461,15 @@ mod tests {
             let mut pinned = Pin::new(&mut fut);
             pinned.as_mut().poll(&mut cx)
         };
-        assert!(matches!(poll, Poll::Pending));
-        assert_eq!(buf[0], b'a');
+        let pending = matches!(poll, Poll::Pending);
+        crate::assert_with_log!(pending, "pending", true, pending);
+        crate::assert_with_log!(buf[0] == b'a', "prefix", b'a', buf[0]);
+        crate::test_complete!("cancel_safety_read_exact_is_not_cancel_safe");
     }
 
     #[test]
     fn cancel_safety_read_to_end_preserves_bytes() {
+        init_test("cancel_safety_read_to_end_preserves_bytes");
         let mut reader = YieldingReader::new(b"abc");
         let mut out = Vec::new();
         let waker = noop_waker();
@@ -432,12 +480,15 @@ mod tests {
             let mut pinned = Pin::new(&mut fut);
             pinned.as_mut().poll(&mut cx)
         };
-        assert!(matches!(poll, Poll::Pending));
-        assert_eq!(out, b"a");
+        let pending = matches!(poll, Poll::Pending);
+        crate::assert_with_log!(pending, "pending", true, pending);
+        crate::assert_with_log!(out == b"a", "out", b"a", out);
+        crate::test_complete!("cancel_safety_read_to_end_preserves_bytes");
     }
 
     #[test]
     fn cancel_safety_read_to_string_preserves_prefix() {
+        init_test("cancel_safety_read_to_string_preserves_prefix");
         let mut reader = YieldingReader::new(b"abc");
         let mut out = String::new();
         let waker = noop_waker();
@@ -448,7 +499,9 @@ mod tests {
             let mut pinned = Pin::new(&mut fut);
             pinned.as_mut().poll(&mut cx)
         };
-        assert!(matches!(poll, Poll::Pending));
-        assert_eq!(out, "a");
+        let pending = matches!(poll, Poll::Pending);
+        crate::assert_with_log!(pending, "pending", true, pending);
+        crate::assert_with_log!(out == "a", "out", "a", out);
+        crate::test_complete!("cancel_safety_read_to_string_preserves_prefix");
     }
 }

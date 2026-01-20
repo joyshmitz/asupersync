@@ -65,16 +65,26 @@ impl<'a> ReadBuf<'a> {
 mod tests {
     use super::*;
 
+    fn init_test(name: &str) {
+        crate::test_utils::init_test_logging();
+        crate::test_phase!(name);
+    }
+
     #[test]
     fn read_buf_put_and_advance() {
+        init_test("read_buf_put_and_advance");
         let mut buf = [0u8; 8];
         let mut read_buf = ReadBuf::new(&mut buf);
 
         read_buf.put_slice(&[1, 2, 3]);
-        assert_eq!(read_buf.filled(), &[1, 2, 3]);
-        assert_eq!(read_buf.remaining(), 5);
+        let filled = read_buf.filled();
+        crate::assert_with_log!(filled == &[1, 2, 3], "filled", &[1, 2, 3], filled);
+        let remaining = read_buf.remaining();
+        crate::assert_with_log!(remaining == 5, "remaining", 5, remaining);
 
         read_buf.advance(2);
-        assert_eq!(read_buf.filled().len(), 5);
+        let len = read_buf.filled().len();
+        crate::assert_with_log!(len == 5, "filled len", 5, len);
+        crate::test_complete!("read_buf_put_and_advance");
     }
 }

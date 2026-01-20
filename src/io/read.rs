@@ -224,8 +224,14 @@ mod tests {
         Waker::from(Arc::new(NoopWaker))
     }
 
+    fn init_test(name: &str) {
+        crate::test_utils::init_test_logging();
+        crate::test_phase!(name);
+    }
+
     #[test]
     fn read_from_slice_advances() {
+        init_test("read_from_slice_advances");
         let mut input: &[u8] = b"hello";
         let mut buf = [0u8; 2];
         let mut read_buf = ReadBuf::new(&mut buf);
@@ -233,13 +239,17 @@ mod tests {
         let mut cx = Context::from_waker(&waker);
 
         let poll = Pin::new(&mut input).poll_read(&mut cx, &mut read_buf);
-        assert!(matches!(poll, Poll::Ready(Ok(()))));
-        assert_eq!(read_buf.filled(), b"he");
-        assert_eq!(input, b"llo");
+        let ready = matches!(poll, Poll::Ready(Ok(())));
+        crate::assert_with_log!(ready, "poll ready", true, ready);
+        let filled = read_buf.filled();
+        crate::assert_with_log!(filled == b"he", "filled", b"he", filled);
+        crate::assert_with_log!(input == b"llo", "remaining", b"llo", input);
+        crate::test_complete!("read_from_slice_advances");
     }
 
     #[test]
     fn chain_reads_both() {
+        init_test("chain_reads_both");
         let first: &[u8] = b"hi";
         let second: &[u8] = b"there";
         let mut chain = Chain::new(first, second);
@@ -249,16 +259,22 @@ mod tests {
         let mut cx = Context::from_waker(&waker);
 
         let poll = Pin::new(&mut chain).poll_read(&mut cx, &mut read_buf);
-        assert!(matches!(poll, Poll::Ready(Ok(()))));
-        assert_eq!(read_buf.filled(), b"hi");
+        let ready = matches!(poll, Poll::Ready(Ok(())));
+        crate::assert_with_log!(ready, "poll ready first", true, ready);
+        let filled = read_buf.filled();
+        crate::assert_with_log!(filled == b"hi", "filled first", b"hi", filled);
 
         let poll = Pin::new(&mut chain).poll_read(&mut cx, &mut read_buf);
-        assert!(matches!(poll, Poll::Ready(Ok(()))));
-        assert_eq!(read_buf.filled(), b"hithere");
+        let ready = matches!(poll, Poll::Ready(Ok(())));
+        crate::assert_with_log!(ready, "poll ready second", true, ready);
+        let filled = read_buf.filled();
+        crate::assert_with_log!(filled == b"hithere", "filled second", b"hithere", filled);
+        crate::test_complete!("chain_reads_both");
     }
 
     #[test]
     fn take_limits_reads() {
+        init_test("take_limits_reads");
         let input: &[u8] = b"abcdef";
         let mut take = Take::new(input, 3);
         let mut buf = [0u8; 8];
@@ -267,8 +283,12 @@ mod tests {
         let mut cx = Context::from_waker(&waker);
 
         let poll = Pin::new(&mut take).poll_read(&mut cx, &mut read_buf);
-        assert!(matches!(poll, Poll::Ready(Ok(()))));
-        assert_eq!(read_buf.filled(), b"abc");
-        assert_eq!(take.limit(), 0);
+        let ready = matches!(poll, Poll::Ready(Ok(())));
+        crate::assert_with_log!(ready, "poll ready", true, ready);
+        let filled = read_buf.filled();
+        crate::assert_with_log!(filled == b"abc", "filled", b"abc", filled);
+        let remaining = take.limit();
+        crate::assert_with_log!(remaining == 0, "limit", 0, remaining);
+        crate::test_complete!("take_limits_reads");
     }
 }

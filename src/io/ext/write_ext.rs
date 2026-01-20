@@ -246,6 +246,11 @@ mod tests {
     use std::sync::Arc;
     use std::task::{Context, Wake, Waker};
 
+    fn init_test(name: &str) {
+        crate::test_utils::init_test_logging();
+        crate::test_phase!(name);
+    }
+
     struct NoopWaker;
 
     impl Wake for NoopWaker {
@@ -269,44 +274,83 @@ mod tests {
 
     #[test]
     fn write_all_ok() {
+        init_test("write_all_ok");
         let mut output = Vec::new();
         let mut fut = output.write_all(b"hello world");
         let mut fut = Pin::new(&mut fut);
         let result = poll_ready(&mut fut);
-        assert!(result.is_ok());
-        assert_eq!(output, b"hello world");
+        crate::assert_with_log!(
+            result.is_ok(),
+            "result ok",
+            true,
+            result.is_ok()
+        );
+        crate::assert_with_log!(
+            output == b"hello world",
+            "output",
+            b"hello world",
+            output
+        );
+        crate::test_complete!("write_all_ok");
     }
 
     #[test]
     fn write_u8_ok() {
+        init_test("write_u8_ok");
         let mut output = Vec::new();
         let mut fut = output.write_u8(0x42);
         let mut fut = Pin::new(&mut fut);
         let result = poll_ready(&mut fut);
-        assert!(result.is_ok());
-        assert_eq!(output, vec![0x42]);
+        crate::assert_with_log!(
+            result.is_ok(),
+            "result ok",
+            true,
+            result.is_ok()
+        );
+        crate::assert_with_log!(
+            output == vec![0x42],
+            "output",
+            vec![0x42],
+            output
+        );
+        crate::test_complete!("write_u8_ok");
     }
 
     #[test]
     fn flush_ok() {
+        init_test("flush_ok");
         let mut output = Vec::new();
         let mut fut = output.flush();
         let mut fut = Pin::new(&mut fut);
         let result = poll_ready(&mut fut);
-        assert!(result.is_ok());
+        crate::assert_with_log!(
+            result.is_ok(),
+            "result ok",
+            true,
+            result.is_ok()
+        );
+        crate::test_complete!("flush_ok");
     }
 
     #[test]
     fn shutdown_ok() {
+        init_test("shutdown_ok");
         let mut output = Vec::new();
         let mut fut = output.shutdown();
         let mut fut = Pin::new(&mut fut);
         let result = poll_ready(&mut fut);
-        assert!(result.is_ok());
+        crate::assert_with_log!(
+            result.is_ok(),
+            "result ok",
+            true,
+            result.is_ok()
+        );
+        crate::test_complete!("shutdown_ok");
     }
 
     #[test]
     fn write_vectored_ok() {
+        init_test("write_vectored_ok");
         let mut output = Vec::new();
         let data1 = b"hello ";
         let data2 = b"world";
@@ -315,19 +359,33 @@ mod tests {
         let mut fut = Pin::new(&mut fut);
         let n = poll_ready(&mut fut).unwrap();
         // Default implementation writes first non-empty buffer
-        assert_eq!(n, 6);
-        assert_eq!(output, b"hello ");
+        crate::assert_with_log!(n == 6, "bytes written", 6, n);
+        crate::assert_with_log!(output == b"hello ", "output", b"hello ", output);
+        crate::test_complete!("write_vectored_ok");
     }
 
     #[test]
     fn write_all_buf_ok() {
+        init_test("write_all_buf_ok");
         let mut output = Vec::new();
         let mut input: &[u8] = b"buffered";
         let mut fut = output.write_all_buf(&mut input);
         let mut fut = Pin::new(&mut fut);
         let result = poll_ready(&mut fut);
-        assert!(result.is_ok());
-        assert!(input.is_empty());
-        assert_eq!(output, b"buffered");
+        crate::assert_with_log!(
+            result.is_ok(),
+            "result ok",
+            true,
+            result.is_ok()
+        );
+        let empty = input.is_empty();
+        crate::assert_with_log!(empty, "input empty", true, empty);
+        crate::assert_with_log!(
+            output == b"buffered",
+            "output",
+            b"buffered",
+            output
+        );
+        crate::test_complete!("write_all_buf_ok");
     }
 }
