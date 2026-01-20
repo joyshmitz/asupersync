@@ -27,6 +27,11 @@ mod tests {
              let mut spans = self.spans.lock().unwrap();
              spans.push(format!("region_record: {:?}", values));
         }
+
+        fn on_event(&self, event: &tracing::Event<'_>, _ctx: Context<'_, S>) {
+            let mut spans = self.spans.lock().unwrap();
+            spans.push(format!("event: {:?}", event));
+        }
     }
 
     #[test]
@@ -66,6 +71,27 @@ mod tests {
             {
                 let spans = spans.lock().unwrap();
                 let update = spans.iter().find(|s| s.contains("region_record") && s.contains("Closed")).expect("Should record Closed state");
+            }
+        });
+    }
+
+    #[test]
+    fn verify_task_logs() {
+        let logs = Arc::new(Mutex::new(Vec::new()));
+        let recorder = SpanRecorder { spans: logs.clone() };
+        let subscriber = tracing_subscriber::registry().with(recorder);
+
+        tracing::subscriber::with_default(subscriber, || {
+            let mut state = RuntimeState::new();
+            let region = state.create_root_region(Budget::INFINITE);
+            
+            // Create a task
+            let _ = state.create_task(region, Budget::INFINITE, async { 42 });
+
+            // Check for log
+            {
+                let logs = logs.lock().unwrap();
+                let task_log = logs.iter().find(|s| s.contains("event") && s.contains("task created")).expect("Should record task creation log");
             }
         });
     }
