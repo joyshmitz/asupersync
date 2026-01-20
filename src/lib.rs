@@ -54,6 +54,7 @@
 
 pub mod bytes;
 pub mod channel;
+pub mod cli;
 pub mod codec;
 pub mod combinator;
 pub mod config;

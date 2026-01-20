@@ -3,7 +3,7 @@
 //! Each event in the trace represents an observable action in the runtime.
 //! Events carry sufficient information for replay and analysis.
 
-use crate::record::ObligationKind;
+use crate::record::{ObligationAbortReason, ObligationKind, ObligationState};
 use crate::types::{CancelReason, ObligationId, RegionId, TaskId, Time};
 use core::fmt;
 
@@ -32,6 +32,8 @@ pub enum TraceEventKind {
     ObligationCommit,
     /// An obligation was aborted.
     ObligationAbort,
+    /// An obligation was leaked (error).
+    ObligationLeak,
     /// Time advanced.
     TimeAdvance,
     /// A task held obligations but stopped being polled (futurelock).
@@ -65,6 +67,16 @@ pub enum TraceData {
         obligation: ObligationId,
         /// The task holding the obligation.
         task: TaskId,
+        /// The region that owns the obligation.
+        region: RegionId,
+        /// The kind of obligation.
+        kind: ObligationKind,
+        /// The obligation state at this event.
+        state: ObligationState,
+        /// Duration held in nanoseconds, if resolved.
+        duration_ns: Option<u64>,
+        /// Abort reason, if aborted.
+        abort_reason: Option<ObligationAbortReason>,
     },
     /// Cancellation data.
     Cancel {
@@ -187,6 +199,114 @@ impl TraceEvent {
         )
     }
 
+    /// Creates an obligation reserve event.
+    #[must_use]
+    pub fn obligation_reserve(
+        seq: u64,
+        time: Time,
+        obligation: ObligationId,
+        task: TaskId,
+        region: RegionId,
+        kind: ObligationKind,
+    ) -> Self {
+        Self::new(
+            seq,
+            time,
+            TraceEventKind::ObligationReserve,
+            TraceData::Obligation {
+                obligation,
+                task,
+                region,
+                kind,
+                state: ObligationState::Reserved,
+                duration_ns: None,
+                abort_reason: None,
+            },
+        )
+    }
+
+    /// Creates an obligation commit event.
+    #[must_use]
+    pub fn obligation_commit(
+        seq: u64,
+        time: Time,
+        obligation: ObligationId,
+        task: TaskId,
+        region: RegionId,
+        kind: ObligationKind,
+        duration_ns: u64,
+    ) -> Self {
+        Self::new(
+            seq,
+            time,
+            TraceEventKind::ObligationCommit,
+            TraceData::Obligation {
+                obligation,
+                task,
+                region,
+                kind,
+                state: ObligationState::Committed,
+                duration_ns: Some(duration_ns),
+                abort_reason: None,
+            },
+        )
+    }
+
+    /// Creates an obligation abort event.
+    #[must_use]
+    pub fn obligation_abort(
+        seq: u64,
+        time: Time,
+        obligation: ObligationId,
+        task: TaskId,
+        region: RegionId,
+        kind: ObligationKind,
+        duration_ns: u64,
+        reason: ObligationAbortReason,
+    ) -> Self {
+        Self::new(
+            seq,
+            time,
+            TraceEventKind::ObligationAbort,
+            TraceData::Obligation {
+                obligation,
+                task,
+                region,
+                kind,
+                state: ObligationState::Aborted,
+                duration_ns: Some(duration_ns),
+                abort_reason: Some(reason),
+            },
+        )
+    }
+
+    /// Creates an obligation leak event.
+    #[must_use]
+    pub fn obligation_leak(
+        seq: u64,
+        time: Time,
+        obligation: ObligationId,
+        task: TaskId,
+        region: RegionId,
+        kind: ObligationKind,
+        duration_ns: u64,
+    ) -> Self {
+        Self::new(
+            seq,
+            time,
+            TraceEventKind::ObligationLeak,
+            TraceData::Obligation {
+                obligation,
+                task,
+                region,
+                kind,
+                state: ObligationState::Leaked,
+                duration_ns: Some(duration_ns),
+                abort_reason: None,
+            },
+        )
+    }
+
     /// Creates a user trace event.
     #[must_use]
     pub fn user_trace(seq: u64, time: Time, message: impl Into<String>) -> Self {
@@ -211,8 +331,25 @@ impl fmt::Display for TraceEvent {
                     write!(f, " (parent: {p})")?;
                 }
             }
-            TraceData::Obligation { obligation, task } => {
-                write!(f, " {obligation} held by {task}")?;
+            TraceData::Obligation {
+                obligation,
+                task,
+                region,
+                kind,
+                state,
+                duration_ns,
+                abort_reason,
+            } => {
+                write!(
+                    f,
+                    " {obligation} {kind:?} {state:?} holder={task} region={region}"
+                )?;
+                if let Some(duration) = duration_ns {
+                    write!(f, " duration={}ns", duration)?;
+                }
+                if let Some(reason) = abort_reason {
+                    write!(f, " abort_reason={reason}")?;
+                }
             }
             TraceData::Cancel {
                 task,

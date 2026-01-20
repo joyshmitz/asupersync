@@ -127,8 +127,25 @@ impl TraceEventSummary {
                 || format!("region={region} parent=None"),
                 |p| format!("region={region} parent={p}"),
             ),
-            TraceData::Obligation { obligation, task } => {
-                format!("obligation={obligation} task={task}")
+            TraceData::Obligation {
+                obligation,
+                task,
+                region,
+                kind,
+                state,
+                duration_ns,
+                abort_reason,
+            } => {
+                let mut summary = format!(
+                    "obligation={obligation} task={task} region={region} kind={kind:?} state={state:?}"
+                );
+                if let Some(duration) = duration_ns {
+                    summary.push_str(&format!(" duration_ns={duration}"));
+                }
+                if let Some(reason) = abort_reason {
+                    summary.push_str(&format!(" abort_reason={reason}"));
+                }
+                summary
             }
             TraceData::Cancel {
                 task,

@@ -210,6 +210,7 @@ mod tests {
             ObligationKind::Ack,
             task_id,
             root,
+            Time::ZERO,
         ));
         let obl_id = ObligationId::from_arena(obl_idx);
         state.obligations.get_mut(obl_idx).unwrap().id = obl_id;

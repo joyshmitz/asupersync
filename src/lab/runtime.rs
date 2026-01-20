@@ -14,6 +14,8 @@ use crate::trace::{TraceData, TraceEvent};
 use crate::types::ObligationId;
 use crate::types::Time;
 use crate::util::DetRng;
+use std::sync::{Arc, Mutex};
+use std::task::{Context, Poll, Wake, Waker};
 
 /// The deterministic lab runtime.
 ///
@@ -25,6 +27,8 @@ use crate::util::DetRng;
 pub struct LabRuntime {
     /// Runtime state (public for tests and oracle access).
     pub state: RuntimeState,
+    /// Scheduler.
+    pub scheduler: Arc<Mutex<crate::runtime::scheduler::PriorityScheduler>>,
     /// Configuration.
     config: LabConfig,
     /// Deterministic RNG.
@@ -44,6 +48,7 @@ impl LabRuntime {
         state.trace = TraceBuffer::new(config.trace_capacity);
         Self {
             state,
+            scheduler: Arc::new(Mutex::new(crate::runtime::scheduler::PriorityScheduler::new())),
             config,
             rng,
             virtual_time: Time::ZERO,
@@ -126,11 +131,73 @@ impl LabRuntime {
         // start making scheduler decisions here.
         let _ = self.rng.next_u64();
         self.check_futurelocks();
-        // In the full implementation, this would:
+
         // 1. Pop a task from the scheduler
-        // 2. Poll it
-        // 3. Handle completion/continuation
-        // 4. Update state
+        let Some(task_id) = self.scheduler.lock().unwrap().pop() else {
+            return;
+        };
+
+        // 2. Prepare context
+        let priority = self
+            .state
+            .tasks
+            .get(task_id.arena_index())
+            .and_then(|t| t.cx_inner.as_ref())
+            .map(|inner| inner.read().expect("lock poisoned").budget.priority)
+            .unwrap_or(0);
+
+        let waker = Waker::from(Arc::new(TaskWaker {
+            task_id,
+            priority,
+            scheduler: self.scheduler.clone(),
+        }));
+        let mut cx = Context::from_waker(&waker);
+
+        // 3. Poll the task
+        let result = if let Some(stored) = self.state.get_stored_future(task_id) {
+            stored.poll(&mut cx)
+        } else {
+            // Task lost (should not happen if consistent)
+            return;
+        };
+
+        // 4. Handle result
+        match result {
+            Poll::Ready(()) => {
+                // Task completed
+                self.state.remove_stored_future(task_id);
+
+                // Update state to Completed if not already terminal
+                if let Some(record) = self.state.tasks.get_mut(task_id.arena_index()) {
+                    if !record.state.is_terminal() {
+                        record.state = crate::record::task::TaskState::Completed(
+                            crate::types::Outcome::Ok(()),
+                        );
+                    }
+                }
+
+                // Notify waiters
+                let waiters = self.state.task_completed(task_id);
+
+                // Schedule waiters
+                let mut sched = self.scheduler.lock().unwrap();
+                for waiter in waiters {
+                    let prio = self
+                        .state
+                        .tasks
+                        .get(waiter.arena_index())
+                        .and_then(|t| t.cx_inner.as_ref())
+                        .map(|inner| inner.read().expect("lock poisoned").budget.priority)
+                        .unwrap_or(0);
+                    sched.schedule(waiter, prio);
+                }
+            }
+            Poll::Pending => {
+                // Task yielded. Waker will reschedule it when ready.
+                // Note: If the task yielded via `cx.waker().wake_by_ref()`, it might already be scheduled.
+                // If it yielded for I/O or other events, it won't be scheduled until that event fires.
+            }
+        }
     }
 
     /// Public wrapper for `step()` for use in tests.
@@ -142,12 +209,15 @@ impl LabRuntime {
 
     /// Checks invariants and returns any violations.
     #[must_use]
-    pub fn check_invariants(&self) -> Vec<InvariantViolation> {
+    pub fn check_invariants(&mut self) -> Vec<InvariantViolation> {
         let mut violations = Vec::new();
 
         // Check for obligation leaks
         let leaks = self.obligation_leaks();
         if !leaks.is_empty() {
+            for leak in &leaks {
+                let _ = self.state.mark_obligation_leaked(leak.obligation);
+            }
             violations.push(InvariantViolation::ObligationLeak { leaks });
         }
 
@@ -319,6 +389,21 @@ impl LabRuntime {
     }
 }
 
+struct TaskWaker {
+    task_id: crate::types::TaskId,
+    priority: u8,
+    scheduler: Arc<Mutex<crate::runtime::scheduler::PriorityScheduler>>,
+}
+
+impl Wake for TaskWaker {
+    fn wake(self: Arc<Self>) {
+        self.scheduler
+            .lock()
+            .unwrap()
+            .schedule(self.task_id, self.priority);
+    }
+}
+
 /// An invariant violation detected by the lab runtime.
 #[derive(Debug, Clone)]
 pub enum InvariantViolation {
@@ -464,6 +549,7 @@ mod tests {
             ObligationKind::SendPermit,
             task_id,
             root,
+            runtime.state.now,
         ));
         let obl_id = ObligationId::from_arena(obl_idx);
         runtime.state.obligations.get_mut(obl_idx).unwrap().id = obl_id;
@@ -515,6 +601,7 @@ mod tests {
             ObligationKind::SendPermit,
             task_id,
             root,
+            runtime.state.now,
         ));
         let obl_id = ObligationId::from_arena(obl_idx);
         runtime.state.obligations.get_mut(obl_idx).unwrap().id = obl_id;
@@ -543,6 +630,7 @@ mod tests {
             ObligationKind::SendPermit,
             task_id,
             root,
+            runtime.state.now,
         ));
         let obl_id = ObligationId::from_arena(obl_idx);
         runtime.state.obligations.get_mut(obl_idx).unwrap().id = obl_id;
@@ -588,11 +676,17 @@ mod tests {
             ObligationKind::Ack,
             task_id,
             root,
+            runtime.state.now,
         ));
         let obl_id = ObligationId::from_arena(obl_idx);
         runtime.state.obligations.get_mut(obl_idx).unwrap().id = obl_id;
 
-        runtime.state.obligations.get_mut(obl_idx).unwrap().commit();
+        runtime
+            .state
+            .obligations
+            .get_mut(obl_idx)
+            .unwrap()
+            .commit(runtime.state.now);
 
         runtime
             .state

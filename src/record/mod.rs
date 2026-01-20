@@ -11,6 +11,6 @@ pub mod region;
 pub mod task;
 
 pub use finalizer::{Finalizer, FinalizerEscalation, FinalizerStack};
-pub use obligation::{ObligationKind, ObligationRecord, ObligationState};
+pub use obligation::{ObligationAbortReason, ObligationKind, ObligationRecord, ObligationState};
 pub use region::RegionRecord;
 pub use task::TaskRecord;

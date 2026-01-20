@@ -7,14 +7,15 @@
 //! - Current time
 
 use crate::record::finalizer::Finalizer;
-use crate::record::{ObligationRecord, RegionRecord, TaskRecord};
+use crate::record::{ObligationAbortReason, ObligationKind, ObligationRecord, RegionRecord, TaskRecord};
+use crate::error::{Error, ErrorKind};
 use crate::runtime::io_driver::IoDriver;
 use crate::runtime::reactor::Reactor;
 use crate::runtime::stored_task::StoredTask;
-use crate::trace::TraceBuffer;
+use crate::trace::{TraceBuffer, TraceEvent};
 use crate::tracing_compat::{debug, debug_span, trace, trace_span};
 use crate::types::policy::PolicyAction;
-use crate::types::{Budget, CancelReason, Outcome, Policy, RegionId, TaskId, Time};
+use crate::types::{Budget, CancelReason, ObligationId, Outcome, Policy, RegionId, TaskId, Time};
 use crate::util::Arena;
 use std::collections::HashMap;
 use std::future::Future;
@@ -277,6 +278,159 @@ impl RuntimeState {
         let handle = crate::runtime::TaskHandle::new(task_id, result_rx, cx_weak);
 
         Ok((task_id, handle))
+    }
+
+    /// Creates and registers an obligation for the given task and region.
+    ///
+    /// This records the obligation in the registry and emits a trace event.
+    pub fn create_obligation(
+        &mut self,
+        kind: ObligationKind,
+        holder: TaskId,
+        region: RegionId,
+        description: Option<String>,
+    ) -> ObligationId {
+        let reserved_at = self.now;
+        let idx = if let Some(desc) = description {
+            self.obligations.insert(ObligationRecord::with_description(
+                ObligationId::from_arena(crate::util::ArenaIndex::new(0, 0)),
+                kind,
+                holder,
+                region,
+                reserved_at,
+                desc,
+            ))
+        } else {
+            self.obligations.insert(ObligationRecord::new(
+                ObligationId::from_arena(crate::util::ArenaIndex::new(0, 0)),
+                kind,
+                holder,
+                region,
+                reserved_at,
+            ))
+        };
+        let obligation_id = ObligationId::from_arena(idx);
+        if let Some(record) = self.obligations.get_mut(idx) {
+            record.id = obligation_id;
+        }
+
+        let seq = self.next_trace_seq();
+        self.trace.push(TraceEvent::obligation_reserve(
+            seq,
+            self.now,
+            obligation_id,
+            holder,
+            region,
+            kind,
+        ));
+
+        obligation_id
+    }
+
+    /// Marks an obligation as committed and emits a trace event.
+    ///
+    /// Returns the duration the obligation was held (nanoseconds).
+    pub fn commit_obligation(&mut self, obligation: ObligationId) -> Result<u64, Error> {
+        let record = self
+            .obligations
+            .get_mut(obligation.arena_index())
+            .ok_or_else(|| {
+                Error::new(ErrorKind::ObligationAlreadyResolved)
+                    .with_message("obligation not found")
+            })?;
+
+        if !record.is_pending() {
+            return Err(Error::new(ErrorKind::ObligationAlreadyResolved));
+        }
+
+        let duration = record.commit(self.now);
+        let seq = self.next_trace_seq();
+        self.trace.push(TraceEvent::obligation_commit(
+            seq,
+            self.now,
+            record.id,
+            record.holder,
+            record.region,
+            record.kind,
+            duration,
+        ));
+
+        Ok(duration)
+    }
+
+    /// Marks an obligation as aborted and emits a trace event.
+    ///
+    /// Returns the duration the obligation was held (nanoseconds).
+    pub fn abort_obligation(
+        &mut self,
+        obligation: ObligationId,
+        reason: ObligationAbortReason,
+    ) -> Result<u64, Error> {
+        let record = self
+            .obligations
+            .get_mut(obligation.arena_index())
+            .ok_or_else(|| {
+                Error::new(ErrorKind::ObligationAlreadyResolved)
+                    .with_message("obligation not found")
+            })?;
+
+        if !record.is_pending() {
+            return Err(Error::new(ErrorKind::ObligationAlreadyResolved));
+        }
+
+        let duration = record.abort(self.now, reason);
+        let seq = self.next_trace_seq();
+        self.trace.push(TraceEvent::obligation_abort(
+            seq,
+            self.now,
+            record.id,
+            record.holder,
+            record.region,
+            record.kind,
+            duration,
+            reason,
+        ));
+
+        Ok(duration)
+    }
+
+    /// Marks an obligation as leaked and emits a trace + error event.
+    ///
+    /// Returns the duration the obligation was held (nanoseconds).
+    pub fn mark_obligation_leaked(&mut self, obligation: ObligationId) -> Result<u64, Error> {
+        let record = self
+            .obligations
+            .get_mut(obligation.arena_index())
+            .ok_or_else(|| {
+                Error::new(ErrorKind::ObligationAlreadyResolved)
+                    .with_message("obligation not found")
+            })?;
+
+        if !record.is_pending() {
+            return Err(Error::new(ErrorKind::ObligationAlreadyResolved));
+        }
+
+        let duration = record.mark_leaked(self.now);
+        let seq = self.next_trace_seq();
+        self.trace.push(TraceEvent::obligation_leak(
+            seq,
+            self.now,
+            record.id,
+            record.holder,
+            record.region,
+            record.kind,
+            duration,
+        ));
+        crate::tracing_compat::error!(
+            obligation_id = ?record.id,
+            kind = ?record.kind,
+            holder_task = ?record.holder,
+            region_id = ?record.region,
+            duration_ns = duration,
+            "obligation leaked"
+        );
+
+        Ok(duration)
     }
 
     /// Gets a mutable reference to a stored future for polling.

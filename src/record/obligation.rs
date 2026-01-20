@@ -3,7 +3,8 @@
 //! Obligations represent resources that must be resolved (commit, abort, etc.)
 //! before their owning region can close. They implement the two-phase pattern.
 
-use crate::types::{ObligationId, RegionId, TaskId};
+use crate::types::{ObligationId, RegionId, TaskId, Time};
+use core::fmt;
 
 /// The kind of obligation.
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
@@ -16,6 +17,35 @@ pub enum ObligationKind {
     Lease,
     /// A pending I/O operation.
     IoOp,
+}
+
+/// The reason an obligation was aborted.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum ObligationAbortReason {
+    /// Aborted due to cancellation.
+    Cancel,
+    /// Aborted due to an error.
+    Error,
+    /// Explicitly aborted by the caller.
+    Explicit,
+}
+
+impl ObligationAbortReason {
+    /// Returns a short string for tracing and diagnostics.
+    #[must_use]
+    pub const fn as_str(self) -> &'static str {
+        match self {
+            Self::Cancel => "cancel",
+            Self::Error => "error",
+            Self::Explicit => "explicit",
+        }
+    }
+}
+
+impl fmt::Display for ObligationAbortReason {
+    fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
+        f.write_str(self.as_str())
+    }
 }
 
 /// The state of an obligation.
@@ -89,12 +119,24 @@ pub struct ObligationRecord {
     pub state: ObligationState,
     /// Optional description for debugging.
     pub description: Option<String>,
+    /// Time when the obligation was reserved.
+    pub reserved_at: Time,
+    /// Time when the obligation was resolved.
+    pub resolved_at: Option<Time>,
+    /// Reason for abort, if applicable.
+    pub abort_reason: Option<ObligationAbortReason>,
 }
 
 impl ObligationRecord {
     /// Creates a new obligation record.
     #[must_use]
-    pub fn new(id: ObligationId, kind: ObligationKind, holder: TaskId, region: RegionId) -> Self {
+    pub fn new(
+        id: ObligationId,
+        kind: ObligationKind,
+        holder: TaskId,
+        region: RegionId,
+        reserved_at: Time,
+    ) -> Self {
         Self {
             id,
             kind,
@@ -102,6 +144,9 @@ impl ObligationRecord {
             region,
             state: ObligationState::Reserved,
             description: None,
+            reserved_at,
+            resolved_at: None,
+            abort_reason: None,
         }
     }
 
@@ -112,6 +157,7 @@ impl ObligationRecord {
         kind: ObligationKind,
         holder: TaskId,
         region: RegionId,
+        reserved_at: Time,
         description: impl Into<String>,
     ) -> Self {
         Self {
@@ -121,6 +167,9 @@ impl ObligationRecord {
             region,
             state: ObligationState::Reserved,
             description: Some(description.into()),
+            reserved_at,
+            resolved_at: None,
+            abort_reason: None,
         }
     }
 
@@ -135,9 +184,12 @@ impl ObligationRecord {
     /// # Panics
     ///
     /// Panics if already resolved.
-    pub fn commit(&mut self) {
+    pub fn commit(&mut self, now: Time) -> u64 {
         assert!(self.is_pending(), "obligation already resolved");
         self.state = ObligationState::Committed;
+        self.resolved_at = Some(now);
+        self.abort_reason = None;
+        now.duration_since(self.reserved_at)
     }
 
     /// Aborts the obligation.
@@ -145,9 +197,12 @@ impl ObligationRecord {
     /// # Panics
     ///
     /// Panics if already resolved.
-    pub fn abort(&mut self) {
+    pub fn abort(&mut self, now: Time, reason: ObligationAbortReason) -> u64 {
         assert!(self.is_pending(), "obligation already resolved");
         self.state = ObligationState::Aborted;
+        self.resolved_at = Some(now);
+        self.abort_reason = Some(reason);
+        now.duration_since(self.reserved_at)
     }
 
     /// Marks the obligation as leaked.
@@ -158,9 +213,12 @@ impl ObligationRecord {
     /// # Panics
     ///
     /// Panics if already resolved.
-    pub fn mark_leaked(&mut self) {
+    pub fn mark_leaked(&mut self, now: Time) -> u64 {
         assert!(self.is_pending(), "obligation already resolved");
         self.state = ObligationState::Leaked;
+        self.resolved_at = Some(now);
+        self.abort_reason = None;
+        now.duration_since(self.reserved_at)
     }
 
     /// Returns true if this obligation leaked.
@@ -209,74 +267,112 @@ mod tests {
     #[test]
     fn obligation_lifecycle_commit() {
         let (oid, tid, rid) = test_ids();
-        let mut ob = ObligationRecord::new(oid, ObligationKind::SendPermit, tid, rid);
+        let reserved_at = Time::from_nanos(10);
+        let mut ob = ObligationRecord::new(
+            oid,
+            ObligationKind::SendPermit,
+            tid,
+            rid,
+            reserved_at,
+        );
 
         assert!(ob.is_pending());
         assert!(!ob.is_leaked());
         assert_eq!(ob.state, ObligationState::Reserved);
 
-        ob.commit();
+        let duration = ob.commit(Time::from_nanos(25));
         assert!(!ob.is_pending());
         assert!(!ob.is_leaked());
         assert_eq!(ob.state, ObligationState::Committed);
+        assert_eq!(duration, 15);
+        assert_eq!(ob.resolved_at, Some(Time::from_nanos(25)));
     }
 
     #[test]
     fn obligation_lifecycle_abort() {
         let (oid, tid, rid) = test_ids();
-        let mut ob = ObligationRecord::new(oid, ObligationKind::Ack, tid, rid);
+        let reserved_at = Time::from_nanos(100);
+        let mut ob = ObligationRecord::new(oid, ObligationKind::Ack, tid, rid, reserved_at);
 
-        ob.abort();
+        let duration = ob.abort(Time::from_nanos(140), ObligationAbortReason::Explicit);
         assert!(!ob.is_pending());
         assert!(!ob.is_leaked());
         assert_eq!(ob.state, ObligationState::Aborted);
+        assert_eq!(duration, 40);
+        assert_eq!(ob.abort_reason, Some(ObligationAbortReason::Explicit));
     }
 
     #[test]
     fn obligation_lifecycle_leaked() {
         let (oid, tid, rid) = test_ids();
-        let mut ob = ObligationRecord::new(oid, ObligationKind::Lease, tid, rid);
+        let reserved_at = Time::from_nanos(5);
+        let mut ob = ObligationRecord::new(oid, ObligationKind::Lease, tid, rid, reserved_at);
 
-        ob.mark_leaked();
+        let duration = ob.mark_leaked(Time::from_nanos(8));
         assert!(!ob.is_pending());
         assert!(ob.is_leaked());
         assert_eq!(ob.state, ObligationState::Leaked);
+        assert_eq!(duration, 3);
     }
 
     #[test]
     #[should_panic(expected = "obligation already resolved")]
     fn double_commit_panics() {
         let (oid, tid, rid) = test_ids();
-        let mut ob = ObligationRecord::new(oid, ObligationKind::IoOp, tid, rid);
-        ob.commit();
-        ob.commit(); // Should panic
+        let mut ob = ObligationRecord::new(
+            oid,
+            ObligationKind::IoOp,
+            tid,
+            rid,
+            Time::ZERO,
+        );
+        ob.commit(Time::ZERO);
+        ob.commit(Time::ZERO); // Should panic
     }
 
     #[test]
     #[should_panic(expected = "obligation already resolved")]
     fn double_abort_panics() {
         let (oid, tid, rid) = test_ids();
-        let mut ob = ObligationRecord::new(oid, ObligationKind::IoOp, tid, rid);
-        ob.abort();
-        ob.abort(); // Should panic
+        let mut ob = ObligationRecord::new(
+            oid,
+            ObligationKind::IoOp,
+            tid,
+            rid,
+            Time::ZERO,
+        );
+        ob.abort(Time::ZERO, ObligationAbortReason::Explicit);
+        ob.abort(Time::ZERO, ObligationAbortReason::Explicit); // Should panic
     }
 
     #[test]
     #[should_panic(expected = "obligation already resolved")]
     fn commit_after_abort_panics() {
         let (oid, tid, rid) = test_ids();
-        let mut ob = ObligationRecord::new(oid, ObligationKind::SendPermit, tid, rid);
-        ob.abort();
-        ob.commit(); // Should panic
+        let mut ob = ObligationRecord::new(
+            oid,
+            ObligationKind::SendPermit,
+            tid,
+            rid,
+            Time::ZERO,
+        );
+        ob.abort(Time::ZERO, ObligationAbortReason::Cancel);
+        ob.commit(Time::ZERO); // Should panic
     }
 
     #[test]
     #[should_panic(expected = "obligation already resolved")]
     fn mark_leaked_after_commit_panics() {
         let (oid, tid, rid) = test_ids();
-        let mut ob = ObligationRecord::new(oid, ObligationKind::SendPermit, tid, rid);
-        ob.commit();
-        ob.mark_leaked(); // Should panic
+        let mut ob = ObligationRecord::new(
+            oid,
+            ObligationKind::SendPermit,
+            tid,
+            rid,
+            Time::ZERO,
+        );
+        ob.commit(Time::ZERO);
+        ob.mark_leaked(Time::ZERO); // Should panic
     }
 
     #[test]
@@ -294,6 +390,7 @@ mod tests {
             ObligationKind::SendPermit,
             tid,
             rid,
+            Time::ZERO,
             "test description",
         );
         assert_eq!(ob.description, Some("test description".to_string()));
