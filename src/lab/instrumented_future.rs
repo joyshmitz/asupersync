@@ -474,10 +474,10 @@ impl InjectionReport {
     #[must_use]
     pub fn reproduction_code(&self, injection_point: u64) -> String {
         format!(
-            r#"Lab::new()
+            r"Lab::new()
     .with_seed({})
     .with_injection_point({})
-    .run(test_fn);"#,
+    .run(test_fn);",
             self.seed, injection_point
         )
     }

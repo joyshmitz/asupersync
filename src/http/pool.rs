@@ -497,13 +497,13 @@ mod tests {
         assert_eq!(key.port, 8080);
         assert!(key.is_https);
 
-        let http_key = PoolKey::http("example.com", None);
-        assert_eq!(http_key.port, 80);
-        assert!(!http_key.is_https);
+        let plain_key = PoolKey::http("example.com", None);
+        assert_eq!(plain_key.port, 80);
+        assert!(!plain_key.is_https);
 
-        let https_key = PoolKey::https("example.com", None);
-        assert_eq!(https_key.port, 443);
-        assert!(https_key.is_https);
+        let tls_key = PoolKey::https("example.com", None);
+        assert_eq!(tls_key.port, 443);
+        assert!(tls_key.is_https);
     }
 
     #[test]

@@ -958,15 +958,15 @@ mod tests {
             Header::new("accept", "text/html"),
         ];
 
-        let mut encoded = BytesMut::new();
-        encoder.encode(&headers, &mut encoded);
+        let mut encoded_block = BytesMut::new();
+        encoder.encode(&headers, &mut encoded_block);
 
         let mut decoder = Decoder::new();
-        let mut src = encoded.freeze();
-        let decoded = decoder.decode(&mut src).unwrap();
+        let mut src = encoded_block.freeze();
+        let decoded_headers = decoder.decode(&mut src).unwrap();
 
-        assert_eq!(decoded.len(), headers.len());
-        for (orig, dec) in headers.iter().zip(decoded.iter()) {
+        assert_eq!(decoded_headers.len(), headers.len());
+        for (orig, dec) in headers.iter().zip(decoded_headers.iter()) {
             assert_eq!(orig.name, dec.name);
             assert_eq!(orig.value, dec.value);
         }

@@ -1031,7 +1031,7 @@ mod tests {
     #[test]
     fn test_frame_header_roundtrip() {
         let original = FrameHeader {
-            length: 0x123456,
+            length: 0x0012_3456,
             frame_type: FrameType::Data as u8,
             flags: 0x05,
             stream_id: 0x7654_3210,

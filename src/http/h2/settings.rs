@@ -303,14 +303,14 @@ mod tests {
             .header_table_size(8192)
             .enable_push(false)
             .max_concurrent_streams(100)
-            .initial_window_size(131072)
+            .initial_window_size(131_072)
             .max_frame_size(32768)
             .build();
 
         assert_eq!(settings.header_table_size, 8192);
         assert!(!settings.enable_push);
         assert_eq!(settings.max_concurrent_streams, 100);
-        assert_eq!(settings.initial_window_size, 131072);
+        assert_eq!(settings.initial_window_size, 131_072);
         assert_eq!(settings.max_frame_size, 32768);
     }
 

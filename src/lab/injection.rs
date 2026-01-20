@@ -301,13 +301,13 @@ impl LabInjectionResult {
     #[must_use]
     pub fn reproduction_code(&self, seed: u64) -> String {
         format!(
-            r#"let config = LabInjectionConfig::new({})
+            r"let config = LabInjectionConfig::new({})
     .with_strategy(InjectionStrategy::AtSequence({}));
 let mut runner = LabInjectionRunner::new(config);
 let report = runner.run_simple(|injector| {{
     InstrumentedFuture::new(your_future(), injector)
 }});
-assert!(report.all_passed());"#,
+assert!(report.all_passed());",
             seed, self.injection.injection_point
         )
     }
