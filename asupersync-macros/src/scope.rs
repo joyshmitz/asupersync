@@ -32,7 +32,9 @@ use proc_macro2::TokenStream as TokenStream2;
 use quote::quote;
 use syn::{
     parse::{Parse, ParseStream},
-    parse_macro_input, Expr, Ident, LitStr, Token,
+    parse_macro_input,
+    spanned::Spanned,
+    Expr, Ident, LitStr, Stmt, Token,
 };
 
 /// Optional name for the scope (for debugging/tracing).
@@ -63,6 +65,13 @@ struct ScopeInput {
 
 impl Parse for ScopeInput {
     fn parse(input: ParseStream) -> syn::Result<Self> {
+        if input.is_empty() || input.peek(syn::token::Brace) {
+            return Err(syn::Error::new(
+                input.span(),
+                "scope! requires cx argument",
+            ));
+        }
+
         // Parse the cx expression
         let cx: Expr = input.parse()?;
 
@@ -87,15 +96,12 @@ impl Parse for ScopeInput {
             let name_lit: LitStr = input.parse()?;
             name = Some(ScopeName(name_lit));
 
-            // After name, expect comma
-            if !input.peek(syn::token::Brace) {
-                let _comma: Token![,] = input.parse().map_err(|_| {
-                    syn::Error::new(
-                        input.span(),
-                        "expected comma after scope name: scope!(cx, \"name\", { body })",
-                    )
-                })?;
-            }
+            let _comma: Token![,] = input.parse().map_err(|_| {
+                syn::Error::new(
+                    input.span(),
+                    "expected comma after scope name: scope!(cx, \"name\", { body })",
+                )
+            })?;
         }
 
         // Check for optional budget specification
@@ -112,15 +118,12 @@ impl Parse for ScopeInput {
                 let budget_expr: Expr = input.parse()?;
                 budget = Some(ScopeBudget(budget_expr));
 
-                // After budget, expect comma before body
-                if !input.peek(syn::token::Brace) {
-                    let _comma: Token![,] = input.parse().map_err(|_| {
-                        syn::Error::new(
-                            input.span(),
-                            "expected comma after budget: scope!(cx, budget: expr, { body })",
-                        )
-                    })?;
-                }
+                let _comma: Token![,] = input.parse().map_err(|_| {
+                    syn::Error::new(
+                        input.span(),
+                        "expected comma after budget: scope!(cx, budget: expr, { body })",
+                    )
+                })?;
             }
         }
 
@@ -131,6 +134,13 @@ impl Parse for ScopeInput {
                 "expected block for scope body: scope!(cx, { body })",
             )
         })?;
+
+        if let Some(span) = return_span(&body.stmts) {
+            return Err(syn::Error::new(
+                span,
+                "scope! body must not use return; use break or early return pattern",
+            ));
+        }
 
         // Check for trailing content
         if !input.is_empty() {
@@ -177,12 +187,12 @@ fn generate_scope(input: &ScopeInput) -> TokenStream2 {
     let scope_creation = match &input.budget {
         Some(ScopeBudget(budget_expr)) => {
             quote! {
-                let scope = __cx.scope_with_budget(#budget_expr);
+                let __scope = __cx.scope_with_budget(#budget_expr);
             }
         }
         None => {
             quote! {
-                let scope = __cx.scope();
+                let __scope = __cx.scope();
             }
         }
     };
@@ -190,10 +200,9 @@ fn generate_scope(input: &ScopeInput) -> TokenStream2 {
     // Generate optional tracing for named scopes
     let trace_name = match &input.name {
         Some(ScopeName(name_lit)) => {
-            let name_str = name_lit.value();
             quote! {
-                // Named scope: #name_str (tracing will be added in observability phase)
-                let _ = #name_str;
+                // Named scope for tracing/debugging (wired in observability phase)
+                let _ = #name_lit;
             }
         }
         None => {
@@ -211,10 +220,25 @@ fn generate_scope(input: &ScopeInput) -> TokenStream2 {
             #scope_creation
             #trace_name
             async move {
+                let scope = __scope;
                 #(#body_stmts)*
             }.await
         }
     }
+}
+
+fn return_span(stmts: &[Stmt]) -> Option<proc_macro2::Span> {
+    for stmt in stmts {
+        match stmt {
+            Stmt::Expr(expr, _) => {
+                if matches!(expr, Expr::Return(_)) {
+                    return Some(expr.span());
+                }
+            }
+            _ => {}
+        }
+    }
+    None
 }
 
 #[cfg(test)]
@@ -287,6 +311,13 @@ mod tests {
     }
 
     #[test]
+    fn test_error_return_in_body() {
+        let input: proc_macro2::TokenStream = quote! { cx, { return 1; } };
+        let result: Result<ScopeInput, _> = syn::parse2(input);
+        assert!(result.is_err());
+    }
+
+    #[test]
     fn test_generate_basic_scope() {
         let input: proc_macro2::TokenStream = quote! { cx, { 42 } };
         let parsed: ScopeInput = syn::parse2(input).unwrap();
@@ -296,11 +327,11 @@ mod tests {
         assert!(generated_str.contains("__cx"));
         assert!(generated_str.contains("scope"));
         assert!(generated_str.contains("async move"));
+        assert!(generated_str.contains("let scope = __scope"));
         // TokenStream renders `.await` with space as `. await`
         assert!(
             generated_str.contains(". await") || generated_str.contains(".await"),
-            "Expected .await in: {}",
-            generated_str
+            "Expected .await in: {generated_str}",
         );
     }
 

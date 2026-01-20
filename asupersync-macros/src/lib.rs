@@ -137,6 +137,39 @@ pub fn join(input: TokenStream) -> TokenStream {
     join::join_impl(input)
 }
 
+/// Joins multiple futures into an array, waiting for all to complete.
+///
+/// The `join_all!` macro is like `join!` but returns an array instead of a tuple.
+/// All futures must return the same type.
+///
+/// # Syntax
+///
+/// ```ignore
+/// join_all!(future1, future2, ...)
+/// ```
+///
+/// # Returns
+///
+/// An array of all the futures' results in the order they were specified.
+/// Since all results must be the same type, this enables easier iteration.
+///
+/// # Example
+///
+/// ```ignore
+/// let results: [i32; 3] = join_all!(
+///     fetch_value(1).await,
+///     fetch_value(2).await,
+///     fetch_value(3).await
+/// );
+/// for result in results {
+///     println!("{}", result);
+/// }
+/// ```
+#[proc_macro]
+pub fn join_all(input: TokenStream) -> TokenStream {
+    join::join_all_impl(input)
+}
+
 /// Races multiple futures, returning the first to complete.
 ///
 /// The `race!` macro runs multiple futures concurrently and returns when the first
@@ -146,7 +179,9 @@ pub fn join(input: TokenStream) -> TokenStream {
 /// # Syntax
 ///
 /// ```ignore
-/// race!(future1, future2, ...)
+/// race!(cx, { future1, future2, ... })
+/// race!(cx, { "name" => future1, "other" => future2, ... })
+/// race!(cx, timeout: Duration::from_secs(5), { future1, future2, ... })
 /// ```
 ///
 /// # Returns
@@ -164,10 +199,10 @@ pub fn join(input: TokenStream) -> TokenStream {
 /// # Example
 ///
 /// ```ignore
-/// let result = race!(
+/// let result = race!(cx, {
 ///     primary_service.fetch().await,
-///     backup_service.fetch().await
-/// );
+///     backup_service.fetch().await,
+/// });
 /// // One completed, the other was cancelled and drained
 /// ```
 #[proc_macro]
