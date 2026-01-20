@@ -24,7 +24,16 @@ impl RegionId {
     /// Returns the underlying arena index (internal use).
     #[must_use]
     #[allow(dead_code)]
+    #[cfg(not(feature = "test-internals"))]
     pub(crate) const fn arena_index(self) -> ArenaIndex {
+        self.0
+    }
+
+    /// Returns the underlying arena index (internal use).
+    #[must_use]
+    #[allow(dead_code)]
+    #[cfg(feature = "test-internals")]
+    pub const fn arena_index(self) -> ArenaIndex {
         self.0
     }
 
@@ -75,7 +84,16 @@ impl TaskId {
     /// Returns the underlying arena index (internal use).
     #[must_use]
     #[allow(dead_code)]
+    #[cfg(not(feature = "test-internals"))]
     pub(crate) const fn arena_index(self) -> ArenaIndex {
+        self.0
+    }
+
+    /// Returns the underlying arena index (internal use).
+    #[must_use]
+    #[allow(dead_code)]
+    #[cfg(feature = "test-internals")]
+    pub const fn arena_index(self) -> ArenaIndex {
         self.0
     }
 
@@ -127,7 +145,16 @@ impl ObligationId {
     /// Returns the underlying arena index (internal use).
     #[must_use]
     #[allow(dead_code)]
+    #[cfg(not(feature = "test-internals"))]
     pub(crate) const fn arena_index(self) -> ArenaIndex {
+        self.0
+    }
+
+    /// Returns the underlying arena index (internal use).
+    #[must_use]
+    #[allow(dead_code)]
+    #[cfg(feature = "test-internals")]
+    pub const fn arena_index(self) -> ArenaIndex {
         self.0
     }
 
