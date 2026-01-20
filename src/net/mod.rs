@@ -11,9 +11,14 @@ pub mod sys;
 /// TCP networking primitives.
 pub mod tcp;
 mod udp;
+/// Unix domain socket networking primitives.
+#[cfg(unix)]
+pub mod unix;
 
 pub use tcp::listener::{Incoming, TcpListener};
 pub use tcp::socket::TcpSocket;
 pub use tcp::split::{OwnedReadHalf, OwnedWriteHalf, ReadHalf, WriteHalf};
 pub use tcp::stream::TcpStream;
 pub use udp::{RecvStream, SendSink, UdpSocket};
+#[cfg(unix)]
+pub use unix::{Incoming as UnixIncoming, UnixListener, UnixStream};
