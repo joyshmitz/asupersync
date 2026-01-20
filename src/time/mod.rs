@@ -46,6 +46,7 @@ mod deadline;
 mod driver;
 mod elapsed;
 mod interval;
+pub mod intrusive_wheel;
 mod sleep;
 mod timeout_future;
 mod wheel;
