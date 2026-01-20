@@ -1,13 +1,13 @@
 //! TCP stream implementation.
 
 use crate::cx::Cx;
-use crate::io::{AsyncRead, AsyncWrite, ReadBuf};
+use crate::io::{AsyncRead, AsyncReadVectored, AsyncWrite, ReadBuf};
 use crate::net::lookup_one;
 use crate::net::tcp::split::{OwnedReadHalf, OwnedWriteHalf, ReadHalf, WriteHalf};
 use crate::runtime::io_driver::IoRegistration;
 use crate::runtime::reactor::Interest;
 use socket2::{Domain, Protocol, SockAddr, Socket, Type};
-use std::io;
+use std::io::{self, IoSlice, IoSliceMut};
 use std::net::{self, Shutdown, SocketAddr, ToSocketAddrs};
 use std::pin::Pin;
 use std::sync::Arc;
@@ -213,6 +213,29 @@ impl AsyncRead for TcpStream {
     }
 }
 
+impl AsyncReadVectored for TcpStream {
+    fn poll_read_vectored(
+        self: Pin<&mut Self>,
+        cx: &mut Context<'_>,
+        bufs: &mut [IoSliceMut<'_>],
+    ) -> Poll<io::Result<usize>> {
+        use std::io::Read;
+
+        let this = self.get_mut();
+        let inner: &net::TcpStream = &this.inner;
+        match (&*inner).read_vectored(bufs) {
+            Ok(n) => Poll::Ready(Ok(n)),
+            Err(ref e) if e.kind() == io::ErrorKind::WouldBlock => {
+                if let Err(err) = this.register_interest(cx, Interest::READABLE) {
+                    return Poll::Ready(Err(err));
+                }
+                Poll::Pending
+            }
+            Err(e) => Poll::Ready(Err(e)),
+        }
+    }
+}
+
 impl AsyncWrite for TcpStream {
     fn poll_write(
         self: Pin<&mut Self>,
@@ -232,6 +255,31 @@ impl AsyncWrite for TcpStream {
             }
             Err(e) => Poll::Ready(Err(e)),
         }
+    }
+
+    fn poll_write_vectored(
+        self: Pin<&mut Self>,
+        cx: &mut Context<'_>,
+        bufs: &[IoSlice<'_>],
+    ) -> Poll<io::Result<usize>> {
+        use std::io::Write;
+
+        let this = self.get_mut();
+        let inner: &net::TcpStream = &this.inner;
+        match (&*inner).write_vectored(bufs) {
+            Ok(n) => Poll::Ready(Ok(n)),
+            Err(ref e) if e.kind() == io::ErrorKind::WouldBlock => {
+                if let Err(err) = this.register_interest(cx, Interest::WRITABLE) {
+                    return Poll::Ready(Err(err));
+                }
+                Poll::Pending
+            }
+            Err(e) => Poll::Ready(Err(e)),
+        }
+    }
+
+    fn is_write_vectored(&self) -> bool {
+        true
     }
 
     fn poll_flush(self: Pin<&mut Self>, cx: &mut Context<'_>) -> Poll<io::Result<()>> {

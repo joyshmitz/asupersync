@@ -1,7 +1,7 @@
 //! AsyncRead trait and adapters.
 
 use super::ReadBuf;
-use std::io;
+use std::io::{self, IoSliceMut};
 use std::ops::DerefMut;
 use std::pin::Pin;
 use std::task::{Context, Poll};
@@ -14,6 +14,32 @@ pub trait AsyncRead {
         cx: &mut Context<'_>,
         buf: &mut ReadBuf<'_>,
     ) -> Poll<io::Result<()>>;
+}
+
+/// Async non-blocking read into multiple buffers (vectored I/O).
+pub trait AsyncReadVectored: AsyncRead {
+    /// Attempt to read data into multiple buffers.
+    fn poll_read_vectored(
+        self: Pin<&mut Self>,
+        cx: &mut Context<'_>,
+        bufs: &mut [IoSliceMut<'_>],
+    ) -> Poll<io::Result<usize>> {
+        let mut this = self;
+        for buf in bufs {
+            if buf.is_empty() {
+                continue;
+            }
+
+            let mut read_buf = ReadBuf::new(buf);
+            return match AsyncRead::poll_read(this.as_mut(), cx, &mut read_buf) {
+                Poll::Pending => Poll::Pending,
+                Poll::Ready(Err(err)) => Poll::Ready(Err(err)),
+                Poll::Ready(Ok(())) => Poll::Ready(Ok(read_buf.filled().len())),
+            };
+        }
+
+        Poll::Ready(Ok(0))
+    }
 }
 
 /// Chain two readers.
@@ -206,6 +232,30 @@ where
         let this = self.get_mut();
         Pin::new(&mut **this).poll_read(cx, buf)
     }
+}
+
+impl<R1, R2> AsyncReadVectored for Chain<R1, R2>
+where
+    R1: AsyncRead + Unpin,
+    R2: AsyncRead + Unpin,
+{
+}
+
+impl<R> AsyncReadVectored for Take<R> where R: AsyncRead + Unpin {}
+
+impl AsyncReadVectored for &[u8] {}
+
+impl<T> AsyncReadVectored for std::io::Cursor<T> where T: AsRef<[u8]> + Unpin {}
+
+impl<R> AsyncReadVectored for &mut R where R: AsyncReadVectored + Unpin + ?Sized {}
+
+impl<R> AsyncReadVectored for Box<R> where R: AsyncReadVectored + Unpin + ?Sized {}
+
+impl<R, P> AsyncReadVectored for Pin<P>
+where
+    P: DerefMut<Target = R> + Unpin,
+    R: AsyncReadVectored + Unpin + ?Sized,
+{
 }
 
 #[cfg(test)]

@@ -40,13 +40,15 @@ pub use copy::{
     copy, copy_bidirectional, copy_buf, copy_with_progress, AsyncBufRead, Copy, CopyBidirectional,
     CopyBuf, CopyWithProgress,
 };
-pub use ext::{AsyncReadExt, ReadExact, ReadToEnd, ReadToString, ReadU8};
+pub use ext::{
+    AsyncReadExt, AsyncReadVectoredExt, ReadExact, ReadToEnd, ReadToString, ReadU8, ReadVectored,
+};
 pub use ext::{AsyncWriteExt, Buf, Flush, Shutdown, WriteAll, WriteAllBuf, WriteU8, WriteVectored};
-pub use read::{AsyncRead, Chain, Take};
+pub use read::{AsyncRead, AsyncReadVectored, Chain, Take};
 pub use read_buf::ReadBuf;
 pub use seek::AsyncSeek;
 pub use split::{split, ReadHalf, SplitStream, WriteHalf};
-pub use write::AsyncWrite;
+pub use write::{AsyncWrite, AsyncWriteVectored};
 pub use write_permit::WritePermit;
 
 pub use buf_reader::BufReader;

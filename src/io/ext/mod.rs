@@ -12,7 +12,9 @@
 mod read_ext;
 mod write_ext;
 
-pub use read_ext::{AsyncReadExt, ReadExact, ReadToEnd, ReadToString, ReadU8};
+pub use read_ext::{
+    AsyncReadExt, AsyncReadVectoredExt, ReadExact, ReadToEnd, ReadToString, ReadU8, ReadVectored,
+};
 pub use write_ext::{
     AsyncWriteExt, Buf, Flush, Shutdown, WriteAll, WriteAllBuf, WriteU8, WriteVectored,
 };

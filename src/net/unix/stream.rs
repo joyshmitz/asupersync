@@ -20,9 +20,9 @@
 //! }
 //! ```
 
-use crate::io::{AsyncRead, AsyncWrite, ReadBuf};
+use crate::io::{AsyncRead, AsyncReadVectored, AsyncWrite, ReadBuf};
 use crate::net::unix::split::{OwnedReadHalf, OwnedWriteHalf, ReadHalf, WriteHalf};
-use std::io::{self, Read, Write};
+use std::io::{self, IoSlice, IoSliceMut, Read, Write};
 use std::net::Shutdown;
 use std::os::unix::net::{self, SocketAddr};
 use std::path::Path;
@@ -423,6 +423,25 @@ impl AsyncRead for UnixStream {
     }
 }
 
+impl AsyncReadVectored for UnixStream {
+    fn poll_read_vectored(
+        self: Pin<&mut Self>,
+        cx: &mut Context<'_>,
+        bufs: &mut [IoSliceMut<'_>],
+    ) -> Poll<io::Result<usize>> {
+        let inner: &net::UnixStream = &self.inner;
+        match (&*inner).read_vectored(bufs) {
+            Ok(n) => Poll::Ready(Ok(n)),
+            Err(ref e) if e.kind() == io::ErrorKind::WouldBlock => {
+                // TODO: Register with reactor for proper wakeup
+                cx.waker().wake_by_ref();
+                Poll::Pending
+            }
+            Err(e) => Poll::Ready(Err(e)),
+        }
+    }
+}
+
 impl AsyncWrite for UnixStream {
     fn poll_write(
         self: Pin<&mut Self>,
@@ -439,6 +458,27 @@ impl AsyncWrite for UnixStream {
             }
             Err(e) => Poll::Ready(Err(e)),
         }
+    }
+
+    fn poll_write_vectored(
+        self: Pin<&mut Self>,
+        cx: &mut Context<'_>,
+        bufs: &[IoSlice<'_>],
+    ) -> Poll<io::Result<usize>> {
+        let inner: &net::UnixStream = &self.inner;
+        match (&*inner).write_vectored(bufs) {
+            Ok(n) => Poll::Ready(Ok(n)),
+            Err(ref e) if e.kind() == io::ErrorKind::WouldBlock => {
+                // TODO: Register with reactor for proper wakeup
+                cx.waker().wake_by_ref();
+                Poll::Pending
+            }
+            Err(e) => Poll::Ready(Err(e)),
+        }
+    }
+
+    fn is_write_vectored(&self) -> bool {
+        true
     }
 
     fn poll_flush(self: Pin<&mut Self>, cx: &mut Context<'_>) -> Poll<io::Result<()>> {
@@ -633,6 +673,7 @@ fn recv_with_ancillary_impl(
 #[cfg(test)]
 mod tests {
     use super::*;
+    use std::io::{IoSlice, IoSliceMut, Read};
 
     fn init_test(name: &str) {
         crate::test_utils::init_test_logging();
@@ -644,7 +685,7 @@ mod tests {
         init_test("test_pair");
         let (mut s1, mut s2) = UnixStream::pair().expect("pair failed");
 
-        s1.write_all(b"hello").expect("write failed");
+        std::io::Write::write_all(&mut s1, b"hello").expect("write failed");
         let mut buf = [0u8; 5];
         s2.read_exact(&mut buf).expect("read failed");
 
@@ -719,6 +760,51 @@ mod tests {
 
         let _stream = UnixStream::from_std(std_s1);
         crate::test_complete!("test_from_std");
+    }
+
+    #[test]
+    fn test_vectored_io() {
+        init_test("test_vectored_io");
+        futures_lite::future::block_on(async {
+            let (mut tx, mut rx) = UnixStream::pair().expect("pair failed");
+            let header = b"hi";
+            let body = b"there";
+            let bufs = [IoSlice::new(header), IoSlice::new(body)];
+
+            let wrote = crate::io::AsyncWriteExt::write_vectored(&mut tx, &bufs)
+                .await
+                .expect("write_vectored failed");
+            let expected_len = header.len() + body.len();
+            crate::assert_with_log!(wrote == expected_len, "wrote", expected_len, wrote);
+            let vectored = crate::io::AsyncWrite::is_write_vectored(&tx);
+            crate::assert_with_log!(vectored, "is_write_vectored", true, vectored);
+
+            let mut out = Vec::new();
+            while out.len() < wrote {
+                let mut a = [0u8; 2];
+                let mut b = [0u8; 8];
+                let mut rbufs = [IoSliceMut::new(&mut a), IoSliceMut::new(&mut b)];
+
+                let n = crate::io::AsyncReadVectoredExt::read_vectored(&mut rx, &mut rbufs)
+                    .await
+                    .expect("read_vectored failed");
+                if n == 0 {
+                    break;
+                }
+
+                let first = n.min(a.len());
+                out.extend_from_slice(&a[..first]);
+                if n > a.len() {
+                    out.extend_from_slice(&b[..n - a.len()]);
+                }
+            }
+
+            let mut expected = Vec::new();
+            expected.extend_from_slice(header);
+            expected.extend_from_slice(body);
+            crate::assert_with_log!(out == expected, "out", expected, out);
+        });
+        crate::test_complete!("test_vectored_io");
     }
 
     #[cfg(target_os = "linux")]

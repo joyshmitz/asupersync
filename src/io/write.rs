@@ -41,6 +41,25 @@ pub trait AsyncWrite {
     fn poll_shutdown(self: Pin<&mut Self>, cx: &mut Context<'_>) -> Poll<io::Result<()>>;
 }
 
+/// Async non-blocking write from multiple buffers (vectored I/O).
+pub trait AsyncWriteVectored: AsyncWrite {
+    /// Attempt to write data from multiple buffers (vectored I/O).
+    fn poll_write_vectored(
+        self: Pin<&mut Self>,
+        cx: &mut Context<'_>,
+        bufs: &[IoSlice<'_>],
+    ) -> Poll<io::Result<usize>> {
+        AsyncWrite::poll_write_vectored(self, cx, bufs)
+    }
+
+    /// Returns whether this writer has efficient vectored writes.
+    fn is_write_vectored(&self) -> bool {
+        AsyncWrite::is_write_vectored(self)
+    }
+}
+
+impl<W> AsyncWriteVectored for W where W: AsyncWrite + ?Sized {}
+
 impl AsyncWrite for Vec<u8> {
     fn poll_write(
         self: Pin<&mut Self>,

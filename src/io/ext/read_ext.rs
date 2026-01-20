@@ -1,9 +1,8 @@
 //! AsyncRead extension methods.
 
-use crate::io::{AsyncRead, Chain, ReadBuf, Take};
+use crate::io::{AsyncRead, AsyncReadVectored, Chain, ReadBuf, Take};
 use std::future::Future;
-use std::io;
-use std::io::ErrorKind;
+use std::io::{self, ErrorKind, IoSliceMut};
 use std::pin::Pin;
 use std::task::{Context, Poll};
 
@@ -73,6 +72,37 @@ pub trait AsyncReadExt: AsyncRead {
 }
 
 impl<R: AsyncRead + ?Sized> AsyncReadExt for R {}
+
+/// Extension trait for `AsyncReadVectored`.
+pub trait AsyncReadVectoredExt: AsyncReadVectored {
+    /// Read into multiple buffers (vectored I/O).
+    fn read_vectored<'a>(&'a mut self, bufs: &'a mut [IoSliceMut<'a>]) -> ReadVectored<'a, Self>
+    where
+        Self: Unpin,
+    {
+        ReadVectored { reader: self, bufs }
+    }
+}
+
+impl<R: AsyncReadVectored + ?Sized> AsyncReadVectoredExt for R {}
+
+/// Future for read_vectored.
+pub struct ReadVectored<'a, R: ?Sized> {
+    reader: &'a mut R,
+    bufs: &'a mut [IoSliceMut<'a>],
+}
+
+impl<R> Future for ReadVectored<'_, R>
+where
+    R: AsyncReadVectored + Unpin + ?Sized,
+{
+    type Output = io::Result<usize>;
+
+    fn poll(self: Pin<&mut Self>, cx: &mut Context<'_>) -> Poll<Self::Output> {
+        let this = self.get_mut();
+        Pin::new(&mut *this.reader).poll_read_vectored(cx, this.bufs)
+    }
+}
 
 /// Future for read_exact.
 pub struct ReadExact<'a, R: ?Sized> {
@@ -248,6 +278,7 @@ where
 #[cfg(test)]
 mod tests {
     use super::*;
+    use std::io::IoSliceMut;
     use std::pin::Pin;
     use std::sync::Arc;
     use std::task::{Context, Wake, Waker};
@@ -397,6 +428,32 @@ mod tests {
             .unwrap();
         crate::assert_with_log!(byte == b'z', "byte", b'z', byte);
         crate::test_complete!("read_u8_reads_byte");
+    }
+
+    #[test]
+    fn read_vectored_reads_prefix() {
+        init_test("read_vectored_reads_prefix");
+        let mut reader: &[u8] = b"hello";
+        let mut a = [0u8; 2];
+        let mut b = [0u8; 3];
+        let mut bufs = [IoSliceMut::new(&mut a), IoSliceMut::new(&mut b)];
+
+        let mut fut = reader.read_vectored(&mut bufs);
+        let mut fut = Pin::new(&mut fut);
+        let n = poll_ready(&mut fut)
+            .expect("future did not resolve")
+            .expect("read_vectored failed");
+
+        let mut got = Vec::new();
+        let first = n.min(a.len());
+        got.extend_from_slice(&a[..first]);
+        if n > a.len() {
+            got.extend_from_slice(&b[..n - a.len()]);
+        }
+
+        let expected = b"hello";
+        crate::assert_with_log!(got == expected[..n], "vectored prefix", &expected[..n], got);
+        crate::test_complete!("read_vectored_reads_prefix");
     }
 
     #[derive(Debug)]
