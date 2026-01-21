@@ -2,9 +2,11 @@
 //!
 //! Provides counters, gauges, and histograms for runtime statistics.
 
+use crate::types::{CancelKind, Outcome, RegionId, TaskId};
 use std::collections::HashMap;
 use std::sync::atomic::{AtomicI64, AtomicU64, Ordering};
 use std::sync::Arc;
+use std::time::Duration;
 
 /// A monotonically increasing counter.
 #[derive(Debug)]
@@ -256,6 +258,121 @@ pub enum MetricValue {
     Histogram(u64, f64),
 }
 
+/// Simplified outcome kind for metrics labeling.
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Hash)]
+pub enum OutcomeKind {
+    /// Successful completion.
+    Ok,
+    /// Application-level error.
+    Err,
+    /// Cancelled before completion.
+    Cancelled,
+    /// Task panicked.
+    Panicked,
+}
+
+impl<T, E> From<&Outcome<T, E>> for OutcomeKind {
+    fn from(outcome: &Outcome<T, E>) -> Self {
+        match outcome {
+            Outcome::Ok(_) => OutcomeKind::Ok,
+            Outcome::Err(_) => OutcomeKind::Err,
+            Outcome::Cancelled(_) => OutcomeKind::Cancelled,
+            Outcome::Panicked(_) => OutcomeKind::Panicked,
+        }
+    }
+}
+
+/// Trait for runtime metrics collection.
+///
+/// Implementations can export metrics to various backends (OpenTelemetry,
+/// Prometheus, custom sinks) or be no-op for zero overhead.
+///
+/// # Thread Safety
+///
+/// Implementations must be safe to call from any thread. Prefer atomics or
+/// lock-free aggregation on hot paths.
+pub trait MetricsProvider: Send + Sync + 'static {
+    // === Task Metrics ===
+
+    /// Called when a task is spawned.
+    fn task_spawned(&self, region_id: RegionId, task_id: TaskId);
+
+    /// Called when a task completes.
+    fn task_completed(&self, task_id: TaskId, outcome: OutcomeKind, duration: Duration);
+
+    // === Region Metrics ===
+
+    /// Called when a region is created.
+    fn region_created(&self, region_id: RegionId, parent: Option<RegionId>);
+
+    /// Called when a region is closed.
+    fn region_closed(&self, region_id: RegionId, lifetime: Duration);
+
+    // === Cancellation Metrics ===
+
+    /// Called when a cancellation is requested.
+    fn cancellation_requested(&self, region_id: RegionId, kind: CancelKind);
+
+    /// Called when drain phase completes.
+    fn drain_completed(&self, region_id: RegionId, duration: Duration);
+
+    // === Budget Metrics ===
+
+    /// Called when a deadline is set.
+    fn deadline_set(&self, region_id: RegionId, deadline: Duration);
+
+    /// Called when a deadline is exceeded.
+    fn deadline_exceeded(&self, region_id: RegionId);
+
+    // === Obligation Metrics ===
+
+    /// Called when an obligation is created.
+    fn obligation_created(&self, region_id: RegionId);
+
+    /// Called when an obligation is discharged.
+    fn obligation_discharged(&self, region_id: RegionId);
+
+    /// Called when an obligation is dropped without discharge.
+    fn obligation_leaked(&self, region_id: RegionId);
+
+    // === Scheduler Metrics ===
+
+    /// Called after each scheduler tick.
+    fn scheduler_tick(&self, tasks_polled: usize, duration: Duration);
+}
+
+/// Metrics provider that does nothing.
+///
+/// Used when metrics are disabled; the compiler should optimize calls away.
+#[derive(Debug, Default, Clone, Copy)]
+pub struct NoOpMetrics;
+
+impl MetricsProvider for NoOpMetrics {
+    fn task_spawned(&self, _: RegionId, _: TaskId) {}
+
+    fn task_completed(&self, _: TaskId, _: OutcomeKind, _: Duration) {}
+
+    fn region_created(&self, _: RegionId, _: Option<RegionId>) {}
+
+    fn region_closed(&self, _: RegionId, _: Duration) {}
+
+    fn cancellation_requested(&self, _: RegionId, _: CancelKind) {}
+
+    fn drain_completed(&self, _: RegionId, _: Duration) {}
+
+    fn deadline_set(&self, _: RegionId, _: Duration) {}
+
+    fn deadline_exceeded(&self, _: RegionId) {}
+
+    fn obligation_created(&self, _: RegionId) {}
+
+    fn obligation_discharged(&self, _: RegionId) {}
+
+    fn obligation_leaked(&self, _: RegionId) {}
+
+    fn scheduler_tick(&self, _: usize, _: Duration) {}
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
@@ -311,5 +428,16 @@ mod tests {
         let output = metrics.export_prometheus();
         assert!(output.contains("requests 10"));
         assert!(output.contains("memory 1024"));
+    }
+
+    #[test]
+    fn test_metrics_provider_object_safe() {
+        fn assert_object_safe(_: &dyn MetricsProvider) {}
+
+        let provider = NoOpMetrics::default();
+        assert_object_safe(&provider);
+
+        let boxed: Box<dyn MetricsProvider> = Box::new(NoOpMetrics::default());
+        boxed.task_spawned(RegionId::testing_default(), TaskId::testing_default());
     }
 }

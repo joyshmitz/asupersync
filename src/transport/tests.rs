@@ -559,43 +559,34 @@ mod tests {
         fn test_multipath_dedup_window_expiry() {
             init_test("test_multipath_dedup_window_expiry");
 
-            // Create deduplicator with very small window
-            // Note: DeduplicatorConfig uses entry_ttl, not window count.
-            // But test relies on count behavior?
-            // SymbolDeduplicator::prune uses TTL.
-            // SymbolDeduplicator does NOT enforce max count per object currently.
-            // So this test as written (expecting eviction by count) would fail if logic wasn't updated.
-            // We should use a short TTL and simulate time advance?
-            // Or just skip this test for now as implementation behavior changed.
-            // I'll update it to use time if possible, or comment it out?
-            // Since I am fixing "compilation" errors, I will fix the config struct.
-            // But logic might fail.
-            
+            // Create deduplicator with short TTL
             let config = DeduplicatorConfig {
-                entry_ttl: Time::from_millis(1), // Short TTL
+                entry_ttl: Time::from_millis(10), // 10ms TTL
                 ..Default::default()
             };
-            let mut dedup = SymbolDeduplicator::new(config);
+            let dedup = SymbolDeduplicator::new(config);
 
-            // Fill the window
+            // Add initial symbols at time 0
             for i in 0..5 {
                 let sym = create_symbol(i);
                 let is_new = dedup.check_and_record(sym.symbol(), PathId(0), Time::ZERO);
                 crate::assert_with_log!(is_new, &format!("sym {} new", i), true, is_new);
             }
 
-            // Adding more should evict oldest
-            for i in 5..10 {
+            // Same symbols should be duplicates at time 0
+            for i in 0..5 {
                 let sym = create_symbol(i);
-                let is_new = dedup.check_and_record(sym.symbol(), PathId(0), Time::ZERO);
-                crate::assert_with_log!(is_new, &format!("sym {} new", i), true, is_new);
+                let is_dup = !dedup.check_and_record(sym.symbol(), PathId(0), Time::ZERO);
+                crate::assert_with_log!(is_dup, &format!("sym {} duplicate", i), true, is_dup);
             }
 
-            // Old symbols (0-4) should be re-accepted after eviction
-            // Note: exact eviction behavior depends on implementation
+            // Prune with time past the TTL (time > 10ms)
+            let pruned = dedup.prune(Time::from_millis(20));
+            crate::assert_with_log!(pruned > 0, "some entries pruned", true, pruned > 0);
+
+            // After pruning, old symbols should be re-accepted as new
             let sym0 = create_symbol(0);
-            let is_new = dedup.check_and_record(sym0.symbol(), PathId(0), Time::ZERO);
-            // After adding 10 symbols with window of 5, symbol 0 should be evicted
+            let is_new = dedup.check_and_record(sym0.symbol(), PathId(0), Time::from_millis(20));
             crate::assert_with_log!(is_new, "old symbol re-accepted", true, is_new);
 
             crate::test_complete!("test_multipath_dedup_window_expiry");
@@ -1351,25 +1342,22 @@ mod tests {
             let path = PathId(1);
             let now = Time::ZERO;
 
-            // Deliver symbols in order
+            // Deliver symbols in order - each should be delivered immediately
             let s0 = Symbol::new_for_test(1, 0, 0, &[0]);
             let s1 = Symbol::new_for_test(1, 0, 1, &[1]);
             let s2 = Symbol::new_for_test(1, 0, 2, &[2]);
 
             let out0 = reorderer.process(s0, path, now);
-            crate::assert_with_log!(out0.is_empty(), "s0 delivered", true, out0.is_empty());
+            crate::assert_with_log!(out0.len() == 1, "s0 delivered", 1, out0.len());
+            crate::assert_with_log!(out0[0].esi() == 0, "s0 esi", 0, out0[0].esi());
 
             let out1 = reorderer.process(s1, path, now);
-            crate::assert_with_log!(out1.is_empty(), "s1 delivered", true, out1.is_empty());
+            crate::assert_with_log!(out1.len() == 1, "s1 delivered", 1, out1.len());
+            crate::assert_with_log!(out1[0].esi() == 1, "s1 esi", 1, out1[0].esi());
 
             let out2 = reorderer.process(s2, path, now);
-            crate::assert_with_log!(out2.len() == 1, "s2 buffered", 1, out2.len());
-            crate::assert_with_log!(
-                out2[0].esi() == 2,
-                "s2 buffered symbol",
-                2,
-                out2[0].esi()
-            );
+            crate::assert_with_log!(out2.len() == 1, "s2 delivered", 1, out2.len());
+            crate::assert_with_log!(out2[0].esi() == 2, "s2 esi", 2, out2[0].esi());
         }
 
         #[test]
@@ -1389,25 +1377,28 @@ mod tests {
             let s2 = Symbol::new_for_test(1, 0, 2, &[2]);
             let s1 = Symbol::new_for_test(1, 0, 1, &[1]);
 
+            // s0 is in-order (esi=0 when next_expected=0) -> delivered immediately
             let out0 = reorderer.process(s0, path, now);
-            crate::assert_with_log!(out0.is_empty(), "s0 delivered", true, out0.is_empty());
+            crate::assert_with_log!(out0.len() == 1, "s0 delivered", 1, out0.len());
 
+            // s2 is out-of-order (esi=2 when next_expected=1) -> buffered
             let out2 = reorderer.process(s2, path, now);
-            crate::assert_with_log!(out2.is_empty(), "s2 delivered", true, out2.is_empty());
+            crate::assert_with_log!(out2.is_empty(), "s2 buffered", true, out2.is_empty());
 
+            // s1 fills the gap -> both s1 and buffered s2 are delivered
             let out1 = reorderer.process(s1, path, now);
-            crate::assert_with_log!(out1.len() == 2, "s1+2 buffered", 2, out1.len());
+            crate::assert_with_log!(out1.len() == 2, "s1+s2 delivered", 2, out1.len());
             crate::assert_with_log!(
-                out1[0].id().esi() == 1,
-                "s1 buffered symbol",
+                out1[0].esi() == 1,
+                "first is s1",
                 1,
-                out1[0].id().esi()
+                out1[0].esi()
             );
             crate::assert_with_log!(
-                out1[1].id().esi() == 2,
-                "s2 buffered symbol",
+                out1[1].esi() == 2,
+                "second is s2",
                 2,
-                out1[1].id().esi()
+                out1[1].esi()
             );
         }
 

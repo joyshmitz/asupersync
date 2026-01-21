@@ -45,7 +45,9 @@ pub use collector::LogCollector;
 pub use context::{DiagnosticContext, Span, SpanId};
 pub use entry::LogEntry;
 pub use level::LogLevel;
-pub use metrics::{Counter, Gauge, Histogram, MetricValue, Metrics};
+pub use metrics::{
+    Counter, Gauge, Histogram, MetricValue, Metrics, MetricsProvider, NoOpMetrics, OutcomeKind,
+};
 
 /// Configuration for observability and logging.
 ///
