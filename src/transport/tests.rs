@@ -4,8 +4,8 @@ mod tests {
     use crate::security::tag::AuthenticationTag;
     use crate::transport::error::{SinkError, StreamError};
     use crate::transport::stream::{MergedStream, VecStream};
-    use crate::transport::{channel, SymbolSet, SymbolSink, SymbolSinkExt, SymbolStreamExt};
-    use crate::types::{Symbol, SymbolId, SymbolKind};
+    use crate::transport::{channel, SymbolSet, SymbolSink, SymbolSinkExt, SymbolStream, SymbolStreamExt};
+    use crate::types::{Symbol, SymbolId, SymbolKind, Time};
     use crate::Cx;
     use futures_lite::future;
     use std::future::Future;
@@ -332,7 +332,7 @@ mod tests {
         use super::*;
         use crate::transport::aggregator::{
             AggregatorConfig, MultipathAggregator, PathSelectionPolicy, PathSet,
-            SymbolDeduplicator, SymbolReorderer, TransportPath, DeduplicatorConfig, ReordererConfig,
+            SymbolDeduplicator, SymbolReorderer, TransportPath, DeduplicatorConfig, ReordererConfig, PathId
         };
         use crate::transport::mock::{mock_channel, MockNetwork, MockTransportConfig};
         use crate::transport::router::{
@@ -522,17 +522,17 @@ mod tests {
             let sym1_dup = create_symbol(0); // Duplicate of sym1
 
             let result1 = aggregator.process(sym1.symbol().clone(), PathId(0), Time::ZERO);
-            crate::assert_with_log!(!result1.symbols.is_empty(), "sym1 accepted", true, !result1.symbols.is_empty());
+            crate::assert_with_log!(!result1.ready.is_empty(), "sym1 accepted", true, !result1.ready.is_empty());
 
             let result2 = aggregator.process(sym2.symbol().clone(), PathId(1), Time::ZERO);
-            crate::assert_with_log!(!result2.symbols.is_empty(), "sym2 accepted", true, !result2.symbols.is_empty());
+            crate::assert_with_log!(!result2.ready.is_empty(), "sym2 accepted", true, !result2.ready.is_empty());
 
             let result_dup = aggregator.process(sym1_dup.symbol().clone(), PathId(1), Time::ZERO);
             crate::assert_with_log!(
-                result_dup.symbols.is_empty(),
+                result_dup.ready.is_empty(),
                 "dup rejected",
                 true,
-                result_dup.symbols.is_empty()
+                result_dup.ready.is_empty()
             );
 
             crate::test_complete!("test_multipath_aggregator_basic");
@@ -715,7 +715,8 @@ mod tests {
 
             let config = MockTransportConfig::reliable();
             let (sink1, mut stream1) = mock_channel(config.clone());
-            let (sink2, mut stream2) = mock_channel(config);
+            let (sink2, mut stream2) = mock_channel(config.clone());
+            let (sink3, mut stream3) = mock_channel(config);
 
             let table = Arc::new(RoutingTable::new());
             let e1 = table.register_endpoint(Endpoint::new(EndpointId(1), "target1"));
@@ -741,6 +742,7 @@ mod tests {
             let dispatcher = SymbolDispatcher::new(router, DispatchConfig::default());
             dispatcher.add_sink(EndpointId(1), Box::new(sink1));
             dispatcher.add_sink(EndpointId(2), Box::new(sink2));
+            dispatcher.add_sink(EndpointId(3), Box::new(sink3));
 
             future::block_on(async {
                 // Symbol 1 maps to target1 via route
@@ -1011,26 +1013,12 @@ mod tests {
 
             // First poll should be pending (no symbols available)
             let first = fut.as_mut().poll(&mut context);
-            crate::assert_with_log!(
-                matches!(first, Poll::Pending),
-                "first poll pending",
-                "Pending",
-                format!("{:?}", first)
-            );
+            assert!(matches!(first, Poll::Pending));
 
             // Cancel mid-flight
             cx.set_cancel_requested(true);
-
-            // Second poll should return cancelled
             let second = fut.as_mut().poll(&mut context);
-            crate::assert_with_log!(
-                matches!(second, Poll::Ready(Err(StreamError::Cancelled))),
-                "cancelled after pending",
-                "Ready(Cancelled)",
-                format!("{:?}", second)
-            );
-
-            crate::test_complete!("test_cancel_mid_flight_pending");
+            assert!(matches!(second, Poll::Ready(Err(StreamError::Cancelled))));
         }
 
         #[test]
@@ -1111,11 +1099,8 @@ mod tests {
                     // Use dispatcher.dispatch
                     let result = dispatcher.dispatch(sym).await;
                     // Some may fail if they hit the failing primary after 3 ops
-                    if i < 4 {
-                        // Early sends should mostly work
-                        if result.is_err() {
-                            // Primary failed, but that's expected
-                        }
+                    if result.is_err() {
+                        // Primary failed, but that's expected
                     }
                 }
 

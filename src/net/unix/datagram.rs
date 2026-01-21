@@ -14,7 +14,7 @@
 //!
 //! async fn example() -> std::io::Result<()> {
 //!     // Create a pair of connected datagrams
-//!     let (a, b) = UnixDatagram::pair()?;
+//!     let (mut a, mut b) = UnixDatagram::pair()?;
 //!
 //!     a.send(b"hello").await?;
 //!     let mut buf = [0u8; 5];
@@ -59,6 +59,9 @@ use std::task::{Context, Poll};
 /// (unless it was created with [`from_std`](Self::from_std) or is an abstract
 /// namespace socket).
 /// A Unix domain socket datagram.
+///
+/// Async methods take `&mut self` to avoid concurrent waiters clobbering
+/// the single reactor registration/waker slot.
 ///
 /// Uses interior mutability for reactor registration to allow async methods
 /// to take `&self` rather than `&mut self`, enabling concurrent use patterns.
@@ -185,7 +188,7 @@ impl UnixDatagram {
     /// # Example
     ///
     /// ```ignore
-    /// let (a, b) = UnixDatagram::pair()?;
+    /// let (mut a, mut b) = UnixDatagram::pair()?;
     /// a.send(b"ping").await?;
     /// let mut buf = [0u8; 4];
     /// let n = b.recv(&mut buf).await?;
@@ -325,10 +328,14 @@ impl UnixDatagram {
     /// # Example
     ///
     /// ```ignore
-    /// let socket = UnixDatagram::unbound()?;
+    /// let mut socket = UnixDatagram::unbound()?;
     /// let n = socket.send_to(b"hello", "/tmp/server.sock").await?;
     /// ```
-    pub async fn send_to<P: AsRef<Path>>(&self, buf: &[u8], path: P) -> io::Result<usize> {
+    pub async fn send_to<P: AsRef<Path>>(
+        &mut self,
+        buf: &[u8],
+        path: P,
+    ) -> io::Result<usize> {
         std::future::poll_fn(|cx| match self.inner.send_to(buf, &path) {
             Ok(n) => Poll::Ready(Ok(n)),
             Err(ref e) if e.kind() == io::ErrorKind::WouldBlock => {
@@ -364,12 +371,12 @@ impl UnixDatagram {
     /// # Example
     ///
     /// ```ignore
-    /// let socket = UnixDatagram::bind("/tmp/server.sock")?;
+    /// let mut socket = UnixDatagram::bind("/tmp/server.sock")?;
     /// let mut buf = [0u8; 1024];
     /// let (n, addr) = socket.recv_from(&mut buf).await?;
     /// println!("Received {} bytes from {:?}", n, addr);
     /// ```
-    pub async fn recv_from(&self, buf: &mut [u8]) -> io::Result<(usize, SocketAddr)> {
+    pub async fn recv_from(&mut self, buf: &mut [u8]) -> io::Result<(usize, SocketAddr)> {
         std::future::poll_fn(|cx| match self.inner.recv_from(buf) {
             Ok((n, addr)) => Poll::Ready(Ok((n, addr))),
             Err(ref e) if e.kind() == io::ErrorKind::WouldBlock => {
@@ -411,10 +418,10 @@ impl UnixDatagram {
     /// # Example
     ///
     /// ```ignore
-    /// let (a, b) = UnixDatagram::pair()?;
+    /// let (mut a, _b) = UnixDatagram::pair()?;
     /// let n = a.send(b"hello").await?;
     /// ```
-    pub async fn send(&self, buf: &[u8]) -> io::Result<usize> {
+    pub async fn send(&mut self, buf: &[u8]) -> io::Result<usize> {
         std::future::poll_fn(|cx| match self.inner.send(buf) {
             Ok(n) => Poll::Ready(Ok(n)),
             Err(ref e) if e.kind() == io::ErrorKind::WouldBlock => {
@@ -453,12 +460,12 @@ impl UnixDatagram {
     /// # Example
     ///
     /// ```ignore
-    /// let (a, b) = UnixDatagram::pair()?;
+    /// let (mut a, mut b) = UnixDatagram::pair()?;
     /// a.send(b"hello").await?;
     /// let mut buf = [0u8; 5];
     /// let n = b.recv(&mut buf).await?;
     /// ```
-    pub async fn recv(&self, buf: &mut [u8]) -> io::Result<usize> {
+    pub async fn recv(&mut self, buf: &mut [u8]) -> io::Result<usize> {
         std::future::poll_fn(|cx| match self.inner.recv(buf) {
             Ok(n) => Poll::Ready(Ok(n)),
             Err(ref e) if e.kind() == io::ErrorKind::WouldBlock => {
@@ -567,7 +574,7 @@ impl UnixDatagram {
     /// Polls for read readiness.
     ///
     /// This is useful for implementing custom poll loops.
-    pub fn poll_recv_ready(&self, cx: &mut Context<'_>) -> Poll<io::Result<()>> {
+    pub fn poll_recv_ready(&mut self, cx: &mut Context<'_>) -> Poll<io::Result<()>> {
         use std::os::unix::io::AsRawFd;
 
         // Try a zero-byte peek to check readiness
@@ -600,7 +607,7 @@ impl UnixDatagram {
     /// Polls for write readiness.
     ///
     /// This is useful for implementing custom poll loops.
-    pub fn poll_send_ready(&self, cx: &mut Context<'_>) -> Poll<io::Result<()>> {
+    pub fn poll_send_ready(&mut self, cx: &mut Context<'_>) -> Poll<io::Result<()>> {
         use std::os::unix::io::AsRawFd;
 
         // Try a zero-byte send to check write readiness
@@ -632,7 +639,7 @@ impl UnixDatagram {
     /// Peeks at incoming data without consuming it.
     ///
     /// Like [`recv`](Self::recv), but the data remains in the receive buffer.
-    pub async fn peek(&self, buf: &mut [u8]) -> io::Result<usize> {
+    pub async fn peek(&mut self, buf: &mut [u8]) -> io::Result<usize> {
         use std::os::unix::io::AsRawFd;
 
         std::future::poll_fn(|cx| {
@@ -666,7 +673,7 @@ impl UnixDatagram {
     /// Peeks at incoming data and returns the source address.
     ///
     /// Like [`recv_from`](Self::recv_from), but the data remains in the receive buffer.
-    pub async fn peek_from(&self, buf: &mut [u8]) -> io::Result<(usize, SocketAddr)> {
+    pub async fn peek_from(&mut self, buf: &mut [u8]) -> io::Result<(usize, SocketAddr)> {
         use std::os::unix::io::AsRawFd;
 
         std::future::poll_fn(|cx| {
@@ -843,7 +850,7 @@ mod tests {
     fn test_pair() {
         init_test("test_datagram_pair");
         futures_lite::future::block_on(async {
-            let (a, b) = UnixDatagram::pair().expect("pair failed");
+            let (mut a, mut b) = UnixDatagram::pair().expect("pair failed");
 
             a.send(b"hello").await.expect("send failed");
             let mut buf = [0u8; 5];
@@ -862,8 +869,8 @@ mod tests {
             let dir = tempdir().expect("create temp dir");
             let server_path = dir.path().join("server.sock");
 
-            let server = UnixDatagram::bind(&server_path).expect("bind failed");
-            let client = UnixDatagram::unbound().expect("unbound failed");
+            let mut server = UnixDatagram::bind(&server_path).expect("bind failed");
+            let mut client = UnixDatagram::unbound().expect("unbound failed");
 
             // Send from client to server
             let sent = client
@@ -889,8 +896,8 @@ mod tests {
             let server_path = dir.path().join("server.sock");
             let client_path = dir.path().join("client.sock");
 
-            let server = UnixDatagram::bind(&server_path).expect("bind server failed");
-            let client = UnixDatagram::bind(&client_path).expect("bind client failed");
+            let mut server = UnixDatagram::bind(&server_path).expect("bind server failed");
+            let mut client = UnixDatagram::bind(&client_path).expect("bind client failed");
 
             // Connect client to server
             client.connect(&server_path).expect("connect failed");
@@ -1010,7 +1017,7 @@ mod tests {
     fn test_peek() {
         init_test("test_datagram_peek");
         futures_lite::future::block_on(async {
-            let (a, b) = UnixDatagram::pair().expect("pair failed");
+            let (mut a, mut b) = UnixDatagram::pair().expect("pair failed");
 
             a.send(b"hello").await.expect("send failed");
 
@@ -1035,9 +1042,9 @@ mod tests {
         init_test("test_datagram_abstract_socket");
         futures_lite::future::block_on(async {
             let server_name = b"asupersync_test_datagram_abstract";
-            let server = UnixDatagram::bind_abstract(server_name).expect("bind failed");
+            let mut server = UnixDatagram::bind_abstract(server_name).expect("bind failed");
 
-            let client = UnixDatagram::unbound().expect("unbound failed");
+            let mut client = UnixDatagram::unbound().expect("unbound failed");
             client
                 .connect_abstract(server_name)
                 .expect("connect failed");
@@ -1071,7 +1078,7 @@ mod tests {
         }
 
         // Create a pair and drain the socket to ensure WouldBlock on recv
-        let (a, b) = UnixDatagram::pair().expect("pair failed");
+        let (mut a, mut b) = UnixDatagram::pair().expect("pair failed");
 
         // Set up reactor context
         let reactor = Arc::new(LabReactor::new());
@@ -1141,7 +1148,7 @@ mod tests {
         }
 
         // Create a pair
-        let (a, _b) = UnixDatagram::pair().expect("pair failed");
+        let (mut a, _b) = UnixDatagram::pair().expect("pair failed");
 
         // Set up reactor context
         let reactor = Arc::new(LabReactor::new());

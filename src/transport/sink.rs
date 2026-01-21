@@ -10,7 +10,7 @@ use std::sync::Arc;
 use std::task::{Context, Poll};
 
 /// A sink for outgoing symbols.
-pub trait SymbolSink: Send {
+pub trait SymbolSink: Send + Unpin {
     /// Send a symbol.
     fn poll_send(
         self: Pin<&mut Self>,
