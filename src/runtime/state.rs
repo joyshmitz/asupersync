@@ -1141,7 +1141,7 @@ impl Default for RuntimeState {
 }
 
 /// Serializable identifier snapshot.
-#[derive(Debug, Clone, Copy, Serialize, Deserialize)]
+#[derive(Debug, Clone, Copy, Serialize, Deserialize, PartialEq, Eq)]
 pub struct IdSnapshot {
     /// Arena index for the entity.
     pub index: u32,
@@ -1381,12 +1381,20 @@ pub enum CancelKindSnapshot {
     User,
     /// Deadline or timeout cancellation.
     Timeout,
+    /// Deadline budget exhaustion.
+    Deadline,
+    /// Poll quota exhaustion.
+    PollQuota,
+    /// Cost budget exhaustion.
+    CostBudget,
     /// Fail-fast cancellation.
     FailFast,
     /// Race-loser cancellation.
     RaceLost,
     /// Parent region cancelled.
     ParentCancelled,
+    /// Resource unavailability cancellation.
+    ResourceUnavailable,
     /// Runtime shutdown cancellation.
     Shutdown,
 }
@@ -1396,9 +1404,13 @@ impl From<CancelKind> for CancelKindSnapshot {
         match kind {
             CancelKind::User => Self::User,
             CancelKind::Timeout => Self::Timeout,
+            CancelKind::Deadline => Self::Deadline,
+            CancelKind::PollQuota => Self::PollQuota,
+            CancelKind::CostBudget => Self::CostBudget,
             CancelKind::FailFast => Self::FailFast,
             CancelKind::RaceLost => Self::RaceLost,
             CancelKind::ParentCancelled => Self::ParentCancelled,
+            CancelKind::ResourceUnavailable => Self::ResourceUnavailable,
             CancelKind::Shutdown => Self::Shutdown,
         }
     }
@@ -1409,15 +1421,30 @@ impl From<CancelKind> for CancelKindSnapshot {
 pub struct CancelReasonSnapshot {
     /// Cancellation kind.
     pub kind: CancelKindSnapshot,
+    /// Originating region identifier.
+    pub origin_region: IdSnapshot,
+    /// Originating task identifier, if any.
+    pub origin_task: Option<IdSnapshot>,
+    /// Timestamp when cancellation was requested (nanoseconds).
+    pub timestamp: u64,
     /// Optional static message.
     pub message: Option<String>,
+    /// Optional parent cause.
+    pub cause: Option<Box<CancelReasonSnapshot>>,
 }
 
 impl From<&CancelReason> for CancelReasonSnapshot {
     fn from(reason: &CancelReason) -> Self {
         Self {
             kind: CancelKindSnapshot::from(reason.kind()),
+            origin_region: reason.origin_region.into(),
+            origin_task: reason.origin_task.map(IdSnapshot::from),
+            timestamp: reason.timestamp.as_nanos(),
             message: reason.message.map(str::to_string),
+            cause: reason
+                .cause
+                .as_deref()
+                .map(|cause| Box::new(CancelReasonSnapshot::from(cause))),
         }
     }
 }
@@ -1802,6 +1829,7 @@ pub struct HeldObligationSnapshot {
 mod tests {
     use super::*;
     use crate::record::task::TaskState;
+    use crate::record::{ObligationKind, ObligationRecord};
     use crate::test_utils::init_test_logging;
     use crate::types::CancelKind;
     use crate::util::ArenaIndex;
@@ -1826,6 +1854,62 @@ mod tests {
             .add_task(id);
         crate::assert_with_log!(added, "task added to region", true, added);
         id
+    }
+
+    #[test]
+    fn snapshot_captures_entities() {
+        init_test("snapshot_captures_entities");
+        let mut state = RuntimeState::new();
+        let region = state.create_root_region(Budget::INFINITE);
+
+        let (task_id, _handle) = state
+            .create_task(region, Budget::INFINITE, async { 42 })
+            .expect("task create");
+
+        let obl_idx = state.obligations.insert(ObligationRecord::new(
+            ObligationId::from_arena(ArenaIndex::new(0, 0)),
+            ObligationKind::SendPermit,
+            task_id,
+            region,
+            state.now,
+        ));
+        let obl_id = ObligationId::from_arena(obl_idx);
+        state
+            .obligations
+            .get_mut(obl_idx)
+            .expect("obligation missing")
+            .id = obl_id;
+
+        let snapshot = state.snapshot();
+        crate::assert_with_log!(
+            snapshot.regions.len() == 1,
+            "region count",
+            1,
+            snapshot.regions.len()
+        );
+        crate::assert_with_log!(
+            snapshot.tasks.len() == 1,
+            "task count",
+            1,
+            snapshot.tasks.len()
+        );
+        crate::assert_with_log!(
+            snapshot.obligations.len() == 1,
+            "obligation count",
+            1,
+            snapshot.obligations.len()
+        );
+
+        let task_snapshot = snapshot
+            .tasks
+            .iter()
+            .find(|t| t.id == IdSnapshot::from(task_id))
+            .expect("task snapshot missing");
+        let has_obligation = task_snapshot
+            .obligations
+            .contains(&IdSnapshot::from(obl_id));
+        crate::assert_with_log!(has_obligation, "task has obligation", true, has_obligation);
+        crate::test_complete!("snapshot_captures_entities");
     }
 
     #[test]
