@@ -260,6 +260,35 @@ impl Cx {
         )
     }
 
+    /// Creates a test-only capability context with a specified budget.
+    ///
+    /// Similar to [`Self::for_testing()`] but allows specifying a custom budget
+    /// for testing timeout behavior.
+    ///
+    /// # Example
+    ///
+    /// ```ignore
+    /// use asupersync::{Cx, Budget, Time};
+    ///
+    /// // Create a context with a 30-second deadline
+    /// let cx = Cx::for_testing_with_budget(
+    ///     Budget::new().with_deadline(Time::from_secs(30))
+    /// );
+    /// ```
+    ///
+    /// # Note
+    ///
+    /// This API is intended for testing only. Production code should receive
+    /// Cx instances from the runtime, not construct them directly.
+    #[must_use]
+    pub fn for_testing_with_budget(budget: Budget) -> Self {
+        Self::new(
+            RegionId::new_for_test(0, 0),
+            TaskId::new_for_test(0, 0),
+            budget,
+        )
+    }
+
     /// Returns the current task context, if one is set.
     ///
     /// This is set by the runtime while polling a task.
