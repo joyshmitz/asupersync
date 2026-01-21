@@ -62,8 +62,8 @@ fn main() {
     println!("Simulating runtime activity...");
 
     // Simulate task lifecycle
-    use asupersync::types::{RegionId, TaskId};
     use asupersync::observability::OutcomeKind;
+    use asupersync::types::{RegionId, TaskId};
 
     // Spawn some tasks
     for i in 0..10 {

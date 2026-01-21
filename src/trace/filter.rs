@@ -634,8 +634,8 @@ mod tests {
 
     #[test]
     fn include_kinds_filter() {
-        let mut filter = TraceFilter::new()
-            .include_kinds([EventCategory::Scheduling, EventCategory::Time]);
+        let mut filter =
+            TraceFilter::new().include_kinds([EventCategory::Scheduling, EventCategory::Time]);
 
         let scheduling = TestEvent {
             kind: EventCategory::Scheduling,

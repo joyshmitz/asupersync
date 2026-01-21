@@ -73,8 +73,8 @@ pub struct TimerWheelConfig {
 impl Default for TimerWheelConfig {
     fn default() -> Self {
         Self {
-            max_wheel_duration: Duration::from_secs(86_400),    // 24 hours
-            max_timer_duration: Duration::from_secs(604_800),   // 7 days
+            max_wheel_duration: Duration::from_secs(86_400), // 24 hours
+            max_timer_duration: Duration::from_secs(604_800), // 7 days
         }
     }
 }
@@ -294,7 +294,11 @@ impl TimerWheel {
     /// Creates a new timer wheel starting at the given time.
     #[must_use]
     pub fn new_at(now: Time) -> Self {
-        Self::with_config(now, TimerWheelConfig::default(), CoalescingConfig::default())
+        Self::with_config(
+            now,
+            TimerWheelConfig::default(),
+            CoalescingConfig::default(),
+        )
     }
 
     /// Creates a new timer wheel with custom configuration.
@@ -701,12 +705,20 @@ impl TimerWheel {
     #[must_use]
     pub fn coalescing_group_size(&self, now: Time) -> usize {
         if !self.coalescing.enabled {
-            return self.ready.iter().filter(|e| self.is_live(e) && e.deadline <= now).count();
+            return self
+                .ready
+                .iter()
+                .filter(|e| self.is_live(e) && e.deadline <= now)
+                .count();
         }
 
         let window_ns = self.coalescing.coalesce_window.as_nanos() as u64;
         if window_ns == 0 {
-            return self.ready.iter().filter(|e| self.is_live(e) && e.deadline <= now).count();
+            return self
+                .ready
+                .iter()
+                .filter(|e| self.is_live(e) && e.deadline <= now)
+                .count();
         }
 
         let now_ns = now.as_nanos();
@@ -853,8 +865,7 @@ mod tests {
     #[test]
     fn timer_at_exactly_max_duration() {
         init_test("timer_at_exactly_max_duration");
-        let config = TimerWheelConfig::new()
-            .max_timer_duration(Duration::from_secs(3600)); // 1 hour max
+        let config = TimerWheelConfig::new().max_timer_duration(Duration::from_secs(3600)); // 1 hour max
         let mut wheel = TimerWheel::with_config(Time::ZERO, config, CoalescingConfig::default());
         let counter = Arc::new(AtomicU64::new(0));
         let waker = counter_waker(counter.clone());
@@ -862,7 +873,12 @@ mod tests {
         // Timer at exactly 1 hour (the max)
         let deadline = Time::from_secs(3600);
         let result = wheel.try_register(deadline, waker);
-        crate::assert_with_log!(result.is_ok(), "at max duration allowed", true, result.is_ok());
+        crate::assert_with_log!(
+            result.is_ok(),
+            "at max duration allowed",
+            true,
+            result.is_ok()
+        );
 
         // Timer should fire when time advances
         let wakers = wheel.collect_expired(deadline);
@@ -873,8 +889,7 @@ mod tests {
     #[test]
     fn timer_beyond_max_duration_rejected() {
         init_test("timer_beyond_max_duration_rejected");
-        let config = TimerWheelConfig::new()
-            .max_timer_duration(Duration::from_secs(3600)); // 1 hour max
+        let config = TimerWheelConfig::new().max_timer_duration(Duration::from_secs(3600)); // 1 hour max
         let mut wheel = TimerWheel::with_config(Time::ZERO, config, CoalescingConfig::default());
         let counter = Arc::new(AtomicU64::new(0));
         let waker = counter_waker(counter.clone());
@@ -882,7 +897,12 @@ mod tests {
         // Timer at 1 hour + 1ms (beyond max)
         let deadline = Time::from_nanos(3600 * 1_000_000_000 + 1_000_000);
         let result = wheel.try_register(deadline, waker);
-        crate::assert_with_log!(result.is_err(), "beyond max rejected", true, result.is_err());
+        crate::assert_with_log!(
+            result.is_err(),
+            "beyond max rejected",
+            true,
+            result.is_err()
+        );
 
         let err = result.unwrap_err();
         crate::assert_with_log!(
@@ -928,11 +948,8 @@ mod tests {
     fn coalescing_100_timers_within_1ms_window() {
         init_test("coalescing_100_timers_within_1ms_window");
         let coalescing = CoalescingConfig::enabled_with_window(Duration::from_millis(1));
-        let mut wheel = TimerWheel::with_config(
-            Time::ZERO,
-            TimerWheelConfig::default(),
-            coalescing,
-        );
+        let mut wheel =
+            TimerWheel::with_config(Time::ZERO, TimerWheelConfig::default(), coalescing);
 
         let counter = Arc::new(AtomicU64::new(0));
 
@@ -946,7 +963,12 @@ mod tests {
             wheel.register(deadline, waker);
         }
 
-        crate::assert_with_log!(wheel.len() == 100, "100 timers registered", 100, wheel.len());
+        crate::assert_with_log!(
+            wheel.len() == 100,
+            "100 timers registered",
+            100,
+            wheel.len()
+        );
 
         // Check coalescing group size
         let group_size = wheel.coalescing_group_size(Time::from_nanos(500_000));
@@ -1012,19 +1034,16 @@ mod tests {
         init_test("coalescing_min_group_size");
         let coalescing = CoalescingConfig::new()
             .coalesce_window(Duration::from_millis(5))
-            .min_group_size(5)  // Only coalesce if 5+ timers
+            .min_group_size(5) // Only coalesce if 5+ timers
             .enable();
-        let mut wheel = TimerWheel::with_config(
-            Time::ZERO,
-            TimerWheelConfig::default(),
-            coalescing,
-        );
+        let mut wheel =
+            TimerWheel::with_config(Time::ZERO, TimerWheelConfig::default(), coalescing);
 
         // Register only 3 timers within the window
         let counter = Arc::new(AtomicU64::new(0));
         for i in 0..3 {
             let waker = counter_waker(counter.clone());
-            wheel.register(Time::from_nanos(i * 100_000), waker);  // 0, 0.1ms, 0.2ms
+            wheel.register(Time::from_nanos(i * 100_000), waker); // 0, 0.1ms, 0.2ms
         }
 
         // Even though we have coalescing enabled, group_size < min_group_size
@@ -1058,16 +1077,16 @@ mod tests {
         // Level 2: ~65s slots, range ~4.6h
         // Level 3: ~4.6h slots, range ~37.2h
         let intervals = [
-            Time::from_millis(10),      // Level 0
-            Time::from_millis(500),     // Level 1
-            Time::from_secs(30),        // Level 1
-            Time::from_secs(120),       // Level 2
-            Time::from_secs(3600),      // Level 2 (1 hour)
-            Time::from_secs(7200),      // Level 2 (2 hours)
-            Time::from_secs(18000),     // Level 3 (5 hours)
-            Time::from_secs(36000),     // Level 3 (10 hours)
-            Time::from_secs(50000),     // Overflow (>37.2h but within 7d)
-            Time::from_secs(86400),     // Overflow (24 hours)
+            Time::from_millis(10),  // Level 0
+            Time::from_millis(500), // Level 1
+            Time::from_secs(30),    // Level 1
+            Time::from_secs(120),   // Level 2
+            Time::from_secs(3600),  // Level 2 (1 hour)
+            Time::from_secs(7200),  // Level 2 (2 hours)
+            Time::from_secs(18000), // Level 3 (5 hours)
+            Time::from_secs(36000), // Level 3 (10 hours)
+            Time::from_secs(50000), // Overflow (>37.2h but within 7d)
+            Time::from_secs(86400), // Overflow (24 hours)
         ];
 
         for (i, &deadline) in intervals.iter().enumerate() {

@@ -32,9 +32,7 @@
 //! }
 //! ```
 
-use super::file::{
-    TraceFileError, TraceFileResult, HEADER_SIZE, TRACE_FILE_VERSION, TRACE_MAGIC,
-};
+use super::file::{TraceFileError, TraceFileResult, HEADER_SIZE, TRACE_FILE_VERSION, TRACE_MAGIC};
 use super::replay::{ReplayEvent, TraceMetadata, REPLAY_SCHEMA_VERSION};
 use std::fs::File;
 use std::io::{BufReader, Read, Seek, SeekFrom};
@@ -787,8 +785,7 @@ mod tests {
         .expect("serialize unknown event");
         file.write_all(&(unknown_event.len() as u32).to_le_bytes())
             .expect("write unknown event len");
-        file.write_all(&unknown_event)
-            .expect("write unknown event");
+        file.write_all(&unknown_event).expect("write unknown event");
 
         // Event 3: Known event (TaskYielded)
         let event3 = ReplayEvent::TaskYielded {

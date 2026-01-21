@@ -241,75 +241,63 @@ fn bench_throughput_10k(c: &mut Criterion) {
         group.throughput(Throughput::Elements(size as u64));
 
         // Insert throughput
-        group.bench_with_input(
-            BenchmarkId::new("insert", size),
-            &size,
-            |b, &size| {
-                b.iter(|| {
-                    let mut wheel = TimerWheel::new();
-                    for i in 0..size {
-                        wheel.register(Time::from_millis(i as u64 + 1), noop_waker());
-                    }
-                    black_box(wheel.len());
-                });
-            },
-        );
+        group.bench_with_input(BenchmarkId::new("insert", size), &size, |b, &size| {
+            b.iter(|| {
+                let mut wheel = TimerWheel::new();
+                for i in 0..size {
+                    wheel.register(Time::from_millis(i as u64 + 1), noop_waker());
+                }
+                black_box(wheel.len());
+            });
+        });
 
         // Cancel throughput
-        group.bench_with_input(
-            BenchmarkId::new("cancel", size),
-            &size,
-            |b, &size| {
-                b.iter_custom(|iters| {
-                    let mut total = std::time::Duration::ZERO;
+        group.bench_with_input(BenchmarkId::new("cancel", size), &size, |b, &size| {
+            b.iter_custom(|iters| {
+                let mut total = std::time::Duration::ZERO;
 
-                    for _ in 0..iters {
-                        let mut wheel = TimerWheel::new();
-                        let handles: Vec<_> = (0..size)
-                            .map(|i| wheel.register(Time::from_millis(i as u64 + 1), noop_waker()))
-                            .collect();
+                for _ in 0..iters {
+                    let mut wheel = TimerWheel::new();
+                    let handles: Vec<_> = (0..size)
+                        .map(|i| wheel.register(Time::from_millis(i as u64 + 1), noop_waker()))
+                        .collect();
 
-                        let start = std::time::Instant::now();
-                        for handle in handles {
-                            wheel.cancel(&handle);
-                        }
-                        total += start.elapsed();
+                    let start = std::time::Instant::now();
+                    for handle in handles {
+                        wheel.cancel(&handle);
                     }
-                    total
-                });
-            },
-        );
+                    total += start.elapsed();
+                }
+                total
+            });
+        });
 
         // Fire throughput (all at once)
-        group.bench_with_input(
-            BenchmarkId::new("fire_all", size),
-            &size,
-            |b, &size| {
-                b.iter_custom(|iters| {
-                    let mut total = std::time::Duration::ZERO;
+        group.bench_with_input(BenchmarkId::new("fire_all", size), &size, |b, &size| {
+            b.iter_custom(|iters| {
+                let mut total = std::time::Duration::ZERO;
 
-                    for _ in 0..iters {
-                        let mut wheel = TimerWheel::new();
-                        let counter = Arc::new(AtomicU64::new(0));
+                for _ in 0..iters {
+                    let mut wheel = TimerWheel::new();
+                    let counter = Arc::new(AtomicU64::new(0));
 
-                        // All timers at same deadline
-                        for _ in 0..size {
-                            wheel.register(Time::from_millis(100), counter_waker(counter.clone()));
-                        }
-
-                        let start = std::time::Instant::now();
-                        let wakers = wheel.collect_expired(Time::from_millis(100));
-                        for waker in &wakers {
-                            waker.wake_by_ref();
-                        }
-                        total += start.elapsed();
-
-                        assert_eq!(counter.load(Ordering::Relaxed), size as u64);
+                    // All timers at same deadline
+                    for _ in 0..size {
+                        wheel.register(Time::from_millis(100), counter_waker(counter.clone()));
                     }
-                    total
-                });
-            },
-        );
+
+                    let start = std::time::Instant::now();
+                    let wakers = wheel.collect_expired(Time::from_millis(100));
+                    for waker in &wakers {
+                        waker.wake_by_ref();
+                    }
+                    total += start.elapsed();
+
+                    assert_eq!(counter.load(Ordering::Relaxed), size as u64);
+                }
+                total
+            });
+        });
     }
 
     group.finish();
@@ -328,7 +316,7 @@ fn bench_coalescing(c: &mut Criterion) {
             let mut total = std::time::Duration::ZERO;
 
             for _ in 0..iters {
-                let mut wheel = TimerWheel::new();  // Coalescing disabled
+                let mut wheel = TimerWheel::new(); // Coalescing disabled
 
                 // 100 timers spread over 1ms
                 for i in 0..100 {
@@ -350,11 +338,8 @@ fn bench_coalescing(c: &mut Criterion) {
 
             for _ in 0..iters {
                 let coalescing = CoalescingConfig::enabled_with_window(Duration::from_millis(1));
-                let mut wheel = TimerWheel::with_config(
-                    Time::ZERO,
-                    TimerWheelConfig::default(),
-                    coalescing,
-                );
+                let mut wheel =
+                    TimerWheel::with_config(Time::ZERO, TimerWheelConfig::default(), coalescing);
 
                 // 100 timers spread over 1ms
                 for i in 0..100 {
@@ -373,11 +358,8 @@ fn bench_coalescing(c: &mut Criterion) {
     // Coalescing group size calculation
     group.bench_function("group_size_calculation", |b| {
         let coalescing = CoalescingConfig::enabled_with_window(Duration::from_millis(1));
-        let mut wheel = TimerWheel::with_config(
-            Time::ZERO,
-            TimerWheelConfig::default(),
-            coalescing,
-        );
+        let mut wheel =
+            TimerWheel::with_config(Time::ZERO, TimerWheelConfig::default(), coalescing);
 
         // 100 timers spread over 0.5ms
         for i in 0..100 {
@@ -461,14 +443,17 @@ fn bench_config(c: &mut Criterion) {
         let coalescing = CoalescingConfig::enabled_with_window(Duration::from_millis(1));
 
         b.iter(|| {
-            black_box(TimerWheel::with_config(Time::ZERO, config.clone(), coalescing.clone()));
+            black_box(TimerWheel::with_config(
+                Time::ZERO,
+                config.clone(),
+                coalescing.clone(),
+            ));
         });
     });
 
     // try_register validation overhead
     group.bench_function("try_register_validation", |b| {
-        let config = TimerWheelConfig::new()
-            .max_timer_duration(Duration::from_secs(3600));
+        let config = TimerWheelConfig::new().max_timer_duration(Duration::from_secs(3600));
         let mut wheel = TimerWheel::with_config(Time::ZERO, config, CoalescingConfig::default());
 
         b.iter(|| {
