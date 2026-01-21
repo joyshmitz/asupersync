@@ -6,17 +6,17 @@
 //! - `SymbolDispatcher`: Sends symbols to resolved destinations
 //! - Load balancing strategies: round-robin, weighted, least-connections
 
+use crate::cx::Cx;
 use crate::error::{Error, ErrorKind};
+use crate::security::authenticated::AuthenticatedSymbol;
+use crate::sync::Mutex;
+use crate::sync::OwnedMutexGuard;
+use crate::transport::sink::{SymbolSink, SymbolSinkExt};
 use crate::types::symbol::{ObjectId, Symbol};
 use crate::types::{RegionId, Time};
 use std::collections::HashMap;
 use std::sync::atomic::{AtomicU32, AtomicU64, Ordering};
 use std::sync::{Arc, RwLock};
-use crate::security::authenticated::AuthenticatedSymbol;
-use crate::transport::sink::{SymbolSink, SymbolSinkExt};
-use crate::sync::Mutex;
-use crate::cx::Cx;
-use crate::sync::OwnedMutexGuard;
 
 // ============================================================================
 // Endpoint Types
@@ -852,8 +852,13 @@ impl std::fmt::Debug for SymbolDispatcher {
             .field("active_dispatches", &self.active_dispatches)
             .field("total_dispatched", &self.total_dispatched)
             .field("total_failures", &self.total_failures)
-            .field("sinks", &format_args!("<{} sinks>",
-                self.sinks.read().map(|s| s.len()).unwrap_or(0)))
+            .field(
+                "sinks",
+                &format_args!(
+                    "<{} sinks>",
+                    self.sinks.read().map(|s| s.len()).unwrap_or(0)
+                ),
+            )
             .finish()
     }
 }
@@ -881,7 +886,11 @@ impl SymbolDispatcher {
     }
 
     /// Dispatches a symbol using the default strategy.
-    pub async fn dispatch(&self, cx: &Cx, symbol: AuthenticatedSymbol) -> Result<DispatchResult, DispatchError> {
+    pub async fn dispatch(
+        &self,
+        cx: &Cx,
+        symbol: AuthenticatedSymbol,
+    ) -> Result<DispatchResult, DispatchError> {
         self.dispatch_with_strategy(cx, symbol, self.config.default_strategy)
             .await
     }
@@ -902,7 +911,9 @@ impl SymbolDispatcher {
 
         let result = match strategy {
             DispatchStrategy::Unicast => self.dispatch_unicast(cx, &symbol).await,
-            DispatchStrategy::Multicast { count } => self.dispatch_multicast(cx, &symbol, count).await,
+            DispatchStrategy::Multicast { count } => {
+                self.dispatch_multicast(cx, &symbol, count).await
+            }
             DispatchStrategy::Broadcast => self.dispatch_broadcast(cx, &symbol).await,
             DispatchStrategy::QuorumCast { required } => {
                 self.dispatch_quorum(cx, &symbol, required).await
@@ -928,7 +939,11 @@ impl SymbolDispatcher {
 
     /// Dispatches to a single endpoint.
     #[allow(clippy::unused_async)]
-    async fn dispatch_unicast(&self, cx: &Cx, symbol: &AuthenticatedSymbol) -> Result<DispatchResult, DispatchError> {
+    async fn dispatch_unicast(
+        &self,
+        cx: &Cx,
+        symbol: &AuthenticatedSymbol,
+    ) -> Result<DispatchResult, DispatchError> {
         let route = self.router.route(symbol.symbol())?;
 
         // Get sink
@@ -939,14 +954,14 @@ impl SymbolDispatcher {
 
         if let Some(sink) = sink {
             route.endpoint.acquire_connection();
-            
+
             // Acquire lock asynchronously
             let mut guard: OwnedMutexGuard<Box<dyn SymbolSink>> = OwnedMutexGuard::lock(sink, cx)
                 .await
-                .map_err(|_| DispatchError::Timeout)?; 
+                .map_err(|_| DispatchError::Timeout)?;
 
             let result = guard.send(symbol.clone()).await;
-            
+
             let success = result.is_ok();
 
             route.endpoint.release_connection();
@@ -968,11 +983,11 @@ impl SymbolDispatcher {
                 })
             }
         } else {
-             // Fallback to simulation if no sink registered (for existing logic)
-             route.endpoint.acquire_connection();
-             let success = true; 
-             route.endpoint.release_connection();
-             if success {
+            // Fallback to simulation if no sink registered (for existing logic)
+            route.endpoint.acquire_connection();
+            let success = true;
+            route.endpoint.release_connection();
+            if success {
                 route.endpoint.record_success(Time::ZERO);
                 Ok(DispatchResult {
                     successes: 1,
@@ -983,7 +998,10 @@ impl SymbolDispatcher {
                 })
             } else {
                 // ...
-                Err(DispatchError::SendFailed { endpoint: route.endpoint.id, reason: "Simulation failed".into() })
+                Err(DispatchError::SendFailed {
+                    endpoint: route.endpoint.id,
+                    reason: "Simulation failed".into(),
+                })
             }
         }
     }
@@ -1019,7 +1037,9 @@ impl SymbolDispatcher {
             .collect();
 
         if available.is_empty() {
-            return Err(DispatchError::RoutingFailed(RoutingError::NoHealthyEndpoints { object_id }));
+            return Err(DispatchError::RoutingFailed(
+                RoutingError::NoHealthyEndpoints { object_id },
+            ));
         }
 
         let selected_count = count.min(available.len());
@@ -1081,7 +1101,11 @@ impl SymbolDispatcher {
 
     /// Dispatches to all endpoints.
     #[allow(clippy::unused_async)]
-    async fn dispatch_broadcast(&self, cx: &Cx, symbol: &AuthenticatedSymbol) -> Result<DispatchResult, DispatchError> {
+    async fn dispatch_broadcast(
+        &self,
+        cx: &Cx,
+        symbol: &AuthenticatedSymbol,
+    ) -> Result<DispatchResult, DispatchError> {
         let endpoints = self.router.table().healthy_endpoints();
 
         if endpoints.is_empty() {

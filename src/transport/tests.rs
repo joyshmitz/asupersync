@@ -4,7 +4,9 @@ mod tests {
     use crate::security::tag::AuthenticationTag;
     use crate::transport::error::{SinkError, StreamError};
     use crate::transport::stream::{MergedStream, VecStream};
-    use crate::transport::{channel, SymbolSet, SymbolSink, SymbolSinkExt, SymbolStream, SymbolStreamExt};
+    use crate::transport::{
+        channel, SymbolSet, SymbolSink, SymbolSinkExt, SymbolStream, SymbolStreamExt,
+    };
     use crate::types::{Symbol, SymbolId, SymbolKind, Time};
     use crate::Cx;
     use futures_lite::future;
@@ -331,13 +333,14 @@ mod tests {
     mod comprehensive_tests {
         use super::*;
         use crate::transport::aggregator::{
-            AggregatorConfig, MultipathAggregator, PathSelectionPolicy, PathSet,
-            SymbolDeduplicator, SymbolReorderer, TransportPath, DeduplicatorConfig, ReordererConfig, PathId, PathCharacteristics
+            AggregatorConfig, DeduplicatorConfig, MultipathAggregator, PathCharacteristics, PathId,
+            PathSelectionPolicy, PathSet, ReordererConfig, SymbolDeduplicator, SymbolReorderer,
+            TransportPath,
         };
         use crate::transport::mock::{mock_channel, MockNetwork, MockTransportConfig};
         use crate::transport::router::{
-            DispatchStrategy, LoadBalanceStrategy, RoutingEntry, RoutingTable, SymbolDispatcher,
-            SymbolRouter, RouteKey, Endpoint, EndpointId, DispatchConfig,
+            DispatchConfig, DispatchStrategy, Endpoint, EndpointId, LoadBalanceStrategy, RouteKey,
+            RoutingEntry, RoutingTable, SymbolDispatcher, SymbolRouter,
         };
         use std::collections::HashSet;
 
@@ -395,7 +398,7 @@ mod tests {
             let endpoint_id = EndpointId(1);
             let endpoint = Endpoint::new(endpoint_id, "endpoint1");
             let endpoint = table.register_endpoint(endpoint);
-            
+
             let route_key = RouteKey::Default;
             let entry = RoutingEntry::new(vec![endpoint], Time::ZERO);
             table.add_route(route_key, entry);
@@ -412,7 +415,12 @@ mod tests {
                     let symbol = create_symbol(i);
                     // We use dispatch now
                     let result = dispatcher.dispatch(&cx, symbol).await;
-                    crate::assert_with_log!(result.is_ok(), "dispatch success", true, result.is_ok());
+                    crate::assert_with_log!(
+                        result.is_ok(),
+                        "dispatch success",
+                        true,
+                        result.is_ok()
+                    );
                 }
 
                 // Verify all symbols arrived
@@ -521,8 +529,11 @@ mod tests {
             init_test("test_multipath_aggregator_basic");
 
             let config = AggregatorConfig {
-                dedup: DeduplicatorConfig { entry_ttl: Time::from_secs(300), ..Default::default() },
-                reorder: ReordererConfig { 
+                dedup: DeduplicatorConfig {
+                    entry_ttl: Time::from_secs(300),
+                    ..Default::default()
+                },
+                reorder: ReordererConfig {
                     max_buffer_per_object: 10,
                     max_wait_time: Time::from_millis(100),
                     ..Default::default()
@@ -539,10 +550,20 @@ mod tests {
             let sym1_dup = create_symbol(0); // Duplicate of sym1
 
             let result1 = aggregator.process(sym1.symbol().clone(), PathId(0), Time::ZERO);
-            crate::assert_with_log!(!result1.ready.is_empty(), "sym1 accepted", true, !result1.ready.is_empty());
+            crate::assert_with_log!(
+                !result1.ready.is_empty(),
+                "sym1 accepted",
+                true,
+                !result1.ready.is_empty()
+            );
 
             let result2 = aggregator.process(sym2.symbol().clone(), PathId(1), Time::ZERO);
-            crate::assert_with_log!(!result2.ready.is_empty(), "sym2 accepted", true, !result2.ready.is_empty());
+            crate::assert_with_log!(
+                !result2.ready.is_empty(),
+                "sym2 accepted",
+                true,
+                !result2.ready.is_empty()
+            );
 
             let result_dup = aggregator.process(sym1_dup.symbol().clone(), PathId(1), Time::ZERO);
             crate::assert_with_log!(
@@ -656,7 +677,7 @@ mod tests {
             let endpoint_id = EndpointId(1);
             let endpoint = Endpoint::new(endpoint_id, "ep1");
             let endpoint = table.register_endpoint(endpoint);
-            
+
             let entry = RoutingEntry::new(vec![endpoint], Time::ZERO);
             table.add_route(RouteKey::Default, entry);
 
@@ -673,23 +694,28 @@ mod tests {
                     dispatcher.dispatch(&cx, sym).await.unwrap();
                 }
 
-                // Third send should hit backpressure. 
+                // Third send should hit backpressure.
                 // Since we use lock-based send in dispatcher, it might not propagate backpressure cleanly as "Pending"
                 // if the sink returns Pending. poll_send returns Pending.
                 // Our dispatcher logic might spin or error?
                 // The current implementation uses `sink.lock().send()`. `SymbolSinkExt::send` creates a future.
                 // That future polls.
                 // So it should block (return Pending) if the sink returns Pending.
-                
+
                 // But we are in block_on.
-                
+
                 // Let's drain to allow progress.
                 let _ = stream.next().await;
                 let _ = stream.next().await;
 
                 // After draining, routing should work
                 let result = dispatcher.dispatch(&cx, create_symbol(10)).await;
-                crate::assert_with_log!(result.is_ok(), "dispatch after drain", true, result.is_ok());
+                crate::assert_with_log!(
+                    result.is_ok(),
+                    "dispatch after drain",
+                    true,
+                    result.is_ok()
+                );
             });
 
             crate::test_complete!("test_backpressure_propagation_through_router");
@@ -743,23 +769,26 @@ mod tests {
             let table = Arc::new(RoutingTable::new());
             let e1 = table.register_endpoint(Endpoint::new(EndpointId(1), "target1"));
             let e2 = table.register_endpoint(Endpoint::new(EndpointId(2), "target2"));
-            
+
             // Add routes if needed, but we use specific strategy here
             // DispatchStrategy::Unicast uses route() which needs a route.
-            table.add_route(RouteKey::Object(SymbolId::new_for_test(1,0,1).object_id()), RoutingEntry::new(vec![e1], Time::ZERO));
+            table.add_route(
+                RouteKey::Object(SymbolId::new_for_test(1, 0, 1).object_id()),
+                RoutingEntry::new(vec![e1], Time::ZERO),
+            );
             // Actually dispatch_unicast uses router.route(symbol).
             // So we need a route for the symbol.
-            
+
             // Wait, the test uses `DispatchStrategy::Unicast`.
             // But `SymbolDispatcher` `dispatch_unicast` implementation calls `self.router.route(symbol)`.
             // `DispatchStrategy::Unicast` in `router.rs` doesn't take a target!
             // It is defined as `Unicast` (unit variant).
             // The test uses `DispatchStrategy::Unicast("target1".to_string())`.
             // This implies the test code is using a DIFFERENT version of DispatchStrategy than what is in `router.rs`.
-            
+
             // I need to adapt the test to the current `DispatchStrategy` which is `Unicast`.
             // And use routing table to direct it.
-            
+
             let router = Arc::new(SymbolRouter::new(table.clone()));
             let dispatcher = SymbolDispatcher::new(router, DispatchConfig::default());
             dispatcher.add_sink(EndpointId(1), Box::new(sink1));
@@ -772,11 +801,7 @@ mod tests {
                 // Symbol 1 maps to target1 via route
                 let sym = create_symbol(1);
                 let result = dispatcher
-                    .dispatch_with_strategy(
-                        &cx,
-                        sym.clone(),
-                        DispatchStrategy::Unicast,
-                    )
+                    .dispatch_with_strategy(&cx, sym.clone(), DispatchStrategy::Unicast)
                     .await;
                 crate::assert_with_log!(result.is_ok(), "unicast ok", true, result.is_ok());
 
@@ -892,18 +917,22 @@ mod tests {
                 let sym = create_symbol(99);
                 // DispatchStrategy::Multicast now takes count, not targets list
                 let result = dispatcher
-                    .dispatch_with_strategy(&cx, sym.clone(), DispatchStrategy::Multicast { count: 2 })
+                    .dispatch_with_strategy(
+                        &cx,
+                        sym.clone(),
+                        DispatchStrategy::Multicast { count: 2 },
+                    )
                     .await;
                 crate::assert_with_log!(result.is_ok(), "multicast ok", true, result.is_ok());
 
                 // We don't know exactly which 2, but 2 should receive.
                 // Wait a bit for propagation? No, channels are reliable.
-                
+
                 // Let's just check streams.
                 // Note: The router selects the first N available.
                 // In our entry vec![e1, e2, e3], e1 and e2 are first.
                 // So stream1 and stream2 should receive.
-                
+
                 let recv1 = stream1.next().await.unwrap().unwrap();
                 crate::assert_with_log!(
                     recv1.symbol().esi() == 99,
@@ -941,7 +970,7 @@ mod tests {
 
             let config = MockTransportConfig::reliable();
             let mut streams = Vec::new();
-            
+
             let table = Arc::new(RoutingTable::new());
             let router = Arc::new(SymbolRouter::new(table.clone()));
             let dispatcher = SymbolDispatcher::new(router, DispatchConfig::default());
@@ -962,7 +991,11 @@ mod tests {
                 let sym = create_symbol(77);
                 // DispatchStrategy::QuorumCast relies on healthy endpoints from table
                 let result = dispatcher
-                    .dispatch_with_strategy(&cx, sym.clone(), DispatchStrategy::QuorumCast { required: 3 })
+                    .dispatch_with_strategy(
+                        &cx,
+                        sym.clone(),
+                        DispatchStrategy::QuorumCast { required: 3 },
+                    )
                     .await;
                 crate::assert_with_log!(result.is_ok(), "quorum cast ok", true, result.is_ok());
 
@@ -1114,7 +1147,7 @@ mod tests {
             let table = Arc::new(RoutingTable::new());
             let e1 = table.register_endpoint(Endpoint::new(EndpointId(1), "primary"));
             let e2 = table.register_endpoint(Endpoint::new(EndpointId(2), "backup"));
-            
+
             let entry = RoutingEntry::new(vec![e1, e2], Time::ZERO);
             table.add_route(RouteKey::Default, entry);
 
@@ -1388,18 +1421,8 @@ mod tests {
             // s1 fills the gap -> both s1 and buffered s2 are delivered
             let out1 = reorderer.process(s1, path, now);
             crate::assert_with_log!(out1.len() == 2, "s1+s2 delivered", 2, out1.len());
-            crate::assert_with_log!(
-                out1[0].esi() == 1,
-                "first is s1",
-                1,
-                out1[0].esi()
-            );
-            crate::assert_with_log!(
-                out1[1].esi() == 2,
-                "second is s2",
-                2,
-                out1[1].esi()
-            );
+            crate::assert_with_log!(out1[0].esi() == 1, "first is s1", 1, out1[0].esi());
+            crate::assert_with_log!(out1[1].esi() == 2, "second is s2", 2, out1[1].esi());
         }
 
         #[test]
@@ -1470,7 +1493,7 @@ mod tests {
         fn test_path_selection_use_all() {
             init_test("test_path_selection_use_all");
 
-            let mut path_set = PathSet::new(PathSelectionPolicy::UseAll);
+            let path_set = PathSet::new(PathSelectionPolicy::UseAll);
 
             path_set.register(TransportPath::new(PathId(1), "path1", "1.0"));
             path_set.register(TransportPath::new(PathId(2), "path2", "0.8"));
@@ -1491,12 +1514,16 @@ mod tests {
         fn test_path_selection_primary_only() {
             init_test("test_path_selection_primary_only");
 
-            let mut path_set = PathSet::new(PathSelectionPolicy::PrimaryOnly);
+            let path_set = PathSet::new(PathSelectionPolicy::PrimaryOnly);
 
-            let p1 = TransportPath::new(PathId(1), "primary", "1.0")
-                .with_characteristics(PathCharacteristics { is_primary: true, ..Default::default() });
+            let p1 = TransportPath::new(PathId(1), "primary", "1.0").with_characteristics(
+                PathCharacteristics {
+                    is_primary: true,
+                    ..Default::default()
+                },
+            );
             path_set.register(p1);
-            
+
             let p2 = TransportPath::new(PathId(2), "backup", "0.8");
             path_set.register(p2);
 
@@ -1521,18 +1548,30 @@ mod tests {
         fn test_path_selection_best_quality() {
             init_test("test_path_selection_best_quality");
 
-            let mut path_set = PathSet::new(PathSelectionPolicy::BestQuality { count: 1 });
+            let path_set = PathSet::new(PathSelectionPolicy::BestQuality { count: 1 });
 
             // Add paths with different quality scores
             // High latency = low quality
-            let p1 = TransportPath::new(PathId(1), "low", "0.3")
-                .with_characteristics(PathCharacteristics { latency_ms: 100, ..Default::default() });
-            
-            let p2 = TransportPath::new(PathId(2), "high", "0.95")
-                .with_characteristics(PathCharacteristics { latency_ms: 10, ..Default::default() });
-            
-            let p3 = TransportPath::new(PathId(3), "medium", "0.6")
-                .with_characteristics(PathCharacteristics { latency_ms: 50, ..Default::default() });
+            let p1 = TransportPath::new(PathId(1), "low", "0.3").with_characteristics(
+                PathCharacteristics {
+                    latency_ms: 100,
+                    ..Default::default()
+                },
+            );
+
+            let p2 = TransportPath::new(PathId(2), "high", "0.95").with_characteristics(
+                PathCharacteristics {
+                    latency_ms: 10,
+                    ..Default::default()
+                },
+            );
+
+            let p3 = TransportPath::new(PathId(3), "medium", "0.6").with_characteristics(
+                PathCharacteristics {
+                    latency_ms: 50,
+                    ..Default::default()
+                },
+            );
 
             path_set.register(p1);
             path_set.register(p2);
@@ -1573,7 +1612,7 @@ mod tests {
             let e1 = table.register_endpoint(Endpoint::new(EndpointId(1), "e1"));
             let e2 = table.register_endpoint(Endpoint::new(EndpointId(2), "e2"));
             let e3 = table.register_endpoint(Endpoint::new(EndpointId(3), "e3"));
-            
+
             let entry = RoutingEntry::new(vec![e1, e2, e3], Time::ZERO)
                 .with_strategy(LoadBalanceStrategy::RoundRobin);
             table.add_route(RouteKey::Default, entry);

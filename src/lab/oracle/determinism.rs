@@ -186,6 +186,38 @@ impl TraceEventSummary {
                 }
                 summary
             }
+            TraceData::RegionCancel { region, reason } => {
+                format!("region={region} reason={reason}")
+            }
+            TraceData::Timer { timer_id, deadline } => match deadline {
+                Some(d) => format!("timer={timer_id} deadline={d}"),
+                None => format!("timer={timer_id}"),
+            },
+            TraceData::IoRequested { token, interest } => {
+                format!("io_token={token} interest={interest:#x}")
+            }
+            TraceData::IoReady { token, readiness } => {
+                format!("io_token={token} readiness={readiness:#x}")
+            }
+            TraceData::IoResult { token, bytes } => {
+                format!("io_token={token} bytes={bytes}")
+            }
+            TraceData::IoError { token, kind } => {
+                format!("io_token={token} error_kind={kind}")
+            }
+            TraceData::RngSeed { seed } => {
+                format!("seed={seed}")
+            }
+            TraceData::RngValue { value } => {
+                format!("rng_value={value}")
+            }
+            TraceData::Checkpoint {
+                sequence,
+                active_tasks,
+                active_regions,
+            } => {
+                format!("seq={sequence} tasks={active_tasks} regions={active_regions}")
+            }
         }
     }
 }

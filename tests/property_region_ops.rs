@@ -147,10 +147,7 @@ pub enum RegionOp {
     ///
     /// Note: This operation is currently a no-op because region budgets
     /// cannot be modified after creation through the public API.
-    SetDeadline {
-        region: RegionSelector,
-        millis: u64,
-    },
+    SetDeadline { region: RegionSelector, millis: u64 },
 }
 
 impl Arbitrary for RegionOp {
@@ -257,12 +254,16 @@ impl TestHarness {
         let placeholder_id = RegionId::new_for_test(0, 0);
 
         // Create a new region record as a child of the parent
-        let idx = self.runtime.state.regions.insert(RegionRecord::new_with_time(
-            placeholder_id,
-            Some(parent),
-            Budget::INFINITE,
-            self.runtime.now(),
-        ));
+        let idx = self
+            .runtime
+            .state
+            .regions
+            .insert(RegionRecord::new_with_time(
+                placeholder_id,
+                Some(parent),
+                Budget::INFINITE,
+                self.runtime.now(),
+            ));
 
         // Convert arena index to proper RegionId
         let child_id = arena_index_to_region_id(idx);
@@ -273,9 +274,10 @@ impl TestHarness {
         }
 
         // Add to parent's children
-        if let Some(parent_record) = self.runtime.state.regions.get(
-            ArenaIndex::new(parent.new_for_test_index(), parent.new_for_test_generation()),
-        ) {
+        if let Some(parent_record) = self.runtime.state.regions.get(ArenaIndex::new(
+            parent.new_for_test_index(),
+            parent.new_for_test_generation(),
+        )) {
             parent_record.add_child(child_id);
         }
 
@@ -322,8 +324,7 @@ impl TestHarness {
     /// Complete a task with the given outcome.
     pub fn complete_task(&mut self, task: TaskId, outcome: TaskOutcome) {
         // Get the arena index for this task
-        let arena_idx =
-            ArenaIndex::new(task.new_for_test_index(), task.new_for_test_generation());
+        let arena_idx = ArenaIndex::new(task.new_for_test_index(), task.new_for_test_generation());
 
         if let Some(record) = self.runtime.state.tasks.get_mut(arena_idx) {
             if !record.state.is_terminal() {
@@ -345,8 +346,10 @@ impl TestHarness {
     /// Request close of a region.
     pub fn close_region(&mut self, region: RegionId) {
         // Get the arena index for this region
-        let arena_idx =
-            ArenaIndex::new(region.new_for_test_index(), region.new_for_test_generation());
+        let arena_idx = ArenaIndex::new(
+            region.new_for_test_index(),
+            region.new_for_test_generation(),
+        );
 
         if let Some(record) = self.runtime.state.regions.get(arena_idx) {
             record.begin_close(None);
@@ -650,7 +653,10 @@ fn test_harness_apply_operations() {
         task: TaskSelector(0),
         outcome: TaskOutcome::Ok,
     };
-    assert!(complete_op.apply(&mut harness), "CompleteTask should succeed");
+    assert!(
+        complete_op.apply(&mut harness),
+        "CompleteTask should succeed"
+    );
 
     test_complete!("test_harness_apply_operations");
 }
@@ -710,7 +716,11 @@ pub struct InvariantViolation {
 
 impl std::fmt::Display for InvariantViolation {
     fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
-        write!(f, "Invariant '{}' violated: {}", self.invariant, self.message)
+        write!(
+            f,
+            "Invariant '{}' violated: {}",
+            self.invariant, self.message
+        )
     }
 }
 
@@ -836,10 +846,7 @@ fn check_valid_tree_structure(harness: &TestHarness) -> Vec<InvariantViolation> 
             if path.contains(&id) {
                 violations.push(InvariantViolation {
                     invariant: "no_cycles",
-                    message: format!(
-                        "Cycle detected: region {:?} is its own ancestor",
-                        id
-                    ),
+                    message: format!("Cycle detected: region {:?} is its own ancestor", id),
                 });
                 break;
             }
@@ -851,10 +858,7 @@ fn check_valid_tree_structure(harness: &TestHarness) -> Vec<InvariantViolation> 
             path.insert(id);
             visited.insert(id);
 
-            let arena_idx = ArenaIndex::new(
-                id.new_for_test_index(),
-                id.new_for_test_generation(),
-            );
+            let arena_idx = ArenaIndex::new(id.new_for_test_index(), id.new_for_test_generation());
 
             current = harness
                 .runtime
@@ -1011,7 +1015,9 @@ fn check_close_ordering(harness: &TestHarness) -> Vec<InvariantViolation> {
                                 invariant: "close_ordering",
                                 message: format!(
                                     "Region {:?} is closed but child {:?} is not (state: {:?})",
-                                    region_id, child_id, child_record.state()
+                                    region_id,
+                                    child_id,
+                                    child_record.state()
                                 ),
                             });
                         }
@@ -1295,7 +1301,11 @@ fn test_unique_id_invariant() {
 
     // Should have no duplicate IDs
     let violations = check_unique_ids(&harness);
-    assert!(violations.is_empty(), "Unique ID violations: {:?}", violations);
+    assert!(
+        violations.is_empty(),
+        "Unique ID violations: {:?}",
+        violations
+    );
 
     test_complete!("test_unique_id_invariant");
 }

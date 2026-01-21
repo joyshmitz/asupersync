@@ -834,6 +834,48 @@ impl Cx {
         );
     }
 
+    /// Cancels without building a full attribution chain (performance-critical path).
+    ///
+    /// Use this when attribution isn't needed and minimizing allocations is important.
+    /// The cancellation reason will have minimal attribution (kind + region only).
+    ///
+    /// # Performance
+    ///
+    /// This method avoids:
+    /// - Message string allocation
+    /// - Cause chain allocation
+    /// - Timestamp lookup
+    ///
+    /// Use `cancel_with` when you need full attribution for debugging.
+    ///
+    /// # Example
+    ///
+    /// ```
+    /// use asupersync::{Cx, types::CancelKind};
+    ///
+    /// let cx = Cx::for_testing();
+    ///
+    /// // Fast cancellation - no allocation
+    /// cx.cancel_fast(CancelKind::RaceLost);
+    /// assert!(cx.is_cancel_requested());
+    /// ```
+    pub fn cancel_fast(&self, kind: CancelKind) {
+        let mut inner = self.inner.write().expect("lock poisoned");
+        let region = inner.region;
+
+        // Minimal attribution: just kind and region
+        let reason = CancelReason::new(kind).with_region(region);
+
+        inner.cancel_requested = true;
+        inner.cancel_reason = Some(reason);
+
+        trace!(
+            region_id = ?region,
+            cancel_kind = ?kind,
+            "cancel_fast initiated"
+        );
+    }
+
     /// Gets the cancellation reason if this context is cancelled.
     ///
     /// Returns `None` if the context is not cancelled, or `Some(reason)` if
@@ -1365,6 +1407,67 @@ mod tests {
         assert_eq!(chain.len(), 2);
         assert_eq!(chain[0].kind, CancelKind::ParentCancelled);
         assert_eq!(chain[1].kind, CancelKind::Timeout);
+    }
+
+    #[test]
+    fn cancel_fast_sets_flag_and_reason() {
+        let cx = test_cx();
+        assert!(!cx.is_cancel_requested());
+        assert!(cx.cancel_reason().is_none());
+
+        cx.cancel_fast(CancelKind::Shutdown);
+
+        assert!(cx.is_cancel_requested());
+        let reason = cx.cancel_reason().expect("should have reason");
+        assert_eq!(reason.kind, CancelKind::Shutdown);
+    }
+
+    #[test]
+    fn cancel_fast_no_cause_chain() {
+        // cancel_fast is for the no-attribution path - it shouldn't create cause chains
+        let cx = test_cx();
+
+        cx.cancel_fast(CancelKind::Timeout);
+
+        let reason = cx.cancel_reason().expect("should have reason");
+        // No cause chain
+        assert!(reason.cause.is_none());
+        // No message
+        assert!(reason.message.is_none());
+        // Not truncated (nothing to truncate)
+        assert!(!reason.truncated);
+    }
+
+    #[test]
+    fn cancel_fast_sets_region() {
+        let cx = test_cx();
+
+        cx.cancel_fast(CancelKind::User);
+
+        let reason = cx.cancel_reason().expect("should have reason");
+        // Region should be set from the Cx
+        assert!(reason.region.is_some());
+    }
+
+    #[test]
+    fn cancel_fast_minimal_allocation() {
+        // cancel_fast should create minimal CancelReason without extra allocations
+        let cx = test_cx();
+
+        cx.cancel_fast(CancelKind::Deadline);
+
+        let reason = cx.cancel_reason().expect("should have reason");
+        // Verify minimal structure: just kind, region, no message, no cause, no truncation
+        assert_eq!(reason.kind, CancelKind::Deadline);
+        assert!(reason.message.is_none());
+        assert!(reason.cause.is_none());
+        assert!(!reason.truncated);
+        assert!(reason.truncated_at_depth.is_none());
+
+        // Memory cost should be minimal (just the struct size, no boxed cause)
+        let cost = reason.estimated_memory_cost();
+        // Should be roughly just the size of CancelReason without any heap allocations for cause
+        assert!(cost < 200, "cancel_fast should have minimal memory cost, got {}", cost);
     }
 
     // ========================================================================

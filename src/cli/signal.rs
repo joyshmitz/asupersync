@@ -274,7 +274,7 @@ mod tests {
         init_test("signal_handler_reset");
         let handler = SignalHandler::new();
 
-        handler.record_signal();
+        let _ = handler.record_signal();
         let cancelled = handler.is_cancelled();
         crate::assert_with_log!(cancelled, "cancelled", true, cancelled);
 
@@ -295,7 +295,7 @@ mod tests {
         let cancelled = token.is_cancelled();
         crate::assert_with_log!(!cancelled, "token not cancelled", false, cancelled);
 
-        handler.record_signal();
+        let _ = handler.record_signal();
         let cancelled = token.is_cancelled();
         crate::assert_with_log!(cancelled, "token cancelled", true, cancelled);
         crate::test_complete!("cancellation_token_shares_state");

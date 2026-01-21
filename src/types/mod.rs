@@ -22,7 +22,7 @@ pub mod task_context;
 pub mod typed_symbol;
 
 pub use budget::Budget;
-pub use cancel::{CancelKind, CancelReason};
+pub use cancel::{CancelAttributionConfig, CancelKind, CancelReason};
 pub use id::{ObligationId, RegionId, TaskId, Time};
 pub use outcome::{join_outcomes, Outcome, OutcomeError, PanicPayload, Severity};
 pub use policy::Policy;

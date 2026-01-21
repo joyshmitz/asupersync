@@ -150,7 +150,7 @@ mod tests {
 
         let cancelled = token.is_cancelled();
         crate::assert_with_log!(!cancelled, "token not cancelled", false, cancelled);
-        handler.record_signal();
+        let _ = handler.record_signal();
         let cancelled = token.is_cancelled();
         crate::assert_with_log!(cancelled, "token cancelled", true, cancelled);
         crate::test_complete!("signal_integration");

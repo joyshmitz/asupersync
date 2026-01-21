@@ -337,16 +337,19 @@ impl TimerWheel {
         &self.coalescing
     }
 
+    /// Returns the number of active timers in the wheel.
     #[must_use]
     pub fn len(&self) -> usize {
         self.active.len()
     }
 
+    /// Returns true if there are no active timers.
     #[must_use]
     pub fn is_empty(&self) -> bool {
         self.active.is_empty()
     }
 
+    /// Removes all timers from the wheel.
     pub fn clear(&mut self) {
         self.active.clear();
         self.ready.clear();
@@ -498,6 +501,17 @@ impl TimerWheel {
         }
 
         let delta = entry.deadline.as_nanos().saturating_sub(current.as_nanos());
+
+        // Check against configured max_wheel_duration for overflow
+        let max_range = self.max_range_ns();
+        if delta >= max_range {
+            self.overflow.push(OverflowEntry {
+                deadline: entry.deadline,
+                entry,
+            });
+            return;
+        }
+
         for (idx, level) in self.levels.iter_mut().enumerate() {
             if delta < level.range_ns() {
                 let tick = entry.deadline.as_nanos() / level.resolution_ns;
@@ -737,7 +751,16 @@ impl TimerWheel {
             .is_some_and(|generation| *generation == entry.generation)
     }
 
+    /// Returns the maximum range in nanoseconds for direct wheel storage.
+    ///
+    /// Timers with deadlines beyond this range from the current time go to overflow.
     fn max_range_ns(&self) -> u64 {
+        self.config.max_wheel_duration.as_nanos() as u64
+    }
+
+    /// Returns the physical wheel range based on level structure.
+    #[allow(dead_code)]
+    fn physical_range_ns(&self) -> u64 {
         self.levels.last().map_or(0, WheelLevel::range_ns)
     }
 }
@@ -1072,21 +1095,22 @@ mod tests {
         let counters: Vec<_> = (0..10).map(|_| Arc::new(AtomicU64::new(0))).collect();
 
         // Register timers at various intervals including overflow
+        // With default config: max_wheel_duration = 24h (86400s)
         // Level 0: 1ms slots, range ~256ms
         // Level 1: 256ms slots, range ~65s
         // Level 2: ~65s slots, range ~4.6h
-        // Level 3: ~4.6h slots, range ~37.2h
+        // Level 3: ~4.6h slots, range ~49.7 days (but capped by config at 24h)
         let intervals = [
-            Time::from_millis(10),  // Level 0
-            Time::from_millis(500), // Level 1
-            Time::from_secs(30),    // Level 1
-            Time::from_secs(120),   // Level 2
-            Time::from_secs(3600),  // Level 2 (1 hour)
-            Time::from_secs(7200),  // Level 2 (2 hours)
-            Time::from_secs(18000), // Level 3 (5 hours)
-            Time::from_secs(36000), // Level 3 (10 hours)
-            Time::from_secs(50000), // Overflow (>37.2h but within 7d)
-            Time::from_secs(86400), // Overflow (24 hours)
+            Time::from_millis(10),   // Level 0
+            Time::from_millis(500),  // Level 1
+            Time::from_secs(30),     // Level 1
+            Time::from_secs(120),    // Level 2
+            Time::from_secs(3600),   // Level 2 (1 hour)
+            Time::from_secs(7200),   // Level 2 (2 hours)
+            Time::from_secs(18000),  // Level 3 (5 hours)
+            Time::from_secs(36000),  // Level 3 (10 hours)
+            Time::from_secs(90000),  // Overflow (25 hours, > 24h max_wheel_duration)
+            Time::from_secs(100000), // Overflow (27.8 hours, within 7d max_timer_duration)
         ];
 
         for (i, &deadline) in intervals.iter().enumerate() {

@@ -11,9 +11,125 @@
 //! - **Cause chain**: Optional chain of parent causes for debugging
 //!
 //! This enables debugging and diagnostics to trace cancellation back to its source.
+//!
+//! # Memory Management
+//!
+//! Cause chains can grow unboundedly deep in complex cancellation scenarios.
+//! To prevent unbounded memory growth, use [`CancelAttributionConfig`] to set limits:
+//!
+//! - `max_chain_depth`: Maximum depth of cause chain to preserve (default: 16)
+//! - `max_chain_memory`: Maximum total memory for cause chain (default: 4KB)
+//!
+//! When chains exceed limits, they are truncated with a clear marker.
+//!
+//! ## Memory Cost Analysis
+//!
+//! Memory cost per `CancelReason`:
+//! - Base: ~80 bytes (ids, timestamp, kind, flags)
+//! - Message: variable (static &str pointer = 16 bytes)
+//! - Cause: recursive (Box pointer = 8 bytes + child cost)
+//!
+//! Total cost for chain of depth D with no messages:
+//! ```text
+//! cost = 80 * D + 8 * (D-1)  // ~88 bytes per level
+//! ```
+//!
+//! Default limits (depth=16, memory=4KB) allow chains up to ~45 levels
+//! but prefer depth limiting for predictability.
 
 use super::{Budget, RegionId, TaskId, Time};
 use core::fmt;
+
+/// Configuration for cancel attribution chain limits.
+///
+/// Controls memory usage by limiting cause chain depth and total memory.
+/// Use this to prevent unbounded memory growth in complex cancellation scenarios.
+///
+/// # Example
+///
+/// ```rust,ignore
+/// use asupersync::types::CancelAttributionConfig;
+///
+/// let config = CancelAttributionConfig::default();
+/// assert_eq!(config.max_chain_depth, 16);
+/// assert_eq!(config.max_chain_memory, 4096);
+///
+/// let custom = CancelAttributionConfig::new(8, 2048);
+/// ```
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub struct CancelAttributionConfig {
+    /// Maximum depth of cause chain to preserve.
+    /// Deeper chains are truncated with a 'truncated' marker.
+    /// Default: 16
+    pub max_chain_depth: usize,
+
+    /// Maximum total memory (in bytes) for cause chain.
+    /// When exceeded, chain is truncated.
+    /// Default: 4096 (4KB)
+    pub max_chain_memory: usize,
+}
+
+impl CancelAttributionConfig {
+    /// Default maximum chain depth.
+    pub const DEFAULT_MAX_DEPTH: usize = 16;
+
+    /// Default maximum chain memory (4KB).
+    pub const DEFAULT_MAX_MEMORY: usize = 4096;
+
+    /// Creates a new configuration with custom limits.
+    #[must_use]
+    pub const fn new(max_chain_depth: usize, max_chain_memory: usize) -> Self {
+        Self {
+            max_chain_depth,
+            max_chain_memory,
+        }
+    }
+
+    /// Creates a configuration with no limits (for testing or special cases).
+    #[must_use]
+    pub const fn unlimited() -> Self {
+        Self {
+            max_chain_depth: usize::MAX,
+            max_chain_memory: usize::MAX,
+        }
+    }
+
+    /// Returns the estimated memory cost of a single `CancelReason` (without cause chain).
+    ///
+    /// This is approximately:
+    /// - 8 bytes: kind (enum)
+    /// - 8 bytes: origin_region (RegionId)
+    /// - 16 bytes: origin_task (Option<TaskId>)
+    /// - 8 bytes: timestamp (Time)
+    /// - 16 bytes: message (Option<&'static str>)
+    /// - 8 bytes: cause (Option<Box<...>> pointer, not content)
+    /// - 1 byte: truncated flag
+    /// - 8 bytes: truncated_at_depth (Option<usize>)
+    /// Total: ~80 bytes (rounded up for alignment)
+    #[must_use]
+    pub const fn single_reason_cost() -> usize {
+        80
+    }
+
+    /// Estimates memory cost for a chain of given depth.
+    #[must_use]
+    pub const fn estimated_chain_cost(depth: usize) -> usize {
+        if depth == 0 {
+            return 0;
+        }
+        // Each level: ~80 bytes base + 8 bytes Box overhead for parent
+        Self::single_reason_cost() * depth + 8 * depth.saturating_sub(1)
+    }
+}
+
+impl Default for CancelAttributionConfig {
+    fn default() -> Self {
+        Self {
+            max_chain_depth: Self::DEFAULT_MAX_DEPTH,
+            max_chain_memory: Self::DEFAULT_MAX_MEMORY,
+        }
+    }
+}
 
 /// The kind of cancellation request.
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Hash, PartialOrd, Ord)]
@@ -111,6 +227,10 @@ pub struct CancelReason {
     pub message: Option<&'static str>,
     /// The parent cause of this cancellation (for building chains).
     pub cause: Option<Box<CancelReason>>,
+    /// True if the cause chain was truncated due to limits.
+    pub truncated: bool,
+    /// Depth at which truncation occurred (if truncated).
+    pub truncated_at_depth: Option<usize>,
 }
 
 impl CancelReason {
@@ -130,6 +250,8 @@ impl CancelReason {
             timestamp,
             message: None,
             cause: None,
+            truncated: false,
+            truncated_at_depth: None,
         }
     }
 
@@ -146,6 +268,8 @@ impl CancelReason {
             timestamp: Time::ZERO,
             message: None,
             cause: None,
+            truncated: false,
+            truncated_at_depth: None,
         }
     }
 
@@ -159,6 +283,8 @@ impl CancelReason {
             timestamp: Time::ZERO,
             message: Some(message),
             cause: None,
+            truncated: false,
+            truncated_at_depth: None,
         }
     }
 
@@ -245,10 +371,123 @@ impl CancelReason {
     }
 
     /// Sets the cause chain for this cancellation reason.
+    ///
+    /// This does not apply any limits to the chain depth.
+    /// For production use with limits, prefer [`with_cause_limited`][Self::with_cause_limited].
     #[must_use]
     pub fn with_cause(mut self, cause: CancelReason) -> Self {
         self.cause = Some(Box::new(cause));
         self
+    }
+
+    /// Sets the cause chain with depth and memory limits.
+    ///
+    /// If the chain would exceed the configured limits, it is truncated
+    /// and the `truncated` flag is set.
+    ///
+    /// # Example
+    ///
+    /// ```rust,ignore
+    /// let config = CancelAttributionConfig::new(4, 1024);
+    /// let reason = CancelReason::shutdown()
+    ///     .with_cause_limited(deep_cause_chain, &config);
+    ///
+    /// if reason.truncated {
+    ///     println!("Chain truncated at depth {}", reason.truncated_at_depth.unwrap());
+    /// }
+    /// ```
+    #[must_use]
+    pub fn with_cause_limited(mut self, cause: CancelReason, config: &CancelAttributionConfig) -> Self {
+        // Check if adding this cause would exceed limits
+        let current_depth = self.chain_depth();
+        let cause_depth = cause.chain_depth();
+        let total_depth = current_depth + cause_depth;
+
+        if total_depth > config.max_chain_depth {
+            // Truncate the cause chain to fit within limits
+            let allowed_cause_depth = config.max_chain_depth.saturating_sub(current_depth);
+            if allowed_cause_depth == 0 {
+                // No room for any cause - mark as truncated
+                self.truncated = true;
+                self.truncated_at_depth = Some(current_depth);
+                return self;
+            }
+            // Truncate the cause chain
+            let truncated_cause = Self::truncate_chain(cause, allowed_cause_depth);
+            self.cause = Some(Box::new(truncated_cause));
+            self.truncated = true;
+            self.truncated_at_depth = Some(current_depth + allowed_cause_depth);
+            return self;
+        }
+
+        // Check memory limit
+        let estimated_memory = CancelAttributionConfig::estimated_chain_cost(total_depth);
+        if estimated_memory > config.max_chain_memory {
+            // Calculate how deep we can go within memory budget
+            let mut allowed_depth = 0;
+            while CancelAttributionConfig::estimated_chain_cost(current_depth + allowed_depth + 1)
+                <= config.max_chain_memory
+                && allowed_depth < cause_depth
+            {
+                allowed_depth += 1;
+            }
+
+            if allowed_depth == 0 {
+                self.truncated = true;
+                self.truncated_at_depth = Some(current_depth);
+                return self;
+            }
+
+            let truncated_cause = Self::truncate_chain(cause, allowed_depth);
+            self.cause = Some(Box::new(truncated_cause));
+            self.truncated = true;
+            self.truncated_at_depth = Some(current_depth + allowed_depth);
+            return self;
+        }
+
+        // Within limits - add full cause chain
+        self.cause = Some(Box::new(cause));
+        self
+    }
+
+    /// Truncates a cause chain to the specified maximum depth.
+    ///
+    /// Returns a new `CancelReason` with at most `max_depth` levels,
+    /// with the `truncated` flag set on the deepest retained level.
+    fn truncate_chain(reason: CancelReason, max_depth: usize) -> CancelReason {
+        if max_depth == 0 {
+            return CancelReason {
+                truncated: true,
+                truncated_at_depth: Some(0),
+                ..reason
+            };
+        }
+
+        if max_depth == 1 || reason.cause.is_none() {
+            // Keep only this level
+            return CancelReason {
+                cause: None,
+                truncated: reason.cause.is_some(), // Mark truncated if we removed a cause
+                truncated_at_depth: if reason.cause.is_some() {
+                    Some(1)
+                } else {
+                    reason.truncated_at_depth
+                },
+                ..reason
+            };
+        }
+
+        // Recursively truncate the cause chain
+        let truncated_cause = reason.cause.map(|boxed_cause| {
+            Box::new(Self::truncate_chain(*boxed_cause, max_depth - 1))
+        });
+
+        CancelReason {
+            cause: truncated_cause,
+            truncated: reason.truncated,
+            truncated_at_depth: reason.truncated_at_depth,
+            ..reason
+        }
     }
 
     /// Sets the timestamp for this cancellation reason.
@@ -493,6 +732,30 @@ impl CancelReason {
     #[must_use]
     pub fn cause(&self) -> Option<&CancelReason> {
         self.cause.as_deref()
+    }
+
+    /// Returns true if this reason's cause chain was truncated due to limits.
+    #[must_use]
+    pub const fn is_truncated(&self) -> bool {
+        self.truncated
+    }
+
+    /// Returns the depth at which truncation occurred (if any).
+    #[must_use]
+    pub const fn truncated_at_depth(&self) -> Option<usize> {
+        self.truncated_at_depth
+    }
+
+    /// Returns true if this reason or any cause in the chain was truncated.
+    #[must_use]
+    pub fn any_truncated(&self) -> bool {
+        self.chain().any(|r| r.truncated)
+    }
+
+    /// Estimates the memory cost of this entire cause chain.
+    #[must_use]
+    pub fn estimated_memory_cost(&self) -> usize {
+        CancelAttributionConfig::estimated_chain_cost(self.chain_depth())
     }
 }
 
@@ -1137,5 +1400,211 @@ mod tests {
         );
 
         crate::test_complete!("new_variants_display");
+    }
+
+    // ========================================================================
+    // Chain Limit and Truncation Tests
+    // ========================================================================
+
+    #[test]
+    fn cancel_attribution_config_defaults() {
+        init_test("cancel_attribution_config_defaults");
+        let config = CancelAttributionConfig::default();
+        crate::assert_with_log!(
+            config.max_chain_depth == 16,
+            "default max_chain_depth should be 16",
+            16,
+            config.max_chain_depth
+        );
+        crate::assert_with_log!(
+            config.max_chain_memory == 4096,
+            "default max_chain_memory should be 4096",
+            4096,
+            config.max_chain_memory
+        );
+        crate::test_complete!("cancel_attribution_config_defaults");
+    }
+
+    #[test]
+    fn cancel_attribution_config_custom() {
+        init_test("cancel_attribution_config_custom");
+        let config = CancelAttributionConfig::new(8, 2048);
+        crate::assert_with_log!(
+            config.max_chain_depth == 8,
+            "custom max_chain_depth should be 8",
+            8,
+            config.max_chain_depth
+        );
+        crate::assert_with_log!(
+            config.max_chain_memory == 2048,
+            "custom max_chain_memory should be 2048",
+            2048,
+            config.max_chain_memory
+        );
+        crate::test_complete!("cancel_attribution_config_custom");
+    }
+
+    #[test]
+    fn cancel_attribution_config_unlimited() {
+        init_test("cancel_attribution_config_unlimited");
+        let config = CancelAttributionConfig::unlimited();
+        crate::assert_with_log!(
+            config.max_chain_depth == usize::MAX,
+            "unlimited max_chain_depth should be usize::MAX",
+            usize::MAX,
+            config.max_chain_depth
+        );
+        crate::test_complete!("cancel_attribution_config_unlimited");
+    }
+
+    #[test]
+    fn chain_at_exact_limit() {
+        init_test("chain_at_exact_limit");
+        let config = CancelAttributionConfig::new(3, usize::MAX);
+
+        // Build a chain of exactly 3 levels
+        let level1 = CancelReason::timeout();
+        let level2 = CancelReason::parent_cancelled().with_cause(level1);
+        let level3 = CancelReason::shutdown().with_cause_limited(level2, &config);
+
+        crate::assert_with_log!(
+            level3.chain_depth() == 3,
+            "chain at limit should have depth 3",
+            3,
+            level3.chain_depth()
+        );
+        crate::assert_with_log!(
+            !level3.truncated,
+            "chain at limit should not be truncated",
+            false,
+            level3.truncated
+        );
+        crate::test_complete!("chain_at_exact_limit");
+    }
+
+    #[test]
+    fn chain_beyond_limit_truncates() {
+        init_test("chain_beyond_limit_truncates");
+        let config = CancelAttributionConfig::new(2, usize::MAX);
+
+        // Build a chain of 3 levels, which exceeds limit of 2
+        let level1 = CancelReason::timeout();
+        let level2 = CancelReason::parent_cancelled().with_cause(level1);
+
+        // This should truncate because we'd have 3 levels total
+        let level3 = CancelReason::shutdown().with_cause_limited(level2, &config);
+
+        crate::assert_with_log!(
+            level3.chain_depth() <= 2,
+            "chain beyond limit should be truncated to 2",
+            2,
+            level3.chain_depth()
+        );
+        crate::assert_with_log!(
+            level3.truncated || level3.any_truncated(),
+            "truncated chain should have truncated flag",
+            true,
+            level3.truncated || level3.any_truncated()
+        );
+        crate::test_complete!("chain_beyond_limit_truncates");
+    }
+
+    #[test]
+    fn truncated_reason_new_fields() {
+        init_test("truncated_reason_new_fields");
+        let reason = CancelReason::timeout();
+
+        crate::assert_with_log!(
+            !reason.truncated,
+            "new reason should not be truncated",
+            false,
+            reason.truncated
+        );
+        crate::assert_with_log!(
+            reason.truncated_at_depth.is_none(),
+            "new reason should have no truncated_at_depth",
+            true,
+            reason.truncated_at_depth.is_none()
+        );
+        crate::assert_with_log!(
+            !reason.is_truncated(),
+            "is_truncated() should be false",
+            false,
+            reason.is_truncated()
+        );
+        crate::test_complete!("truncated_reason_new_fields");
+    }
+
+    #[test]
+    fn estimated_memory_cost() {
+        init_test("estimated_memory_cost");
+        let single = CancelReason::timeout();
+        let cost1 = single.estimated_memory_cost();
+        crate::assert_with_log!(
+            cost1 > 0,
+            "single reason should have positive memory cost",
+            true,
+            cost1 > 0
+        );
+
+        // Chain of 2 should cost more
+        let chain2 = CancelReason::shutdown().with_cause(CancelReason::timeout());
+        let cost2 = chain2.estimated_memory_cost();
+        crate::assert_with_log!(
+            cost2 > cost1,
+            "chain of 2 should cost more than single",
+            true,
+            cost2 > cost1
+        );
+
+        crate::test_complete!("estimated_memory_cost");
+    }
+
+    #[test]
+    fn memory_limit_triggers_truncation() {
+        init_test("memory_limit_triggers_truncation");
+        // Set a very tight memory limit that should trigger truncation
+        let config = CancelAttributionConfig::new(usize::MAX, 100);
+
+        let level1 = CancelReason::timeout();
+        let level2 = CancelReason::parent_cancelled().with_cause(level1);
+        let level3 = CancelReason::shutdown().with_cause_limited(level2, &config);
+
+        // With only 100 bytes, we can't fit even 2 full levels
+        // So truncation should occur
+        let truncated = level3.truncated || level3.any_truncated();
+        crate::assert_with_log!(
+            truncated,
+            "tight memory limit should trigger truncation",
+            true,
+            truncated
+        );
+        crate::test_complete!("memory_limit_triggers_truncation");
+    }
+
+    #[test]
+    fn any_truncated_finds_nested_truncation() {
+        init_test("any_truncated_finds_nested_truncation");
+        // Manually create a chain where an inner level is truncated
+        let inner = CancelReason {
+            truncated: true,
+            truncated_at_depth: Some(1),
+            ..CancelReason::timeout()
+        };
+        let outer = CancelReason::shutdown().with_cause(inner);
+
+        crate::assert_with_log!(
+            !outer.truncated,
+            "outer itself is not truncated",
+            false,
+            outer.truncated
+        );
+        crate::assert_with_log!(
+            outer.any_truncated(),
+            "any_truncated should find inner truncation",
+            true,
+            outer.any_truncated()
+        );
+        crate::test_complete!("any_truncated_finds_nested_truncation");
     }
 }

@@ -411,28 +411,30 @@ impl ReplayEvent {
     #[must_use]
     pub const fn estimated_size(&self) -> usize {
         match self {
-            Self::TaskScheduled { .. } => 17,                    // 1 + 8 + 8
-            Self::TaskYielded { .. } => 9,                       // 1 + 8
-            Self::TaskCompleted { .. } => 10,                    // 1 + 8 + 1
-            Self::TaskSpawned { .. } => 25,                      // 1 + 8 + 8 + 8
-            Self::TimeAdvanced { .. } => 17,                     // 1 + 8 + 8
-            Self::TimerCreated { .. } => 17,                     // 1 + 8 + 8
-            Self::TimerFired { .. } => 9,                        // 1 + 8
-            Self::TimerCancelled { .. } => 9,                    // 1 + 8
-            Self::IoReady { .. } => 10,                          // 1 + 8 + 1
-            Self::IoResult { .. } => 17,                         // 1 + 8 + 8
-            Self::IoError { .. } => 10,                          // 1 + 8 + 1
-            Self::RngSeed { .. } => 9,                           // 1 + 8
-            Self::RngValue { .. } => 9,                          // 1 + 8
-            Self::ChaosInjection { task: None, .. } => 11,       // 1 + 1 + 1 + 8
-            Self::ChaosInjection { task: Some(_), .. } => 19,    // 1 + 1 + 9 + 8
-            Self::RegionCreated { parent: None, .. } => 17,      // 1 + 8 + 8
-            Self::RegionCreated { parent: Some(_), .. } => 25,   // 1 + 8 + 8 + 8
-            Self::RegionClosed { .. } => 10,                     // 1 + 8 + 1
-            Self::RegionCancelled { .. } => 10,                  // 1 + 8 + 1
-            Self::WakerWake { .. } => 9,                         // 1 + 8
-            Self::WakerBatchWake { .. } => 5,                    // 1 + 4
-            Self::Checkpoint { .. } => 25,                       // 1 + 8 + 8 + 4 + 4
+            Self::TaskScheduled { .. } => 17,                 // 1 + 8 + 8
+            Self::TaskYielded { .. } => 9,                    // 1 + 8
+            Self::TaskCompleted { .. } => 10,                 // 1 + 8 + 1
+            Self::TaskSpawned { .. } => 25,                   // 1 + 8 + 8 + 8
+            Self::TimeAdvanced { .. } => 17,                  // 1 + 8 + 8
+            Self::TimerCreated { .. } => 17,                  // 1 + 8 + 8
+            Self::TimerFired { .. } => 9,                     // 1 + 8
+            Self::TimerCancelled { .. } => 9,                 // 1 + 8
+            Self::IoReady { .. } => 10,                       // 1 + 8 + 1
+            Self::IoResult { .. } => 17,                      // 1 + 8 + 8
+            Self::IoError { .. } => 10,                       // 1 + 8 + 1
+            Self::RngSeed { .. } => 9,                        // 1 + 8
+            Self::RngValue { .. } => 9,                       // 1 + 8
+            Self::ChaosInjection { task: None, .. } => 11,    // 1 + 1 + 1 + 8
+            Self::ChaosInjection { task: Some(_), .. } => 19, // 1 + 1 + 9 + 8
+            Self::RegionCreated { parent: None, .. } => 17,   // 1 + 8 + 8
+            Self::RegionCreated {
+                parent: Some(_), ..
+            } => 25, // 1 + 8 + 8 + 8
+            Self::RegionClosed { .. } => 10,                  // 1 + 8 + 1
+            Self::RegionCancelled { .. } => 10,               // 1 + 8 + 1
+            Self::WakerWake { .. } => 9,                      // 1 + 8
+            Self::WakerBatchWake { .. } => 5,                 // 1 + 4
+            Self::Checkpoint { .. } => 25,                    // 1 + 8 + 8 + 4 + 4
         }
     }
 
@@ -902,11 +904,7 @@ mod tests {
 
     #[test]
     fn region_created_event() {
-        let event = ReplayEvent::region_created(
-            CompactRegionId(1),
-            Some(CompactRegionId(0)),
-            100,
-        );
+        let event = ReplayEvent::region_created(CompactRegionId(1), Some(CompactRegionId(0)), 100);
 
         if let ReplayEvent::RegionCreated {
             region,
@@ -922,11 +920,7 @@ mod tests {
         }
 
         // Test without parent (root region)
-        let root = ReplayEvent::region_created(
-            CompactRegionId(0),
-            None::<CompactRegionId>,
-            0,
-        );
+        let root = ReplayEvent::region_created(CompactRegionId(0), None::<CompactRegionId>, 0);
         if let ReplayEvent::RegionCreated { parent, .. } = root {
             assert!(parent.is_none());
         } else {
