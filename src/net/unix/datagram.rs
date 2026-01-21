@@ -40,7 +40,6 @@ use crate::runtime::reactor::Interest;
 use std::io;
 use std::os::unix::net::{self, SocketAddr};
 use std::path::{Path, PathBuf};
-use std::sync::Mutex;
 use std::task::{Context, Poll};
 
 /// A Unix domain socket datagram.
@@ -63,8 +62,8 @@ use std::task::{Context, Poll};
 /// Async methods take `&mut self` to avoid concurrent waiters clobbering
 /// the single reactor registration/waker slot.
 ///
-/// Uses interior mutability for reactor registration to allow async methods
-/// to take `&self` rather than `&mut self`, enabling concurrent use patterns.
+/// Async methods take `&mut self` to avoid concurrent waiters clobbering
+/// the single reactor registration/waker slot.
 #[derive(Debug)]
 pub struct UnixDatagram {
     /// The underlying standard library datagram socket.
@@ -73,8 +72,7 @@ pub struct UnixDatagram {
     /// None for abstract namespace sockets, unbound sockets, or from_std().
     path: Option<PathBuf>,
     /// Reactor registration for async I/O wakeup.
-    /// Uses Mutex for thread-safe interior mutability.
-    registration: Mutex<Option<IoRegistration>>,
+    registration: Option<IoRegistration>,
 }
 
 impl UnixDatagram {
@@ -111,7 +109,7 @@ impl UnixDatagram {
         Ok(Self {
             inner,
             path: Some(path.to_path_buf()),
-            registration: Mutex::new(None),
+            registration: None,
         })
     }
 
@@ -144,7 +142,7 @@ impl UnixDatagram {
         Ok(Self {
             inner,
             path: None, // No filesystem path for abstract sockets
-            registration: Mutex::new(None),
+            registration: None,
         })
     }
 
@@ -171,7 +169,7 @@ impl UnixDatagram {
         Ok(Self {
             inner,
             path: None,
-            registration: Mutex::new(None),
+            registration: None,
         })
     }
 
@@ -203,12 +201,12 @@ impl UnixDatagram {
             Self {
                 inner: s1,
                 path: None,
-                registration: Mutex::new(None),
+                registration: None,
             },
             Self {
                 inner: s2,
                 path: None,
-                registration: Mutex::new(None),
+                registration: None,
             },
         ))
     }
@@ -257,17 +255,13 @@ impl UnixDatagram {
     }
 
     /// Register interest with the reactor for async wakeup.
-    ///
-    /// Uses interior mutability via Mutex since async methods take &self.
-    fn register_interest(&self, cx: &Context<'_>, interest: Interest) -> io::Result<()> {
-        let mut reg = self.registration.lock().expect("registration lock poisoned");
-
-        if let Some(registration) = reg.as_mut() {
+    fn register_interest(&mut self, cx: &Context<'_>, interest: Interest) -> io::Result<()> {
+        if let Some(registration) = &mut self.registration {
             let combined = registration.interest() | interest;
             if combined != registration.interest() {
                 if let Err(err) = registration.set_interest(combined) {
                     if err.kind() == io::ErrorKind::NotConnected {
-                        *reg = None;
+                        self.registration = None;
                         cx.waker().wake_by_ref();
                         return Ok(());
                     }
@@ -277,7 +271,7 @@ impl UnixDatagram {
             if registration.update_waker(cx.waker().clone()) {
                 return Ok(());
             }
-            *reg = None;
+            self.registration = None;
         }
 
         let Some(current) = Cx::current() else {
@@ -291,7 +285,7 @@ impl UnixDatagram {
 
         match driver.register(&self.inner, interest, cx.waker().clone()) {
             Ok(registration) => {
-                *reg = Some(registration);
+                self.registration = Some(registration);
                 Ok(())
             }
             Err(err) if err.kind() == io::ErrorKind::Unsupported => {
@@ -553,7 +547,7 @@ impl UnixDatagram {
         Ok(Self {
             inner: socket,
             path: None, // Don't clean up sockets we didn't create
-            registration: Mutex::new(None),
+            registration: None,
         })
     }
 

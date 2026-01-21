@@ -30,7 +30,7 @@
 //! }
 //!
 //! async fn datagram_example() -> std::io::Result<()> {
-//!     let (a, b) = UnixDatagram::pair()?;
+//!     let (mut a, mut b) = UnixDatagram::pair()?;
 //!     a.send(b"hello").await?;
 //!     let mut buf = [0u8; 5];
 //!     let n = b.recv(&mut buf).await?;
