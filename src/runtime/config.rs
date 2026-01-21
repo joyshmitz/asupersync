@@ -1,5 +1,6 @@
 //! Runtime configuration types.
 
+use crate::observability::metrics::{MetricsProvider, NoOpMetrics};
 use crate::runtime::deadline_monitor::{DeadlineWarning, MonitorConfig};
 use std::sync::Arc;
 
@@ -48,6 +49,8 @@ pub struct RuntimeConfig {
     pub deadline_monitor: Option<MonitorConfig>,
     /// Warning callback for deadline monitoring.
     pub deadline_warning_handler: Option<Arc<dyn Fn(DeadlineWarning) + Send + Sync>>,
+    /// Metrics provider for runtime instrumentation.
+    pub metrics_provider: Arc<dyn MetricsProvider>,
 }
 
 impl RuntimeConfig {
@@ -93,6 +96,7 @@ impl Default for RuntimeConfig {
             on_thread_stop: None,
             deadline_monitor: None,
             deadline_warning_handler: None,
+            metrics_provider: Arc::new(NoOpMetrics),
         }
     }
 }

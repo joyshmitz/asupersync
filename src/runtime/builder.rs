@@ -1,6 +1,7 @@
 //! Runtime builder and handles.
 
 use crate::error::Error;
+use crate::observability::metrics::MetricsProvider;
 use crate::runtime::config::RuntimeConfig;
 use crate::runtime::deadline_monitor::{default_warning_handler, DeadlineWarning, MonitorConfig};
 use std::future::Future;
@@ -99,6 +100,32 @@ impl RuntimeBuilder {
         F: Fn() + Send + Sync + 'static,
     {
         self.config.on_thread_stop = Some(Arc::new(f));
+        self
+    }
+
+    /// Set the metrics provider for the runtime.
+    ///
+    /// The metrics provider receives callbacks for task spawning, completion,
+    /// region lifecycle events, and scheduler metrics. Use this to export
+    /// runtime metrics to OpenTelemetry, Prometheus, or custom backends.
+    ///
+    /// # Example
+    ///
+    /// ```ignore
+    /// use asupersync::runtime::RuntimeBuilder;
+    /// use asupersync::observability::OtelMetrics;
+    /// use opentelemetry::global;
+    ///
+    /// let meter = global::meter("asupersync");
+    /// let metrics = OtelMetrics::new(meter);
+    ///
+    /// let runtime = RuntimeBuilder::new()
+    ///     .metrics(metrics)
+    ///     .build()?;
+    /// ```
+    #[must_use]
+    pub fn metrics<M: MetricsProvider>(mut self, provider: M) -> Self {
+        self.config.metrics_provider = Arc::new(provider);
         self
     }
 
