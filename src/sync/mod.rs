@@ -31,6 +31,7 @@ mod barrier;
 mod mutex;
 mod notify;
 mod once_cell;
+mod pool;
 mod rwlock;
 mod semaphore;
 
@@ -38,6 +39,10 @@ pub use barrier::{Barrier, BarrierWaitError, BarrierWaitResult};
 pub use mutex::{LockError, Mutex, MutexGuard, OwnedMutexGuard, TryLockError};
 pub use notify::{Notified, Notify};
 pub use once_cell::{OnceCell, OnceCellError};
+pub use pool::{
+    AcquireError as PoolAcquireError, Pool, PoolStats, PooledResource, ReturnAction,
+    ReturnCallback, TryAcquireError as PoolTryAcquireError,
+};
 pub use rwlock::{
     OwnedRwLockReadGuard, OwnedRwLockWriteGuard, RwLock, RwLockError, RwLockReadGuard,
     RwLockWriteGuard, TryReadError, TryWriteError,
