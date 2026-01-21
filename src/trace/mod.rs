@@ -10,6 +10,7 @@
 //!
 //! - [`event`]: Observability trace events for debugging and analysis
 //! - [`replay`]: Compact replay events for deterministic record/replay
+//! - [`recorder`]: Trace recorder for Lab runtime instrumentation
 //! - [`file`]: Binary file format for trace persistence
 //! - [`buffer`]: Ring buffer for recent events
 //! - [`format`]: Output formatting utilities
@@ -19,6 +20,7 @@ pub mod distributed;
 pub mod event;
 pub mod file;
 pub mod format;
+pub mod recorder;
 pub mod replay;
 
 pub use buffer::TraceBuffer;
@@ -27,6 +29,7 @@ pub use file::{
     read_trace, write_trace, TraceEventIterator, TraceFileError, TraceReader, TraceWriter,
     TRACE_FILE_VERSION, TRACE_MAGIC,
 };
+pub use recorder::{RecorderConfig, TraceRecorder};
 pub use replay::{
     CompactRegionId, CompactTaskId, ReplayEvent, ReplayTrace, ReplayTraceError, TraceMetadata,
     REPLAY_SCHEMA_VERSION,

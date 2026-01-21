@@ -55,6 +55,7 @@
 //! ```
 
 use super::chaos::ChaosConfig;
+use crate::trace::RecorderConfig;
 use crate::util::DetRng;
 
 /// Configuration for the lab runtime.
@@ -79,6 +80,11 @@ pub struct LabConfig {
     /// When enabled, the runtime will inject faults at various points
     /// to stress-test the system's resilience.
     pub chaos: Option<ChaosConfig>,
+    /// Replay recording configuration.
+    ///
+    /// When enabled, the runtime will record all non-determinism sources
+    /// for later replay.
+    pub replay_recording: Option<RecorderConfig>,
 }
 
 impl LabConfig {
@@ -93,6 +99,7 @@ impl LabConfig {
             panic_on_futurelock: true,
             max_steps: Some(100_000),
             chaos: None,
+            replay_recording: None,
         }
     }
 
@@ -176,6 +183,25 @@ impl LabConfig {
     #[must_use]
     pub fn has_chaos(&self) -> bool {
         self.chaos.as_ref().is_some_and(ChaosConfig::is_enabled)
+    }
+
+    /// Enables replay recording with the given configuration.
+    #[must_use]
+    pub fn with_replay_recording(mut self, config: RecorderConfig) -> Self {
+        self.replay_recording = Some(config);
+        self
+    }
+
+    /// Enables replay recording with default configuration.
+    #[must_use]
+    pub fn with_default_replay_recording(self) -> Self {
+        self.with_replay_recording(RecorderConfig::enabled())
+    }
+
+    /// Returns true if replay recording is enabled.
+    #[must_use]
+    pub fn has_replay_recording(&self) -> bool {
+        self.replay_recording.as_ref().is_some_and(|c| c.enabled)
     }
 
     /// Creates a deterministic RNG from this configuration.

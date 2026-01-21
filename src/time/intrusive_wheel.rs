@@ -69,6 +69,8 @@ pub struct TimerNode {
     waker: Cell<Option<Waker>>,
     /// Slot index this timer is in (for O(1) cancel).
     slot: Cell<usize>,
+    /// Level index this timer is in (for hierarchical wheels).
+    level: Cell<u8>,
     /// Absolute expiration deadline.
     deadline: Cell<Instant>,
     /// Whether this node is currently linked in a wheel.
@@ -84,6 +86,7 @@ impl std::fmt::Debug for TimerNode {
             .field("prev", &self.prev.get().map(|p| p.as_ptr()))
             .field("waker", &"<waker>")
             .field("slot", &self.slot.get())
+            .field("level", &self.level.get())
             .field("deadline", &self.deadline.get())
             .field("linked", &self.linked.get())
             .finish()
@@ -99,6 +102,7 @@ impl TimerNode {
             prev: Cell::new(None),
             waker: Cell::new(None),
             slot: Cell::new(0),
+            level: Cell::new(0),
             deadline: Cell::new(Instant::now()),
             linked: Cell::new(false),
             _pinned: PhantomPinned,
@@ -117,16 +121,29 @@ impl TimerNode {
         self.deadline.get()
     }
 
+    /// Returns the level index for this timer.
+    #[must_use]
+    pub fn level(&self) -> u8 {
+        self.level.get()
+    }
+
     /// Takes the waker from this node.
     fn take_waker(&self) -> Option<Waker> {
         self.waker.take()
     }
 
     /// Sets the deadline and waker for this node.
-    fn set(&self, deadline: Instant, waker: Waker, slot: usize) {
+    fn set(&self, deadline: Instant, waker: Waker, slot: usize, level: u8) {
         self.deadline.set(deadline);
         self.waker.set(Some(waker));
         self.slot.set(slot);
+        self.level.set(level);
+    }
+
+    /// Updates slot/level metadata without touching waker/deadline.
+    fn update_slot_level(&self, slot: usize, level: u8) {
+        self.slot.set(slot);
+        self.level.set(level);
     }
 }
 
@@ -242,6 +259,21 @@ impl TimerSlot {
         }
 
         wakers
+    }
+
+    /// Drains all nodes from the slot without consuming their wakers.
+    ///
+    /// # Safety
+    ///
+    /// All nodes in the slot must be valid.
+    unsafe fn drain_nodes(&self) -> Vec<NonNull<TimerNode>> {
+        let mut nodes = Vec::with_capacity(self.count.get());
+
+        while let Some(node) = self.pop_front() {
+            nodes.push(node);
+        }
+
+        nodes
     }
 
     /// Collects expired wakers without draining non-expired nodes.
@@ -379,7 +411,9 @@ impl<const SLOTS: usize> TimerWheel<SLOTS> {
         );
 
         let slot = self.slot_for(deadline);
-        node.as_mut().get_unchecked_mut().set(deadline, waker, slot);
+        node.as_mut()
+            .get_unchecked_mut()
+            .set(deadline, waker, slot, 0);
 
         let node_ptr = NonNull::from(node.as_mut().get_unchecked_mut());
         self.slots[slot].push_back(node_ptr);
@@ -497,6 +531,359 @@ impl<const SLOTS: usize> TimerWheel<SLOTS> {
         }
         self.count = 0;
     }
+}
+
+/// Hierarchical timer wheel built from intrusive slots.
+///
+/// Level layout (default 1ms resolution):
+/// - Level 0: 256 slots @ 1ms   => 256ms range
+/// - Level 1: 64 slots  @ 256ms => 16.384s range
+/// - Level 2: 64 slots  @ 16.384s => ~17.45min range
+/// - Level 3: 128 slots @ ~17.45min => ~37.2hr range (>=24hr)
+#[derive(Debug)]
+pub struct HierarchicalTimerWheel {
+    level0: WheelLevel<LEVEL0_SLOTS>,
+    level1: WheelLevel<LEVEL1_SLOTS>,
+    level2: WheelLevel<LEVEL2_SLOTS>,
+    level3: WheelLevel<LEVEL3_SLOTS>,
+    /// Base time for slot calculations.
+    base_time: Instant,
+    /// Current tick in level-0 resolution.
+    current_tick: u64,
+    /// Total number of timers in the wheel.
+    count: usize,
+}
+
+const LEVEL0_SLOTS: usize = 256;
+const LEVEL1_SLOTS: usize = 64;
+const LEVEL2_SLOTS: usize = 64;
+const LEVEL3_SLOTS: usize = 128;
+
+const DEFAULT_LEVEL0_RESOLUTION: Duration = Duration::from_millis(1);
+
+#[derive(Debug)]
+struct WheelLevel<const SLOTS: usize> {
+    slots: [TimerSlot; SLOTS],
+    cursor: usize,
+    resolution_ns: u64,
+}
+
+impl<const SLOTS: usize> WheelLevel<SLOTS> {
+    fn new(resolution_ns: u64, cursor: usize) -> Self {
+        Self {
+            slots: std::array::from_fn(|_| TimerSlot::new()),
+            cursor,
+            resolution_ns,
+        }
+    }
+
+    fn range_ns(&self) -> u64 {
+        self.resolution_ns.saturating_mul(SLOTS as u64)
+    }
+}
+
+impl HierarchicalTimerWheel {
+    /// Creates a new hierarchical timer wheel with 1ms base resolution.
+    #[must_use]
+    pub fn new() -> Self {
+        Self::new_at(DEFAULT_LEVEL0_RESOLUTION, Instant::now())
+    }
+
+    /// Creates a new hierarchical timer wheel with a specific base time.
+    #[must_use]
+    pub fn new_at(level0_resolution: Duration, base_time: Instant) -> Self {
+        let level0_res_ns = duration_to_ns(level0_resolution);
+        let level1_res_ns = level0_res_ns.saturating_mul(LEVEL0_SLOTS as u64);
+        let level2_res_ns = level1_res_ns.saturating_mul(LEVEL1_SLOTS as u64);
+        let level3_res_ns = level2_res_ns.saturating_mul(LEVEL2_SLOTS as u64);
+
+        Self {
+            level0: WheelLevel::new(level0_res_ns, 0),
+            level1: WheelLevel::new(level1_res_ns, 0),
+            level2: WheelLevel::new(level2_res_ns, 0),
+            level3: WheelLevel::new(level3_res_ns, 0),
+            base_time,
+            current_tick: 0,
+            count: 0,
+        }
+    }
+
+    /// Returns the wheel's base resolution.
+    #[must_use]
+    pub fn resolution(&self) -> Duration {
+        Duration::from_nanos(self.level0.resolution_ns.max(1))
+    }
+
+    /// Returns the total number of pending timers.
+    #[must_use]
+    pub fn len(&self) -> usize {
+        self.count
+    }
+
+    /// Returns true if there are no pending timers.
+    #[must_use]
+    pub fn is_empty(&self) -> bool {
+        self.count == 0
+    }
+
+    /// Returns the current time aligned to the wheel resolution.
+    #[must_use]
+    pub fn current_time(&self) -> Instant {
+        self.base_time
+            + Duration::from_nanos(self.current_tick.saturating_mul(self.level0.resolution_ns))
+    }
+
+    /// Inserts a timer node with the given deadline.
+    ///
+    /// # Safety
+    ///
+    /// * The `node` must be pinned and remain valid until removed.
+    /// * The `node` must not already be linked in any wheel.
+    pub unsafe fn insert(
+        &mut self,
+        mut node: std::pin::Pin<&mut TimerNode>,
+        deadline: Instant,
+        waker: Waker,
+    ) {
+        debug_assert!(
+            !node.is_linked(),
+            "attempted to insert already-linked timer node"
+        );
+
+        let (level, slot) = self.slot_for(deadline);
+        node.as_mut()
+            .get_unchecked_mut()
+            .set(deadline, waker, slot, level);
+
+        let node_ptr = NonNull::from(node.as_mut().get_unchecked_mut());
+        self.push_node(level, slot, node_ptr);
+        self.count += 1;
+    }
+
+    /// Cancels a timer node, removing it from the wheel.
+    ///
+    /// # Safety
+    ///
+    /// The `node` must be valid and currently linked in this wheel.
+    pub unsafe fn cancel(&mut self, node: std::pin::Pin<&mut TimerNode>) {
+        if !node.is_linked() {
+            return;
+        }
+
+        let slot = node.slot.get();
+        let level = node.level.get();
+        let node_ptr = NonNull::from(&*node);
+        self.remove_node(level, slot, node_ptr);
+        self.count = self.count.saturating_sub(1);
+    }
+
+    /// Advances the wheel by one tick and returns expired wakers.
+    ///
+    /// # Safety
+    ///
+    /// All timer nodes in the wheel must be valid.
+    pub unsafe fn tick(&mut self) -> Vec<Waker> {
+        let now = Instant::now();
+        let wakers = self.level0.slots[self.level0.cursor].collect_expired(now);
+        self.count = self.count.saturating_sub(wakers.len());
+
+        self.level0.cursor = (self.level0.cursor + 1) % LEVEL0_SLOTS;
+        self.current_tick = self.current_tick.saturating_add(1);
+
+        if self.level0.cursor == 0 {
+            self.cascade(1, now);
+        }
+
+        wakers
+    }
+
+    /// Advances to the given time and returns all expired wakers.
+    ///
+    /// # Safety
+    ///
+    /// All timer nodes in the wheel must be valid.
+    pub unsafe fn advance_to(&mut self, now: Instant) -> Vec<Waker> {
+        let elapsed = now.saturating_duration_since(self.base_time);
+        let target_tick = duration_to_ns(elapsed) / self.level0.resolution_ns.max(1);
+        let mut wakers = Vec::new();
+
+        while self.current_tick < target_tick {
+            let mut tick_wakers = self.tick();
+            wakers.append(&mut tick_wakers);
+        }
+
+        // One more pass to flush any expired entries in the current slot.
+        let mut current = self.level0.slots[self.level0.cursor].collect_expired(now);
+        self.count = self.count.saturating_sub(current.len());
+        wakers.append(&mut current);
+
+        wakers
+    }
+
+    /// Returns the duration until the next timer expires, if any.
+    ///
+    /// Returns `None` if the wheel is empty.
+    #[must_use]
+    pub fn next_expiration(&self) -> Option<Duration> {
+        if self.is_empty() {
+            return None;
+        }
+
+        let now = Instant::now();
+        self.min_deadline()
+            .map(|deadline| deadline.saturating_duration_since(now))
+    }
+
+    /// Clears all timers without firing them.
+    ///
+    /// # Safety
+    ///
+    /// All timer nodes in the wheel must be valid.
+    pub unsafe fn clear(&mut self) {
+        let _ = self.level0.clear_slots();
+        let _ = self.level1.clear_slots();
+        let _ = self.level2.clear_slots();
+        let _ = self.level3.clear_slots();
+        self.count = 0;
+    }
+
+    fn slot_for(&self, deadline: Instant) -> (u8, usize) {
+        let current = self.current_time();
+        let delta_ns = duration_to_ns(deadline.saturating_duration_since(current));
+        let ticks_until = delta_ns / self.level0.resolution_ns.max(1);
+
+        if ticks_until < LEVEL0_SLOTS as u64 {
+            (0, self.slot_for_level(deadline, &self.level0, LEVEL0_SLOTS))
+        } else if ticks_until < (LEVEL0_SLOTS * LEVEL1_SLOTS) as u64 {
+            (1, self.slot_for_level(deadline, &self.level1, LEVEL1_SLOTS))
+        } else if ticks_until < (LEVEL0_SLOTS * LEVEL1_SLOTS * LEVEL2_SLOTS) as u64 {
+            (2, self.slot_for_level(deadline, &self.level2, LEVEL2_SLOTS))
+        } else {
+            (3, self.slot_for_level(deadline, &self.level3, LEVEL3_SLOTS))
+        }
+    }
+
+    fn slot_for_level<const SLOTS: usize>(
+        &self,
+        deadline: Instant,
+        level: &WheelLevel<SLOTS>,
+        slots: usize,
+    ) -> usize {
+        let elapsed_ns = duration_to_ns(deadline.saturating_duration_since(self.base_time));
+        let tick = elapsed_ns / level.resolution_ns.max(1);
+        (tick % slots as u64) as usize
+    }
+
+    fn push_node(&self, level: u8, slot: usize, node: NonNull<TimerNode>) {
+        match level {
+            0 => unsafe { self.level0.slots[slot].push_back(node) },
+            1 => unsafe { self.level1.slots[slot].push_back(node) },
+            2 => unsafe { self.level2.slots[slot].push_back(node) },
+            _ => unsafe { self.level3.slots[slot].push_back(node) },
+        }
+    }
+
+    fn remove_node(&self, level: u8, slot: usize, node: NonNull<TimerNode>) {
+        match level {
+            0 => unsafe { self.level0.slots[slot].remove(node) },
+            1 => unsafe { self.level1.slots[slot].remove(node) },
+            2 => unsafe { self.level2.slots[slot].remove(node) },
+            _ => unsafe { self.level3.slots[slot].remove(node) },
+        }
+    }
+
+    fn cascade(&mut self, level_index: u8, now: Instant) {
+        match level_index {
+            1 => self.cascade_level(&mut self.level1, 1, now, LEVEL1_SLOTS),
+            2 => self.cascade_level(&mut self.level2, 2, now, LEVEL2_SLOTS),
+            3 => self.cascade_level(&mut self.level3, 3, now, LEVEL3_SLOTS),
+            _ => {}
+        }
+    }
+
+    fn cascade_level<const SLOTS: usize>(
+        &mut self,
+        level: &mut WheelLevel<SLOTS>,
+        level_index: u8,
+        now: Instant,
+        slots: usize,
+    ) {
+        level.cursor = (level.cursor + 1) % slots;
+        let bucket = unsafe { level.slots[level.cursor].drain_nodes() };
+        for node in bucket {
+            let node_ref = unsafe { node.as_ref() };
+            if !node_ref.is_linked() {
+                let (new_level, new_slot) = self.slot_for(node_ref.deadline());
+                node_ref.update_slot_level(new_slot, new_level);
+                self.push_node(new_level, new_slot, node);
+            }
+        }
+
+        if level.cursor == 0 {
+            self.cascade(level_index + 1, now);
+        }
+    }
+
+    fn min_deadline(&self) -> Option<Instant> {
+        let mut min_deadline: Option<Instant> = None;
+        for deadline in self.iter_deadlines() {
+            min_deadline = Some(min_deadline.map_or(deadline, |current| current.min(deadline)));
+        }
+        min_deadline
+    }
+
+    fn iter_deadlines(&self) -> impl Iterator<Item = Instant> + '_ {
+        self.level0
+            .iter_deadlines()
+            .chain(self.level1.iter_deadlines())
+            .chain(self.level2.iter_deadlines())
+            .chain(self.level3.iter_deadlines())
+    }
+}
+
+impl<const SLOTS: usize> WheelLevel<SLOTS> {
+    fn iter_deadlines(&self) -> impl Iterator<Item = Instant> + '_ {
+        self.slots.iter().flat_map(|slot| slot.iter_deadlines())
+    }
+
+    unsafe fn clear_slots(&mut self) -> Vec<Waker> {
+        let mut wakers = Vec::new();
+        for slot in &self.slots {
+            wakers.extend(slot.drain());
+        }
+        wakers
+    }
+}
+
+impl TimerSlot {
+    fn iter_deadlines(&self) -> impl Iterator<Item = Instant> + '_ {
+        TimerSlotIter::new(self.head.get())
+    }
+}
+
+struct TimerSlotIter {
+    current: Option<NonNull<TimerNode>>,
+}
+
+impl TimerSlotIter {
+    fn new(current: Option<NonNull<TimerNode>>) -> Self {
+        Self { current }
+    }
+}
+
+impl Iterator for TimerSlotIter {
+    type Item = Instant;
+
+    fn next(&mut self) -> Option<Self::Item> {
+        let node = self.current?;
+        let node_ref = unsafe { node.as_ref() };
+        self.current = node_ref.next.get();
+        Some(node_ref.deadline())
+    }
+}
+
+fn duration_to_ns(duration: Duration) -> u64 {
+    duration.as_nanos().min(u128::from(u64::MAX)) as u64
 }
 
 #[cfg(test)]
