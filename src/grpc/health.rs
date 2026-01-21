@@ -171,8 +171,7 @@ impl HealthService {
     /// Check if a service is serving.
     #[must_use]
     pub fn is_serving(&self, service: &str) -> bool {
-        self.get_status(service)
-            .is_some_and(|s| s.is_healthy())
+        self.get_status(service).is_some_and(|s| s.is_healthy())
     }
 
     /// Clear all service statuses.
