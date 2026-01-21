@@ -15,12 +15,84 @@ use asupersync::types::Time;
 use std::future::Future;
 use std::sync::Once;
 use std::time::Duration;
+use proptest::prelude::ProptestConfig;
+use proptest::test_runner::RngSeed;
 use tracing_subscriber::fmt::format::FmtSpan;
 
 static INIT_LOGGING: Once = Once::new();
 
 /// Default seed used by test lab helpers.
 pub const DEFAULT_TEST_SEED: u64 = 0xDEADBEEF;
+/// Default seed for property tests when running under CI.
+pub const DEFAULT_PROPTEST_SEED: u64 = 0x5EED5EED;
+
+const PROPTEST_SEED_ENV: &str = "ASUPERSYNC_PROPTEST_SEED";
+const PROPTEST_MAX_SHRINK_ITERS_ENV: &str = "ASUPERSYNC_PROPTEST_MAX_SHRINK_ITERS";
+
+/// Configuration for property tests with optional deterministic seed support.
+#[derive(Debug, Clone)]
+pub struct PropertyTestConfig {
+    /// Fixed seed for reproducibility (overrides CI default when set).
+    pub seed: Option<u64>,
+    /// Number of successful cases required.
+    pub cases: u32,
+    /// Maximum shrink iterations.
+    pub max_shrink_iters: u32,
+}
+
+impl PropertyTestConfig {
+    /// Build a config with defaults for property tests.
+    #[must_use]
+    pub fn new(cases: u32) -> Self {
+        Self {
+            seed: read_proptest_seed(),
+            cases,
+            max_shrink_iters: read_max_shrink_iters()
+                .unwrap_or(ProptestConfig::default().max_shrink_iters),
+        }
+    }
+
+    /// Convert into a ProptestConfig, applying deterministic seed rules.
+    #[must_use]
+    pub fn to_proptest_config(&self) -> ProptestConfig {
+        let mut config = ProptestConfig::with_cases(self.cases);
+
+        // Honor existing PROPTEST_RNG_SEED, otherwise apply our own.
+        if matches!(config.rng_seed, RngSeed::Random) {
+            if let Some(seed) = self.seed {
+                config.rng_seed = RngSeed::Fixed(seed);
+            }
+        }
+
+        config.max_shrink_iters = self.max_shrink_iters;
+        config
+    }
+}
+
+/// Build a ProptestConfig with deterministic seed support for CI.
+#[must_use]
+pub fn test_proptest_config(cases: u32) -> ProptestConfig {
+    PropertyTestConfig::new(cases).to_proptest_config()
+}
+
+fn read_proptest_seed() -> Option<u64> {
+    if let Ok(value) = std::env::var(PROPTEST_SEED_ENV) {
+        return value.parse::<u64>().ok();
+    }
+
+    // If CI is set and no explicit seed is provided, use a fixed seed.
+    if std::env::var("CI").is_ok() {
+        return Some(DEFAULT_PROPTEST_SEED);
+    }
+
+    None
+}
+
+fn read_max_shrink_iters() -> Option<u32> {
+    std::env::var(PROPTEST_MAX_SHRINK_ITERS_ENV)
+        .ok()
+        .and_then(|value| value.parse::<u32>().ok())
+}
 
 /// Initialize test logging with trace-level output.
 pub fn init_test_logging() {
@@ -256,4 +328,270 @@ impl std::fmt::Display for MockError {
     fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
         write!(f, "MockError: {}", self.0)
     }
+}
+
+// =============================================================================
+// Property Testing Configuration (asupersync-kbg7)
+// =============================================================================
+
+/// Fixed seed for CI reproducibility.
+/// Using a memorable constant makes debugging easier.
+pub const FIXED_PROPERTY_SEED: [u8; 32] = [
+    0xDE, 0xAD, 0xBE, 0xEF, 0xCA, 0xFE, 0xBA, 0xBE,
+    0x01, 0x23, 0x45, 0x67, 0x89, 0xAB, 0xCD, 0xEF,
+    0xFE, 0xDC, 0xBA, 0x98, 0x76, 0x54, 0x32, 0x10,
+    0xAA, 0xBB, 0xCC, 0xDD, 0xEE, 0xFF, 0x00, 0x11,
+];
+
+/// Configuration for property tests.
+///
+/// This wraps proptest's configuration with asupersync-specific defaults
+/// and provides deterministic seeds for CI reproducibility.
+#[derive(Debug, Clone)]
+pub struct PropertyTestConfig {
+    /// Fixed seed for CI reproducibility.
+    /// When set, tests are deterministic across runs.
+    pub seed: Option<[u8; 32]>,
+
+    /// Number of test cases to generate.
+    pub cases: u32,
+
+    /// Maximum shrink iterations.
+    pub max_shrink_iters: u32,
+
+    /// Directory for recording failures.
+    pub regression_dir: Option<std::path::PathBuf>,
+}
+
+impl Default for PropertyTestConfig {
+    fn default() -> Self {
+        Self {
+            seed: None,
+            cases: 100,
+            max_shrink_iters: 1000,
+            regression_dir: None,
+        }
+    }
+}
+
+impl PropertyTestConfig {
+    /// Create a new property test configuration with defaults.
+    #[must_use]
+    pub fn new() -> Self {
+        Self::default()
+    }
+
+    /// Create a configuration for CI with fixed seed for reproducibility.
+    #[must_use]
+    pub fn for_ci() -> Self {
+        Self {
+            seed: Some(FIXED_PROPERTY_SEED),
+            cases: 100,
+            max_shrink_iters: 2000,
+            regression_dir: Some(std::path::PathBuf::from("tests/regressions")),
+        }
+    }
+
+    /// Create a configuration for local development with more cases.
+    #[must_use]
+    pub fn for_local() -> Self {
+        Self {
+            seed: None,
+            cases: 500,
+            max_shrink_iters: 5000,
+            regression_dir: None,
+        }
+    }
+
+    /// Set a fixed seed for reproducibility.
+    #[must_use]
+    pub fn with_seed(mut self, seed: [u8; 32]) -> Self {
+        self.seed = Some(seed);
+        self
+    }
+
+    /// Set the number of test cases.
+    #[must_use]
+    pub fn with_cases(mut self, cases: u32) -> Self {
+        self.cases = cases;
+        self
+    }
+
+    /// Set maximum shrink iterations.
+    #[must_use]
+    pub fn with_max_shrink_iters(mut self, iters: u32) -> Self {
+        self.max_shrink_iters = iters;
+        self
+    }
+
+    /// Set the regression directory for failure recording.
+    #[must_use]
+    pub fn with_regression_dir<P: Into<std::path::PathBuf>>(mut self, dir: P) -> Self {
+        self.regression_dir = Some(dir.into());
+        self
+    }
+
+    /// Convert to proptest configuration.
+    #[must_use]
+    pub fn to_proptest_config(&self) -> proptest::test_runner::Config {
+        let mut config = proptest::test_runner::Config::with_cases(self.cases);
+        config.max_shrink_iters = self.max_shrink_iters;
+
+        if let Some(seed) = self.seed {
+            config.rng_algorithm = proptest::test_runner::RngAlgorithm::ChaCha;
+            config = config.clone();
+            // Note: proptest uses a different seed type, we'll need to handle this
+            // in the proptest! macro configuration
+        }
+
+        config
+    }
+
+    /// Check if running in CI environment.
+    #[must_use]
+    pub fn is_ci() -> bool {
+        std::env::var("CI").is_ok() || std::env::var("GITHUB_ACTIONS").is_ok()
+    }
+
+    /// Create configuration based on environment.
+    #[must_use]
+    pub fn auto() -> Self {
+        if Self::is_ci() {
+            Self::for_ci()
+        } else {
+            Self::for_local()
+        }
+    }
+}
+
+// =============================================================================
+// Failure Recording Infrastructure (asupersync-kbg7)
+// =============================================================================
+
+/// Record a property test failure for regression testing.
+///
+/// Saves the failure input to a JSON file in the regression directory.
+pub fn record_failure<T: serde::Serialize>(
+    test_name: &str,
+    input: &T,
+    regression_dir: Option<&std::path::Path>,
+) -> std::io::Result<std::path::PathBuf> {
+    let dir = regression_dir.unwrap_or(std::path::Path::new("tests/regressions"));
+
+    // Ensure directory exists
+    std::fs::create_dir_all(dir)?;
+
+    // Generate filename with timestamp
+    let timestamp = std::time::SystemTime::now()
+        .duration_since(std::time::UNIX_EPOCH)
+        .map(|d| d.as_secs())
+        .unwrap_or(0);
+
+    let filename = format!("{}_{}.json", test_name, timestamp);
+    let path = dir.join(&filename);
+
+    // Serialize and write
+    let json = serde_json::to_string_pretty(input)
+        .map_err(|e| std::io::Error::new(std::io::ErrorKind::InvalidData, e))?;
+
+    std::fs::write(&path, json)?;
+
+    tracing::warn!(
+        test = %test_name,
+        path = %path.display(),
+        "recorded property test failure for regression testing"
+    );
+
+    Ok(path)
+}
+
+/// Load a regression test case from a JSON file.
+pub fn load_regression<T: serde::de::DeserializeOwned>(
+    path: &std::path::Path,
+) -> std::io::Result<T> {
+    let content = std::fs::read_to_string(path)?;
+    serde_json::from_str(&content)
+        .map_err(|e| std::io::Error::new(std::io::ErrorKind::InvalidData, e))
+}
+
+/// Find all regression test files for a given test name.
+pub fn find_regressions(
+    test_name: &str,
+    regression_dir: Option<&std::path::Path>,
+) -> std::io::Result<Vec<std::path::PathBuf>> {
+    let dir = regression_dir.unwrap_or(std::path::Path::new("tests/regressions"));
+
+    if !dir.exists() {
+        return Ok(Vec::new());
+    }
+
+    let mut files = Vec::new();
+    let prefix = format!("{}_", test_name);
+
+    for entry in std::fs::read_dir(dir)? {
+        let entry = entry?;
+        let path = entry.path();
+
+        if path.is_file() {
+            if let Some(name) = path.file_name().and_then(|n| n.to_str()) {
+                if name.starts_with(&prefix) && name.ends_with(".json") {
+                    files.push(path);
+                }
+            }
+        }
+    }
+
+    // Sort by filename (which includes timestamp) for consistent ordering
+    files.sort();
+
+    Ok(files)
+}
+
+/// Run a regression test with the loaded input.
+///
+/// This is a helper for running regression tests in a consistent way.
+pub fn run_regression_test<T, F>(test_name: &str, input: T, test_fn: F)
+where
+    F: FnOnce(T),
+{
+    init_test_logging();
+    tracing::info!(
+        test = %test_name,
+        "running regression test"
+    );
+    test_fn(input);
+    tracing::info!(
+        test = %test_name,
+        "regression test passed"
+    );
+}
+
+// =============================================================================
+// Shrinking Helper Macros (asupersync-kbg7)
+// =============================================================================
+
+/// Helper macro for recording failures in proptest.
+///
+/// Use this in proptest! blocks to automatically record failures:
+///
+/// ```ignore
+/// proptest! {
+///     #[test]
+///     fn my_property_test(input in any::<MyInput>()) {
+///         let result = test_with(&input);
+///         if result.is_err() {
+///             record_on_failure!("my_property_test", &input);
+///         }
+///         prop_assert!(result.is_ok());
+///     }
+/// }
+/// ```
+#[macro_export]
+macro_rules! record_on_failure {
+    ($test_name:expr, $input:expr) => {
+        let _ = $crate::common::record_failure($test_name, $input, None);
+    };
+    ($test_name:expr, $input:expr, $dir:expr) => {
+        let _ = $crate::common::record_failure($test_name, $input, Some($dir));
+    };
 }

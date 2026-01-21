@@ -17,6 +17,23 @@
 //! - Common operations (CreateChild, SpawnTask): weight 3
 //! - State transitions (Cancel, CompleteTask, CloseRegion): weight 2
 //! - Time/deadline operations (AdvanceTime, SetDeadline): weight 1
+//!
+//! # Shrinking Strategies (asupersync-kbg7)
+//!
+//! Custom shrinking is provided to find minimal failing cases:
+//! - Removes operations that don't affect the failure
+//! - Preserves causal relationships (spawn before use)
+//! - Simplifies selectors toward index 0
+//! - Reduces time advances to minimum values
+//!
+//! # Failure Recording
+//!
+//! Failed test cases can be recorded for regression testing:
+//! ```ignore
+//! if failure_detected {
+//!     record_failure("test_name", &ops, None);
+//! }
+//! ```
 
 #[macro_use]
 mod common;
@@ -27,7 +44,14 @@ use asupersync::record::RegionRecord;
 use asupersync::types::{Budget, CancelKind, CancelReason, Outcome, RegionId, TaskId};
 use asupersync::util::ArenaIndex;
 use common::*;
+use proptest::collection::SizeRange;
 use proptest::prelude::*;
+use proptest::strategy::{NewTree, ValueTree};
+use proptest::test_runner::{RngSeed, TestRunner};
+use serde::{Deserialize, Serialize};
+use std::path::{Path, PathBuf};
+use std::time::{SystemTime, UNIX_EPOCH};
+use serde::{Deserialize, Serialize};
 
 // ============================================================================
 // Selector Types
@@ -37,7 +61,7 @@ use proptest::prelude::*;
 ///
 /// The `usize` value is used as an index into a collection of existing regions.
 /// If the index is out of bounds, operations using this selector are skipped.
-#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize)]
 pub struct RegionSelector(pub usize);
 
 impl Arbitrary for RegionSelector {
@@ -53,7 +77,7 @@ impl Arbitrary for RegionSelector {
 ///
 /// The `usize` value is used as an index into a collection of existing tasks.
 /// If the index is out of bounds, operations using this selector are skipped.
-#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize)]
 pub struct TaskSelector(pub usize);
 
 impl Arbitrary for TaskSelector {
@@ -72,7 +96,7 @@ impl Arbitrary for TaskSelector {
 /// Possible task completion outcomes for testing.
 ///
 /// Used to simulate different task completion scenarios in property tests.
-#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize)]
 pub enum TaskOutcome {
     /// Task completed successfully.
     Ok,
@@ -117,7 +141,7 @@ fn arb_cancel_kind_for_ops() -> impl Strategy<Value = CancelKind> {
 ///
 /// These operations model the key mutations in a structured concurrency system:
 /// creating hierarchy, spawning work, cancellation, and cleanup.
-#[derive(Debug, Clone)]
+#[derive(Debug, Clone, PartialEq, Eq)]
 pub enum RegionOp {
     /// Create a child region under the selected parent.
     CreateChild { parent: RegionSelector },
@@ -170,6 +194,399 @@ impl Arbitrary for RegionOp {
         ]
         .boxed()
     }
+}
+
+// ============================================================================
+// Region Operation Sequences (custom shrinker)
+// ============================================================================
+
+#[derive(Debug, Clone)]
+struct RegionOpSequenceStrategy {
+    size: SizeRange,
+}
+
+impl RegionOpSequenceStrategy {
+    fn new(size: impl Into<SizeRange>) -> Self {
+        Self { size: size.into() }
+    }
+}
+
+impl Strategy for RegionOpSequenceStrategy {
+    type Tree = RegionOpSequenceTree;
+    type Value = Vec<RegionOp>;
+
+    fn new_tree(&self, runner: &mut TestRunner) -> NewTree<Self> {
+        let base = proptest::collection::vec(any::<RegionOp>(), self.size.clone());
+        let mut tree = base.new_tree(runner)?;
+        Ok(RegionOpSequenceTree::new(tree.current()))
+    }
+}
+
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+enum LastShrink {
+    None,
+    Simplify,
+    Complicate,
+}
+
+#[derive(Debug)]
+struct RegionOpSequenceTree {
+    current: Vec<RegionOp>,
+    shrink_queue: Vec<Vec<RegionOp>>,
+    shrink_pos: usize,
+    last_shrink: LastShrink,
+    previous: Option<Vec<RegionOp>>,
+}
+
+impl RegionOpSequenceTree {
+    fn new(current: Vec<RegionOp>) -> Self {
+        let shrink_queue = shrink_op_sequence(&current);
+        Self {
+            current,
+            shrink_queue,
+            shrink_pos: 0,
+            last_shrink: LastShrink::None,
+            previous: None,
+        }
+    }
+
+    fn reset_queue(&mut self) {
+        self.shrink_queue = shrink_op_sequence(&self.current);
+        self.shrink_pos = 0;
+    }
+}
+
+impl ValueTree for RegionOpSequenceTree {
+    type Value = Vec<RegionOp>;
+
+    fn current(&self) -> Vec<RegionOp> {
+        self.current.clone()
+    }
+
+    fn simplify(&mut self) -> bool {
+        if matches!(self.last_shrink, LastShrink::Simplify) {
+            // Previous simplify accepted; recompute shrink candidates from current.
+            self.reset_queue();
+        }
+
+        while self.shrink_pos < self.shrink_queue.len() {
+            let candidate = self.shrink_queue[self.shrink_pos].clone();
+            self.shrink_pos += 1;
+            if candidate.is_empty() {
+                continue;
+            }
+
+            self.previous = Some(self.current.clone());
+            self.current = candidate;
+            self.last_shrink = LastShrink::Simplify;
+            return true;
+        }
+
+        self.last_shrink = LastShrink::Simplify;
+        false
+    }
+
+    fn complicate(&mut self) -> bool {
+        if let Some(prev) = self.previous.take() {
+            self.current = prev;
+            self.last_shrink = LastShrink::Complicate;
+            return true;
+        }
+
+        self.last_shrink = LastShrink::Complicate;
+        false
+    }
+}
+
+fn region_op_sequence(size: impl Into<SizeRange>) -> RegionOpSequenceStrategy {
+    RegionOpSequenceStrategy::new(size)
+}
+
+fn shrink_op_sequence(ops: &[RegionOp]) -> Vec<Vec<RegionOp>> {
+    if ops.len() <= 1 {
+        return Vec::new();
+    }
+
+    let mut candidates = Vec::new();
+    let len = ops.len();
+    let half = len / 2;
+
+    if half >= 1 {
+        candidates.push(ops[..half].to_vec());
+    }
+    if len > 1 {
+        candidates.push(ops[..len - 1].to_vec());
+    }
+
+    // Drop time-related operations to focus on structural behavior.
+    let without_time: Vec<RegionOp> = ops
+        .iter()
+        .filter(|op| !matches!(op, RegionOp::AdvanceTime { .. } | RegionOp::SetDeadline { .. }))
+        .cloned()
+        .collect();
+    if without_time.len() >= 1 && without_time.len() < len && is_sequence_causal(&without_time) {
+        candidates.push(without_time);
+    }
+
+    // Try removing individual operations while preserving causal structure.
+    for idx in 0..len {
+        let mut candidate = ops.to_vec();
+        candidate.remove(idx);
+        if candidate.len() >= 1 && is_sequence_causal(&candidate) {
+            candidates.push(candidate);
+        }
+    }
+
+    // Try simplifying individual operations.
+    for (idx, op) in ops.iter().enumerate() {
+        if let Some(simplified) = simplify_op(op) {
+            let mut candidate = ops.to_vec();
+            candidate[idx] = simplified;
+            if is_sequence_causal(&candidate) {
+                candidates.push(candidate);
+            }
+        }
+    }
+
+    candidates.truncate(64);
+    candidates
+}
+
+fn simplify_op(op: &RegionOp) -> Option<RegionOp> {
+    match op {
+        RegionOp::CreateChild { parent } => Some(RegionOp::CreateChild {
+            parent: RegionSelector(parent.0.min(1)),
+        }),
+        RegionOp::SpawnTask { region } => Some(RegionOp::SpawnTask {
+            region: RegionSelector(region.0.min(1)),
+        }),
+        RegionOp::Cancel { region, reason } => Some(RegionOp::Cancel {
+            region: RegionSelector(region.0.min(1)),
+            reason: CancelKind::User,
+        }),
+        RegionOp::CompleteTask { task, outcome } => Some(RegionOp::CompleteTask {
+            task: TaskSelector(task.0.min(1)),
+            outcome: TaskOutcome::Ok,
+        }),
+        RegionOp::CloseRegion { region } => Some(RegionOp::CloseRegion {
+            region: RegionSelector(region.0.min(1)),
+        }),
+        RegionOp::AdvanceTime { .. } => Some(RegionOp::AdvanceTime { millis: 1 }),
+        RegionOp::SetDeadline { region, .. } => Some(RegionOp::SetDeadline {
+            region: RegionSelector(region.0.min(1)),
+            millis: 1,
+        }),
+    }
+}
+
+fn is_sequence_causal(ops: &[RegionOp]) -> bool {
+    let mut has_spawn = false;
+    for op in ops {
+        match op {
+            RegionOp::SpawnTask { .. } => has_spawn = true,
+            RegionOp::CompleteTask { .. } if !has_spawn => return false,
+            _ => {}
+        }
+    }
+    true
+}
+
+// ============================================================================
+// Failure Recording + Regression Infrastructure
+// ============================================================================
+
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(rename_all = "snake_case")]
+enum CancelKindRecord {
+    User,
+    Timeout,
+    Deadline,
+    PollQuota,
+    CostBudget,
+    FailFast,
+    RaceLost,
+    ParentCancelled,
+    ResourceUnavailable,
+    Shutdown,
+}
+
+impl From<CancelKind> for CancelKindRecord {
+    fn from(kind: CancelKind) -> Self {
+        match kind {
+            CancelKind::User => Self::User,
+            CancelKind::Timeout => Self::Timeout,
+            CancelKind::Deadline => Self::Deadline,
+            CancelKind::PollQuota => Self::PollQuota,
+            CancelKind::CostBudget => Self::CostBudget,
+            CancelKind::FailFast => Self::FailFast,
+            CancelKind::RaceLost => Self::RaceLost,
+            CancelKind::ParentCancelled => Self::ParentCancelled,
+            CancelKind::ResourceUnavailable => Self::ResourceUnavailable,
+            CancelKind::Shutdown => Self::Shutdown,
+        }
+    }
+}
+
+impl From<CancelKindRecord> for CancelKind {
+    fn from(kind: CancelKindRecord) -> Self {
+        match kind {
+            CancelKindRecord::User => Self::User,
+            CancelKindRecord::Timeout => Self::Timeout,
+            CancelKindRecord::Deadline => Self::Deadline,
+            CancelKindRecord::PollQuota => Self::PollQuota,
+            CancelKindRecord::CostBudget => Self::CostBudget,
+            CancelKindRecord::FailFast => Self::FailFast,
+            CancelKindRecord::RaceLost => Self::RaceLost,
+            CancelKindRecord::ParentCancelled => Self::ParentCancelled,
+            CancelKindRecord::ResourceUnavailable => Self::ResourceUnavailable,
+            CancelKindRecord::Shutdown => Self::Shutdown,
+        }
+    }
+}
+
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(rename_all = "snake_case")]
+enum TaskOutcomeRecord {
+    Ok,
+    Err,
+    Panic,
+}
+
+impl From<TaskOutcome> for TaskOutcomeRecord {
+    fn from(outcome: TaskOutcome) -> Self {
+        match outcome {
+            TaskOutcome::Ok => Self::Ok,
+            TaskOutcome::Err => Self::Err,
+            TaskOutcome::Panic => Self::Panic,
+        }
+    }
+}
+
+impl From<TaskOutcomeRecord> for TaskOutcome {
+    fn from(outcome: TaskOutcomeRecord) -> Self {
+        match outcome {
+            TaskOutcomeRecord::Ok => Self::Ok,
+            TaskOutcomeRecord::Err => Self::Err,
+            TaskOutcomeRecord::Panic => Self::Panic,
+        }
+    }
+}
+
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(tag = "op", rename_all = "snake_case")]
+enum RegionOpRecord {
+    CreateChild { parent: usize },
+    SpawnTask { region: usize },
+    Cancel { region: usize, reason: CancelKindRecord },
+    CompleteTask { task: usize, outcome: TaskOutcomeRecord },
+    CloseRegion { region: usize },
+    AdvanceTime { millis: u64 },
+    SetDeadline { region: usize, millis: u64 },
+}
+
+impl RegionOpRecord {
+    fn from_op(op: &RegionOp) -> Self {
+        match op {
+            RegionOp::CreateChild { parent } => Self::CreateChild { parent: parent.0 },
+            RegionOp::SpawnTask { region } => Self::SpawnTask { region: region.0 },
+            RegionOp::Cancel { region, reason } => Self::Cancel {
+                region: region.0,
+                reason: (*reason).into(),
+            },
+            RegionOp::CompleteTask { task, outcome } => Self::CompleteTask {
+                task: task.0,
+                outcome: (*outcome).into(),
+            },
+            RegionOp::CloseRegion { region } => Self::CloseRegion { region: region.0 },
+            RegionOp::AdvanceTime { millis } => Self::AdvanceTime { millis: *millis },
+            RegionOp::SetDeadline { region, millis } => {
+                Self::SetDeadline { region: region.0, millis: *millis }
+            }
+        }
+    }
+
+    fn to_op(&self) -> RegionOp {
+        match self {
+            Self::CreateChild { parent } => RegionOp::CreateChild {
+                parent: RegionSelector(*parent),
+            },
+            Self::SpawnTask { region } => RegionOp::SpawnTask {
+                region: RegionSelector(*region),
+            },
+            Self::Cancel { region, reason } => RegionOp::Cancel {
+                region: RegionSelector(*region),
+                reason: (*reason).into(),
+            },
+            Self::CompleteTask { task, outcome } => RegionOp::CompleteTask {
+                task: TaskSelector(*task),
+                outcome: (*outcome).into(),
+            },
+            Self::CloseRegion { region } => RegionOp::CloseRegion {
+                region: RegionSelector(*region),
+            },
+            Self::AdvanceTime { millis } => RegionOp::AdvanceTime { millis: *millis },
+            Self::SetDeadline { region, millis } => RegionOp::SetDeadline {
+                region: RegionSelector(*region),
+                millis: *millis,
+            },
+        }
+    }
+}
+
+fn ops_to_records(ops: &[RegionOp]) -> Vec<RegionOpRecord> {
+    ops.iter().map(RegionOpRecord::from_op).collect()
+}
+
+fn record_failure(test_name: &str, ops: &[RegionOp]) {
+    let dir = Path::new("tests/regressions/region_ops");
+    if let Err(err) = record_failure_to_dir(dir, test_name, ops) {
+        tracing::warn!(error = ?err, "failed to record regression case");
+    }
+}
+
+fn record_failure_to_dir(
+    dir: &Path,
+    test_name: &str,
+    ops: &[RegionOp],
+) -> std::io::Result<PathBuf> {
+    std::fs::create_dir_all(dir)?;
+    let timestamp = SystemTime::now()
+        .duration_since(UNIX_EPOCH)
+        .unwrap_or_default()
+        .as_secs();
+    let filename = format!("failure_{}_{}.json", sanitize_filename(test_name), timestamp);
+    let path = dir.join(filename);
+    let payload = serde_json::to_string_pretty(&ops_to_records(ops))
+        .map_err(|err| std::io::Error::new(std::io::ErrorKind::Other, err))?;
+    std::fs::write(&path, payload)?;
+    Ok(path)
+}
+
+fn load_regression_cases(dir: &Path) -> std::io::Result<Vec<(PathBuf, Vec<RegionOpRecord>)>> {
+    let mut cases = Vec::new();
+    if !dir.exists() {
+        return Ok(cases);
+    }
+
+    for entry in std::fs::read_dir(dir)? {
+        let entry = entry?;
+        let path = entry.path();
+        if path.extension().and_then(|ext| ext.to_str()) != Some("json") {
+            continue;
+        }
+        let contents = std::fs::read_to_string(&path)?;
+        let records: Vec<RegionOpRecord> = serde_json::from_str(&contents)
+            .map_err(|err| std::io::Error::new(std::io::ErrorKind::InvalidData, err))?;
+        cases.push((path, records));
+    }
+
+    Ok(cases)
+}
+
+fn sanitize_filename(name: &str) -> String {
+    name.chars()
+        .map(|c| if c.is_ascii_alphanumeric() { c } else { '_' })
+        .collect()
 }
 
 // ============================================================================
@@ -503,7 +920,7 @@ impl RegionOp {
 // ============================================================================
 
 proptest! {
-    #![proptest_config(ProptestConfig::with_cases(100))]
+    #![proptest_config(test_proptest_config(100))]
 
     /// Test that RegionSelector generates values in the expected range.
     #[test]
@@ -1035,24 +1452,29 @@ fn check_close_ordering(harness: &TestHarness) -> Vec<InvariantViolation> {
 // ============================================================================
 
 proptest! {
-    #![proptest_config(ProptestConfig::with_cases(50))]
+    #![proptest_config(test_proptest_config(50))]
 
     /// Test that random operation sequences don't panic and maintain invariants.
     #[test]
-    fn random_ops_no_panic(ops in proptest::collection::vec(any::<RegionOp>(), 1..50)) {
+    fn random_ops_no_panic(ops in region_op_sequence(1..50)) {
         init_test_logging();
         test_phase!("random_ops_no_panic");
 
         let mut harness = TestHarness::with_root(0xDEADBEEF);
 
         let mut applied_count = 0;
+        let mut applied_ops = Vec::new();
         for op in &ops {
             if op.apply(&mut harness) {
                 applied_count += 1;
+                applied_ops.push(op.clone());
             }
 
             // Check invariants after each operation
             let violations = check_all_invariants(&harness);
+            if !violations.is_empty() {
+                record_failure("random_ops_no_panic", &applied_ops);
+            }
             prop_assert!(
                 violations.is_empty(),
                 "Invariant violations after {:?}: {:?}",
@@ -1079,7 +1501,7 @@ proptest! {
 
     /// Test invariants are maintained after many operations.
     #[test]
-    fn invariants_maintained_under_stress(ops in proptest::collection::vec(any::<RegionOp>(), 50..100)) {
+    fn invariants_maintained_under_stress(ops in region_op_sequence(50..100)) {
         init_test_logging();
         test_phase!("invariants_maintained_under_stress");
 
@@ -1091,6 +1513,9 @@ proptest! {
 
         // Final invariant check
         let violations = check_all_invariants(&harness);
+        if !violations.is_empty() {
+            record_failure("invariants_maintained_under_stress", &ops);
+        }
         prop_assert!(
             violations.is_empty(),
             "Final invariant violations: {:?}",
@@ -1119,6 +1544,14 @@ proptest! {
             current = harness.create_child(current);
 
             let violations = check_all_invariants(&harness);
+            if !violations.is_empty() {
+                let ops: Vec<RegionOp> = (0..depth)
+                    .map(|_| RegionOp::CreateChild {
+                        parent: RegionSelector(0),
+                    })
+                    .collect();
+                record_failure("deep_nesting_maintains_invariants", &ops);
+            }
             prop_assert!(
                 violations.is_empty(),
                 "Invariant violations at depth: {:?}",
@@ -1130,6 +1563,18 @@ proptest! {
         harness.cancel_region(harness.regions[0], CancelKind::User);
 
         let violations = check_all_invariants(&harness);
+        if !violations.is_empty() {
+            let mut ops: Vec<RegionOp> = (0..depth)
+                .map(|_| RegionOp::CreateChild {
+                    parent: RegionSelector(0),
+                })
+                .collect();
+            ops.push(RegionOp::Cancel {
+                region: RegionSelector(0),
+                reason: CancelKind::User,
+            });
+            record_failure("deep_nesting_maintains_invariants", &ops);
+        }
         prop_assert!(
             violations.is_empty(),
             "Invariant violations after root cancel: {:?}",
@@ -1152,10 +1597,17 @@ proptest! {
         let root = harness.regions[0];
 
         // Create many children at root level
+        let mut created_ops = Vec::new();
         for _ in 0..width {
             harness.create_child(root);
+            created_ops.push(RegionOp::CreateChild {
+                parent: RegionSelector(0),
+            });
 
             let violations = check_all_invariants(&harness);
+            if !violations.is_empty() {
+                record_failure("wide_tree_maintains_invariants", &created_ops);
+            }
             prop_assert!(
                 violations.is_empty(),
                 "Invariant violations with {} children: {:?}",
@@ -1171,7 +1623,7 @@ proptest! {
     /// Test 5: Cancellation always propagates to children (asupersync-s4hw)
     #[test]
     fn cancellation_propagates_to_children(
-        setup_ops in proptest::collection::vec(any::<RegionOp>(), 10..30),
+        setup_ops in region_op_sequence(10..30),
         cancel_target in any::<RegionSelector>()
     ) {
         init_test_logging();
@@ -1189,6 +1641,9 @@ proptest! {
             harness.cancel_region(target, CancelKind::User);
 
             let violations = check_all_invariants(&harness);
+            if !violations.is_empty() {
+                record_failure("cancellation_propagates_to_children", &setup_ops);
+            }
             prop_assert!(
                 violations.is_empty(),
                 "Invariant violations after cancel: {:?}",
@@ -1203,8 +1658,8 @@ proptest! {
     /// Test 6: Full lifecycle - build up and tear down (asupersync-s4hw)
     #[test]
     fn full_lifecycle_preserves_invariants(
-        create_ops in proptest::collection::vec(any::<RegionOp>(), 20..50),
-        destroy_ops in proptest::collection::vec(any::<RegionOp>(), 20..50)
+        create_ops in region_op_sequence(20..50),
+        destroy_ops in region_op_sequence(20..50)
     ) {
         init_test_logging();
         test_phase!("full_lifecycle_preserves_invariants");
@@ -1215,6 +1670,9 @@ proptest! {
         for op in &create_ops {
             let _ = op.apply(&mut harness);
             let violations = check_all_invariants(&harness);
+            if !violations.is_empty() {
+                record_failure("full_lifecycle_preserves_invariants_build", &create_ops);
+            }
             prop_assert!(
                 violations.is_empty(),
                 "Invariant violations during build-up: {:?}",
@@ -1226,6 +1684,9 @@ proptest! {
         for op in &destroy_ops {
             let _ = op.apply(&mut harness);
             let violations = check_all_invariants(&harness);
+            if !violations.is_empty() {
+                record_failure("full_lifecycle_preserves_invariants_teardown", &destroy_ops);
+            }
             prop_assert!(
                 violations.is_empty(),
                 "Invariant violations during tear-down: {:?}",
