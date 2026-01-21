@@ -1446,7 +1446,8 @@ mod tests {
 
         let reason = cx.cancel_reason().expect("should have reason");
         // Region should be set from the Cx
-        assert!(reason.region.is_some());
+        let expected_region = RegionId::from_arena(ArenaIndex::new(0, 0));
+        assert_eq!(reason.origin_region, expected_region);
     }
 
     #[test]
