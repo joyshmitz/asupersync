@@ -398,8 +398,9 @@ struct GenericPoolState<R> {
 pub struct GenericPool<R, F>
 where
     R: Send + 'static,
-    F: Fn() -> std::pin::Pin<Box<dyn Future<Output = Result<R, Box<dyn std::error::Error + Send + Sync>>> + Send>>
-        + Send
+    F: Fn() -> std::pin::Pin<
+            Box<dyn Future<Output = Result<R, Box<dyn std::error::Error + Send + Sync>>> + Send>,
+        > + Send
         + Sync
         + 'static,
 {
@@ -418,8 +419,9 @@ where
 impl<R, F> GenericPool<R, F>
 where
     R: Send + 'static,
-    F: Fn() -> std::pin::Pin<Box<dyn Future<Output = Result<R, Box<dyn std::error::Error + Send + Sync>>> + Send>>
-        + Send
+    F: Fn() -> std::pin::Pin<
+            Box<dyn Future<Output = Result<R, Box<dyn std::error::Error + Send + Sync>>> + Send>,
+        > + Send
         + Sync
         + 'static,
 {
@@ -550,8 +552,9 @@ where
 impl<R, F> Pool for GenericPool<R, F>
 where
     R: Send + 'static,
-    F: Fn() -> std::pin::Pin<Box<dyn Future<Output = Result<R, Box<dyn std::error::Error + Send + Sync>>> + Send>>
-        + Send
+    F: Fn() -> std::pin::Pin<
+            Box<dyn Future<Output = Result<R, Box<dyn std::error::Error + Send + Sync>>> + Send>,
+        > + Send
         + Sync
         + 'static,
 {
@@ -791,7 +794,12 @@ mod tests {
 
         // try_acquire returns None when pool is empty (no pre-created resources)
         let result = pool.try_acquire();
-        crate::assert_with_log!(result.is_none(), "try_acquire empty", true, result.is_none());
+        crate::assert_with_log!(
+            result.is_none(),
+            "try_acquire empty",
+            true,
+            result.is_none()
+        );
 
         crate::test_complete!("generic_pool_try_acquire_creates_resource");
     }
@@ -803,8 +811,7 @@ mod tests {
         let closed = PoolError::Closed;
         let timeout = PoolError::Timeout;
         let cancelled = PoolError::Cancelled;
-        let create_failed =
-            PoolError::CreateFailed(Box::new(std::io::Error::other("test error")));
+        let create_failed = PoolError::CreateFailed(Box::new(std::io::Error::other("test error")));
 
         crate::assert_with_log!(
             closed.to_string() == "pool closed",
@@ -825,7 +832,9 @@ mod tests {
             cancelled.to_string()
         );
         crate::assert_with_log!(
-            create_failed.to_string().contains("resource creation failed"),
+            create_failed
+                .to_string()
+                .contains("resource creation failed"),
             "create_failed display",
             "contains resource creation failed",
             create_failed.to_string()
