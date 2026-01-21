@@ -22,7 +22,9 @@
 mod common;
 
 use asupersync::lab::{LabConfig, LabRuntime};
+use asupersync::record::RegionRecord;
 use asupersync::types::{Budget, CancelKind, CancelReason, Outcome, RegionId, TaskId};
+use asupersync::util::ArenaIndex;
 use common::*;
 use proptest::prelude::*;
 
@@ -141,6 +143,9 @@ pub enum RegionOp {
     AdvanceTime { millis: u64 },
 
     /// Set a deadline on a region.
+    ///
+    /// Note: This operation is currently a no-op because region budgets
+    /// cannot be modified after creation through the public API.
     SetDeadline {
         region: RegionSelector,
         millis: u64,
@@ -184,6 +189,16 @@ pub struct TestHarness {
     pub regions: Vec<RegionId>,
     /// Ordered list of created tasks (for selector resolution).
     pub tasks: Vec<TaskId>,
+}
+
+/// Helper to convert ArenaIndex to RegionId using the public test API.
+fn arena_index_to_region_id(idx: ArenaIndex) -> RegionId {
+    RegionId::new_for_test(idx.index(), idx.generation())
+}
+
+/// Helper to convert ArenaIndex to TaskId using the public test API.
+fn arena_index_to_task_id(idx: ArenaIndex) -> TaskId {
+    TaskId::new_for_test(idx.index(), idx.generation())
 }
 
 impl TestHarness {
@@ -237,16 +252,19 @@ impl TestHarness {
     ///
     /// Returns the new region's ID.
     pub fn create_child(&mut self, parent: RegionId) -> RegionId {
+        // Create a placeholder ID for the new record
+        let placeholder_id = RegionId::new_for_test(0, 0);
+
         // Create a new region record as a child of the parent
-        let idx = self.runtime.state.regions.insert(
-            asupersync::record::RegionRecord::new_with_time(
-                RegionId::from_arena(asupersync::util::ArenaIndex::new(0, 0)),
-                Some(parent),
-                Budget::INFINITE,
-                self.runtime.now(),
-            ),
-        );
-        let child_id = RegionId::from_arena(idx);
+        let idx = self.runtime.state.regions.insert(RegionRecord::new_with_time(
+            placeholder_id,
+            Some(parent),
+            Budget::INFINITE,
+            self.runtime.now(),
+        ));
+
+        // Convert arena index to proper RegionId
+        let child_id = arena_index_to_region_id(idx);
 
         // Update the record with the correct ID
         if let Some(record) = self.runtime.state.regions.get_mut(idx) {
@@ -254,12 +272,9 @@ impl TestHarness {
         }
 
         // Add to parent's children
-        if let Some(parent_record) = self
-            .runtime
-            .state
-            .regions
-            .get(parent.arena_index())
-        {
+        if let Some(parent_record) = self.runtime.state.regions.get(
+            ArenaIndex::new(parent.new_for_test_index(), parent.new_for_test_generation()),
+        ) {
             parent_record.add_child(child_id);
         }
 
@@ -272,7 +287,10 @@ impl TestHarness {
     /// Returns the new task's ID, or `None` if spawning failed.
     pub fn spawn_task(&mut self, region: RegionId) -> Option<TaskId> {
         // Create a simple no-op task
-        let result = self.runtime.state.create_task(region, Budget::INFINITE, async {});
+        let result = self
+            .runtime
+            .state
+            .create_task(region, Budget::INFINITE, async {});
         match result {
             Ok((task_id, _handle)) => {
                 // Schedule the task
@@ -290,19 +308,23 @@ impl TestHarness {
 
     /// Request cancellation of a region.
     pub fn cancel_region(&mut self, region: RegionId, reason: CancelKind) {
-        if let Some(record) = self
+        let cancel_reason = CancelReason::new(reason);
+        // Use RuntimeState's cancel_request which handles the full cancellation flow
+        let _tasks_to_schedule = self
             .runtime
             .state
-            .regions
-            .get(region.arena_index())
-        {
-            record.request_cancel(CancelReason::new(reason));
-        }
+            .cancel_request(region, &cancel_reason, None);
+        // Note: We don't actually schedule these tasks in this simple harness
+        // since we're testing the region tree structure, not the full execution.
     }
 
     /// Complete a task with the given outcome.
     pub fn complete_task(&mut self, task: TaskId, outcome: TaskOutcome) {
-        if let Some(record) = self.runtime.state.tasks.get_mut(task.arena_index()) {
+        // Get the arena index for this task
+        let arena_idx =
+            ArenaIndex::new(task.new_for_test_index(), task.new_for_test_generation());
+
+        if let Some(record) = self.runtime.state.tasks.get_mut(arena_idx) {
             if !record.state.is_terminal() {
                 let runtime_outcome: Outcome<(), ()> = match outcome {
                     TaskOutcome::Ok => Outcome::Ok(()),
@@ -321,27 +343,71 @@ impl TestHarness {
 
     /// Request close of a region.
     pub fn close_region(&mut self, region: RegionId) {
-        if let Some(record) = self
-            .runtime
-            .state
-            .regions
-            .get(region.arena_index())
-        {
+        // Get the arena index for this region
+        let arena_idx =
+            ArenaIndex::new(region.new_for_test_index(), region.new_for_test_generation());
+
+        if let Some(record) = self.runtime.state.regions.get(arena_idx) {
             record.request_close();
         }
     }
 
     /// Set a deadline on a region.
-    pub fn set_deadline(&mut self, region: RegionId, millis: u64) {
-        if let Some(record) = self
-            .runtime
-            .state
-            .regions
-            .get(region.arena_index())
-        {
-            let deadline = self.runtime.now().saturating_add_millis(millis);
-            record.set_deadline(deadline);
-        }
+    ///
+    /// Note: This is currently a no-op because region budgets cannot be modified
+    /// after creation through the public API. The operation returns false.
+    #[allow(unused_variables)]
+    pub fn set_deadline(&mut self, region: RegionId, millis: u64) -> bool {
+        // Region budgets (including deadlines) are set at creation time and
+        // cannot be modified through the public API. This is a design decision
+        // in asupersync's structured concurrency model.
+        false
+    }
+}
+
+// Extension trait for RegionId to access test-only index/generation
+trait RegionIdTestExt {
+    fn new_for_test_index(&self) -> u32;
+    fn new_for_test_generation(&self) -> u32;
+}
+
+impl RegionIdTestExt for RegionId {
+    fn new_for_test_index(&self) -> u32 {
+        // Use debug formatting to extract the index
+        // Format is "RegionId(index:generation)"
+        let s = format!("{:?}", self);
+        let start = s.find('(').unwrap() + 1;
+        let colon = s.find(':').unwrap();
+        s[start..colon].parse().unwrap()
+    }
+
+    fn new_for_test_generation(&self) -> u32 {
+        let s = format!("{:?}", self);
+        let colon = s.find(':').unwrap() + 1;
+        let end = s.find(')').unwrap();
+        s[colon..end].parse().unwrap()
+    }
+}
+
+// Extension trait for TaskId to access test-only index/generation
+trait TaskIdTestExt {
+    fn new_for_test_index(&self) -> u32;
+    fn new_for_test_generation(&self) -> u32;
+}
+
+impl TaskIdTestExt for TaskId {
+    fn new_for_test_index(&self) -> u32 {
+        let s = format!("{:?}", self);
+        let start = s.find('(').unwrap() + 1;
+        let colon = s.find(':').unwrap();
+        s[start..colon].parse().unwrap()
+    }
+
+    fn new_for_test_generation(&self) -> u32 {
+        let s = format!("{:?}", self);
+        let colon = s.find(':').unwrap() + 1;
+        let end = s.find(')').unwrap();
+        s[colon..end].parse().unwrap()
     }
 }
 
@@ -355,11 +421,15 @@ impl RegionOp {
             RegionOp::CreateChild { parent } => {
                 if let Some(parent_id) = harness.resolve_region(parent) {
                     // Check if parent region is still accepting children
+                    let arena_idx = ArenaIndex::new(
+                        parent_id.new_for_test_index(),
+                        parent_id.new_for_test_generation(),
+                    );
                     let can_create = harness
                         .runtime
                         .state
                         .regions
-                        .get(parent_id.arena_index())
+                        .get(arena_idx)
                         .is_some_and(|r| !r.state().is_terminal());
 
                     if can_create {
@@ -415,8 +485,7 @@ impl RegionOp {
 
             RegionOp::SetDeadline { region, millis } => {
                 if let Some(region_id) = harness.resolve_region(region) {
-                    harness.set_deadline(region_id, *millis);
-                    true
+                    harness.set_deadline(region_id, *millis)
                 } else {
                     false
                 }
@@ -597,19 +666,28 @@ fn test_harness_apply_invalid_selectors() {
     let create_op = RegionOp::CreateChild {
         parent: RegionSelector(0),
     };
-    assert!(!create_op.apply(&mut harness), "CreateChild with no regions should fail");
+    assert!(
+        !create_op.apply(&mut harness),
+        "CreateChild with no regions should fail"
+    );
 
     let spawn_op = RegionOp::SpawnTask {
         region: RegionSelector(0),
     };
-    assert!(!spawn_op.apply(&mut harness), "SpawnTask with no regions should fail");
+    assert!(
+        !spawn_op.apply(&mut harness),
+        "SpawnTask with no regions should fail"
+    );
 
     // Operations on non-existent tasks should return false
     let complete_op = RegionOp::CompleteTask {
         task: TaskSelector(0),
         outcome: TaskOutcome::Ok,
     };
-    assert!(!complete_op.apply(&mut harness), "CompleteTask with no tasks should fail");
+    assert!(
+        !complete_op.apply(&mut harness),
+        "CompleteTask with no tasks should fail"
+    );
 
     test_complete!("test_harness_apply_invalid_selectors");
 }

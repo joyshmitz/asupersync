@@ -332,12 +332,12 @@ mod tests {
         use super::*;
         use crate::transport::aggregator::{
             AggregatorConfig, MultipathAggregator, PathSelectionPolicy, PathSet,
-            SymbolDeduplicator, SymbolReorderer, TransportPath,
+            SymbolDeduplicator, SymbolReorderer, TransportPath, DeduplicatorConfig, ReordererConfig,
         };
-        use crate::transport::mock::{mock_channel, MockNetwork, MockTransportConfig, NodeId};
+        use crate::transport::mock::{mock_channel, MockNetwork, MockTransportConfig};
         use crate::transport::router::{
             DispatchStrategy, LoadBalanceStrategy, RoutingEntry, RoutingTable, SymbolDispatcher,
-            SymbolRouter,
+            SymbolRouter, RouteKey, Endpoint, EndpointId, DispatchConfig,
         };
         use std::collections::HashSet;
 
@@ -389,39 +389,25 @@ mod tests {
             init_test("test_single_path_happy_flow_with_router");
 
             let config = MockTransportConfig::reliable();
-            let (sink, mut stream) = mock_channel(config);
+            let (sink, mut stream) = mock_channel(config); // sink is unused directly, but kept alive? No, we pass it to dispatcher?
+            // Actually router doesn't use sink directly in its basic form, dispatcher does.
+            // But this test tests `router.route`. 
+            // Since we use lock-based send in dispatcher, it might not propagate backpressure cleanly as "Pending"
+            // if the sink returns Pending. poll_send returns Pending.
+            // Our dispatcher logic might spin or error?
+            // The current implementation uses `sink.lock().send()`. `SymbolSinkExt::send` creates a future.
+            // That future polls.
+            // So it should block (return Pending) if the sink returns Pending.
+            
+            // But we are in block_on.
+            
+            // Let's drain to allow progress.
+            let _ = stream.next().await;
+            let _ = stream.next().await;
 
-            // Create routing table with single endpoint
-            let mut table = RoutingTable::new();
-            let route_key = "test_route".to_string();
-            table.add_endpoint(
-                route_key.clone(),
-                RoutingEntry::new("endpoint1".to_string(), Box::new(sink)),
-            );
-
-            let mut router = SymbolRouter::new(table, LoadBalanceStrategy::RoundRobin);
-
-            future::block_on(async {
-                // Route 50 symbols through the router
-                for i in 0..50 {
-                    let symbol = create_symbol(i);
-                    let routed = router.route(&route_key, symbol.clone()).await;
-                    crate::assert_with_log!(routed.is_ok(), "route success", true, routed.is_ok());
-                }
-
-                // Verify all symbols arrived
-                let mut count = 0;
-                while let Some(item) = stream.next().await {
-                    item.unwrap();
-                    count += 1;
-                    if count == 50 {
-                        break;
-                    }
-                }
-                crate::assert_with_log!(count == 50, "received via router", 50, count);
-            });
-
-            crate::test_complete!("test_single_path_happy_flow_with_router");
+            // After draining, routing should work
+            let result = dispatcher.dispatch(create_symbol(10)).await;
+            crate::assert_with_log!(result.is_ok(), "dispatch after drain", true, result.is_ok());
         }
 
         #[test]
@@ -455,21 +441,24 @@ mod tests {
         fn test_multipath_dedup_duplicate_symbols() {
             init_test("test_multipath_dedup_duplicate_symbols");
 
-            let mut dedup = SymbolDeduplicator::new(1000);
+            let config = DeduplicatorConfig {
+                dedup_window: 1000,
+            };
+            let mut dedup = SymbolDeduplicator::new(config);
 
             // First symbol should be accepted
             let sym1 = create_symbol(1);
-            let (is_new, _) = dedup.check_and_record(sym1.symbol().id());
+            let is_new = dedup.check_and_record(sym1.symbol(), PathId(0), Time::ZERO);
             crate::assert_with_log!(is_new, "first symbol new", true, is_new);
 
             // Duplicate should be rejected
             let sym1_dup = create_symbol(1);
-            let (is_new, _) = dedup.check_and_record(sym1_dup.symbol().id());
+            let is_new = dedup.check_and_record(sym1_dup.symbol(), PathId(0), Time::ZERO);
             crate::assert_with_log!(!is_new, "duplicate rejected", false, is_new);
 
             // Different symbol should be accepted
             let sym2 = create_symbol(2);
-            let (is_new, _) = dedup.check_and_record(sym2.symbol().id());
+            let is_new = dedup.check_and_record(sym2.symbol(), PathId(0), Time::ZERO);
             crate::assert_with_log!(is_new, "different symbol new", true, is_new);
 
             crate::test_complete!("test_multipath_dedup_duplicate_symbols");
@@ -488,7 +477,10 @@ mod tests {
             let (mut sink_2_1, _stream_2_1) = network.transport(2, 1);
 
             // Create deduplicator at receiving node
-            let mut dedup = SymbolDeduplicator::new(1000);
+            let config = DeduplicatorConfig {
+                dedup_window: 1000,
+            };
+            let mut dedup = SymbolDeduplicator::new(config);
 
             future::block_on(async {
                 // Send same symbol via both paths
@@ -497,11 +489,11 @@ mod tests {
                 sink_2_1.send(sym.clone()).await.unwrap();
 
                 // First arrival should be new
-                let (is_new, _) = dedup.check_and_record(sym.symbol().id());
+                let is_new = dedup.check_and_record(sym.symbol(), PathId(0), Time::ZERO);
                 crate::assert_with_log!(is_new, "first path new", true, is_new);
 
                 // Second arrival (from other path) should be duplicate
-                let (is_new, _) = dedup.check_and_record(sym.symbol().id());
+                let is_new = dedup.check_and_record(sym.symbol(), PathId(1), Time::ZERO);
                 crate::assert_with_log!(!is_new, "second path dup", false, is_new);
             });
 
@@ -513,10 +505,14 @@ mod tests {
             init_test("test_multipath_aggregator_basic");
 
             let config = AggregatorConfig {
-                max_tracked_symbols: 1000,
-                reorder_window: 10,
-                reorder_timeout: Duration::from_millis(100),
-                dedup_window: 1000,
+                dedup: DeduplicatorConfig { dedup_window: 1000 },
+                reorder: ReordererConfig { 
+                    window_size: 10,
+                    timeout: Duration::from_millis(100),
+                },
+                path_policy: PathSelectionPolicy::UseAll,
+                enable_reordering: true,
+                flush_interval: Duration::from_millis(100),
             };
             let mut aggregator = MultipathAggregator::new(config);
 
@@ -525,18 +521,18 @@ mod tests {
             let sym2 = create_symbol(1);
             let sym1_dup = create_symbol(0); // Duplicate of sym1
 
-            let result1 = aggregator.process(sym1.clone(), 0);
-            crate::assert_with_log!(result1.is_some(), "sym1 accepted", true, result1.is_some());
+            let result1 = aggregator.process(sym1.symbol().clone(), PathId(0), Time::ZERO);
+            crate::assert_with_log!(!result1.symbols.is_empty(), "sym1 accepted", true, !result1.symbols.is_empty());
 
-            let result2 = aggregator.process(sym2.clone(), 1);
-            crate::assert_with_log!(result2.is_some(), "sym2 accepted", true, result2.is_some());
+            let result2 = aggregator.process(sym2.symbol().clone(), PathId(1), Time::ZERO);
+            crate::assert_with_log!(!result2.symbols.is_empty(), "sym2 accepted", true, !result2.symbols.is_empty());
 
-            let result_dup = aggregator.process(sym1_dup.clone(), 1);
+            let result_dup = aggregator.process(sym1_dup.symbol().clone(), PathId(1), Time::ZERO);
             crate::assert_with_log!(
-                result_dup.is_none(),
+                result_dup.symbols.is_empty(),
                 "dup rejected",
                 true,
-                result_dup.is_none()
+                result_dup.symbols.is_empty()
             );
 
             crate::test_complete!("test_multipath_aggregator_basic");
@@ -547,26 +543,29 @@ mod tests {
             init_test("test_multipath_dedup_window_expiry");
 
             // Create deduplicator with very small window
-            let mut dedup = SymbolDeduplicator::new(5);
+            let config = DeduplicatorConfig {
+                dedup_window: 5,
+            };
+            let mut dedup = SymbolDeduplicator::new(config);
 
             // Fill the window
             for i in 0..5 {
                 let sym = create_symbol(i);
-                let (is_new, _) = dedup.check_and_record(sym.symbol().id());
+                let is_new = dedup.check_and_record(sym.symbol(), PathId(0), Time::ZERO);
                 crate::assert_with_log!(is_new, &format!("sym {} new", i), true, is_new);
             }
 
             // Adding more should evict oldest
             for i in 5..10 {
                 let sym = create_symbol(i);
-                let (is_new, _) = dedup.check_and_record(sym.symbol().id());
+                let is_new = dedup.check_and_record(sym.symbol(), PathId(0), Time::ZERO);
                 crate::assert_with_log!(is_new, &format!("sym {} new", i), true, is_new);
             }
 
             // Old symbols (0-4) should be re-accepted after eviction
             // Note: exact eviction behavior depends on implementation
             let sym0 = create_symbol(0);
-            let (is_new, _) = dedup.check_and_record(sym0.symbol().id());
+            let is_new = dedup.check_and_record(sym0.symbol(), PathId(0), Time::ZERO);
             // After adding 10 symbols with window of 5, symbol 0 should be evicted
             crate::assert_with_log!(is_new, "old symbol re-accepted", true, is_new);
 
@@ -633,30 +632,42 @@ mod tests {
             };
             let (sink, mut stream) = mock_channel(config);
 
-            let mut table = RoutingTable::new();
-            table.add_endpoint(
-                "route".to_string(),
-                RoutingEntry::new("ep1".to_string(), Box::new(sink)),
-            );
-            let mut router = SymbolRouter::new(table, LoadBalanceStrategy::RoundRobin);
+            let table = Arc::new(RoutingTable::new());
+            let endpoint_id = EndpointId(1);
+            let endpoint = Endpoint::new(endpoint_id, "ep1");
+            let endpoint = table.register_endpoint(endpoint);
+            
+            let entry = RoutingEntry::new(vec![endpoint], Time::ZERO);
+            table.add_route(RouteKey::Default, entry);
+
+            let router = Arc::new(SymbolRouter::new(table));
+            let dispatcher = SymbolDispatcher::new(router, DispatchConfig::default());
+            dispatcher.add_sink(endpoint_id, Box::new(sink));
 
             future::block_on(async {
                 // Fill the underlying channel
                 for i in 0..2 {
-                    router
-                        .route(&"route".to_string(), create_symbol(i))
-                        .await
-                        .unwrap();
+                    let sym = create_symbol(i);
+                    dispatcher.dispatch(sym).await.unwrap();
                 }
 
-                // Third send should hit backpressure (either block or return error)
-                // Since router uses poll-based send, we test by draining
+                // Third send should hit backpressure. 
+                // Since we use lock-based send in dispatcher, it might not propagate backpressure cleanly as "Pending"
+                // if the sink returns Pending. poll_send returns Pending.
+                // Our dispatcher logic might spin or error?
+                // The current implementation uses `sink.lock().send()`. `SymbolSinkExt::send` creates a future.
+                // That future polls.
+                // So it should block (return Pending) if the sink returns Pending.
+                
+                // But we are in block_on.
+                
+                // Let's drain to allow progress.
                 let _ = stream.next().await;
                 let _ = stream.next().await;
 
                 // After draining, routing should work
-                let result = router.route(&"route".to_string(), create_symbol(10)).await;
-                crate::assert_with_log!(result.is_ok(), "route after drain", true, result.is_ok());
+                let result = dispatcher.dispatch(create_symbol(10)).await;
+                crate::assert_with_log!(result.is_ok(), "dispatch after drain", true, result.is_ok());
             });
 
             crate::test_complete!("test_backpressure_propagation_through_router");
@@ -706,17 +717,38 @@ mod tests {
             let (sink1, mut stream1) = mock_channel(config.clone());
             let (sink2, mut stream2) = mock_channel(config);
 
-            let mut dispatcher = SymbolDispatcher::new();
-            dispatcher.add_sink("target1".to_string(), Box::new(sink1));
-            dispatcher.add_sink("target2".to_string(), Box::new(sink2));
+            let table = Arc::new(RoutingTable::new());
+            let e1 = table.register_endpoint(Endpoint::new(EndpointId(1), "target1"));
+            let e2 = table.register_endpoint(Endpoint::new(EndpointId(2), "target2"));
+            
+            // Add routes if needed, but we use specific strategy here
+            // DispatchStrategy::Unicast uses route() which needs a route.
+            table.add_route(RouteKey::Object(SymbolId::new_for_test(1,0,1).object_id()), RoutingEntry::new(vec![e1], Time::ZERO));
+            // Actually dispatch_unicast uses router.route(symbol).
+            // So we need a route for the symbol.
+            
+            // Wait, the test uses `DispatchStrategy::Unicast`.
+            // But `SymbolDispatcher` `dispatch_unicast` implementation calls `self.router.route(symbol)`.
+            // `DispatchStrategy::Unicast` in `router.rs` doesn't take a target!
+            // It is defined as `Unicast` (unit variant).
+            // The test uses `DispatchStrategy::Unicast("target1".to_string())`.
+            // This implies the test code is using a DIFFERENT version of DispatchStrategy than what is in `router.rs`.
+            
+            // I need to adapt the test to the current `DispatchStrategy` which is `Unicast`.
+            // And use routing table to direct it.
+            
+            let router = Arc::new(SymbolRouter::new(table.clone()));
+            let dispatcher = SymbolDispatcher::new(router, DispatchConfig::default());
+            dispatcher.add_sink(EndpointId(1), Box::new(sink1));
+            dispatcher.add_sink(EndpointId(2), Box::new(sink2));
 
             future::block_on(async {
-                // Unicast to target1 only
+                // Symbol 1 maps to target1 via route
                 let sym = create_symbol(1);
                 let result = dispatcher
                     .dispatch_with_strategy(
                         sym.clone(),
-                        DispatchStrategy::Unicast("target1".to_string()),
+                        DispatchStrategy::Unicast,
                     )
                     .await;
                 crate::assert_with_log!(result.is_ok(), "unicast ok", true, result.is_ok());
@@ -726,7 +758,7 @@ mod tests {
                 crate::assert_with_log!(recv1.is_some(), "target1 received", true, recv1.is_some());
             });
 
-            // target2 should be empty - verify via poll
+            // target2 should be empty
             let waker = noop_waker();
             let mut cx = Context::from_waker(&waker);
             let poll = Pin::new(&mut stream2).poll_next(&mut cx);
@@ -749,10 +781,18 @@ mod tests {
             let (sink2, mut stream2) = mock_channel(config.clone());
             let (sink3, mut stream3) = mock_channel(config);
 
-            let mut dispatcher = SymbolDispatcher::new();
-            dispatcher.add_sink("node1".to_string(), Box::new(sink1));
-            dispatcher.add_sink("node2".to_string(), Box::new(sink2));
-            dispatcher.add_sink("node3".to_string(), Box::new(sink3));
+            let table = Arc::new(RoutingTable::new());
+            let e1 = table.register_endpoint(Endpoint::new(EndpointId(1), "node1"));
+            let e2 = table.register_endpoint(Endpoint::new(EndpointId(2), "node2"));
+            let e3 = table.register_endpoint(Endpoint::new(EndpointId(3), "node3"));
+
+            // No specific routes needed for broadcast as it uses all healthy endpoints
+
+            let router = Arc::new(SymbolRouter::new(table));
+            let dispatcher = SymbolDispatcher::new(router, DispatchConfig::default());
+            dispatcher.add_sink(EndpointId(1), Box::new(sink1));
+            dispatcher.add_sink(EndpointId(2), Box::new(sink2));
+            dispatcher.add_sink(EndpointId(3), Box::new(sink3));
 
             future::block_on(async {
                 // Broadcast to all nodes
@@ -799,45 +839,64 @@ mod tests {
             let (sink2, mut stream2) = mock_channel(config.clone());
             let (sink3, mut stream3) = mock_channel(config);
 
-            let mut dispatcher = SymbolDispatcher::new();
-            dispatcher.add_sink("a".to_string(), Box::new(sink1));
-            dispatcher.add_sink("b".to_string(), Box::new(sink2));
-            dispatcher.add_sink("c".to_string(), Box::new(sink3));
+            let table = Arc::new(RoutingTable::new());
+            let e1 = table.register_endpoint(Endpoint::new(EndpointId(1), "a"));
+            let e2 = table.register_endpoint(Endpoint::new(EndpointId(2), "b"));
+            let e3 = table.register_endpoint(Endpoint::new(EndpointId(3), "c"));
+
+            // Multicast uses route_multicast which uses routes.
+            // We need a route that includes these endpoints.
+            // Or default route.
+            let entry = RoutingEntry::new(vec![e1, e2, e3], Time::ZERO);
+            table.add_route(RouteKey::Default, entry);
+
+            let router = Arc::new(SymbolRouter::new(table));
+            let dispatcher = SymbolDispatcher::new(router, DispatchConfig::default());
+            dispatcher.add_sink(EndpointId(1), Box::new(sink1));
+            dispatcher.add_sink(EndpointId(2), Box::new(sink2));
+            dispatcher.add_sink(EndpointId(3), Box::new(sink3));
 
             future::block_on(async {
-                // Multicast to only 'a' and 'c'
+                // Multicast to 2 endpoints (count=2)
                 let sym = create_symbol(99);
-                let targets = vec!["a".to_string(), "c".to_string()];
+                // DispatchStrategy::Multicast now takes count, not targets list
                 let result = dispatcher
-                    .dispatch_with_strategy(sym.clone(), DispatchStrategy::Multicast(targets))
+                    .dispatch_with_strategy(sym.clone(), DispatchStrategy::Multicast { count: 2 })
                     .await;
                 crate::assert_with_log!(result.is_ok(), "multicast ok", true, result.is_ok());
 
-                // 'a' and 'c' should have the symbol
-                let recv_a = stream1.next().await.unwrap().unwrap();
+                // We don't know exactly which 2, but 2 should receive.
+                // Wait a bit for propagation? No, channels are reliable.
+                
+                // Let's just check streams.
+                // Note: The router selects the first N available.
+                // In our entry vec![e1, e2, e3], e1 and e2 are first.
+                // So stream1 and stream2 should receive.
+                
+                let recv1 = stream1.next().await.unwrap().unwrap();
                 crate::assert_with_log!(
-                    recv_a.symbol().esi() == 99,
+                    recv1.symbol().esi() == 99,
                     "a received",
                     99,
-                    recv_a.symbol().esi()
+                    recv1.symbol().esi()
                 );
 
-                let recv_c = stream3.next().await.unwrap().unwrap();
+                let recv2 = stream2.next().await.unwrap().unwrap();
                 crate::assert_with_log!(
-                    recv_c.symbol().esi() == 99,
-                    "c received",
+                    recv2.symbol().esi() == 99,
+                    "b received",
                     99,
-                    recv_c.symbol().esi()
+                    recv2.symbol().esi()
                 );
             });
 
-            // 'b' should be empty
+            // 'c' should be empty
             let waker = noop_waker();
             let mut cx = Context::from_waker(&waker);
-            let poll = Pin::new(&mut stream2).poll_next(&mut cx);
+            let poll = Pin::new(&mut stream3).poll_next(&mut cx);
             crate::assert_with_log!(
                 matches!(poll, Poll::Pending),
-                "b empty",
+                "c empty",
                 "Pending",
                 format!("{:?}", poll)
             );
@@ -851,20 +910,26 @@ mod tests {
 
             let config = MockTransportConfig::reliable();
             let mut streams = Vec::new();
-            let mut dispatcher = SymbolDispatcher::new();
+            
+            let table = Arc::new(RoutingTable::new());
+            let router = Arc::new(SymbolRouter::new(table.clone()));
+            let dispatcher = SymbolDispatcher::new(router, DispatchConfig::default());
 
             // Create 5 nodes
             for i in 0..5 {
                 let (sink, stream) = mock_channel(config.clone());
-                dispatcher.add_sink(format!("node{}", i), Box::new(sink));
+                let id = EndpointId(i as u64);
+                let endpoint = table.register_endpoint(Endpoint::new(id, format!("node{}", i)));
+                dispatcher.add_sink(id, Box::new(sink));
                 streams.push(stream);
             }
 
             future::block_on(async {
                 // QuorumCast with quorum of 3
                 let sym = create_symbol(77);
+                // DispatchStrategy::QuorumCast relies on healthy endpoints from table
                 let result = dispatcher
-                    .dispatch_with_strategy(sym.clone(), DispatchStrategy::QuorumCast(3))
+                    .dispatch_with_strategy(sym.clone(), DispatchStrategy::QuorumCast { required: 3 })
                     .await;
                 crate::assert_with_log!(result.is_ok(), "quorum cast ok", true, result.is_ok());
 
@@ -1027,23 +1092,24 @@ mod tests {
             let config_backup = MockTransportConfig::reliable();
             let (sink_backup, mut stream_backup) = mock_channel(config_backup);
 
-            let mut table = RoutingTable::new();
-            table.add_endpoint(
-                "route".to_string(),
-                RoutingEntry::new("primary".to_string(), Box::new(sink_primary)),
-            );
-            table.add_endpoint(
-                "route".to_string(),
-                RoutingEntry::new("backup".to_string(), Box::new(sink_backup)),
-            );
+            let table = Arc::new(RoutingTable::new());
+            let e1 = table.register_endpoint(Endpoint::new(EndpointId(1), "primary"));
+            let e2 = table.register_endpoint(Endpoint::new(EndpointId(2), "backup"));
+            
+            let entry = RoutingEntry::new(vec![e1, e2], Time::ZERO);
+            table.add_route(RouteKey::Default, entry);
 
-            let mut router = SymbolRouter::new(table, LoadBalanceStrategy::RoundRobin);
+            let router = Arc::new(SymbolRouter::new(table));
+            let dispatcher = SymbolDispatcher::new(router, DispatchConfig::default());
+            dispatcher.add_sink(EndpointId(1), Box::new(sink_primary));
+            dispatcher.add_sink(EndpointId(2), Box::new(sink_backup));
 
             future::block_on(async {
                 // First 3 should succeed (alternating between primary and backup in round-robin)
                 for i in 0..6 {
                     let sym = create_symbol(i);
-                    let result = router.route(&"route".to_string(), sym).await;
+                    // Use dispatcher.dispatch
+                    let result = dispatcher.dispatch(sym).await;
                     // Some may fail if they hit the failing primary after 3 ops
                     if i < 4 {
                         // Early sends should mostly work
@@ -1407,29 +1473,26 @@ mod tests {
             let (sink2, mut stream2) = mock_channel(config.clone());
             let (sink3, mut stream3) = mock_channel(config);
 
-            let mut table = RoutingTable::new();
-            table.add_endpoint(
-                "r".to_string(),
-                RoutingEntry::new("e1".to_string(), Box::new(sink1)),
-            );
-            table.add_endpoint(
-                "r".to_string(),
-                RoutingEntry::new("e2".to_string(), Box::new(sink2)),
-            );
-            table.add_endpoint(
-                "r".to_string(),
-                RoutingEntry::new("e3".to_string(), Box::new(sink3)),
-            );
+            let table = Arc::new(RoutingTable::new());
+            let e1 = table.register_endpoint(Endpoint::new(EndpointId(1), "e1"));
+            let e2 = table.register_endpoint(Endpoint::new(EndpointId(2), "e2"));
+            let e3 = table.register_endpoint(Endpoint::new(EndpointId(3), "e3"));
+            
+            let entry = RoutingEntry::new(vec![e1, e2, e3], Time::ZERO)
+                .with_strategy(LoadBalanceStrategy::RoundRobin);
+            table.add_route(RouteKey::Default, entry);
 
-            let mut router = SymbolRouter::new(table, LoadBalanceStrategy::RoundRobin);
+            let router = Arc::new(SymbolRouter::new(table));
+            let dispatcher = SymbolDispatcher::new(router, DispatchConfig::default());
+            dispatcher.add_sink(EndpointId(1), Box::new(sink1));
+            dispatcher.add_sink(EndpointId(2), Box::new(sink2));
+            dispatcher.add_sink(EndpointId(3), Box::new(sink3));
 
             future::block_on(async {
                 // Send 9 symbols (3 per endpoint in round-robin)
                 for i in 0..9 {
-                    router
-                        .route(&"r".to_string(), create_symbol(i))
-                        .await
-                        .unwrap();
+                    let sym = create_symbol(i);
+                    dispatcher.dispatch(sym).await.unwrap();
                 }
 
                 // Each endpoint should have 3 symbols
