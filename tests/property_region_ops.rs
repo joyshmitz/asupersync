@@ -1096,6 +1096,140 @@ proptest! {
 
         test_complete!("invariants_maintained_under_stress");
     }
+
+    /// Test 3: Deep nesting stress test (asupersync-s4hw)
+    ///
+    /// Creates a very deep tree and verifies invariants at each level.
+    #[test]
+    fn deep_nesting_maintains_invariants(depth in 1usize..50) {
+        init_test_logging();
+        test_phase!("deep_nesting_maintains_invariants");
+
+        let mut harness = TestHarness::with_root(42);
+
+        // Create a deep chain of nested regions
+        let mut current = harness.regions[0];
+        for _ in 0..depth {
+            current = harness.create_child(current);
+
+            let violations = check_all_invariants(&harness);
+            prop_assert!(
+                violations.is_empty(),
+                "Invariant violations at depth: {:?}",
+                violations
+            );
+        }
+
+        // Cancel from root, which should propagate down
+        harness.cancel_region(harness.regions[0], CancelKind::User);
+
+        let violations = check_all_invariants(&harness);
+        prop_assert!(
+            violations.is_empty(),
+            "Invariant violations after root cancel: {:?}",
+            violations
+        );
+
+        harness.runtime.run_until_quiescent();
+        test_complete!("deep_nesting_maintains_invariants");
+    }
+
+    /// Test 4: Wide tree stress test (asupersync-s4hw)
+    ///
+    /// Creates many children at the root level.
+    #[test]
+    fn wide_tree_maintains_invariants(width in 1usize..100) {
+        init_test_logging();
+        test_phase!("wide_tree_maintains_invariants");
+
+        let mut harness = TestHarness::with_root(42);
+        let root = harness.regions[0];
+
+        // Create many children at root level
+        for _ in 0..width {
+            harness.create_child(root);
+
+            let violations = check_all_invariants(&harness);
+            prop_assert!(
+                violations.is_empty(),
+                "Invariant violations with {} children: {:?}",
+                harness.regions.len(),
+                violations
+            );
+        }
+
+        harness.runtime.run_until_quiescent();
+        test_complete!("wide_tree_maintains_invariants");
+    }
+
+    /// Test 5: Cancellation always propagates to children (asupersync-s4hw)
+    #[test]
+    fn cancellation_propagates_to_children(
+        setup_ops in proptest::collection::vec(any::<RegionOp>(), 10..30),
+        cancel_target in any::<RegionSelector>()
+    ) {
+        init_test_logging();
+        test_phase!("cancellation_propagates_to_children");
+
+        let mut harness = TestHarness::with_root(0xDEADBEEF);
+
+        // Build a tree
+        for op in &setup_ops {
+            let _ = op.apply(&mut harness);
+        }
+
+        // Cancel a random region if we can resolve it
+        if let Some(target) = harness.resolve_region(&cancel_target) {
+            harness.cancel_region(target, CancelKind::User);
+
+            let violations = check_all_invariants(&harness);
+            prop_assert!(
+                violations.is_empty(),
+                "Invariant violations after cancel: {:?}",
+                violations
+            );
+        }
+
+        harness.runtime.run_until_quiescent();
+        test_complete!("cancellation_propagates_to_children");
+    }
+
+    /// Test 6: Full lifecycle - build up and tear down (asupersync-s4hw)
+    #[test]
+    fn full_lifecycle_preserves_invariants(
+        create_ops in proptest::collection::vec(any::<RegionOp>(), 20..50),
+        destroy_ops in proptest::collection::vec(any::<RegionOp>(), 20..50)
+    ) {
+        init_test_logging();
+        test_phase!("full_lifecycle_preserves_invariants");
+
+        let mut harness = TestHarness::with_root(0xCAFEBABE);
+
+        // Build up
+        for op in &create_ops {
+            let _ = op.apply(&mut harness);
+            let violations = check_all_invariants(&harness);
+            prop_assert!(
+                violations.is_empty(),
+                "Invariant violations during build-up: {:?}",
+                violations
+            );
+        }
+
+        // Tear down
+        for op in &destroy_ops {
+            let _ = op.apply(&mut harness);
+            let violations = check_all_invariants(&harness);
+            prop_assert!(
+                violations.is_empty(),
+                "Invariant violations during tear-down: {:?}",
+                violations
+            );
+        }
+
+        harness.runtime.run_until_quiescent();
+        test_complete!("full_lifecycle_preserves_invariants");
+    }
 }
 
 // ============================================================================
