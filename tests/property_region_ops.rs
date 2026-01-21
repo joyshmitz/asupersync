@@ -21,6 +21,7 @@
 #[macro_use]
 mod common;
 
+use asupersync::error::{Error, ErrorKind};
 use asupersync::lab::{LabConfig, LabRuntime};
 use asupersync::record::RegionRecord;
 use asupersync::types::{Budget, CancelKind, CancelReason, Outcome, RegionId, TaskId};
@@ -326,9 +327,9 @@ impl TestHarness {
 
         if let Some(record) = self.runtime.state.tasks.get_mut(arena_idx) {
             if !record.state.is_terminal() {
-                let runtime_outcome: Outcome<(), ()> = match outcome {
+                let runtime_outcome = match outcome {
                     TaskOutcome::Ok => Outcome::Ok(()),
-                    TaskOutcome::Err => Outcome::Err(()),
+                    TaskOutcome::Err => Outcome::Err(Error::new(ErrorKind::Internal)),
                     TaskOutcome::Panic => {
                         Outcome::Panicked(asupersync::types::PanicPayload::new("test panic"))
                     }
@@ -348,7 +349,7 @@ impl TestHarness {
             ArenaIndex::new(region.new_for_test_index(), region.new_for_test_generation());
 
         if let Some(record) = self.runtime.state.regions.get(arena_idx) {
-            record.request_close();
+            record.begin_close(None);
         }
     }
 

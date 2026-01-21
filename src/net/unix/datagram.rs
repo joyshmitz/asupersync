@@ -61,9 +61,6 @@ use std::task::{Context, Poll};
 ///
 /// Async methods take `&mut self` to avoid concurrent waiters clobbering
 /// the single reactor registration/waker slot.
-///
-/// Async methods take `&mut self` to avoid concurrent waiters clobbering
-/// the single reactor registration/waker slot.
 #[derive(Debug)]
 pub struct UnixDatagram {
     /// The underlying standard library datagram socket.
@@ -325,11 +322,7 @@ impl UnixDatagram {
     /// let mut socket = UnixDatagram::unbound()?;
     /// let n = socket.send_to(b"hello", "/tmp/server.sock").await?;
     /// ```
-    pub async fn send_to<P: AsRef<Path>>(
-        &mut self,
-        buf: &[u8],
-        path: P,
-    ) -> io::Result<usize> {
+    pub async fn send_to<P: AsRef<Path>>(&mut self, buf: &[u8], path: P) -> io::Result<usize> {
         std::future::poll_fn(|cx| match self.inner.send_to(buf, &path) {
             Ok(n) => Poll::Ready(Ok(n)),
             Err(ref e) if e.kind() == io::ErrorKind::WouldBlock => {
@@ -1097,7 +1090,7 @@ mod tests {
             "Poll::Pending",
             format!("{:?}", poll)
         );
-        let has_registration = b.registration.lock().unwrap().is_some();
+        let has_registration = b.registration.is_some();
         crate::assert_with_log!(
             has_registration,
             "registration present",
@@ -1163,7 +1156,7 @@ mod tests {
         let poll = a.poll_send_ready(&mut poll_cx);
         // Either ready or pending with registration is acceptable
         if matches!(poll, Poll::Pending) {
-            let has_registration = a.registration.lock().unwrap().is_some();
+            let has_registration = a.registration.is_some();
             crate::assert_with_log!(
                 has_registration,
                 "registration present on Pending",
