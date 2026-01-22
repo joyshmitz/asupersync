@@ -512,7 +512,7 @@ mod tests {
         crate::assert_with_log!(count >= 1, "has events", true, count >= 1);
 
         let mut found = false;
-        for event in events.iter() {
+        for event in &events {
             if event.token == token && event.is_writable() {
                 found = true;
                 break;
@@ -547,7 +547,7 @@ mod tests {
         crate::assert_with_log!(count >= 1, "has events", true, count >= 1);
 
         let mut found = false;
-        for event in events.iter() {
+        for event in &events {
             if event.token == token && event.is_readable() {
                 found = true;
                 break;
@@ -618,7 +618,7 @@ mod tests {
             if count == 0 {
                 continue;
             }
-            for event in events.iter() {
+            for event in &events {
                 if event.token == token && event.is_readable() {
                     found = true;
                     break;
@@ -815,7 +815,7 @@ mod tests {
     fn debug_impl() {
         init_test("debug_impl");
         let reactor = EpollReactor::new().expect("failed to create reactor");
-        let debug_text = format!("{:?}", reactor);
+        let debug_text = format!("{reactor:?}");
         crate::assert_with_log!(
             debug_text.contains("EpollReactor"),
             "debug contains type",

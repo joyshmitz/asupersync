@@ -492,7 +492,7 @@ mod tests {
             item.description == Some("Show help".to_string()),
             "description",
             Some("Show help".to_string()),
-            item.description.clone()
+            item.description
         );
         crate::test_complete!("completion_item_builder");
     }
@@ -500,7 +500,7 @@ mod tests {
     struct TestCompletable;
 
     impl Completable for TestCompletable {
-        fn command_name(&self) -> &str {
+        fn command_name(&self) -> &'static str {
             "testcmd"
         }
 

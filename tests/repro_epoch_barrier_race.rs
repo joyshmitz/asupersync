@@ -26,7 +26,7 @@ fn test_epoch_barrier_overflow_race() {
     for i in 0..actual {
         let b = barrier.clone();
         let g = start_gate.clone();
-        let id = format!("p-{}", i);
+        let id = format!("p-{i}");
 
         handles.push(thread::spawn(move || {
             g.wait();

@@ -481,7 +481,7 @@ mod tests {
 
     fn poll_once<T>(future: &mut impl Future<Output = T>) -> Option<T> {
         let waker = Waker::noop();
-        let mut cx = Context::from_waker(&waker);
+        let mut cx = Context::from_waker(waker);
         match unsafe { Pin::new_unchecked(future) }.poll(&mut cx) {
             Poll::Ready(v) => Some(v),
             Poll::Pending => None,

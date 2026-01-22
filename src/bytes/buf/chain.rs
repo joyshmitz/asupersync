@@ -120,7 +120,7 @@ mod tests {
         let b: &[u8] = &[4, 5, 6];
         let chain = Chain::new(a, b);
         let chunk = chain.chunk();
-        crate::assert_with_log!(chunk == &[1, 2, 3], "chunk", &[1, 2, 3], chunk);
+        crate::assert_with_log!(chunk == [1, 2, 3], "chunk", &[1, 2, 3], chunk);
         crate::test_complete!("test_chain_chunk");
     }
 
@@ -135,19 +135,19 @@ mod tests {
         let remaining = chain.remaining();
         crate::assert_with_log!(remaining == 4, "remaining", 4, remaining);
         let chunk = chain.chunk();
-        crate::assert_with_log!(chunk == &[3], "chunk", &[3], chunk);
+        crate::assert_with_log!(chunk == [3], "chunk", &[3], chunk);
 
         chain.advance(1);
         let remaining = chain.remaining();
         crate::assert_with_log!(remaining == 3, "remaining", 3, remaining);
         let chunk = chain.chunk();
-        crate::assert_with_log!(chunk == &[4, 5, 6], "chunk", &[4, 5, 6], chunk);
+        crate::assert_with_log!(chunk == [4, 5, 6], "chunk", &[4, 5, 6], chunk);
 
         chain.advance(2);
         let remaining = chain.remaining();
         crate::assert_with_log!(remaining == 1, "remaining", 1, remaining);
         let chunk = chain.chunk();
-        crate::assert_with_log!(chunk == &[6], "chunk", &[6], chunk);
+        crate::assert_with_log!(chunk == [6], "chunk", &[6], chunk);
         crate::test_complete!("test_chain_advance");
     }
 
@@ -194,9 +194,9 @@ mod tests {
         let chain = Chain::new(a, b);
 
         let (a_out, b_out) = chain.into_inner();
-        let ok = a_out == &[1, 2, 3];
+        let ok = a_out == [1, 2, 3];
         crate::assert_with_log!(ok, "a_out", &[1, 2, 3], a_out);
-        let ok = b_out == &[4, 5, 6];
+        let ok = b_out == [4, 5, 6];
         crate::assert_with_log!(ok, "b_out", &[4, 5, 6], b_out);
         crate::test_complete!("test_chain_into_inner");
     }

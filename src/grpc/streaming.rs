@@ -526,7 +526,7 @@ mod tests {
 
         match metadata.get("data-bin") {
             Some(MetadataValue::Binary(v)) => {
-                crate::assert_with_log!(v.as_ref() == &[0, 1, 2], "binary", &[0, 1, 2], v.as_ref());
+                crate::assert_with_log!(v.as_ref() == [0, 1, 2], "binary", &[0, 1, 2], v.as_ref());
             }
             _ => panic!("expected binary value"),
         }

@@ -928,7 +928,7 @@ mod tests {
     #[test]
     fn progress_display() {
         let progress = ReplayProgress::new(250, 1000);
-        let display = format!("{}", progress);
+        let display = format!("{progress}");
         assert!(display.contains("250/1000"));
         assert!(display.contains("25.0%"));
     }

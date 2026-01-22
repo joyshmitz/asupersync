@@ -830,7 +830,7 @@ mod tests {
         let name = HeaderName::from_static("content-type");
         let value = HeaderValue::from_static("application/json");
 
-        headers.insert(name.clone(), value.clone());
+        headers.insert(name.clone(), value);
         assert_eq!(headers.len(), 1);
         assert!(!headers.is_empty());
 

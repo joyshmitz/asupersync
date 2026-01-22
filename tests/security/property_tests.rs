@@ -29,7 +29,7 @@ proptest! {
         let symbol = symbol_with(&data);
         let tag = AuthenticationTag::compute(&key, &symbol);
 
-        let mut tampered = data.clone();
+        let mut tampered = data;
         tampered[0] = tampered[0].wrapping_add(1);
         let tampered_symbol = symbol_with(&tampered);
 

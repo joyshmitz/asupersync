@@ -164,7 +164,7 @@ impl InvariantTracker {
             return 0.0;
         }
 
-        let total: f64 = self.invariants.values().map(|i| i.detection_rate()).sum();
+        let total: f64 = self.invariants.values().map(CoverageInfo::detection_rate).sum();
         total / self.invariants.len() as f64
     }
 
@@ -186,7 +186,7 @@ impl InvariantTracker {
     }
 
     /// Merge another tracker's data into this one.
-    pub fn merge(&mut self, other: &InvariantTracker) {
+    pub fn merge(&mut self, other: &Self) {
         for (name, info) in &other.invariants {
             let entry = self.invariants.entry(name).or_default();
             entry.checks += info.checks;
@@ -343,13 +343,11 @@ pub fn assert_coverage(tracker: &InvariantTracker, required_invariants: &[&str])
         }
     }
 
-    if !missing.is_empty() {
-        panic!(
-            "Missing invariant coverage: {:?}\n\nTracked invariants:\n{}",
-            missing,
-            tracker.report()
-        );
-    }
+    assert!(missing.is_empty(), 
+        "Missing invariant coverage: {:?}\n\nTracked invariants:\n{}",
+        missing,
+        tracker.report()
+    );
 }
 
 /// Assert that coverage meets a minimum threshold.
@@ -357,12 +355,9 @@ pub fn assert_coverage_threshold(tracker: &InvariantTracker, min_percentage: f64
     let report = tracker.report();
     let actual = report.coverage_percentage();
 
-    if actual < min_percentage {
-        panic!(
-            "Coverage {:.1}% is below threshold {:.1}%\n\n{}",
-            actual, min_percentage, report
-        );
-    }
+    assert!(actual >= min_percentage, 
+        "Coverage {actual:.1}% is below threshold {min_percentage:.1}%\n\n{report}"
+    );
 }
 
 #[cfg(test)]

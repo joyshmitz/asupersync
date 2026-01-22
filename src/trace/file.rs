@@ -1383,8 +1383,7 @@ mod tests {
         // Should be well under 64 bytes per event
         assert!(
             bytes_per_event < 40.0,
-            "File size too large: {:.1} bytes/event",
-            bytes_per_event
+            "File size too large: {bytes_per_event:.1} bytes/event"
         );
     }
 

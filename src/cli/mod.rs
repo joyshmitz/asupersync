@@ -162,7 +162,7 @@ mod tests {
         struct TestCmd;
 
         impl Completable for TestCmd {
-            fn command_name(&self) -> &str {
+            fn command_name(&self) -> &'static str {
                 "test"
             }
 

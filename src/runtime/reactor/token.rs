@@ -448,7 +448,7 @@ mod tests {
             true,
             removed.is_some()
         );
-        crate::assert_with_log!(slab.len() == 0, "len after remove", 0usize, slab.len());
+        crate::assert_with_log!(slab.is_empty(), "len after remove", 0usize, slab.len());
         crate::assert_with_log!(
             slab.is_empty(),
             "slab empty after remove",
@@ -642,7 +642,7 @@ mod tests {
         crate::assert_with_log!(slab.len() == 10, "len before clear", 10usize, slab.len());
 
         slab.clear();
-        crate::assert_with_log!(slab.len() == 0, "len after clear", 0usize, slab.len());
+        crate::assert_with_log!(slab.is_empty(), "len after clear", 0usize, slab.len());
         crate::assert_with_log!(
             slab.is_empty(),
             "slab empty after clear",

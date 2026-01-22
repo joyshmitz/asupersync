@@ -37,7 +37,7 @@ impl Future for YieldNow {
 }
 
 async fn yield_now() {
-    YieldNow { yielded: false }.await
+    YieldNow { yielded: false }.await;
 }
 
 #[test]
@@ -68,7 +68,7 @@ fn test_mutex_contention_async() {
         })
         .unwrap();
 
-    let m2 = mutex.clone();
+    let m2 = mutex;
     let f2 = finished_2.clone();
 
     // Task 2: Try to acquire lock

@@ -284,7 +284,7 @@ mod tests {
         let mut record = TaskRecord::new_with_time(task_id, region_id, budget, created_at);
         let mut inner = CxInner::new(region_id, task_id, budget);
         inner.checkpoint_state.last_checkpoint = last_checkpoint;
-        inner.checkpoint_state.last_message = last_message.map(|msg| msg.to_string());
+        inner.checkpoint_state.last_message = last_message.map(std::string::ToString::to_string);
         record.set_cx_inner(Arc::new(RwLock::new(inner)));
         record
     }
@@ -344,7 +344,7 @@ mod tests {
             warnings_ref.lock().unwrap().push(warning.reason);
         });
 
-        let stale = Instant::now() - Duration::from_secs(30);
+        let stale = Instant::now().checked_sub(Duration::from_secs(30)).unwrap();
         let task = make_task(
             TaskId::new_for_test(2, 0),
             RegionId::new_for_test(1, 0),
@@ -417,7 +417,7 @@ mod tests {
             warnings_ref.lock().unwrap().push(warning.reason);
         });
 
-        let stale = Instant::now() - Duration::from_secs(20);
+        let stale = Instant::now().checked_sub(Duration::from_secs(20)).unwrap();
         let task = make_task(
             TaskId::new_for_test(4, 0),
             RegionId::new_for_test(1, 0),

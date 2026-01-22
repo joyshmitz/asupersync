@@ -490,7 +490,7 @@ mod tests {
         let b = Bytes::copy_from_slice(&data);
         let len = b.len();
         crate::assert_with_log!(len == 5, "len", 5, len);
-        let ok = &b[..] == &data[..];
+        let ok = b[..] == data[..];
         crate::assert_with_log!(ok, "contents", &data[..], &b[..]);
         crate::test_complete!("test_bytes_copy_from_slice");
     }
@@ -585,7 +585,7 @@ mod tests {
         init_test("test_bytes_from_vec");
         let v = vec![1u8, 2, 3];
         let b: Bytes = v.into();
-        let ok = &b[..] == &[1, 2, 3];
+        let ok = b[..] == [1, 2, 3];
         crate::assert_with_log!(ok, "from vec", &[1, 2, 3], &b[..]);
         crate::test_complete!("test_bytes_from_vec");
     }

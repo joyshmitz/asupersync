@@ -1474,8 +1474,7 @@ mod tests {
         // Should be roughly just the size of CancelReason without any heap allocations for cause
         assert!(
             cost < 200,
-            "cancel_fast should have minimal memory cost, got {}",
-            cost
+            "cancel_fast should have minimal memory cost, got {cost}"
         );
     }
 

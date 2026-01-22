@@ -694,7 +694,7 @@ mod tests {
         );
 
         let req = HealthCheckRequest::server();
-        crate::assert_with_log!(req.service == "", "service", "", req.service);
+        crate::assert_with_log!(req.service.is_empty(), "service", "", req.service);
         crate::test_complete!("health_check_request_constructors");
     }
 

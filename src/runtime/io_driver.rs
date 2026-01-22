@@ -858,7 +858,7 @@ mod tests {
         let reactor = Arc::new(LabReactor::new());
         let driver = IoDriver::new(reactor);
 
-        let debug_text = format!("{:?}", driver);
+        let debug_text = format!("{driver:?}");
         crate::assert_with_log!(
             debug_text.contains("IoDriver"),
             "debug contains type",
@@ -924,7 +924,7 @@ mod tests {
         fn io_driver_with_epoll_reactor_dispatches_waker() {
             super::init_test("io_driver_with_epoll_reactor_dispatches_waker");
             let reactor = Arc::new(EpollReactor::new().expect("create reactor"));
-            let mut driver = IoDriver::new(reactor.clone());
+            let mut driver = IoDriver::new(reactor);
 
             // Create a unix socket pair
             let (sock_read, mut sock_write) = UnixStream::pair().expect("create socket pair");

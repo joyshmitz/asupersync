@@ -719,7 +719,7 @@ mod tests {
             64usize,
             events.capacity()
         );
-        crate::assert_with_log!(events.len() == 0, "len", 0usize, events.len());
+        crate::assert_with_log!(events.is_empty(), "len", 0usize, events.len());
         crate::assert_with_log!(events.is_empty(), "is_empty", true, events.is_empty());
         crate::test_complete!("events_with_capacity");
     }
@@ -754,7 +754,7 @@ mod tests {
 
         crate::assert_with_log!(events.len() == 2, "len before clear", 2usize, events.len());
         events.clear();
-        crate::assert_with_log!(events.len() == 0, "len after clear", 0usize, events.len());
+        crate::assert_with_log!(events.is_empty(), "len after clear", 0usize, events.len());
         crate::assert_with_log!(
             events.is_empty(),
             "empty after clear",
@@ -856,11 +856,11 @@ mod tests {
             0usize,
             events.capacity()
         );
-        crate::assert_with_log!(events.len() == 0, "len zero", 0usize, events.len());
+        crate::assert_with_log!(events.is_empty(), "len zero", 0usize, events.len());
 
         // Should be silently dropped
         events.push(Event::readable(Token::new(1)));
-        crate::assert_with_log!(events.len() == 0, "len stays zero", 0usize, events.len());
+        crate::assert_with_log!(events.is_empty(), "len stays zero", 0usize, events.len());
         crate::test_complete!("events_zero_capacity");
     }
 

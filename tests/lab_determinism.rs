@@ -134,14 +134,14 @@ fn test_lab_deterministic_scheduling_same_seed() {
     assert_with_log!(
         result1 == result2,
         "Run 1 and Run 2 should be identical",
-        result1.clone(),
-        result2.clone()
+        result1,
+        result2
     );
     assert_with_log!(
         result2 == result3,
         "Run 2 and Run 3 should be identical",
-        result2.clone(),
-        result3.clone()
+        result2,
+        result3
     );
 
     tracing::info!(
@@ -180,7 +180,7 @@ fn test_lab_different_seeds_different_results() {
     // Count unique orderings
     let mut unique_orderings = std::collections::HashSet::new();
     for r in &results {
-        unique_orderings.insert(format!("{:?}", r));
+        unique_orderings.insert(format!("{r:?}"));
     }
 
     // With 5 different seeds, we should see at least 2 different orderings
@@ -288,7 +288,7 @@ fn run_with_time_advancement(seed: u64) -> Vec<(u64, String)> {
                 events_clone
                     .lock()
                     .unwrap()
-                    .push((0, format!("task-{}-start", i)));
+                    .push((0, format!("task-{i}-start")));
             })
             .expect("create task");
         runtime.scheduler.lock().unwrap().schedule(task_id, 0);
@@ -323,8 +323,8 @@ fn test_lab_virtual_time_determinism() {
     assert_with_log!(
         events1 == events2,
         "Time-based events should be deterministic",
-        events1.clone(),
-        events2.clone()
+        events1,
+        events2
     );
 
     tracing::info!(
@@ -447,8 +447,8 @@ fn test_lab_priority_scheduling_determinism() {
     assert_with_log!(
         result1 == result2,
         "Priority-based scheduling should be deterministic",
-        result1.clone(),
-        result2.clone()
+        result1,
+        result2
     );
 
     // Verify higher priority tasks complete before lower priority ones
@@ -485,10 +485,7 @@ where
         let result = f(seed);
         assert!(
             result == baseline,
-            "Non-deterministic execution detected on run {}: baseline={:?}, got={:?}",
-            run,
-            baseline,
-            result
+            "Non-deterministic execution detected on run {run}: baseline={baseline:?}, got={result:?}"
         );
     }
 }
@@ -669,8 +666,8 @@ fn test_lab_interleaved_completion_determinism() {
     assert_with_log!(
         result1 == result2,
         "Interleaved completion should be deterministic",
-        result1.clone(),
-        result2.clone()
+        result1,
+        result2
     );
 
     tracing::info!(

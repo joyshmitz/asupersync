@@ -127,8 +127,7 @@ where
         }
         Err(_) => {
             panic!(
-                "operation '{}' did not complete within {:?}",
-                description, timeout_duration
+                "operation '{description}' did not complete within {timeout_duration:?}"
             );
         }
     }

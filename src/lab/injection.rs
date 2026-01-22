@@ -948,7 +948,7 @@ mod tests {
         ];
 
         let report = LabInjectionReport::from_results(results, 5, "AllPoints", 12345);
-        let display = format!("{}", report);
+        let display = format!("{report}");
 
         assert!(display.contains("Cancellation Injection Test Report"));
         assert!(display.contains("Await points discovered: 5"));

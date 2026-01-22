@@ -434,10 +434,10 @@ mod tests {
     fn test_metrics_provider_object_safe() {
         fn assert_object_safe(_: &dyn MetricsProvider) {}
 
-        let provider = NoOpMetrics::default();
+        let provider = NoOpMetrics;
         assert_object_safe(&provider);
 
-        let boxed: Box<dyn MetricsProvider> = Box::new(NoOpMetrics::default());
+        let boxed: Box<dyn MetricsProvider> = Box::new(NoOpMetrics);
         boxed.task_spawned(RegionId::testing_default(), TaskId::testing_default());
     }
 }

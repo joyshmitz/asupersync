@@ -496,7 +496,7 @@ mod tests {
 
             // Create mock network with 3 nodes
             let config = MockTransportConfig::reliable();
-            let network = MockNetwork::fully_connected(3, config.clone());
+            let network = MockNetwork::fully_connected(3, config);
 
             // Get transports from node 0 to node 1, and node 2 to node 1
             let (mut sink_0_1, _stream_0_1) = network.transport(0, 1);
@@ -591,14 +591,14 @@ mod tests {
             for i in 0..5 {
                 let sym = create_symbol(i);
                 let is_new = dedup.check_and_record(sym.symbol(), PathId(0), Time::ZERO);
-                crate::assert_with_log!(is_new, &format!("sym {} new", i), true, is_new);
+                crate::assert_with_log!(is_new, &format!("sym {i} new"), true, is_new);
             }
 
             // Same symbols should be duplicates at time 0
             for i in 0..5 {
                 let sym = create_symbol(i);
                 let is_dup = !dedup.check_and_record(sym.symbol(), PathId(0), Time::ZERO);
-                crate::assert_with_log!(is_dup, &format!("sym {} duplicate", i), true, is_dup);
+                crate::assert_with_log!(is_dup, &format!("sym {i} duplicate"), true, is_dup);
             }
 
             // Prune with time past the TTL (time > 10ms)
@@ -789,7 +789,7 @@ mod tests {
             // I need to adapt the test to the current `DispatchStrategy` which is `Unicast`.
             // And use routing table to direct it.
 
-            let router = Arc::new(SymbolRouter::new(table.clone()));
+            let router = Arc::new(SymbolRouter::new(table));
             let dispatcher = SymbolDispatcher::new(router, DispatchConfig::default());
             dispatcher.add_sink(EndpointId(1), Box::new(sink1));
             dispatcher.add_sink(EndpointId(2), Box::new(sink2));
@@ -979,7 +979,7 @@ mod tests {
             for i in 0..5 {
                 let (sink, stream) = mock_channel(config.clone());
                 let id = EndpointId(i as u64);
-                let _endpoint = table.register_endpoint(Endpoint::new(id, format!("node{}", i)));
+                let _endpoint = table.register_endpoint(Endpoint::new(id, format!("node{i}")));
                 dispatcher.add_sink(id, Box::new(sink));
                 streams.push(stream);
             }
@@ -1109,13 +1109,13 @@ mod tests {
                         Ok(Some(_)) => collected += 1,
                         Ok(None) => break,
                         Err(StreamError::Cancelled) => break,
-                        Err(e) => panic!("unexpected error: {:?}", e),
+                        Err(e) => panic!("unexpected error: {e:?}"),
                     }
                 }
 
                 // Should have collected around 10-11 before cancel
                 crate::assert_with_log!(
-                    collected >= 10 && collected <= 12,
+                    (10..=12).contains(&collected),
                     "partial collect",
                     "10-12",
                     collected

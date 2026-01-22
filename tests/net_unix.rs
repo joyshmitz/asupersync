@@ -84,8 +84,7 @@ fn net_uds_001_basic_connect_accept() {
 
     assert!(
         result.is_ok(),
-        "basic connect/accept should succeed: {:?}",
-        result
+        "basic connect/accept should succeed: {result:?}"
     );
     test_complete!("net_uds_001_basic_connect_accept");
 }
@@ -158,8 +157,7 @@ fn net_uds_002_echo_roundtrip() {
 
     assert!(
         result.is_ok(),
-        "echo roundtrip should succeed: {:?}",
-        result
+        "echo roundtrip should succeed: {result:?}"
     );
     test_complete!("net_uds_002_echo_roundtrip");
 }
@@ -200,8 +198,7 @@ fn net_uds_003_stream_pair() {
 
     assert!(
         result.is_ok(),
-        "stream pair should work: {:?}",
-        result
+        "stream pair should work: {result:?}"
     );
     test_complete!("net_uds_003_stream_pair");
 }
@@ -241,8 +238,7 @@ fn net_uds_004_datagram_basic() {
 
     assert!(
         result.is_ok(),
-        "datagram basic should succeed: {:?}",
-        result
+        "datagram basic should succeed: {result:?}"
     );
     test_complete!("net_uds_004_datagram_basic");
 }
@@ -295,8 +291,7 @@ fn net_uds_005_socket_file_cleanup() {
 
     assert!(
         result.is_ok(),
-        "socket cleanup test should complete: {:?}",
-        result
+        "socket cleanup test should complete: {result:?}"
     );
     test_complete!("net_uds_005_socket_file_cleanup");
 }
@@ -345,8 +340,7 @@ fn net_uds_006_large_data_transfer() {
 
     assert!(
         result.is_ok(),
-        "large data transfer should succeed: {:?}",
-        result
+        "large data transfer should succeed: {result:?}"
     );
     test_complete!("net_uds_006_large_data_transfer");
 }
@@ -417,7 +411,7 @@ fn net_uds_007_multiple_connections() {
                 tracing::info!(client = i, "client connected");
 
                 // Send a message
-                let msg = format!("client {}", i);
+                let msg = format!("client {i}");
                 client.write_all(msg.as_bytes())?;
 
                 // Receive echo
@@ -446,8 +440,7 @@ fn net_uds_007_multiple_connections() {
         let total_accepted = accepted_count.load(Ordering::SeqCst);
         assert_eq!(
             total_accepted, NUM_CLIENTS,
-            "should accept all {} clients",
-            NUM_CLIENTS
+            "should accept all {NUM_CLIENTS} clients"
         );
         tracing::info!(total_accepted, "all clients handled");
 
@@ -456,8 +449,7 @@ fn net_uds_007_multiple_connections() {
 
     assert!(
         result.is_ok(),
-        "multiple connections should succeed: {:?}",
-        result
+        "multiple connections should succeed: {result:?}"
     );
     test_complete!("net_uds_007_multiple_connections");
 }
@@ -504,8 +496,7 @@ fn net_uds_008_datagram_pair() {
 
     assert!(
         result.is_ok(),
-        "datagram pair should work: {:?}",
-        result
+        "datagram pair should work: {result:?}"
     );
     test_complete!("net_uds_008_datagram_pair");
 }
@@ -538,8 +529,7 @@ fn net_uds_009_local_addr() {
 
     assert!(
         result.is_ok(),
-        "local addr test should succeed: {:?}",
-        result
+        "local addr test should succeed: {result:?}"
     );
     test_complete!("net_uds_009_local_addr");
 }
@@ -597,8 +587,7 @@ fn net_uds_010_bidirectional() {
 
     assert!(
         result.is_ok(),
-        "bidirectional test should succeed: {:?}",
-        result
+        "bidirectional test should succeed: {result:?}"
     );
     test_complete!("net_uds_010_bidirectional");
 }

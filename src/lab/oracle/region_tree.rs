@@ -682,7 +682,7 @@ mod tests {
         crate::assert_with_log!(depth2 == Some(2), "depth 2", Some(2), depth2);
         let depth_missing = oracle.depth(region(99));
         crate::assert_with_log!(
-            depth_missing == None,
+            depth_missing.is_none(),
             "depth missing",
             None::<usize>,
             depth_missing
@@ -699,7 +699,7 @@ mod tests {
         oracle.on_region_create(region(1), None, t(20));
 
         let root = oracle.root();
-        crate::assert_with_log!(root == None, "root none", None::<RegionId>, root);
+        crate::assert_with_log!(root.is_none(), "root none", None::<RegionId>, root);
         crate::test_complete!("root_returns_none_for_multiple_roots");
     }
 

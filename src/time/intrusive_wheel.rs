@@ -929,7 +929,7 @@ mod tests {
             true,
             wheel.is_empty()
         );
-        crate::assert_with_log!(wheel.len() == 0, "len is 0", 0, wheel.len());
+        crate::assert_with_log!(wheel.is_empty(), "len is 0", 0, wheel.len());
         crate::assert_with_log!(
             wheel.resolution() == Duration::from_millis(1),
             "resolution",
@@ -1056,7 +1056,7 @@ mod tests {
         // Insert timer that wraps around (slot 5 % 4 = 1)
         let mut node = Box::pin(TimerNode::new());
         let deadline = base + Duration::from_millis(50);
-        let waker = counter_waker(counter.clone());
+        let waker = counter_waker(counter);
 
         unsafe {
             wheel.insert(node.as_mut(), deadline, waker);

@@ -1481,7 +1481,7 @@ mod tests {
         ];
         let report = InjectionReport::from_results_with_seed(results, 5, "AllPoints", 42);
 
-        let display = format!("{}", report);
+        let display = format!("{report}");
         assert!(display.contains("Cancellation Injection Test Report"));
         assert!(display.contains("Await points discovered: 5"));
         assert!(display.contains("Passed: 1"));

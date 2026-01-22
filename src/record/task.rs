@@ -851,7 +851,7 @@ mod tests {
             true,
             cancel_requested
         );
-        let cancel_reason = inner.read().unwrap().cancel_reason.as_ref().cloned();
+        let cancel_reason = inner.read().unwrap().cancel_reason.clone();
         crate::assert_with_log!(
             cancel_reason == Some(CancelReason::timeout()),
             "cancel_reason",

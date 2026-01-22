@@ -78,7 +78,7 @@ mod tests {
 
         read_buf.put_slice(&[1, 2, 3]);
         let filled = read_buf.filled();
-        crate::assert_with_log!(filled == &[1, 2, 3], "filled", &[1, 2, 3], filled);
+        crate::assert_with_log!(filled == [1, 2, 3], "filled", &[1, 2, 3], filled);
         let remaining = read_buf.remaining();
         crate::assert_with_log!(remaining == 5, "remaining", 5, remaining);
 

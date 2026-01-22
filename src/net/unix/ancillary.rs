@@ -377,7 +377,7 @@ mod tests {
             128,
             ancillary.capacity()
         );
-        crate::assert_with_log!(ancillary.len() == 0, "len", 0, ancillary.len());
+        crate::assert_with_log!(ancillary.is_empty(), "len", 0, ancillary.len());
         crate::assert_with_log!(ancillary.is_empty(), "is_empty", true, ancillary.is_empty());
         crate::assert_with_log!(
             !ancillary.is_truncated(),

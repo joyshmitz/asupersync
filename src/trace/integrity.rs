@@ -996,7 +996,7 @@ mod tests {
         result.declared_events = 100;
         result.verified_events = 100;
 
-        let display = format!("{}", result);
+        let display = format!("{result}");
         assert!(display.contains("valid"));
         assert!(display.contains("100 events"));
 
@@ -1006,7 +1006,7 @@ mod tests {
         });
         result.verified_events = 50;
 
-        let display = format!("{}", result);
+        let display = format!("{result}");
         assert!(display.contains("1 issue"));
         assert!(display.contains("50/100"));
     }

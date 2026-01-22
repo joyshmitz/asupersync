@@ -1536,7 +1536,7 @@ mod tests {
             first.was_duplicate
         );
 
-        let second = aggregator.process(symbol.clone(), p2, Time::ZERO);
+        let second = aggregator.process(symbol, p2, Time::ZERO);
         crate::assert_with_log!(
             second.was_duplicate,
             "duplicate across paths",

@@ -693,7 +693,7 @@ mod tests {
             context: divergence_context(&expected, &actual),
         };
 
-        let msg = format!("{}", err);
+        let msg = format!("{err}");
         assert!(msg.contains("event 5"));
         assert!(msg.contains("Different task scheduled"));
     }

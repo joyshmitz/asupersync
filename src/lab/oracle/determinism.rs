@@ -652,7 +652,7 @@ mod tests {
             data_summary: "task=Task(0) region=Region(0)".to_string(),
         };
 
-        crate::assert_with_log!(s1 == s2, "equal", s2.clone(), s1.clone());
+        crate::assert_with_log!(s1 == s2, "equal", s2, s1);
 
         let s3 = TraceEventSummary {
             seq: 1, // Different seq

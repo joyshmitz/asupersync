@@ -1122,7 +1122,7 @@ mod tests {
         // Drop implementation.
 
         let (tx, rx) = mpsc::channel();
-        let pooled = PooledResource::new(99u8, tx.clone());
+        let pooled = PooledResource::new(99u8, tx);
 
         // Simulate cancellation by just dropping the resource
         // In a real scenario, cancellation would cause the future to be dropped
@@ -1255,7 +1255,7 @@ mod tests {
                 // Good - closed error as expected
             }
             Ok(_) => panic!("expected Closed error, got Ok"),
-            Err(e) => panic!("expected Closed error, got {:?}", e),
+            Err(e) => panic!("expected Closed error, got {e:?}"),
         }
 
         crate::test_complete!("generic_pool_acquire_when_closed_returns_error");

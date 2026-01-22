@@ -70,7 +70,7 @@ impl Arbitrary for RegionSelector {
     type Parameters = ();
     type Strategy = BoxedStrategy<Self>;
 
-    fn arbitrary_with(_: ()) -> Self::Strategy {
+    fn arbitrary_with((): ()) -> Self::Strategy {
         (0usize..100).prop_map(RegionSelector).boxed()
     }
 }
@@ -86,7 +86,7 @@ impl Arbitrary for TaskSelector {
     type Parameters = ();
     type Strategy = BoxedStrategy<Self>;
 
-    fn arbitrary_with(_: ()) -> Self::Strategy {
+    fn arbitrary_with((): ()) -> Self::Strategy {
         (0usize..100).prop_map(TaskSelector).boxed()
     }
 }
@@ -112,11 +112,11 @@ impl Arbitrary for TaskOutcome {
     type Parameters = ();
     type Strategy = BoxedStrategy<Self>;
 
-    fn arbitrary_with(_: ()) -> Self::Strategy {
+    fn arbitrary_with((): ()) -> Self::Strategy {
         prop_oneof![
-            8 => Just(TaskOutcome::Ok),    // Most tasks succeed
-            1 => Just(TaskOutcome::Err),   // Some fail
-            1 => Just(TaskOutcome::Panic), // Rare panics
+            8 => Just(Self::Ok),    // Most tasks succeed
+            1 => Just(Self::Err),   // Some fail
+            1 => Just(Self::Panic), // Rare panics
         ]
         .boxed()
     }
@@ -180,19 +180,19 @@ impl Arbitrary for RegionOp {
     type Parameters = ();
     type Strategy = BoxedStrategy<Self>;
 
-    fn arbitrary_with(_: ()) -> Self::Strategy {
+    fn arbitrary_with((): ()) -> Self::Strategy {
         prop_oneof![
             // Weight towards common operations
-            3 => any::<RegionSelector>().prop_map(|parent| RegionOp::CreateChild { parent }),
-            3 => any::<RegionSelector>().prop_map(|region| RegionOp::SpawnTask { region }),
+            3 => any::<RegionSelector>().prop_map(|parent| Self::CreateChild { parent }),
+            3 => any::<RegionSelector>().prop_map(|region| Self::SpawnTask { region }),
             2 => (any::<RegionSelector>(), arb_cancel_kind_for_ops())
-                .prop_map(|(region, reason)| RegionOp::Cancel { region, reason }),
+                .prop_map(|(region, reason)| Self::Cancel { region, reason }),
             2 => (any::<TaskSelector>(), any::<TaskOutcome>())
-                .prop_map(|(task, outcome)| RegionOp::CompleteTask { task, outcome }),
-            2 => any::<RegionSelector>().prop_map(|region| RegionOp::CloseRegion { region }),
-            1 => (1u64..10000).prop_map(|millis| RegionOp::AdvanceTime { millis }),
+                .prop_map(|(task, outcome)| Self::CompleteTask { task, outcome }),
+            2 => any::<RegionSelector>().prop_map(|region| Self::CloseRegion { region }),
+            1 => (1u64..10000).prop_map(|millis| Self::AdvanceTime { millis }),
             1 => (any::<RegionSelector>(), 1u64..60000)
-                .prop_map(|(region, millis)| RegionOp::SetDeadline { region, millis }),
+                .prop_map(|(region, millis)| Self::SetDeadline { region, millis }),
         ]
         .boxed()
     }
@@ -335,7 +335,7 @@ fn shrink_op_sequence(ops: &[RegionOp]) -> Vec<Vec<RegionOp>> {
         })
         .cloned()
         .collect();
-    if without_time.len() >= 1 && without_time.len() < len && is_sequence_causal(&without_time) {
+    if !without_time.is_empty() && without_time.len() < len && is_sequence_causal(&without_time) {
         candidates.push(without_time);
     }
 
@@ -343,7 +343,7 @@ fn shrink_op_sequence(ops: &[RegionOp]) -> Vec<Vec<RegionOp>> {
     for idx in 0..len {
         let mut candidate = ops.to_vec();
         candidate.remove(idx);
-        if candidate.len() >= 1 && is_sequence_causal(&candidate) {
+        if !candidate.is_empty() && is_sequence_causal(&candidate) {
             candidates.push(candidate);
         }
     }
@@ -632,7 +632,7 @@ fn record_failure_to_dir(
     );
     let path = dir.join(filename);
     let payload = serde_json::to_string_pretty(&ops_to_records(ops))
-        .map_err(|err| std::io::Error::new(std::io::ErrorKind::Other, err))?;
+        .map_err(|err| std::io::Error::other(err))?;
     std::fs::write(&path, payload)?;
     Ok(path)
 }
@@ -872,14 +872,14 @@ impl RegionIdTestExt for RegionId {
     fn new_for_test_index(&self) -> u32 {
         // Use debug formatting to extract the index
         // Format is "RegionId(index:generation)"
-        let s = format!("{:?}", self);
+        let s = format!("{self:?}");
         let start = s.find('(').unwrap() + 1;
         let colon = s.find(':').unwrap();
         s[start..colon].parse().unwrap()
     }
 
     fn new_for_test_generation(&self) -> u32 {
-        let s = format!("{:?}", self);
+        let s = format!("{self:?}");
         let colon = s.find(':').unwrap() + 1;
         let end = s.find(')').unwrap();
         s[colon..end].parse().unwrap()
@@ -894,14 +894,14 @@ trait TaskIdTestExt {
 
 impl TaskIdTestExt for TaskId {
     fn new_for_test_index(&self) -> u32 {
-        let s = format!("{:?}", self);
+        let s = format!("{self:?}");
         let start = s.find('(').unwrap() + 1;
         let colon = s.find(':').unwrap();
         s[start..colon].parse().unwrap()
     }
 
     fn new_for_test_generation(&self) -> u32 {
-        let s = format!("{:?}", self);
+        let s = format!("{self:?}");
         let colon = s.find(':').unwrap() + 1;
         let end = s.find(')').unwrap();
         s[colon..end].parse().unwrap()
@@ -915,7 +915,7 @@ impl RegionOp {
     /// (e.g., due to an invalid selector pointing to a non-existent entity).
     pub fn apply(&self, harness: &mut TestHarness) -> bool {
         match self {
-            RegionOp::CreateChild { parent } => {
+            Self::CreateChild { parent } => {
                 if let Some(parent_id) = harness.resolve_region(parent) {
                     // Check if parent region is still accepting children
                     let arena_idx = ArenaIndex::new(
@@ -940,7 +940,7 @@ impl RegionOp {
                 }
             }
 
-            RegionOp::SpawnTask { region } => {
+            Self::SpawnTask { region } => {
                 if let Some(region_id) = harness.resolve_region(region) {
                     harness.spawn_task(region_id).is_some()
                 } else {
@@ -948,7 +948,7 @@ impl RegionOp {
                 }
             }
 
-            RegionOp::Cancel { region, reason } => {
+            Self::Cancel { region, reason } => {
                 if let Some(region_id) = harness.resolve_region(region) {
                     harness.cancel_region(region_id, *reason);
                     true
@@ -957,7 +957,7 @@ impl RegionOp {
                 }
             }
 
-            RegionOp::CompleteTask { task, outcome } => {
+            Self::CompleteTask { task, outcome } => {
                 if let Some(task_id) = harness.resolve_task(task) {
                     harness.complete_task(task_id, *outcome);
                     true
@@ -966,7 +966,7 @@ impl RegionOp {
                 }
             }
 
-            RegionOp::CloseRegion { region } => {
+            Self::CloseRegion { region } => {
                 if let Some(region_id) = harness.resolve_region(region) {
                     harness.close_region(region_id);
                     true
@@ -975,12 +975,12 @@ impl RegionOp {
                 }
             }
 
-            RegionOp::AdvanceTime { millis } => {
+            Self::AdvanceTime { millis } => {
                 harness.runtime.advance_time(*millis * 1_000_000); // Convert ms to ns
                 true
             }
 
-            RegionOp::SetDeadline { region, millis } => {
+            Self::SetDeadline { region, millis } => {
                 if let Some(region_id) = harness.resolve_region(region) {
                     harness.set_deadline(region_id, *millis)
                 } else {
@@ -1244,7 +1244,7 @@ pub fn check_all_invariants(harness: &TestHarness) -> Vec<InvariantViolation> {
 pub fn assert_all_invariants(harness: &TestHarness) {
     let violations = check_all_invariants(harness);
     if !violations.is_empty() {
-        let messages: Vec<_> = violations.iter().map(|v| v.to_string()).collect();
+        let messages: Vec<_> = violations.iter().map(std::string::ToString::to_string).collect();
         panic!(
             "Region tree invariant violations detected:\n{}",
             messages.join("\n")
@@ -1305,7 +1305,7 @@ pub fn check_all_invariants_tracked(
 pub fn assert_all_invariants_tracked(harness: &TestHarness, tracker: &mut InvariantTracker) {
     let violations = check_all_invariants_tracked(harness, tracker);
     if !violations.is_empty() {
-        let messages: Vec<_> = violations.iter().map(|v| v.to_string()).collect();
+        let messages: Vec<_> = violations.iter().map(std::string::ToString::to_string).collect();
         panic!(
             "Region tree invariant violations detected:\n{}",
             messages.join("\n")
@@ -1348,8 +1348,7 @@ fn check_no_orphan_tasks(harness: &TestHarness) -> Vec<InvariantViolation> {
                 violations.push(InvariantViolation {
                     invariant: "no_orphan_tasks",
                     message: format!(
-                        "Task {:?} references non-existent region {:?}",
-                        task_id, region_id
+                        "Task {task_id:?} references non-existent region {region_id:?}"
                     ),
                 });
             }
@@ -1410,7 +1409,7 @@ fn check_valid_tree_structure(harness: &TestHarness) -> Vec<InvariantViolation> 
             if path.contains(&id) {
                 violations.push(InvariantViolation {
                     invariant: "no_cycles",
-                    message: format!("Cycle detected: region {:?} is its own ancestor", id),
+                    message: format!("Cycle detected: region {id:?} is its own ancestor"),
                 });
                 break;
             }
@@ -1486,7 +1485,7 @@ fn check_unique_ids(harness: &TestHarness) -> Vec<InvariantViolation> {
         if !seen_regions.insert(region_id) {
             violations.push(InvariantViolation {
                 invariant: "unique_region_ids",
-                message: format!("Duplicate region ID: {:?}", region_id),
+                message: format!("Duplicate region ID: {region_id:?}"),
             });
         }
     }
@@ -1497,7 +1496,7 @@ fn check_unique_ids(harness: &TestHarness) -> Vec<InvariantViolation> {
         if !seen_tasks.insert(task_id) {
             violations.push(InvariantViolation {
                 invariant: "unique_task_ids",
-                message: format!("Duplicate task ID: {:?}", task_id),
+                message: format!("Duplicate task ID: {task_id:?}"),
             });
         }
     }
@@ -1538,8 +1537,7 @@ fn check_cancel_propagation(harness: &TestHarness) -> Vec<InvariantViolation> {
                             violations.push(InvariantViolation {
                                 invariant: "cancel_propagation",
                                 message: format!(
-                                    "Region {:?} is cancelled but child {:?} is not (state: {:?})",
-                                    region_id, child_id, child_state
+                                    "Region {region_id:?} is cancelled but child {child_id:?} is not (state: {child_state:?})"
                                 ),
                             });
                         }
@@ -1860,8 +1858,7 @@ fn test_invariants_on_fresh_harness() {
 
     assert!(
         violations.is_empty(),
-        "Fresh harness should have no violations: {:?}",
-        violations
+        "Fresh harness should have no violations: {violations:?}"
     );
 
     test_complete!("test_invariants_on_fresh_harness");
@@ -1882,8 +1879,7 @@ fn test_invariants_after_operations() {
     let violations = check_all_invariants(&harness);
     assert!(
         violations.is_empty(),
-        "Violations after creating children: {:?}",
-        violations
+        "Violations after creating children: {violations:?}"
     );
 
     // Spawn some tasks
@@ -1893,8 +1889,7 @@ fn test_invariants_after_operations() {
     let violations = check_all_invariants(&harness);
     assert!(
         violations.is_empty(),
-        "Violations after spawning tasks: {:?}",
-        violations
+        "Violations after spawning tasks: {violations:?}"
     );
 
     test_complete!("test_invariants_after_operations");
@@ -1911,8 +1906,7 @@ fn test_unique_id_invariant() {
     let violations = check_unique_ids(&harness);
     assert!(
         violations.is_empty(),
-        "Unique ID violations: {:?}",
-        violations
+        "Unique ID violations: {violations:?}"
     );
 
     test_complete!("test_unique_id_invariant");
@@ -2027,9 +2021,7 @@ fn regression_cases_replay_without_violations() {
         let violations = check_all_invariants(&harness);
         assert!(
             violations.is_empty(),
-            "Regression {:?} violated invariants: {:?}",
-            path,
-            violations
+            "Regression {path:?} violated invariants: {violations:?}"
         );
     }
 }

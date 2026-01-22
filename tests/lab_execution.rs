@@ -37,7 +37,7 @@ impl Future for YieldNow {
 }
 
 async fn yield_now() {
-    YieldNow { yielded: false }.await
+    YieldNow { yielded: false }.await;
 }
 
 #[test]
@@ -312,7 +312,7 @@ fn test_chaos_with_heavy_preset() {
     let region = runtime.state.create_root_region(Budget::INFINITE);
 
     let completed = Arc::new(AtomicBool::new(false));
-    let completed_clone = completed.clone();
+    let completed_clone = completed;
 
     let (task_id, _handle) = runtime
         .state

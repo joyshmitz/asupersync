@@ -29,14 +29,14 @@ fn repro_mpsc_cancel_returns_disconnected() {
     test_section!("verify");
     tracing::debug!(result = ?result, "reserve result");
     match result {
-        Err(SendError::Cancelled(_)) => {
+        Err(SendError::Cancelled(())) => {
             // Success: cancellation is now correctly reported
         }
-        Err(SendError::Disconnected(_)) => {
+        Err(SendError::Disconnected(())) => {
             panic!("Got Disconnected, expected Cancelled - bug persists");
         }
         Err(e) => {
-            panic!("Unexpected error type: {:?}", e);
+            panic!("Unexpected error type: {e:?}");
         }
         Ok(_) => panic!("Should have failed due to cancellation"),
     }

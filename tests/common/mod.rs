@@ -189,8 +189,7 @@ where
         }
         Err(_) => {
             panic!(
-                "operation '{}' did not complete within {:?}",
-                description, timeout_duration
+                "operation '{description}' did not complete within {timeout_duration:?}"
             );
         }
     }
@@ -360,7 +359,7 @@ pub fn record_failure<T: serde::Serialize>(
         .map(|d| d.as_secs())
         .unwrap_or(0);
 
-    let filename = format!("{}_{}.json", test_name, timestamp);
+    let filename = format!("{test_name}_{timestamp}.json");
     let path = dir.join(&filename);
 
     // Serialize and write
@@ -399,7 +398,7 @@ pub fn find_regressions(
     }
 
     let mut files = Vec::new();
-    let prefix = format!("{}_", test_name);
+    let prefix = format!("{test_name}_");
 
     for entry in std::fs::read_dir(dir)? {
         let entry = entry?;

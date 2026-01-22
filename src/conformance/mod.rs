@@ -530,7 +530,7 @@ mod tests {
         let after = LabRuntimeTarget::now(&runtime);
 
         assert!(after > before);
-        assert_eq!(after - before, Duration::from_secs(1));
+        assert_eq!(after.checked_sub(before).unwrap(), Duration::from_secs(1));
     }
 
     #[test]

@@ -582,7 +582,7 @@ mod tests {
         init_test("test_bytes_mut_from_vec");
         let v = vec![1u8, 2, 3];
         let b: BytesMut = v.into();
-        let ok = &b[..] == &[1, 2, 3];
+        let ok = b[..] == [1, 2, 3];
         crate::assert_with_log!(ok, "from vec", &[1, 2, 3], &b[..]);
         crate::test_complete!("test_bytes_mut_from_vec");
     }

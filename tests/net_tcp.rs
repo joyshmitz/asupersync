@@ -107,8 +107,7 @@ fn net_tcp_001_basic_connect_accept() {
 
     assert!(
         result.is_ok(),
-        "connect/accept should succeed: {:?}",
-        result
+        "connect/accept should succeed: {result:?}"
     );
     test_complete!("net_tcp_001_basic_connect_accept");
 }
@@ -170,7 +169,7 @@ fn net_tcp_002_echo_server() {
         Ok::<_, io::Error>(())
     });
 
-    assert!(result.is_ok(), "echo test should complete: {:?}", result);
+    assert!(result.is_ok(), "echo test should complete: {result:?}");
     test_complete!("net_tcp_002_echo_server");
 }
 
@@ -219,8 +218,7 @@ fn net_tcp_003_connection_refused() {
 
     assert!(
         result.is_ok(),
-        "connection refused test should complete: {:?}",
-        result
+        "connection refused test should complete: {result:?}"
     );
     test_complete!("net_tcp_003_connection_refused");
 }
@@ -302,9 +300,7 @@ fn net_tcp_004_multiple_connections() {
 
         assert!(
             accepted >= NUM_CLIENTS - 1, // Allow 1 failure due to timing
-            "server should accept most connections: {}/{}",
-            accepted,
-            NUM_CLIENTS
+            "server should accept most connections: {accepted}/{NUM_CLIENTS}"
         );
 
         Ok::<_, io::Error>(())
@@ -312,8 +308,7 @@ fn net_tcp_004_multiple_connections() {
 
     assert!(
         result.is_ok(),
-        "multiple connections test should complete: {:?}",
-        result
+        "multiple connections test should complete: {result:?}"
     );
     test_complete!("net_tcp_004_multiple_connections");
 }
@@ -401,8 +396,7 @@ fn net_tcp_005_large_transfer() {
 
     assert!(
         result.is_ok(),
-        "large transfer test should complete: {:?}",
-        result
+        "large transfer test should complete: {result:?}"
     );
     test_complete!("net_tcp_005_large_transfer");
 }
@@ -460,8 +454,7 @@ fn net_tcp_006_split_streams() {
 
     assert!(
         result.is_ok(),
-        "split streams test should complete: {:?}",
-        result
+        "split streams test should complete: {result:?}"
     );
     test_complete!("net_tcp_006_split_streams");
 }
@@ -512,8 +505,7 @@ fn net_tcp_007_local_addr() {
 
     assert!(
         result.is_ok(),
-        "local addr test should complete: {:?}",
-        result
+        "local addr test should complete: {result:?}"
     );
     test_complete!("net_tcp_007_local_addr");
 }

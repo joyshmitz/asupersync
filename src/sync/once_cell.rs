@@ -613,7 +613,7 @@ mod tests {
     fn clone_copies_value() {
         init_test("clone_copies_value");
         let cell = OnceCell::with_value(42);
-        let cloned = cell.clone();
+        let cloned = cell;
         crate::assert_with_log!(
             cloned.get() == Some(&42),
             "cloned value",
@@ -627,7 +627,7 @@ mod tests {
     fn debug_shows_value() {
         init_test("debug_shows_value");
         let cell = OnceCell::with_value(42);
-        let debug_text = format!("{:?}", cell);
+        let debug_text = format!("{cell:?}");
         crate::assert_with_log!(
             debug_text.contains("42"),
             "debug shows value",

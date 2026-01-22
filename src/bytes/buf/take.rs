@@ -123,7 +123,7 @@ mod tests {
         let buf: &[u8] = &[1, 2, 3, 4, 5];
         let take = Take::new(buf, 3);
         let chunk = take.chunk();
-        crate::assert_with_log!(chunk == &[1, 2, 3], "chunk", &[1, 2, 3], chunk);
+        crate::assert_with_log!(chunk == [1, 2, 3], "chunk", &[1, 2, 3], chunk);
         crate::test_complete!("test_take_chunk");
     }
 
@@ -137,7 +137,7 @@ mod tests {
         let remaining = take.remaining();
         crate::assert_with_log!(remaining == 1, "remaining", 1, remaining);
         let chunk = take.chunk();
-        crate::assert_with_log!(chunk == &[3], "chunk", &[3], chunk);
+        crate::assert_with_log!(chunk == [3], "chunk", &[3], chunk);
         crate::test_complete!("test_take_advance");
     }
 
@@ -178,7 +178,7 @@ mod tests {
         let buf: &[u8] = &[1, 2, 3, 4, 5];
         let take = Take::new(buf, 3);
         let inner = take.into_inner();
-        let ok = inner == &[1, 2, 3, 4, 5];
+        let ok = inner == [1, 2, 3, 4, 5];
         crate::assert_with_log!(ok, "inner", &[1, 2, 3, 4, 5], inner);
         crate::test_complete!("test_take_into_inner");
     }

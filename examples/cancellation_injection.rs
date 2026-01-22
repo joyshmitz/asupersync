@@ -133,17 +133,17 @@ fn example_recording() {
 
     // Inspect what was recorded
     let recorded = injector.recorded_points();
-    println!("  Future completed with value: {:?}", result);
-    println!("  Await points recorded: {:?}", recorded);
+    println!("  Future completed with value: {result:?}");
+    println!("  Await points recorded: {recorded:?}");
     println!("  Total await points: {}", recorded.len());
 
     match result {
         InstrumentedPollResult::Inner(val) => {
             assert_eq!(val, 42);
-            println!("  Result: Inner({})", val);
+            println!("  Result: Inner({val})");
         }
         InstrumentedPollResult::CancellationInjected(point) => {
-            println!("  (Unexpected) Cancellation at point {}", point);
+            println!("  (Unexpected) Cancellation at point {point}");
         }
     }
     println!();
@@ -162,15 +162,15 @@ fn example_injection_at_point() {
     let result = poll_to_completion(instrumented);
 
     let recorded = injector.recorded_points();
-    println!("  Await points before injection: {:?}", recorded);
+    println!("  Await points before injection: {recorded:?}");
     println!("  Injection count: {}", injector.injection_count());
 
     match result {
         InstrumentedPollResult::Inner(val) => {
-            println!("  (Unexpected) Completed with: {}", val);
+            println!("  (Unexpected) Completed with: {val}");
         }
         InstrumentedPollResult::CancellationInjected(point) => {
-            println!("  Cancellation injected at point: {}", point);
+            println!("  Cancellation injected at point: {point}");
             assert_eq!(point, 3);
         }
     }
@@ -324,17 +324,17 @@ fn example_reports() {
     let xml = report.to_junit_xml();
     println!("\n  JUnit XML starts with:");
     for line in xml.lines().take(3) {
-        println!("    {}", line);
+        println!("    {line}");
     }
 
     // Reproduction code for failures
-    if !report.failures().is_empty() {
+    if report.failures().is_empty() {
+        println!("\n  No failures - no reproduction code needed!");
+    } else {
         println!("\n  Reproduction code for first failure:");
         let first_failure = report.failures()[0];
         for line in first_failure.reproduction_code(report.seed).lines() {
-            println!("    {}", line);
+            println!("    {line}");
         }
-    } else {
-        println!("\n  No failures - no reproduction code needed!");
     }
 }

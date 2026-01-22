@@ -433,7 +433,7 @@ mod tests {
             Interest::READABLE,
         );
 
-        let debug_text = format!("{:?}", reg);
+        let debug_text = format!("{reg:?}");
         crate::assert_with_log!(
             debug_text.contains("Registration"),
             "debug includes type",

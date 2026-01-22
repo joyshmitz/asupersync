@@ -61,7 +61,7 @@ impl Future for YieldN {
 }
 
 async fn yield_times(n: u32) {
-    YieldN { remaining: n }.await
+    YieldN { remaining: n }.await;
 }
 
 fn main() {

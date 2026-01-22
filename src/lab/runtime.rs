@@ -967,7 +967,7 @@ mod tests {
                 crate::assert_with_log!(*region == root, "region", root, *region);
                 let idle_ok = *idle_steps > 3;
                 crate::assert_with_log!(idle_ok, "idle_steps > 3", true, idle_ok);
-                let ok = held.as_slice() == &[(obl_id, ObligationKind::SendPermit)];
+                let ok = held.as_slice() == [(obl_id, ObligationKind::SendPermit)];
                 crate::assert_with_log!(
                     ok,
                     "held",
@@ -1188,7 +1188,7 @@ mod tests {
                     duration_ns
                 );
                 crate::assert_with_log!(
-                    abort_reason == &None::<crate::record::ObligationAbortReason>,
+                    abort_reason.is_none(),
                     "abort_reason",
                     &None::<crate::record::ObligationAbortReason>,
                     abort_reason
@@ -1316,7 +1316,7 @@ mod tests {
                     duration_ns
                 );
                 crate::assert_with_log!(
-                    abort_reason == &None::<crate::record::ObligationAbortReason>,
+                    abort_reason.is_none(),
                     "abort_reason",
                     &None::<crate::record::ObligationAbortReason>,
                     abort_reason

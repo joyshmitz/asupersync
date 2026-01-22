@@ -954,7 +954,7 @@ mod tests {
         crate::assert_with_log!(
             left == right,
             "strengthen should be associative",
-            left.clone(),
+            left,
             right
         );
         crate::test_complete!("strengthen_is_associative");
@@ -1169,7 +1169,7 @@ mod tests {
         let root = CancelReason::timeout().with_message("original timeout");
         let middle = CancelReason::parent_cancelled()
             .with_message("parent cancelled")
-            .with_cause(root.clone());
+            .with_cause(root);
         let leaf = CancelReason::shutdown()
             .with_message("shutdown")
             .with_cause(middle);

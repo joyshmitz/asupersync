@@ -891,7 +891,7 @@ mod tests {
         let config = TimerWheelConfig::new().max_timer_duration(Duration::from_secs(3600)); // 1 hour max
         let mut wheel = TimerWheel::with_config(Time::ZERO, config, CoalescingConfig::default());
         let counter = Arc::new(AtomicU64::new(0));
-        let waker = counter_waker(counter.clone());
+        let waker = counter_waker(counter);
 
         // Timer at exactly 1 hour (the max)
         let deadline = Time::from_secs(3600);
@@ -915,7 +915,7 @@ mod tests {
         let config = TimerWheelConfig::new().max_timer_duration(Duration::from_secs(3600)); // 1 hour max
         let mut wheel = TimerWheel::with_config(Time::ZERO, config, CoalescingConfig::default());
         let counter = Arc::new(AtomicU64::new(0));
-        let waker = counter_waker(counter.clone());
+        let waker = counter_waker(counter);
 
         // Timer at 1 hour + 1ms (beyond max)
         let deadline = Time::from_nanos(3600 * 1_000_000_000 + 1_000_000);
@@ -943,7 +943,7 @@ mod tests {
         // Default config has 24h max_wheel_duration, 7d max_timer_duration
         let mut wheel = TimerWheel::new();
         let counter = Arc::new(AtomicU64::new(0));
-        let waker = counter_waker(counter.clone());
+        let waker = counter_waker(counter);
 
         // Timer at 25 hours (beyond default wheel range but within max timer duration)
         let deadline = Time::from_secs(25 * 3600);
@@ -1137,7 +1137,7 @@ mod tests {
             let count = counters[i].load(Ordering::SeqCst);
             crate::assert_with_log!(
                 count == 1,
-                &format!("timer {} fired at {:?}", i, deadline),
+                &format!("timer {i} fired at {deadline:?}"),
                 1,
                 count
             );

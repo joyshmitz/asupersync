@@ -937,7 +937,7 @@ mod tests {
 
         // Add events and size should grow
         for i in 0..100 {
-            recorder.record_task_scheduled(make_task_id(i, 0), i as u64);
+            recorder.record_task_scheduled(make_task_id(i, 0), u64::from(i));
         }
 
         let with_events = recorder.estimated_size();

@@ -117,7 +117,7 @@ mod tests {
         let heap = TimerHeap::new();
         crate::assert_with_log!(heap.is_empty(), "heap starts empty", true, heap.is_empty());
         crate::assert_with_log!(
-            heap.peek_deadline() == None::<Time>,
+            heap.peek_deadline().is_none(),
             "empty heap has no deadline",
             None::<Time>,
             heap.peek_deadline()

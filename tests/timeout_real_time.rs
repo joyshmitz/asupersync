@@ -53,9 +53,7 @@ fn timeout_wakes_up_pending_future() {
             break;
         }
         std::thread::yield_now();
-        if wait_start.elapsed().as_secs() > 5 {
-            panic!("Timeout future failed to wake up within 5 seconds (expected ~200ms)");
-        }
+        assert!(wait_start.elapsed().as_secs() <= 5, "Timeout future failed to wake up within 5 seconds (expected ~200ms)")
     }
 
     // Poll again: should be Ready(Err(Elapsed))
@@ -66,7 +64,7 @@ fn timeout_wakes_up_pending_future() {
     // Verify it is an error (timeout) not Ok (completion)
     match result {
         std::task::Poll::Ready(Err(_)) => {}
-        _ => panic!("Expected Ready(Err(Elapsed)), got {:?}", result),
+        _ => panic!("Expected Ready(Err(Elapsed)), got {result:?}"),
     }
     test_complete!("timeout_wakes_up_pending_future");
 }

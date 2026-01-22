@@ -575,7 +575,7 @@ mod tests {
         pool.register_connecting(key2.clone(), now, 2);
 
         // One more overall
-        pool.register_connecting(key2.clone(), now, 2);
+        pool.register_connecting(key2, now, 2);
 
         // Now at total limit
         let key3 = PoolKey::https("host3.com", None);

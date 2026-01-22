@@ -511,7 +511,7 @@ mod tests {
         let mut buf = [0u8; 8];
 
         // poll_recv_from should return Pending and register with reactor
-        let poll = socket.poll_recv_from(&mut cx, &mut buf);
+        let poll = socket.poll_recv_from(&cx, &mut buf);
         assert!(matches!(poll, Poll::Pending));
         assert!(socket.registration.is_some());
     }

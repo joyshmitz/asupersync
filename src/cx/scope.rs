@@ -732,7 +732,7 @@ mod tests {
         let mut join_fut = Box::pin(handle.join(&cx));
         match join_fut.as_mut().poll(&mut poll_cx) {
             Poll::Ready(Ok(val)) => assert_eq!(val, 42),
-            other => panic!("Expected Ready(Ok(42)), got {:?}", other),
+            other => panic!("Expected Ready(Ok(42)), got {other:?}"),
         }
     }
 
@@ -947,7 +947,7 @@ mod tests {
             Poll::Ready(Err(JoinError::Panicked(p))) => {
                 assert_eq!(p.message(), "oops");
             }
-            res => panic!("Expected Panicked, got {:?}", res),
+            res => panic!("Expected Panicked, got {res:?}"),
         }
     }
 
@@ -1080,7 +1080,7 @@ mod tests {
                 assert_eq!(val, 1);
                 assert_eq!(idx, 0);
             }
-            res => panic!("Expected Ready(Ok((1, 0))), got {:?}", res),
+            res => panic!("Expected Ready(Ok((1, 0))), got {res:?}"),
         }
     }
 }

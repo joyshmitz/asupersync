@@ -415,7 +415,7 @@ mod tests {
             Err(RecvError::Lagged(n)) => {
                 crate::assert_with_log!(n == 1, "lagged count", 1, n);
             }
-            other => panic!("expected lagged, got {:?}", other),
+            other => panic!("expected lagged, got {other:?}"),
         }
 
         // next should be 2

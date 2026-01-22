@@ -777,9 +777,7 @@ mod tests {
             let size = event.estimated_size();
             assert!(
                 size < 64,
-                "Event {:?} exceeds 64 bytes: {} bytes",
-                event,
-                size
+                "Event {event:?} exceeds 64 bytes: {size} bytes"
             );
         }
     }
@@ -827,8 +825,7 @@ mod tests {
         // Verify average event size is reasonable (should be well under 64 bytes)
         assert!(
             avg_size < 32,
-            "Average serialized event size {} bytes exceeds expected",
-            avg_size
+            "Average serialized event size {avg_size} bytes exceeds expected"
         );
     }
 
@@ -848,7 +845,7 @@ mod tests {
         for kind in kinds {
             let encoded = error_kind_to_u8(kind);
             let decoded = u8_to_error_kind(encoded);
-            assert_eq!(kind, decoded, "Failed roundtrip for {:?}", kind);
+            assert_eq!(kind, decoded, "Failed roundtrip for {kind:?}");
         }
     }
 
@@ -1010,9 +1007,7 @@ mod tests {
             let size = event.estimated_size();
             assert!(
                 size < 64,
-                "Event {:?} exceeds 64 bytes: {} bytes",
-                event,
-                size
+                "Event {event:?} exceeds 64 bytes: {size} bytes"
             );
         }
     }

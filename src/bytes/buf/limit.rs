@@ -136,7 +136,7 @@ mod tests {
             let remaining = limit.remaining_mut();
             crate::assert_with_log!(remaining == 2, "remaining", 2, remaining);
         }
-        let ok = &data[..5] == &[1, 2, 3, 0, 0];
+        let ok = data[..5] == [1, 2, 3, 0, 0];
         crate::assert_with_log!(ok, "data", &[1, 2, 3, 0, 0], &data[..5]);
         crate::test_complete!("test_limit_put_slice");
     }

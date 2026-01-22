@@ -43,7 +43,7 @@ fn bench_region_creation(c: &mut Criterion) {
             let mut state = RuntimeState::new();
             // This triggers RegionRecord::new which has the span creation
             black_box(state.create_root_region(Budget::INFINITE))
-        })
+        });
     });
 
     group.finish();
@@ -60,7 +60,7 @@ fn bench_task_creation(c: &mut Criterion) {
             // But we can't easily use Scope here without Cx.
             // RuntimeState::create_task also has tracing (debug!).
             black_box(state.create_task(region, Budget::INFINITE, async { 42 }))
-        })
+        });
     });
 
     group.finish();
@@ -75,7 +75,7 @@ fn bench_trace_write_uncompressed(c: &mut Criterion) {
         b.iter(|| {
             let config = TraceFileConfig::new().with_compression(CompressionMode::None);
             write_trace_file(&path, config, &events);
-        })
+        });
     });
 }
 
@@ -91,7 +91,7 @@ fn bench_trace_read_uncompressed(c: &mut Criterion) {
             let reader = TraceReader::open(&path).expect("open trace reader");
             let loaded = reader.load_all().expect("load trace");
             black_box(loaded.len());
-        })
+        });
     });
 }
 
