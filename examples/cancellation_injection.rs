@@ -38,7 +38,6 @@ use asupersync::lab::{
 };
 use std::future::Future;
 use std::pin::Pin;
-use std::sync::atomic::{AtomicU32, Ordering};
 use std::sync::Arc;
 use std::task::{Context, Poll, Wake, Waker};
 

@@ -459,7 +459,7 @@ fn bench_config(c: &mut Criterion) {
         b.iter(|| {
             // Just under max
             let result = wheel.try_register(Time::from_secs(3599), noop_waker());
-            black_box(result);
+            let _ = black_box(result);
         });
     });
 

@@ -1,3 +1,5 @@
+#![allow(missing_docs)]
+
 #[cfg(feature = "proc-macros")]
 mod demo {
     use asupersync::proc_macros::{join, scope, spawn};

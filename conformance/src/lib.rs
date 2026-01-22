@@ -52,6 +52,10 @@ pub use runner::{
     compare_results, run_comparison, ComparisonResult, ComparisonStatus, ComparisonSummary,
     RunConfig, RunSummary, SingleRunResult, TestRunner,
 };
+pub use traceability::{
+    CiReport, CoverageStats, SpecRequirement, TraceabilityEntry, TraceabilityMatrix,
+    TraceabilityMatrixBuilder,
+};
 
 // ============================================================================
 // Test Result Types
