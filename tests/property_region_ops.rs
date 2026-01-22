@@ -35,6 +35,8 @@
 //! }
 //! ```
 
+#![allow(missing_docs)]
+
 #[macro_use]
 mod common;
 
@@ -43,6 +45,7 @@ use asupersync::lab::{LabConfig, LabRuntime};
 use asupersync::record::RegionRecord;
 use asupersync::types::{Budget, CancelKind, CancelReason, Outcome, RegionId, TaskId};
 use asupersync::util::ArenaIndex;
+use common::coverage::InvariantTracker;
 use common::*;
 use proptest::collection::SizeRange;
 use proptest::prelude::*;
@@ -216,7 +219,7 @@ impl Strategy for RegionOpSequenceStrategy {
 
     fn new_tree(&self, runner: &mut TestRunner) -> NewTree<Self> {
         let base = proptest::collection::vec(any::<RegionOp>(), self.size.clone());
-        let mut tree = base.new_tree(runner)?;
+        let tree = base.new_tree(runner)?;
         Ok(RegionOpSequenceTree::new(tree.current()))
     }
 }
@@ -684,6 +687,7 @@ fn arena_index_to_region_id(idx: ArenaIndex) -> RegionId {
 }
 
 /// Helper to convert ArenaIndex to TaskId using the public test API.
+#[allow(dead_code)]
 fn arena_index_to_task_id(idx: ArenaIndex) -> TaskId {
     TaskId::new_for_test(idx.index(), idx.generation())
 }
@@ -1247,6 +1251,77 @@ pub fn assert_all_invariants(harness: &TestHarness) {
         );
     }
 }
+
+/// Checks all region tree invariants with coverage tracking.
+///
+/// This version tracks which invariants are checked using an `InvariantTracker`,
+/// enabling coverage measurement for property tests.
+///
+/// # Arguments
+///
+/// * `harness` - The test harness to check
+/// * `tracker` - The coverage tracker to record checks
+///
+/// # Returns
+///
+/// A vector of all invariant violations found (empty if all invariants hold).
+pub fn check_all_invariants_tracked(
+    harness: &TestHarness,
+    tracker: &mut InvariantTracker,
+) -> Vec<InvariantViolation> {
+    let mut violations = Vec::new();
+
+    // Check each invariant and track coverage
+    let no_orphan = check_no_orphan_tasks(harness);
+    tracker.check("no_orphan_tasks", no_orphan.is_empty());
+    violations.extend(no_orphan);
+
+    let tree_structure = check_valid_tree_structure(harness);
+    tracker.check("valid_tree_structure", tree_structure.is_empty());
+    violations.extend(tree_structure);
+
+    let child_tracking = check_child_tracking_consistent(harness);
+    tracker.check("child_tracking_consistent", child_tracking.is_empty());
+    violations.extend(child_tracking);
+
+    let unique_ids = check_unique_ids(harness);
+    tracker.check("unique_ids", unique_ids.is_empty());
+    violations.extend(unique_ids);
+
+    let cancel_propagation = check_cancel_propagation(harness);
+    tracker.check("cancel_propagation", cancel_propagation.is_empty());
+    violations.extend(cancel_propagation);
+
+    let close_ordering = check_close_ordering(harness);
+    tracker.check("close_ordering", close_ordering.is_empty());
+    violations.extend(close_ordering);
+
+    violations
+}
+
+/// Asserts all invariants hold with coverage tracking.
+///
+/// Same as `assert_all_invariants` but uses an `InvariantTracker` for coverage measurement.
+pub fn assert_all_invariants_tracked(harness: &TestHarness, tracker: &mut InvariantTracker) {
+    let violations = check_all_invariants_tracked(harness, tracker);
+    if !violations.is_empty() {
+        let messages: Vec<_> = violations.iter().map(|v| v.to_string()).collect();
+        panic!(
+            "Region tree invariant violations detected:\n{}",
+            messages.join("\n")
+        );
+    }
+}
+
+/// The list of all invariants that should be checked.
+pub const ALL_INVARIANT_NAMES: &[&str] = &[
+    "no_orphan_tasks",
+    "valid_tree_structure",
+    "child_tracking_consistent",
+    "unique_ids",
+    "cancel_propagation",
+    "close_ordering",
+];
 
 /// Invariant 1: No Orphan Tasks
 ///

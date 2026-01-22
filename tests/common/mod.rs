@@ -7,6 +7,13 @@
 //! use common::*;
 //! ```
 
+pub mod coverage;
+
+pub use coverage::{
+    assert_coverage, assert_coverage_threshold, CoverageEntry, CoverageInfo, CoverageReport,
+    InvariantTracker,
+};
+
 use asupersync::cx::Cx;
 use asupersync::lab::{LabConfig, LabRuntime};
 use asupersync::runtime::RuntimeBuilder;

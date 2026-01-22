@@ -14,12 +14,8 @@ mod common;
 use asupersync::lab::{LabConfig, LabRuntime};
 use asupersync::types::Budget;
 use common::*;
-use std::cell::RefCell;
-use std::collections::HashMap;
 use std::future::Future;
 use std::pin::Pin;
-use std::rc::Rc;
-use std::sync::atomic::{AtomicUsize, Ordering};
 use std::sync::Arc;
 use std::task::{Context, Poll};
 
@@ -288,7 +284,7 @@ fn run_with_time_advancement(seed: u64) -> Vec<(u64, String)> {
             .state
             .create_task(region, Budget::INFINITE, async move {
                 yield_now().await;
-                let time = asupersync::types::Time::ZERO; // Would use Cx::current().now() in real code
+                let _time = asupersync::types::Time::ZERO; // Would use Cx::current().now() in real code
                 events_clone
                     .lock()
                     .unwrap()
@@ -507,11 +503,7 @@ fn test_lab_multiple_runs_consistency() {
     // Run 10 times and verify all produce identical results
     verify_deterministic(seed, 10, |s| run_tasks_with_seed(s, 8, 4));
 
-    tracing::info!(
-        seed = seed,
-        runs = 10,
-        "Multiple runs consistency verified"
-    );
+    tracing::info!(seed = seed, runs = 10, "Multiple runs consistency verified");
 
     test_complete!("test_lab_multiple_runs_consistency");
 }
@@ -621,7 +613,12 @@ fn test_lab_empty_runtime_determinism() {
         true,
         result1.0
     );
-    assert_with_log!(result1.1 == 0, "Empty runtime should have 0 steps", 0, result1.1);
+    assert_with_log!(
+        result1.1 == 0,
+        "Empty runtime should have 0 steps",
+        0,
+        result1.1
+    );
 
     test_complete!("test_lab_empty_runtime_determinism");
 }
