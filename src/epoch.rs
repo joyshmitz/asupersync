@@ -22,6 +22,7 @@ use std::pin::Pin;
 use std::sync::atomic::{AtomicU32, AtomicU64, Ordering};
 use std::sync::{Arc, RwLock};
 use std::task::{Context, Poll};
+use std::time::Duration;
 
 // ============================================================================
 // EpochId - Core Identifier
@@ -322,9 +323,9 @@ impl Epoch {
 
     /// Returns the duration of this epoch (or elapsed time if still active).
     #[must_use]
-    pub fn duration(&self, now: Time) -> Time {
+    pub fn duration(&self, now: Time) -> Duration {
         let end = self.ended_at.unwrap_or(now);
-        Time::from_nanos(end.as_nanos().saturating_sub(self.started_at.as_nanos()))
+        Duration::from_nanos(end.as_nanos().saturating_sub(self.started_at.as_nanos()))
     }
 
     /// Returns true if the epoch has exceeded its maximum duration.
@@ -345,11 +346,11 @@ impl Epoch {
 
     /// Returns the time remaining until expected end.
     #[must_use]
-    pub fn remaining(&self, now: Time) -> Option<Time> {
+    pub fn remaining(&self, now: Time) -> Option<Duration> {
         if now >= self.expected_end {
             None
         } else {
-            Some(Time::from_nanos(
+            Some(Duration::from_nanos(
                 self.expected_end.as_nanos() - now.as_nanos(),
             ))
         }
@@ -991,11 +992,11 @@ impl EpochContext {
 
     /// Returns remaining time in this epoch.
     #[must_use]
-    pub fn remaining_time(&self, now: Time) -> Option<Time> {
+    pub fn remaining_time(&self, now: Time) -> Option<Duration> {
         if now >= self.deadline {
             None
         } else {
-            Some(Time::from_nanos(self.deadline.as_nanos() - now.as_nanos()))
+            Some(Duration::from_nanos(self.deadline.as_nanos() - now.as_nanos()))
         }
     }
 
@@ -2439,9 +2440,9 @@ mod tests {
         // Check remaining time
         let remaining = ctx.remaining_time(Time::from_secs(3));
         crate::assert_with_log!(
-            remaining == Some(Time::from_secs(7)),
+            remaining == Some(Duration::from_secs(7)),
             "remaining at t=3",
-            Some(Time::from_secs(7)),
+            Some(Duration::from_secs(7)),
             remaining
         );
 
@@ -2643,9 +2644,9 @@ mod tests {
         // Active epoch - duration is elapsed time
         let duration_active = epoch.duration(Time::from_secs(25));
         crate::assert_with_log!(
-            duration_active == Time::from_secs(15),
+            duration_active == Duration::from_secs(15),
             "active duration",
-            Time::from_secs(15),
+            Duration::from_secs(15),
             duration_active
         );
 
@@ -2656,9 +2657,9 @@ mod tests {
         // Completed epoch - duration is fixed
         let duration_ended = epoch.duration(Time::from_secs(100));
         crate::assert_with_log!(
-            duration_ended == Time::from_secs(50),
+            duration_ended == Duration::from_secs(50),
             "ended duration",
-            Time::from_secs(50),
+            Duration::from_secs(50),
             duration_ended
         );
 

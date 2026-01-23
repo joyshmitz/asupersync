@@ -4,8 +4,10 @@ use crate::runtime::scheduler::global_queue::GlobalQueue;
 use crate::runtime::scheduler::local_queue::{LocalQueue, Stealer};
 use crate::runtime::scheduler::stealing;
 use crate::runtime::RuntimeState;
+use crate::tracing_compat::trace;
 use crate::types::TaskId;
 use crate::util::DetRng;
+use std::sync::atomic::{AtomicBool, Ordering};
 use std::sync::{Arc, Condvar, Mutex};
 use std::time::Duration;
 
@@ -25,10 +27,12 @@ pub struct Worker {
     pub global: Arc<GlobalQueue>,
     /// Shared runtime state.
     pub state: Arc<Mutex<RuntimeState>>, // RuntimeState is usually guarded
-    /// Parking handle for idle workers.
+    /// Parking mechanism for idle workers.
     pub parker: Parker,
     /// Deterministic RNG for stealing decisions.
     pub rng: DetRng,
+    /// Shutdown signal.
+    pub shutdown: Arc<AtomicBool>,
 }
 
 impl Worker {
@@ -38,6 +42,7 @@ impl Worker {
         stealers: Vec<Stealer>,
         global: Arc<GlobalQueue>,
         state: Arc<Mutex<RuntimeState>>,
+        shutdown: Arc<AtomicBool>,
     ) -> Self {
         Self {
             id,
@@ -47,12 +52,13 @@ impl Worker {
             state,
             parker: Parker::new(),
             rng: DetRng::new(id as u64 + 1), // Simple seed
+            shutdown,
         }
     }
 
     /// Runs the worker scheduling loop.
     pub fn run_loop(&mut self) {
-        loop {
+        while !self.shutdown.load(Ordering::Relaxed) {
             // 1. Try local queue (LIFO)
             if let Some(task) = self.local.pop() {
                 self.execute(task);
@@ -78,7 +84,8 @@ impl Worker {
     }
 
     #[allow(clippy::unused_self)]
-    fn execute(&self, _task: TaskId) {
+    fn execute(&self, task: TaskId) {
+        trace!(task_id = ?task, worker_id = self.id, "executing task (placeholder)");
         // Placeholder for execution logic.
         // In real implementation, this would:
         // 1. Get stored future from RuntimeState

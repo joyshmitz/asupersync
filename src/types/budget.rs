@@ -130,6 +130,7 @@
 use super::id::Time;
 use crate::tracing_compat::{info, trace};
 use core::fmt;
+use std::time::Duration;
 
 /// A budget constraining resource usage for a task or region.
 ///
@@ -479,17 +480,18 @@ impl Budget {
     /// ```
     /// # use asupersync::Budget;
     /// # use asupersync::types::id::Time;
+    /// # use std::time::Duration;
     /// let budget = Budget::with_deadline_secs(30);
     /// let now = Time::from_secs(10);
     ///
     /// let remaining = budget.remaining_time(now);
-    /// assert_eq!(remaining, Some(Time::from_secs(20)));
+    /// assert_eq!(remaining, Some(Duration::from_secs(20)));
     /// ```
     #[must_use]
-    pub fn remaining_time(&self, now: Time) -> Option<Time> {
+    pub fn remaining_time(&self, now: Time) -> Option<Duration> {
         self.deadline.and_then(|d| {
             if now < d {
-                Some(Time::from_nanos(
+                Some(Duration::from_nanos(
                     d.as_nanos().saturating_sub(now.as_nanos()),
                 ))
             } else {
@@ -544,15 +546,16 @@ impl Budget {
     /// ```
     /// # use asupersync::Budget;
     /// # use asupersync::types::id::Time;
+    /// # use std::time::Duration;
     /// let budget = Budget::with_deadline_secs(30);
     /// let now = Time::from_secs(5);
     ///
     /// // 25 seconds remaining
     /// let timeout = budget.to_timeout(now);
-    /// assert_eq!(timeout, Some(Time::from_secs(25)));
+    /// assert_eq!(timeout, Some(Duration::from_secs(25)));
     /// ```
     #[must_use]
-    pub fn to_timeout(&self, now: Time) -> Option<Time> {
+    pub fn to_timeout(&self, now: Time) -> Option<Duration> {
         self.remaining_time(now)
     }
 }
@@ -1013,7 +1016,7 @@ mod tests {
         let now = Time::from_secs(10);
 
         let remaining = budget.remaining_time(now);
-        assert_eq!(remaining, Some(Time::from_secs(20)));
+        assert_eq!(remaining, Some(Duration::from_secs(20)));
     }
 
     #[test]

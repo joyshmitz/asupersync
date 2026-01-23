@@ -20,7 +20,7 @@ impl LocalQueue {
     #[must_use]
     pub fn new() -> Self {
         Self {
-            inner: Worker::new_fifo(),
+            inner: Worker::new_lifo(),
         }
     }
 

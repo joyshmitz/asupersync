@@ -12,6 +12,7 @@ pub use priority::Scheduler as PriorityScheduler;
 pub use worker::{Parker, Worker};
 
 use crate::types::TaskId;
+use std::sync::atomic::{AtomicBool, Ordering};
 use std::sync::Arc;
 
 /// Work-stealing scheduler coordinator.
@@ -21,6 +22,8 @@ pub struct WorkStealingScheduler {
     // We keep them here for initialization.
     workers: Vec<Worker>,
     global: Arc<GlobalQueue>,
+    shutdown: Arc<AtomicBool>,
+    parkers: Vec<Parker>,
 }
 
 impl WorkStealingScheduler {
@@ -32,8 +35,10 @@ impl WorkStealingScheduler {
         state: &std::sync::Arc<std::sync::Mutex<crate::runtime::RuntimeState>>,
     ) -> Self {
         let global = Arc::new(GlobalQueue::new());
+        let shutdown = Arc::new(AtomicBool::new(false));
         let mut workers = Vec::with_capacity(worker_count);
         let mut stealers = Vec::with_capacity(worker_count);
+        let mut parkers = Vec::with_capacity(worker_count);
 
         // First pass: create workers and collect stealers
         // We can't create workers fully yet because they need all stealers.
@@ -58,18 +63,27 @@ impl WorkStealingScheduler {
                 // .filter(|s| ...) // Stealer doesn't have ID.
                 .collect();
 
+            let parker = Parker::new();
+            parkers.push(parker.clone());
+
             workers.push(Worker {
                 id,
                 local,
                 stealers: my_stealers,
                 global: Arc::clone(&global),
                 state: state.clone(),
-                parker: Parker::new(),
+                parker,
                 rng: crate::util::DetRng::new(id as u64),
+                shutdown: Arc::clone(&shutdown),
             });
         }
 
-        Self { workers, global }
+        Self {
+            workers,
+            global,
+            shutdown,
+            parkers,
+        }
     }
 
     /// Spawns a task.
@@ -93,7 +107,59 @@ impl WorkStealingScheduler {
     pub fn take_workers(&mut self) -> Vec<Worker> {
         std::mem::take(&mut self.workers)
     }
+
+    /// Signals all workers to shutdown.
+    pub fn shutdown(&self) {
+        self.shutdown.store(true, Ordering::Relaxed);
+        for parker in &self.parkers {
+            parker.unpark();
+        }
+    }
 }
 
 // Preserve backward compatibility for Phase 0
 pub use priority::Scheduler;
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+    use crate::runtime::RuntimeState;
+    use std::sync::{Arc, Mutex};
+    use std::time::Duration;
+
+    #[test]
+    fn test_worker_shutdown() {
+        // Create state
+        let state = Arc::new(Mutex::new(RuntimeState::new()));
+
+        // Create scheduler with 2 workers
+        let mut scheduler = WorkStealingScheduler::new(2, &state);
+
+        // Take workers
+        let workers = scheduler.take_workers();
+        assert_eq!(workers.len(), 2);
+
+        // Spawn threads for workers
+        let handles: Vec<_> = workers
+            .into_iter()
+            .map(|mut worker| {
+                std::thread::spawn(move || {
+                    worker.run_loop();
+                })
+            })
+            .collect();
+
+        // Let them run briefly (they will park immediately as there is no work)
+        std::thread::sleep(Duration::from_millis(10));
+
+        // Signal shutdown
+        scheduler.shutdown();
+
+        // Join threads (this will hang if shutdown logic is broken)
+        for handle in handles {
+            handle.join().unwrap();
+        }
+
+        // If we reach here, shutdown worked!
+    }
+}

@@ -318,6 +318,14 @@ impl CancelReason {
         Self::new(CancelKind::FailFast)
     }
 
+    /// Creates a fail-fast cancellation reason (alias for sibling_failed).
+    ///
+    /// Used when a task is cancelled because a sibling failed in a fail-fast region.
+    #[must_use]
+    pub const fn fail_fast() -> Self {
+        Self::new(CancelKind::FailFast)
+    }
+
     /// Creates a race loser cancellation reason.
     ///
     /// Used when a task is cancelled because another task in a race completed first.
@@ -557,8 +565,25 @@ impl CancelReason {
     }
 
     // ========================================================================
-    // Kind Checks
+    // Kind Checks and Severity
     // ========================================================================
+
+    /// Returns the severity level of this cancellation reason.
+    ///
+    /// Severity determines cancellation priority. Higher values are more severe
+    /// and should override lower-severity cancellations.
+    ///
+    /// Severity levels:
+    /// - 0: User (graceful, allows full cleanup)
+    /// - 1: Timeout/Deadline (time pressure)
+    /// - 2: PollQuota/CostBudget (resource exhaustion)
+    /// - 3: FailFast/RaceLost (sibling events)
+    /// - 4: ParentCancelled/ResourceUnavailable (external pressure)
+    /// - 5: Shutdown (highest priority, minimal cleanup)
+    #[must_use]
+    pub const fn severity(&self) -> u8 {
+        self.kind.severity()
+    }
 
     /// Returns true if this reason's kind matches the given kind.
     #[must_use]
