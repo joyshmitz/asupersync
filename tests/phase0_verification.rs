@@ -210,6 +210,63 @@ fn e2e_two_phase_channel_abort_releases_capacity() {
 }
 
 // ============================================================================
+// Finalizer LIFO + masking scenario
+// ============================================================================
+
+#[test]
+fn e2e_finalizer_lifo_runs_after_cancel() {
+    init_test("e2e_finalizer_lifo_runs_after_cancel");
+    let mut suite = OracleSuite::new();
+
+    let root = region(0);
+
+    suite.region_tree.on_region_create(root, None, t(0));
+    suite.quiescence.on_region_create(root, None);
+
+    // Register finalizers (in-order: f1, f2, f3).
+    let f1 = suite.finalizer.generate_id();
+    let f2 = suite.finalizer.generate_id();
+    let f3 = suite.finalizer.generate_id();
+
+    suite.finalizer.on_register(f1, root, t(10));
+    suite.finalizer.on_register(f2, root, t(11));
+    suite.finalizer.on_register(f3, root, t(12));
+
+    // Cancellation requested before finalizers run.
+    suite
+        .cancellation_protocol
+        .on_region_cancel(root, CancelReason::timeout(), t(15));
+
+    // Finalizers run in LIFO order (f3, f2, f1).
+    let mut order = Vec::new();
+    order.push(f3);
+    suite.finalizer.on_run(f3, t(20));
+    order.push(f2);
+    suite.finalizer.on_run(f2, t(21));
+    order.push(f1);
+    suite.finalizer.on_run(f1, t(22));
+
+    // Region closes after finalizers complete.
+    suite.finalizer.on_region_close(root, t(30));
+    suite.quiescence.on_region_close(root, t(30));
+
+    let violations = suite.check_all(t(40));
+    assert_with_log!(
+        violations.is_empty(),
+        "expected no violations",
+        "empty",
+        violations
+    );
+    assert_with_log!(
+        order == vec![f3, f2, f1],
+        "finalizer LIFO order",
+        vec![f3, f2, f1],
+        order
+    );
+    test_complete!("e2e_finalizer_lifo_runs_after_cancel");
+}
+
+// ============================================================================
 // Determinism oracle scenarios (trace-based)
 // ============================================================================
 
