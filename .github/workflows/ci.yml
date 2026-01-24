@@ -86,14 +86,15 @@ jobs:
           key: ${{ runner.os }}-cargo-conformance-${{ hashFiles('**/Cargo.lock') }}
 
       - name: Run conformance tests
+        working-directory: conformance
         run: |
-          cargo test --package asupersync-conformance --all-features -- --nocapture
+          cargo test -- --nocapture
         continue-on-error: true
 
       - name: Generate conformance report
         run: |
           mkdir -p conformance-reports
-          cargo test --package asupersync-conformance --all-features -- --format json 2>&1 | tee conformance-reports/results.json || true
+          cd conformance && cargo test -- --format json 2>&1 | tee ../conformance-reports/results.json || true
 
       - name: Upload conformance report
         uses: actions/upload-artifact@v4

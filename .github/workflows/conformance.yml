@@ -45,11 +45,13 @@ jobs:
             ${{ runner.os }}-cargo-conformance-
 
       - name: Build conformance package
-        run: cargo build --package asupersync-conformance --all-features
+        working-directory: conformance
+        run: cargo build
 
       - name: Run conformance tests
+        working-directory: conformance
         run: |
-          cargo test --package asupersync-conformance --all-features -- --nocapture 2>&1 | tee conformance_output.log
+          cargo test -- --nocapture 2>&1 | tee ../conformance_output.log
         continue-on-error: true
 
       - name: Parse test results
@@ -122,8 +124,9 @@ jobs:
           key: ${{ runner.os }}-cargo-perf-${{ hashFiles('**/Cargo.lock') }}
 
       - name: Run performance benchmarks
+        working-directory: conformance
         run: |
-          cargo bench --package asupersync-conformance --all-features 2>&1 | tee perf_output.log || true
+          cargo bench 2>&1 | tee ../perf_output.log || true
 
       - name: Check for performance regressions
         run: |
@@ -201,9 +204,10 @@ jobs:
           key: ${{ runner.os }}-cargo-negative-${{ hashFiles('**/Cargo.lock') }}
 
       - name: Run negative conformance tests
+        working-directory: conformance
         run: |
           # Negative tests verify that certain patterns correctly fail
-          cargo test --package asupersync-conformance negative -- --nocapture 2>&1 | tee negative_output.log || true
+          cargo test negative -- --nocapture 2>&1 | tee ../negative_output.log || true
 
       - name: Upload negative test log
         uses: actions/upload-artifact@v4
