@@ -11,7 +11,7 @@
 mod imp {
     #![allow(unsafe_code)]
 
-    use super::{Event, Events, Interest, Reactor, Source, Token};
+    use super::super::{Event, Events, Interest, Reactor, Source, Token};
     use io_uring::{opcode, types, IoUring};
     use parking_lot::Mutex;
     use std::collections::HashMap;
@@ -248,6 +248,10 @@ mod imp {
                 return Ok(());
             }
             Err(err)
+        }
+
+        fn registration_count(&self) -> usize {
+            self.registrations.lock().len()
         }
     }
 
