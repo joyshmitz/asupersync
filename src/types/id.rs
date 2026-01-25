@@ -6,7 +6,11 @@
 use crate::util::ArenaIndex;
 use core::fmt;
 use std::ops::Add;
+use std::sync::atomic::{AtomicU32, Ordering};
 use std::time::Duration;
+
+static EPHEMERAL_REGION_COUNTER: AtomicU32 = AtomicU32::new(1);
+static EPHEMERAL_TASK_COUNTER: AtomicU32 = AtomicU32::new(1);
 
 /// A unique identifier for a region in the runtime.
 ///
@@ -52,6 +56,17 @@ impl RegionId {
     #[must_use]
     pub const fn testing_default() -> Self {
         Self(ArenaIndex::new(0, 0))
+    }
+
+    /// Creates a new ephemeral region ID for request-scoped contexts created
+    /// outside the runtime scheduler.
+    ///
+    /// This is intended for production request handling that needs unique
+    /// identifiers without full runtime region registration.
+    #[must_use]
+    pub fn new_ephemeral() -> Self {
+        let index = EPHEMERAL_REGION_COUNTER.fetch_add(1, Ordering::Relaxed);
+        Self(ArenaIndex::new(index, 1))
     }
 }
 
@@ -112,6 +127,14 @@ impl TaskId {
     #[must_use]
     pub const fn testing_default() -> Self {
         Self(ArenaIndex::new(0, 0))
+    }
+
+    /// Creates a new ephemeral task ID for request-scoped contexts created
+    /// outside the runtime scheduler.
+    #[must_use]
+    pub fn new_ephemeral() -> Self {
+        let index = EPHEMERAL_TASK_COUNTER.fetch_add(1, Ordering::Relaxed);
+        Self(ArenaIndex::new(index, 1))
     }
 }
 

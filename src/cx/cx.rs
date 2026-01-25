@@ -303,6 +303,25 @@ impl Cx {
         )
     }
 
+    /// Creates a request-scoped capability context with a specified budget.
+    ///
+    /// This is intended for production request handling that needs unique
+    /// task/region identifiers outside the scheduler.
+    #[must_use]
+    pub fn for_request_with_budget(budget: Budget) -> Self {
+        Self::new(
+            RegionId::new_ephemeral(),
+            TaskId::new_ephemeral(),
+            budget,
+        )
+    }
+
+    /// Creates a request-scoped capability context with an infinite budget.
+    #[must_use]
+    pub fn for_request() -> Self {
+        Self::for_request_with_budget(Budget::INFINITE)
+    }
+
     /// Returns the current task context, if one is set.
     ///
     /// This is set by the runtime while polling a task.
