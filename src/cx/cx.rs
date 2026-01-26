@@ -64,6 +64,9 @@ use std::pin::Pin;
 use std::sync::{Arc, OnceLock};
 use std::time::Duration;
 
+type NamedFuture<T> = (&'static str, Pin<Box<dyn Future<Output = T> + Send>>);
+type NamedFutures<T> = Vec<NamedFuture<T>>;
+
 /// Get the current wall clock time.
 fn wall_clock_now() -> Time {
     static CLOCK: OnceLock<WallClock> = OnceLock::new();
@@ -1119,10 +1122,7 @@ impl Cx {
     /// Races multiple named futures.
     ///
     /// Similar to `race`, but accepts names for tracing purposes.
-    pub async fn race_named<T>(
-        &self,
-        futures: Vec<(&'static str, Pin<Box<dyn Future<Output = T> + Send>>)>,
-    ) -> Result<T, JoinError> {
+    pub async fn race_named<T>(&self, futures: NamedFutures<T>) -> Result<T, JoinError> {
         let futures: Vec<_> = futures.into_iter().map(|(_, f)| f).collect();
         self.race(futures).await
     }
@@ -1136,17 +1136,16 @@ impl Cx {
         futures: Vec<Pin<Box<dyn Future<Output = T> + Send>>>,
     ) -> Result<T, JoinError> {
         let race_fut = Box::pin(self.race(futures));
-        match timeout(wall_clock_now(), duration, race_fut).await {
-            Ok(res) => res,
-            Err(_) => Err(JoinError::Cancelled(CancelReason::timeout())),
-        }
+        timeout(wall_clock_now(), duration, race_fut)
+            .await
+            .unwrap_or_else(|_| Err(JoinError::Cancelled(CancelReason::timeout())))
     }
 
     /// Races multiple named futures with a timeout.
     pub async fn race_timeout_named<T>(
         &self,
         duration: Duration,
-        futures: Vec<(&'static str, Pin<Box<dyn Future<Output = T> + Send>>)>,
+        futures: NamedFutures<T>,
     ) -> Result<T, JoinError> {
         let futures: Vec<_> = futures.into_iter().map(|(_, f)| f).collect();
         self.race_timeout(duration, futures).await

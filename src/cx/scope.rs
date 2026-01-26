@@ -2,6 +2,99 @@
 //!
 //! A `Scope` provides the API for spawning tasks, creating child regions,
 //! and registering finalizers.
+//!
+//! # Execution Tiers and Soundness Rules
+//!
+//! Asupersync defines two execution tiers with different constraints:
+//!
+//! ## Fiber Tier (Phase 0)
+//!
+//! - Single-thread, borrow-friendly execution
+//! - Can capture borrowed references (`&T`) since no migration
+//! - Implemented via `spawn_local` (currently requires Send bounds; relaxed in Phase 1+)
+//!
+//! ## Task Tier (Phase 1+)
+//!
+//! - Multi-threaded, `Send` tasks that may migrate across workers
+//! - **Must capture only `Send + 'static` data** by construction
+//! - Can reference region-owned data via [`RRef<T>`](crate::types::rref::RRef)
+//!
+//! # Soundness Rules for Send Tasks
+//!
+//! The [`spawn`](Scope::spawn) method enforces the following bounds:
+//!
+//! | Component | Bound | Rationale |
+//! |-----------|-------|-----------|
+//! | Factory | `F: Send + 'static` | Factory may be called on any worker |
+//! | Future | `Fut: Send + 'static` | Task may migrate between polls |
+//! | Output | `Fut::Output: Send + 'static` | Result sent to potentially different thread |
+//!
+//! ## What Can Be Captured
+//!
+//! **Allowed captures in Send tasks:**
+//! - Owned `'static` data that is `Send` (e.g., `String`, `Vec<T>`, `Arc<T>`)
+//! - [`RRef<T>`](crate::types::rref::RRef) handles to region-heap-allocated data
+//! - Atomic types (`AtomicU64`, etc.)
+//! - Clone'd `Cx` (the capability context)
+//!
+//! **Disallowed captures:**
+//! - Borrowed references (`&T`, `&mut T`) - not `'static`
+//! - `Rc<T>`, `RefCell<T>` - not `Send`
+//! - Raw pointers (unless wrapped in a `Send` type)
+//! - References to stack-local data
+//!
+//! ## RRef for Region-Owned Data
+//!
+//! When tasks need to share data within a region without cloning, use the region
+//! heap and [`RRef<T>`](crate::types::rref::RRef):
+//!
+//! ```ignore
+//! // Allocate in region heap
+//! let index = region.heap_alloc(expensive_data);
+//! let rref = RRef::<ExpensiveData>::new(region_id, index);
+//!
+//! // Pass RRef to task - it's Copy + Send
+//! scope.spawn(state, &cx, move |cx| async move {
+//!     // Access via region record (requires runtime lookup)
+//!     let data = rref.get_via_region(&region_record)?;
+//!     process(data).await
+//! });
+//! ```
+//!
+//! # Compile-Time Enforcement
+//!
+//! The bounds are enforced at compile time. Attempting to capture non-Send
+//! or non-static data will result in a compilation error:
+//!
+//! ```compile_fail
+//! use std::rc::Rc;
+//! use asupersync::cx::Scope;
+//!
+//! fn try_capture_rc(scope: &Scope, state: &mut RuntimeState, cx: &Cx) {
+//!     let rc = Rc::new(42); // Rc is !Send
+//!     scope.spawn(state, cx, move |_| async move {
+//!         println!("{}", rc); // ERROR: Rc is not Send
+//!     });
+//! }
+//! ```
+//!
+//! ```compile_fail
+//! use asupersync::cx::Scope;
+//!
+//! fn try_capture_borrow(scope: &Scope, state: &mut RuntimeState, cx: &Cx) {
+//!     let local = 42;
+//!     let reference = &local; // Borrowed, not 'static
+//!     scope.spawn(state, cx, move |_| async move {
+//!         println!("{}", reference); // ERROR: borrowed data not 'static
+//!     });
+//! }
+//! ```
+//!
+//! # Lab Runtime Compatibility
+//!
+//! The Send bounds do not affect lab runtime determinism. The lab runtime
+//! simulates multi-worker scheduling deterministically (same seed = same
+//! execution), regardless of whether tasks are actually migrated.
 
 use crate::channel::oneshot;
 use crate::combinator::{Either, Select};
@@ -87,6 +180,9 @@ impl<P: Policy> Scope<'_, P> {
 
     /// Spawns a new task within this scope's region.
     ///
+    /// This is the **Task Tier** spawn method for parallel execution. The task
+    /// may migrate between worker threads, so all captured data must be thread-safe.
+    ///
     /// The task will be owned by the region and will be cancelled if the
     /// region is cancelled. The returned `TaskHandle` can be used to await
     /// the task's result.
@@ -101,11 +197,27 @@ impl<P: Policy> Scope<'_, P> {
     ///
     /// A `TaskHandle<T>` that can be used to await the task's result.
     ///
-    /// # Type Bounds
+    /// # Soundness Rules (Type Bounds)
     ///
-    /// * `F: FnOnce(Cx) -> Fut + Send + 'static` - The factory must be Send
-    /// * `Fut: Future + Send + 'static` - The future must be Send
-    /// * `Fut::Output: Send + 'static` - The output must be Send
+    /// The following bounds encode the soundness rules for Send tasks:
+    ///
+    /// * `F: FnOnce(Cx) -> Fut + Send + 'static` - Factory called on any worker
+    /// * `Fut: Future + Send + 'static` - Task may migrate between polls
+    /// * `Fut::Output: Send + 'static` - Result crosses thread boundary
+    ///
+    /// These bounds ensure captured data can safely cross thread boundaries.
+    /// Use [`RRef<T>`](crate::types::rref::RRef) for region-heap-allocated data.
+    ///
+    /// # Allowed Captures
+    ///
+    /// | Type | Allowed | Reason |
+    /// |------|---------|--------|
+    /// | `String`, `Vec<T>`, owned data | ✅ | Send + 'static by ownership |
+    /// | `Arc<T>` where T: Send + Sync | ✅ | Thread-safe shared ownership |
+    /// | `RRef<T>` | ✅ | Region-heap reference, Copy + Send |
+    /// | `Cx` (cloned) | ✅ | Capability context is Send + Sync |
+    /// | `Rc<T>`, `RefCell<T>` | ❌ | Not Send |
+    /// | `&T`, `&mut T` | ❌ | Not 'static |
     ///
     /// # Example
     ///
@@ -116,6 +228,56 @@ impl<P: Policy> Scope<'_, P> {
     /// });
     ///
     /// let result = handle.join(&cx).await?;
+    /// ```
+    ///
+    /// # Example with RRef
+    ///
+    /// ```ignore
+    /// // Allocate expensive data in region heap
+    /// let index = region_record.heap_alloc(vec![1, 2, 3, 4, 5]);
+    /// let rref = RRef::<Vec<i32>>::new(region_id, index);
+    ///
+    /// // RRef is Copy + Send, can be captured by multiple tasks
+    /// scope.spawn(&mut state, &cx, move |cx| async move {
+    ///     // Would access via runtime state in real code
+    ///     process_data(rref).await
+    /// });
+    /// ```
+    ///
+    /// # Compile-Time Errors
+    ///
+    /// Attempting to capture `!Send` types fails at compile time:
+    ///
+    /// ```compile_fail,E0277
+    /// # // This test demonstrates that Rc cannot be captured
+    /// use std::rc::Rc;
+    /// fn test_rc_rejected<'r, P: asupersync::types::Policy>(
+    ///     scope: &asupersync::cx::Scope<'r, P>,
+    ///     state: &mut asupersync::runtime::RuntimeState,
+    ///     cx: &asupersync::cx::Cx,
+    /// ) {
+    ///     let rc = Rc::new(42);
+    ///     let _ = scope.spawn(state, cx, move |_| async move {
+    ///         let _ = rc;  // Rc<i32> is not Send
+    ///     });
+    /// }
+    /// ```
+    ///
+    /// Attempting to capture non-`'static` references fails:
+    ///
+    /// ```compile_fail,E0597
+    /// # // This test demonstrates that borrowed data cannot be captured
+    /// fn test_borrow_rejected<'r, P: asupersync::types::Policy>(
+    ///     scope: &asupersync::cx::Scope<'r, P>,
+    ///     state: &mut asupersync::runtime::RuntimeState,
+    ///     cx: &asupersync::cx::Cx,
+    /// ) {
+    ///     let local = 42;
+    ///     let borrow = &local;
+    ///     let _ = scope.spawn(state, cx, move |_| async move {
+    ///         let _ = borrow;  // &i32 is not 'static
+    ///     });
+    /// }
     /// ```
     pub fn spawn<F, Fut>(
         &self,
@@ -211,6 +373,43 @@ impl<P: Policy> Scope<'_, P> {
         Ok((handle, stored))
     }
 
+    /// Spawns a Send task (explicit Task Tier API).
+    ///
+    /// This is an explicit alias for [`spawn`](Self::spawn) that makes the
+    /// execution tier clear in the API. Use this when you want to emphasize
+    /// that the task may migrate between workers.
+    ///
+    /// # Type Bounds (Soundness Rules)
+    ///
+    /// Same as [`spawn`](Self::spawn):
+    /// - `F: FnOnce(Cx) -> Fut + Send + 'static`
+    /// - `Fut: Future + Send + 'static`
+    /// - `Fut::Output: Send + 'static`
+    ///
+    /// # Example
+    ///
+    /// ```ignore
+    /// // Explicit task tier spawn
+    /// let (handle, stored) = scope.spawn_task(&mut state, &cx, |cx| async move {
+    ///     // This task may run on any worker
+    ///     compute_parallel().await
+    /// })?;
+    /// ```
+    #[inline]
+    pub fn spawn_task<F, Fut>(
+        &self,
+        state: &mut RuntimeState,
+        cx: &Cx,
+        f: F,
+    ) -> Result<(TaskHandle<Fut::Output>, StoredTask), SpawnError>
+    where
+        F: FnOnce(Cx) -> Fut + Send + 'static,
+        Fut: Future + Send + 'static,
+        Fut::Output: Send + 'static,
+    {
+        self.spawn(state, cx, f)
+    }
+
     /// Spawns a task and registers it with the runtime state.
     ///
     /// This is a convenience method that combines `spawn()` with
@@ -253,11 +452,20 @@ impl<P: Policy> Scope<'_, P> {
         Ok(handle)
     }
 
-    /// Spawns a local (non-Send) task within this scope's region.
+    /// Spawns a local (non-Send) task within this scope's region (**Fiber Tier**).
     ///
-    /// Local tasks are pinned to the current worker thread and cannot be
-    /// stolen by other workers. This is useful for futures that contain
-    /// `!Send` types like `Rc` or `RefCell`.
+    /// This is the **Fiber Tier** spawn method. Local tasks are pinned to the
+    /// current worker thread and cannot be stolen by other workers. This enables
+    /// borrow-friendly execution with `!Send` types like `Rc` or `RefCell`.
+    ///
+    /// # Execution Tier: Fiber
+    ///
+    /// | Property | Value |
+    /// |----------|-------|
+    /// | Migration | Never (thread-pinned) |
+    /// | Send bound | Not required (Phase 1+) |
+    /// | Borrowing | Can capture `&T` (same-thread) |
+    /// | Use case | `!Send` types, borrowed data |
     ///
     /// # Arguments
     ///
@@ -269,7 +477,7 @@ impl<P: Policy> Scope<'_, P> {
     ///
     /// Panics if called from a blocking thread (spawn_blocking context).
     ///
-    /// # Example
+    /// # Example (Phase 1+)
     ///
     /// ```ignore
     /// use std::rc::Rc;
@@ -280,15 +488,23 @@ impl<P: Policy> Scope<'_, P> {
     /// let counter_clone = counter.clone();
     ///
     /// let (handle, stored) = scope.spawn_local(&mut state, &cx, |cx| async move {
+    ///     // Rc<RefCell<_>> is !Send but allowed in local tasks
     ///     *counter_clone.borrow_mut() += 1;
     /// });
     /// ```
     ///
-    /// # Note
+    /// # Phase 0 Limitation
     ///
-    /// In Phase 0 (single-threaded), this requires `Send` bounds since we use
-    /// a shared task storage. In Phase 1+, `spawn_local` will use thread-local
-    /// task storage and accept `!Send` futures.
+    /// In Phase 0 (single-threaded), this method still requires `Send` bounds
+    /// because task storage is shared. In Phase 1+, this will be relaxed to
+    /// accept `!Send` futures via thread-local task storage.
+    ///
+    /// # Comparison with `spawn_task`
+    ///
+    /// | Method | Tier | Bounds | Migration |
+    /// |--------|------|--------|-----------|
+    /// | `spawn` / `spawn_task` | Task | `Send + 'static` | Yes |
+    /// | `spawn_local` | Fiber | `!Send` OK (Phase 1+) | No |
     pub fn spawn_local<F, Fut>(
         &self,
         state: &mut RuntimeState,
