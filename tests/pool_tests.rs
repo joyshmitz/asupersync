@@ -21,12 +21,28 @@
 mod common;
 use common::*;
 
+use asupersync::cx::Cx;
 use asupersync::sync::{GenericPool, Pool, PoolConfig, PoolError};
 use std::future::Future;
 use std::pin::Pin;
 use std::sync::atomic::{AtomicUsize, Ordering};
 use std::sync::Arc;
 use std::time::Duration;
+
+/// Helper to acquire a resource using async acquire().
+fn acquire_resource<R, F>(
+    pool: &GenericPool<R, F>,
+) -> asupersync::sync::PooledResource<R>
+where
+    R: Send + 'static,
+    F: Fn() -> Pin<Box<dyn Future<Output = Result<R, Box<dyn std::error::Error + Send + Sync>>> + Send>>
+        + Send
+        + Sync
+        + 'static,
+{
+    let cx = Cx::for_testing();
+    futures_lite::future::block_on(pool.acquire(&cx)).expect("acquire should succeed")
+}
 
 // ============================================================================
 // Test Infrastructure
@@ -126,13 +142,19 @@ fn pool_respects_max_size() {
     test_section!("Acquiring up to max");
 
     // Acquire 3 resources (should succeed)
-    let r1 = pool.try_acquire();
-    let r2 = pool.try_acquire();
-    let r3 = pool.try_acquire();
+    let cx = Cx::for_testing();
+    let r1 = futures_lite::future::block_on(pool.acquire(&cx));
+    let r2 = futures_lite::future::block_on(pool.acquire(&cx));
+    let r3 = futures_lite::future::block_on(pool.acquire(&cx));
 
-    assert!(r1.is_some(), "First acquire should succeed");
-    assert!(r2.is_some(), "Second acquire should succeed");
-    assert!(r3.is_some(), "Third acquire should succeed");
+    assert!(r1.is_ok(), "First acquire should succeed");
+    assert!(r2.is_ok(), "Second acquire should succeed");
+    assert!(r3.is_ok(), "Third acquire should succeed");
+
+    // Keep resources alive to count as active
+    let _r1 = r1.unwrap();
+    let _r2 = r2.unwrap();
+    let _r3 = r3.unwrap();
 
     let stats = pool.stats();
     tracing::info!(active = %stats.active, "After acquiring 3 resources");
@@ -140,7 +162,7 @@ fn pool_respects_max_size() {
 
     test_section!("Trying to exceed max");
 
-    // 4th acquire should fail (pool at capacity)
+    // 4th acquire should fail (pool at capacity) - use try_acquire for non-blocking check
     let r4 = pool.try_acquire();
     assert!(r4.is_none(), "Fourth acquire should fail (at capacity)");
 
@@ -187,7 +209,7 @@ fn pooled_resource_returns_on_drop() {
     test_section!("Acquire and drop");
 
     {
-        let r1 = pool.try_acquire().expect("acquire should succeed");
+        let r1 = acquire_resource(&pool);
         tracing::info!(id = %r1.id(), "Acquired resource");
 
         let stats = pool.stats();
@@ -225,7 +247,7 @@ fn pooled_resource_explicit_return() {
 
     let pool = GenericPool::new(mock_factory(), PoolConfig::with_max_size(2));
 
-    let r1 = pool.try_acquire().expect("acquire should succeed");
+    let r1 = acquire_resource(&pool);
     let id = r1.id();
     tracing::info!(id = %id, "Acquired resource");
 
@@ -257,7 +279,7 @@ fn pooled_resource_discard() {
     let pool = GenericPool::new(mock_factory(), PoolConfig::with_max_size(2));
 
     // Acquire first resource
-    let r1 = pool.try_acquire().expect("acquire should succeed");
+    let r1 = acquire_resource(&pool);
     let id = r1.id();
     tracing::info!(id = %id, "Acquired resource");
 
@@ -291,7 +313,7 @@ fn pooled_resource_deref_access() {
 
     let pool = GenericPool::new(mock_factory(), PoolConfig::with_max_size(1));
 
-    let r1 = pool.try_acquire().expect("acquire should succeed");
+    let r1 = acquire_resource(&pool);
 
     // Test Deref access
     let id = r1.id(); // Using Deref to access MockConnection::id()
@@ -314,7 +336,7 @@ fn pooled_resource_held_duration() {
 
     let pool = GenericPool::new(mock_factory(), PoolConfig::with_max_size(1));
 
-    let r1 = pool.try_acquire().expect("acquire should succeed");
+    let r1 = acquire_resource(&pool);
 
     // Sleep briefly to accumulate hold time
     std::thread::sleep(Duration::from_millis(10));
@@ -351,11 +373,17 @@ fn pool_stats_track_acquisitions() {
 
     test_section!("Multiple acquisitions");
 
-    let r1 = pool.try_acquire();
-    let r2 = pool.try_acquire();
-    let r3 = pool.try_acquire();
+    let cx = Cx::for_testing();
+    let r1 = futures_lite::future::block_on(pool.acquire(&cx));
+    let r2 = futures_lite::future::block_on(pool.acquire(&cx));
+    let r3 = futures_lite::future::block_on(pool.acquire(&cx));
 
-    assert!(r1.is_some() && r2.is_some() && r3.is_some());
+    assert!(r1.is_ok() && r2.is_ok() && r3.is_ok());
+
+    // Keep resources alive to count as active
+    let _r1 = r1.unwrap();
+    let _r2 = r2.unwrap();
+    let _r3 = r3.unwrap();
 
     let stats = pool.stats();
     tracing::info!(
@@ -386,8 +414,8 @@ fn pool_stats_track_idle_and_active() {
 
     test_section!("Acquire resources");
 
-    let r1 = pool.try_acquire().unwrap();
-    let r2 = pool.try_acquire().unwrap();
+    let r1 = acquire_resource(&pool);
+    let r2 = acquire_resource(&pool);
 
     let stats = pool.stats();
     tracing::info!(active = %stats.active, idle = %stats.idle, "After acquiring 2");
@@ -426,8 +454,9 @@ fn pool_close_rejects_new_acquisitions() {
     let pool = GenericPool::new(mock_factory(), PoolConfig::with_max_size(3));
 
     // Acquire a resource before close
-    let r1 = pool.try_acquire();
-    assert!(r1.is_some(), "Should acquire before close");
+    let cx = Cx::for_testing();
+    let r1 = futures_lite::future::block_on(pool.acquire(&cx));
+    assert!(r1.is_ok(), "Should acquire before close");
 
     test_section!("Closing pool");
 
@@ -460,6 +489,20 @@ fn pool_concurrent_access_is_safe() {
         mock_factory(),
         PoolConfig::with_max_size(10),
     ));
+
+    // Pre-populate the pool with resources using acquire()
+    test_section!("Pre-populating pool with resources");
+    {
+        let cx = Cx::for_testing();
+        let mut resources = Vec::new();
+        for _ in 0..10 {
+            let r = futures_lite::future::block_on(pool.acquire(&cx))
+                .expect("pre-population acquire should succeed");
+            resources.push(r);
+        }
+        // Drop all resources to return them to idle pool
+        drop(resources);
+    }
 
     let acquired = Arc::new(AtomicUsize::new(0));
     let released = Arc::new(AtomicUsize::new(0));
@@ -563,6 +606,20 @@ fn e2e_pool_under_load() {
             .acquire_timeout(Duration::from_secs(5)),
     ));
 
+    // Pre-populate the pool with resources using acquire()
+    test_section!("Pre-populating pool");
+    {
+        let cx = Cx::for_testing();
+        let mut resources = Vec::new();
+        for _ in 0..5 {
+            let r = futures_lite::future::block_on(pool.acquire(&cx))
+                .expect("pre-population acquire should succeed");
+            resources.push(r);
+        }
+        // Drop all resources to return them to idle pool
+        drop(resources);
+    }
+
     let completed = Arc::new(AtomicUsize::new(0));
     let failed = Arc::new(AtomicUsize::new(0));
 
@@ -658,15 +715,19 @@ fn pool_reuses_returned_resources() {
 
     test_section!("First acquisition");
 
-    let r1 = pool.try_acquire().expect("first acquire should succeed");
+    let r1 = acquire_resource(&pool);
     let first_id = r1.id();
     tracing::info!(id = %first_id, "First resource acquired");
 
     r1.return_to_pool();
 
+    // Process returns before trying to acquire again
+    let _ = pool.stats();
+
     test_section!("Second acquisition (should reuse)");
 
-    let r2 = pool.try_acquire().expect("second acquire should succeed");
+    // Now try_acquire should work since resource is in idle pool
+    let r2 = pool.try_acquire().expect("second acquire should succeed (resource should be idle)");
     let second_id = r2.id();
     tracing::info!(id = %second_id, "Second resource acquired");
 
