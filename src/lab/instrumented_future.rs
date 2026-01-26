@@ -610,6 +610,7 @@ impl InjectionRunner {
     /// # Returns
     ///
     /// An `InjectionReport` summarizing all test runs.
+    #[allow(clippy::needless_pass_by_value)] // API design: take ownership for flexibility
     pub fn run_with_injection<F, Fut, P>(
         &mut self,
         strategy: InjectionStrategy,

@@ -108,6 +108,7 @@ impl ReplayProgress {
 
     /// Returns progress as a percentage (0.0 to 100.0).
     #[must_use]
+    #[allow(clippy::cast_precision_loss)] // Precision loss is acceptable for progress display
     pub fn percent(&self) -> f64 {
         if self.total_events == 0 {
             100.0
@@ -118,6 +119,7 @@ impl ReplayProgress {
 
     /// Returns progress as a fraction (0.0 to 1.0).
     #[must_use]
+    #[allow(clippy::cast_precision_loss)] // Precision loss is acceptable for progress display
     pub fn fraction(&self) -> f64 {
         if self.total_events == 0 {
             1.0
@@ -165,7 +167,7 @@ impl std::fmt::Display for ReplayProgress {
 /// Checkpoints are only valid for the specific trace file they were created from.
 /// Attempting to resume with a checkpoint from a different trace will result in
 /// an error.
-#[derive(Debug, Clone, Serialize, Deserialize)]
+#[derive(Debug, Clone, Copy, Serialize, Deserialize)]
 pub struct ReplayCheckpoint {
     /// Number of events that have been processed.
     pub events_processed: u64,

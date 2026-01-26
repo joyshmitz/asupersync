@@ -212,6 +212,7 @@ impl MockNetwork {
     ///
     /// If the link is missing, returns a closed channel pair.
     #[must_use]
+    #[allow(clippy::option_if_let_else)] // if-let-else is clearer than map_or_else here
     pub fn transport(&self, from: NodeId, to: NodeId) -> (MockChannelSink, MockChannelStream) {
         if let Some(link) = self.links.get(&(from, to)) {
             mock_channel(link.config.clone())
@@ -495,6 +496,7 @@ impl SymbolSink for MockSymbolSink {
         }
     }
 
+    #[allow(clippy::useless_let_if_seq)] // Can't convert to expression due to early return
     fn poll_send(
         self: Pin<&mut Self>,
         cx: &mut Context<'_>,
@@ -676,6 +678,7 @@ impl SymbolStream for MockSymbolStream {
         Poll::Pending
     }
 
+    #[allow(clippy::significant_drop_tightening)] // Lock release timing is fine
     fn size_hint(&self) -> (usize, Option<usize>) {
         let state = self.inner.state.lock().expect("mock queue lock poisoned");
         let len = state.queue.len() + usize::from(self.pending.is_some());
