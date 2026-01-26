@@ -63,6 +63,11 @@ use crate::util::DetRng;
 pub struct LabConfig {
     /// Random seed for deterministic scheduling.
     pub seed: u64,
+    /// Number of virtual workers to model in the lab scheduler.
+    ///
+    /// This does not spawn threads; it controls deterministic multi-worker simulation.
+    /// Values less than 1 are clamped to 1.
+    pub worker_count: usize,
     /// Whether to panic on obligation leaks.
     pub panic_on_obligation_leak: bool,
     /// Trace buffer capacity.
@@ -93,6 +98,7 @@ impl LabConfig {
     pub const fn new(seed: u64) -> Self {
         Self {
             seed,
+            worker_count: 1,
             panic_on_obligation_leak: true,
             trace_capacity: 4096,
             futurelock_max_idle_steps: 10_000,
@@ -125,6 +131,15 @@ impl LabConfig {
     #[must_use]
     pub const fn trace_capacity(mut self, capacity: usize) -> Self {
         self.trace_capacity = capacity;
+        self
+    }
+
+    /// Sets the number of virtual workers to model.
+    ///
+    /// Values less than 1 are clamped to 1.
+    #[must_use]
+    pub const fn worker_count(mut self, count: usize) -> Self {
+        self.worker_count = if count == 0 { 1 } else { count };
         self
     }
 
@@ -233,6 +248,12 @@ mod tests {
         let ok = config.seed == 42;
         crate::assert_with_log!(ok, "seed", 42, config.seed);
         crate::assert_with_log!(
+            config.worker_count == 1,
+            "worker_count",
+            1,
+            config.worker_count
+        );
+        crate::assert_with_log!(
             config.panic_on_obligation_leak,
             "panic_on_obligation_leak",
             true,
@@ -258,5 +279,18 @@ mod tests {
         let b = rng2.next_u64();
         crate::assert_with_log!(a == b, "rng equal", b, a);
         crate::test_complete!("rng_is_deterministic");
+    }
+
+    #[test]
+    fn worker_count_clamps_to_one() {
+        init_test("worker_count_clamps_to_one");
+        let config = LabConfig::new(7).worker_count(0);
+        crate::assert_with_log!(
+            config.worker_count == 1,
+            "worker_count",
+            1,
+            config.worker_count
+        );
+        crate::test_complete!("worker_count_clamps_to_one");
     }
 }

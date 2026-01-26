@@ -118,6 +118,8 @@ impl TraceEventSummary {
 
     /// Summarizes trace data for comparison.
     fn summarize_data(data: &TraceData) -> String {
+        use std::fmt::Write;
+
         match data {
             TraceData::None => String::new(),
             TraceData::Task { task, region } => {
@@ -140,10 +142,10 @@ impl TraceEventSummary {
                     "obligation={obligation} task={task} region={region} kind={kind:?} state={state:?}"
                 );
                 if let Some(duration) = duration_ns {
-                    summary.push_str(&format!(" duration_ns={duration}"));
+                    let _ = write!(summary, " duration_ns={duration}");
                 }
                 if let Some(reason) = abort_reason {
-                    summary.push_str(&format!(" abort_reason={reason}"));
+                    let _ = write!(summary, " abort_reason={reason}");
                 }
                 summary
             }
@@ -179,20 +181,20 @@ impl TraceEventSummary {
             TraceData::Chaos { kind, task, detail } => {
                 let mut summary = format!("chaos={kind}");
                 if let Some(t) = task {
-                    summary.push_str(&format!(" task={t}"));
+                    let _ = write!(summary, " task={t}");
                 }
                 if !detail.is_empty() {
-                    summary.push_str(&format!(" detail={detail}"));
+                    let _ = write!(summary, " detail={detail}");
                 }
                 summary
             }
             TraceData::RegionCancel { region, reason } => {
                 format!("region={region} reason={reason}")
             }
-            TraceData::Timer { timer_id, deadline } => match deadline {
-                Some(d) => format!("timer={timer_id} deadline={d}"),
-                None => format!("timer={timer_id}"),
-            },
+            TraceData::Timer { timer_id, deadline } => deadline.map_or_else(
+                || format!("timer={timer_id}"),
+                |d| format!("timer={timer_id} deadline={d}"),
+            ),
             TraceData::IoRequested { token, interest } => {
                 format!("io_token={token} interest={interest:#x}")
             }

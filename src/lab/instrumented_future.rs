@@ -704,13 +704,14 @@ impl InjectionRunner {
                         }
                     }
                     Err(e) => {
-                        let message = if let Some(s) = e.downcast_ref::<&str>() {
-                            (*s).to_string()
-                        } else if let Some(s) = e.downcast_ref::<String>() {
-                            s.clone()
-                        } else {
-                            "Unknown panic".to_string()
-                        };
+                        let message = e.downcast_ref::<&str>().map_or_else(
+                            || {
+                                e.downcast_ref::<String>()
+                                    .cloned()
+                                    .unwrap_or_else(|| "Unknown panic".to_string())
+                            },
+                            |s| (*s).to_string(),
+                        );
                         InjectionOutcome::Panic(message)
                     }
                 }
@@ -830,8 +831,14 @@ impl CancellationInjector {
     /// Checks if cancellation should be injected at this await point.
     #[must_use]
     pub fn should_inject_at(&self, sequence: u64) -> bool {
+        // Selection-only strategies don't inject at the point level.
         match &self.strategy {
-            InjectionStrategy::Never => false,
+            InjectionStrategy::Never
+            | InjectionStrategy::AllPoints
+            | InjectionStrategy::RandomSample(_)
+            | InjectionStrategy::SpecificPoints(_)
+            | InjectionStrategy::FirstN(_)
+            | InjectionStrategy::Probabilistic(_) => false,
             InjectionStrategy::AtSequence(target) => {
                 if sequence == *target {
                     self.injection_count.fetch_add(1, Ordering::SeqCst);
@@ -860,14 +867,6 @@ impl CancellationInjector {
                     false
                 }
             }
-            // The following strategies are "selection" strategies used by InjectionRunner.
-            // They determine which points to test at the runner level, not at the
-            // individual injector level. When used directly, they don't inject.
-            InjectionStrategy::AllPoints
-            | InjectionStrategy::RandomSample(_)
-            | InjectionStrategy::SpecificPoints(_)
-            | InjectionStrategy::FirstN(_)
-            | InjectionStrategy::Probabilistic(_) => false,
         }
     }
 

@@ -222,11 +222,8 @@ impl VirtualTimerWheel {
     /// If there are no pending timers, returns an empty list and does not
     /// advance time.
     pub fn advance_to_next(&mut self) -> Vec<ExpiredTimer> {
-        if let Some(deadline) = self.next_deadline() {
-            self.advance_to(deadline)
-        } else {
-            Vec::new()
-        }
+        self.next_deadline()
+            .map_or_else(Vec::new, |deadline| self.advance_to(deadline))
     }
 
     /// Advances virtual time by the given number of ticks.

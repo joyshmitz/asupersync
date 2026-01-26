@@ -21,6 +21,7 @@ use crate::trace::{TraceData, TraceEvent};
 use crate::types::{ObligationId, TaskId};
 use crate::types::{Severity, Time};
 use crate::util::DetRng;
+use std::collections::{HashMap, HashSet};
 use std::sync::{Arc, Mutex};
 use std::task::{Context, Poll, Wake, Waker};
 
@@ -36,7 +37,7 @@ pub struct LabRuntime {
     /// Runtime state (public for tests and oracle access).
     pub state: RuntimeState,
     /// Scheduler.
-    pub scheduler: Arc<Mutex<crate::runtime::scheduler::PriorityScheduler>>,
+    pub scheduler: Arc<Mutex<LabScheduler>>,
     /// Configuration.
     config: LabConfig,
     /// Deterministic RNG.
@@ -76,9 +77,7 @@ impl LabRuntime {
 
         Self {
             state,
-            scheduler: Arc::new(Mutex::new(
-                crate::runtime::scheduler::PriorityScheduler::new(),
-            )),
+            scheduler: Arc::new(Mutex::new(LabScheduler::new(config.worker_count))),
             config,
             rng,
             virtual_time: Time::ZERO,
@@ -235,8 +234,16 @@ impl LabRuntime {
         self.replay_recorder.record_rng_value(rng_value);
         self.check_futurelocks();
 
-        // 1. Pop a task from the scheduler (using RNG hint for tie-breaking)
-        let Some(task_id) = self.scheduler.lock().unwrap().pop_with_rng_hint(rng_value) else {
+        // 1. Choose a worker and pop a task (deterministic multi-worker model)
+        let worker_count = self.config.worker_count.max(1);
+        let worker_hint = (rng_value as usize) % worker_count;
+        let task_id = {
+            let mut sched = self.scheduler.lock().unwrap();
+            sched
+                .pop_for_worker(worker_hint, rng_value)
+                .or_else(|| sched.steal_for_worker(worker_hint, rng_value.rotate_left(17)))
+        };
+        let Some(task_id) = task_id else {
             self.check_deadline_monitor();
             return;
         };
@@ -287,6 +294,7 @@ impl LabRuntime {
             Poll::Ready(()) => {
                 // Task completed
                 self.state.remove_stored_future(task_id);
+                self.scheduler.lock().unwrap().forget_task(task_id);
 
                 // Record task completion
                 self.replay_recorder
@@ -295,9 +303,7 @@ impl LabRuntime {
                 // Update state to Completed if not already terminal
                 if let Some(record) = self.state.tasks.get_mut(task_id.arena_index()) {
                     if !record.state.is_terminal() {
-                        record.state = crate::record::task::TaskState::Completed(
-                            crate::types::Outcome::Ok(()),
-                        );
+                        record.complete(crate::types::Outcome::Ok(()));
                     }
                 }
 
@@ -352,25 +358,16 @@ impl LabRuntime {
             return false;
         };
 
-        let mut skip_poll = false;
-
-        // Check for cancellation injection
-        if chaos_rng.should_inject_cancel(&chaos_config) {
-            skip_poll = true;
-        }
+        let mut skip_poll = chaos_rng.should_inject_cancel(&chaos_config);
 
         // Check for delay injection
-        let delay = if chaos_rng.should_inject_delay(&chaos_config) {
-            Some(chaos_rng.next_delay(&chaos_config))
-        } else {
-            None
-        };
+        let delay = chaos_rng
+            .should_inject_delay(&chaos_config)
+            .then(|| chaos_rng.next_delay(&chaos_config));
 
         // Check for budget exhaustion injection
         let budget_exhaust = chaos_rng.should_inject_budget_exhaust(&chaos_config);
-        if budget_exhaust {
-            skip_poll = true;
-        }
+        skip_poll |= budget_exhaust;
 
         // Now apply the injections (no more borrowing chaos_rng)
         if skip_poll && !budget_exhaust {
@@ -429,10 +426,8 @@ impl LabRuntime {
         // Mark the task as cancel-requested with chaos reason
         if let Some(record) = self.state.tasks.get_mut(task_id.arena_index()) {
             if !record.state.is_terminal() {
-                record.state = crate::record::task::TaskState::CancelRequested {
-                    reason: CancelReason::user("chaos-injected"),
-                    cleanup_budget: Budget::ZERO,
-                };
+                record
+                    .request_cancel_with_budget(CancelReason::user("chaos-injected"), Budget::ZERO);
             }
         }
 
@@ -696,10 +691,130 @@ impl LabRuntime {
     }
 }
 
+#[derive(Debug)]
+/// Deterministic lab scheduler with per-worker queues.
+///
+/// This is a single-threaded model of multi-worker scheduling used by the lab
+/// runtime to simulate parallel execution deterministically.
+pub struct LabScheduler {
+    workers: Vec<crate::runtime::scheduler::PriorityScheduler>,
+    scheduled: HashSet<TaskId>,
+    assignments: HashMap<TaskId, usize>,
+    next_worker: usize,
+}
+
+impl LabScheduler {
+    fn new(worker_count: usize) -> Self {
+        let count = if worker_count == 0 { 1 } else { worker_count };
+        Self {
+            workers: (0..count)
+                .map(|_| crate::runtime::scheduler::PriorityScheduler::new())
+                .collect(),
+            scheduled: HashSet::new(),
+            assignments: HashMap::new(),
+            next_worker: 0,
+        }
+    }
+
+    fn worker_count(&self) -> usize {
+        self.workers.len()
+    }
+
+    fn assign_worker(&mut self, task: TaskId) -> usize {
+        if let Some(&worker) = self.assignments.get(&task) {
+            return worker;
+        }
+
+        let worker = self.next_worker % self.workers.len();
+        self.next_worker = self.next_worker.wrapping_add(1);
+        self.assignments.insert(task, worker);
+        worker
+    }
+
+    /// Schedules a task in the ready lane on its assigned worker.
+    pub fn schedule(&mut self, task: TaskId, priority: u8) {
+        if !self.scheduled.insert(task) {
+            return;
+        }
+
+        let worker = self.assign_worker(task);
+        self.workers[worker].schedule(task, priority);
+    }
+
+    /// Schedules or promotes a task into the cancel lane.
+    pub fn schedule_cancel(&mut self, task: TaskId, priority: u8) {
+        if self.scheduled.insert(task) {
+            let worker = self.assign_worker(task);
+            self.workers[worker].schedule_cancel(task, priority);
+            return;
+        }
+
+        if let Some(&worker) = self.assignments.get(&task) {
+            self.workers[worker].move_to_cancel_lane(task, priority);
+        }
+    }
+
+    /// Schedules a task in the timed lane on its assigned worker.
+    pub fn schedule_timed(&mut self, task: TaskId, deadline: Time) {
+        if !self.scheduled.insert(task) {
+            return;
+        }
+
+        let worker = self.assign_worker(task);
+        self.workers[worker].schedule_timed(task, deadline);
+    }
+
+    fn pop_for_worker(&mut self, worker: usize, rng_hint: u64) -> Option<TaskId> {
+        if self.workers.is_empty() {
+            return None;
+        }
+
+        let worker = worker % self.workers.len();
+        let task = self.workers[worker].pop_with_rng_hint(rng_hint)?;
+        self.scheduled.remove(&task);
+        self.assignments.insert(task, worker);
+        Some(task)
+    }
+
+    fn steal_for_worker(&mut self, thief: usize, rng_hint: u64) -> Option<TaskId> {
+        let count = self.workers.len();
+        if count <= 1 {
+            return None;
+        }
+
+        let thief = thief % count;
+        let start = (rng_hint as usize) % count;
+
+        for offset in 0..count {
+            let victim = (start + offset) % count;
+            if victim == thief {
+                continue;
+            }
+            if let Some(task) =
+                self.workers[victim].pop_with_rng_hint(rng_hint.wrapping_add(offset as u64))
+            {
+                self.scheduled.remove(&task);
+                self.assignments.insert(task, thief);
+                return Some(task);
+            }
+        }
+
+        None
+    }
+
+    fn forget_task(&mut self, task: TaskId) {
+        self.scheduled.remove(&task);
+        self.assignments.remove(&task);
+        for worker in &mut self.workers {
+            worker.remove(task);
+        }
+    }
+}
+
 struct TaskWaker {
     task_id: crate::types::TaskId,
     priority: u8,
-    scheduler: Arc<Mutex<crate::runtime::scheduler::PriorityScheduler>>,
+    scheduler: Arc<Mutex<LabScheduler>>,
 }
 
 impl Wake for TaskWaker {
@@ -854,6 +969,28 @@ mod tests {
         let b = r2.rng.next_u64();
         crate::assert_with_log!(a == b, "rng", b, a);
         crate::test_complete!("deterministic_rng");
+    }
+
+    #[test]
+    fn deterministic_multiworker_schedule() {
+        init_test("deterministic_multiworker_schedule");
+        let config = LabConfig::new(7).worker_count(4);
+
+        crate::lab::assert_deterministic(config, |runtime| {
+            let root = runtime.state.create_root_region(Budget::INFINITE);
+            for _ in 0..4 {
+                let (task_id, _handle) = runtime
+                    .state
+                    .create_task(root, Budget::INFINITE, async {
+                        crate::runtime::yield_now::yield_now().await;
+                    })
+                    .expect("create task");
+                runtime.scheduler.lock().unwrap().schedule(task_id, 0);
+            }
+            runtime.run_until_quiescent();
+        });
+
+        crate::test_complete!("deterministic_multiworker_schedule");
     }
 
     #[test]
