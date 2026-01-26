@@ -11,10 +11,11 @@
 #[macro_use]
 mod common;
 
+use asupersync::cx::Cx;
 use asupersync::lab::{LabConfig, LabRuntime};
 use asupersync::runtime::reactor::{Event, Events, FaultConfig, Interest, LabReactor, Token};
 use asupersync::runtime::Reactor;
-use asupersync::types::Budget;
+use asupersync::types::{Budget, CancelReason};
 use asupersync::util::DetRng;
 use common::*;
 use std::future::Future;
@@ -377,7 +378,11 @@ fn run_reactor_event_order(seed: u64) -> (Vec<usize>, Vec<usize>) {
 
     for idx in &order {
         let token = tokens[*idx];
-        reactor.inject_event(token, Event::readable(token), std::time::Duration::from_millis(1));
+        reactor.inject_event(
+            token,
+            Event::readable(token),
+            std::time::Duration::from_millis(1),
+        );
     }
 
     let mut events = Events::with_capacity(16);
@@ -441,7 +446,11 @@ fn run_fault_stats(seed: u64) -> (u64, u64, u64) {
     reactor.set_fault_config(token, config).expect("set fault");
 
     for _ in 0..50 {
-        reactor.inject_event(token, Event::readable(token), std::time::Duration::from_millis(1));
+        reactor.inject_event(
+            token,
+            Event::readable(token),
+            std::time::Duration::from_millis(1),
+        );
     }
 
     let mut events = Events::with_capacity(64);
@@ -706,6 +715,112 @@ fn test_lab_quiescence_detection_determinism() {
     );
 
     test_complete!("test_lab_quiescence_detection_determinism");
+}
+
+// ============================================================================
+// Test: Cancellation Drain Under Contention
+// ============================================================================
+
+fn run_cancel_drain_stress(seed: u64, task_count: usize) -> (usize, usize, bool, u64) {
+    let mut runtime = LabRuntime::new(LabConfig::new(seed));
+    let region = runtime.state.create_root_region(Budget::INFINITE);
+
+    let mut task_ids = Vec::with_capacity(task_count);
+    for _ in 0..task_count {
+        let (task_id, _handle) = runtime
+            .state
+            .create_task(region, Budget::INFINITE, async {
+                for _ in 0..8 {
+                    let Some(cx) = Cx::current() else {
+                        return;
+                    };
+                    if cx.checkpoint().is_err() {
+                        return;
+                    }
+                    yield_n(1).await;
+                }
+            })
+            .expect("create task");
+        runtime.scheduler.lock().unwrap().schedule(task_id, 0);
+        task_ids.push(task_id);
+    }
+
+    for _ in 0..16 {
+        runtime.step_for_test();
+    }
+
+    let cancel_reason = CancelReason::shutdown();
+    let tasks_to_cancel = runtime.state.cancel_request(region, &cancel_reason, None);
+    {
+        let mut scheduler = runtime.scheduler.lock().unwrap();
+        for (task_id, priority) in tasks_to_cancel {
+            scheduler.move_to_cancel_lane(task_id, priority);
+        }
+    }
+
+    let steps = runtime.run_until_quiescent();
+
+    let tracked: std::collections::HashSet<_> = task_ids.into_iter().collect();
+    let mut terminal = 0usize;
+    let mut non_terminal = 0usize;
+
+    for (_, record) in runtime.state.tasks.iter() {
+        if !tracked.contains(&record.id) {
+            continue;
+        }
+        if record.state.is_terminal() {
+            terminal += 1;
+        } else {
+            non_terminal += 1;
+        }
+    }
+
+    (terminal, non_terminal, runtime.is_quiescent(), steps)
+}
+
+#[test]
+fn test_lab_cancel_drain_under_contention_deterministic() {
+    init_test("test_lab_cancel_drain_under_contention_deterministic");
+    test_section!("run_cancel_stress");
+
+    let seed = 0xA11CE5EED;
+    let task_count = 64;
+
+    let result1 = run_cancel_drain_stress(seed, task_count);
+    let result2 = run_cancel_drain_stress(seed, task_count);
+
+    test_section!("verify_determinism");
+    assert_with_log!(
+        result1 == result2,
+        "cancel drain results should be deterministic",
+        result1,
+        result2
+    );
+
+    test_section!("verify_quiescence");
+    assert_with_log!(
+        result1.0 == task_count && result1.1 == 0,
+        "all tasks terminal after cancel drain",
+        (task_count, 0),
+        (result1.0, result1.1)
+    );
+    assert_with_log!(
+        result1.2,
+        "runtime reaches quiescence after cancel drain",
+        true,
+        result1.2
+    );
+
+    tracing::info!(
+        seed = seed,
+        task_count = task_count,
+        terminal = result1.0,
+        non_terminal = result1.1,
+        steps = result1.3,
+        "cancel drain under contention verified"
+    );
+
+    test_complete!("test_lab_cancel_drain_under_contention_deterministic");
 }
 
 // ============================================================================

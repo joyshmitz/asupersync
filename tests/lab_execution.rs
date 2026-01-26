@@ -4,6 +4,7 @@
 mod common;
 
 use asupersync::cx::Cx;
+use asupersync::lab::assert_deterministic;
 use asupersync::lab::LabConfig;
 use asupersync::lab::LabRuntime;
 use asupersync::runtime::{DeadlineWarning, MonitorConfig, WarningReason};
@@ -11,7 +12,7 @@ use asupersync::types::{Budget, Time};
 use common::*;
 use std::future::Future;
 use std::pin::Pin;
-use std::sync::atomic::{AtomicBool, Ordering};
+use std::sync::atomic::{AtomicBool, AtomicUsize, Ordering};
 use std::sync::{Arc, Mutex};
 use std::task::{Context, Poll};
 
@@ -40,6 +41,35 @@ impl Future for YieldNow {
 
 async fn yield_now() {
     YieldNow { yielded: false }.await;
+}
+
+fn schedule_yielding_tasks(
+    runtime: &mut LabRuntime,
+    task_count: usize,
+    yields_per_task: usize,
+) -> Arc<Vec<AtomicUsize>> {
+    let region = runtime.state.create_root_region(Budget::INFINITE);
+    let completions: Arc<Vec<AtomicUsize>> = Arc::new(
+        (0..task_count)
+            .map(|_| AtomicUsize::new(0))
+            .collect::<Vec<_>>(),
+    );
+
+    for idx in 0..task_count {
+        let completions = Arc::clone(&completions);
+        let (task_id, _handle) = runtime
+            .state
+            .create_task(region, Budget::INFINITE, async move {
+                for _ in 0..yields_per_task {
+                    yield_now().await;
+                }
+                completions[idx].fetch_add(1, Ordering::SeqCst);
+            })
+            .expect("create task");
+        runtime.scheduler.lock().unwrap().schedule(task_id, 0);
+    }
+
+    completions
 }
 
 #[test]
@@ -95,6 +125,45 @@ fn test_lab_executor_runs_task() {
     let quiescent = runtime.is_quiescent();
     assert_with_log!(quiescent, "runtime should be quiescent", true, quiescent);
     test_complete!("test_lab_executor_runs_task");
+}
+
+#[test]
+fn test_parallel_lab_completes_without_loss() {
+    init_test("test_parallel_lab_completes_without_loss");
+    test_section!("setup");
+    let mut runtime = LabRuntime::new(LabConfig::new(1337).worker_count(4));
+    let completions = schedule_yielding_tasks(&mut runtime, 31, 4);
+
+    test_section!("run");
+    let steps = runtime.run_until_quiescent();
+
+    test_section!("verify");
+    assert_with_log!(
+        steps > 0,
+        "should execute steps in parallel lab run",
+        "> 0",
+        steps
+    );
+    for (idx, count) in completions.iter().enumerate() {
+        let value = count.load(Ordering::SeqCst);
+        assert_with_log!(value == 1, "task completed exactly once", 1usize, value);
+    }
+    test_complete!("test_parallel_lab_completes_without_loss");
+}
+
+#[test]
+fn test_parallel_lab_determinism_multiworker_yields() {
+    init_test("test_parallel_lab_determinism_multiworker_yields");
+    test_section!("setup");
+    let config = LabConfig::new(2025).worker_count(4);
+
+    test_section!("verify");
+    assert_deterministic(config, |runtime| {
+        let _ = schedule_yielding_tasks(runtime, 29, 3);
+        runtime.run_until_quiescent();
+    });
+
+    test_complete!("test_parallel_lab_determinism_multiworker_yields");
 }
 
 #[test]
