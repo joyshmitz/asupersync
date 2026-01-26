@@ -42,6 +42,57 @@ fn insert_by_deadline(lane: &mut VecDeque<TimedEntry>, entry: TimedEntry) {
     lane.insert(pos, entry);
 }
 
+/// Pop from a priority-based lane with RNG tie-breaking among equal-priority tasks.
+fn pop_from_priority_lane_with_hint(
+    lane: &mut VecDeque<SchedulerEntry>,
+    rng_hint: u64,
+) -> Option<TaskId> {
+    if lane.is_empty() {
+        return None;
+    }
+
+    // Find how many tasks share the highest priority at the front
+    let front_priority = lane.front().unwrap().priority;
+    let tie_count = lane
+        .iter()
+        .take_while(|e| e.priority == front_priority)
+        .count();
+
+    if tie_count == 1 {
+        // No tie, just pop the front
+        return lane.pop_front().map(|e| e.task);
+    }
+
+    // Use rng_hint to select among the tied tasks
+    let selected_idx = (rng_hint as usize) % tie_count;
+    let entry = lane.remove(selected_idx).unwrap();
+    Some(entry.task)
+}
+
+/// Pop from a timed lane with RNG tie-breaking for equal deadlines.
+fn pop_from_timed_lane_with_hint(lane: &mut VecDeque<TimedEntry>, rng_hint: u64) -> Option<TaskId> {
+    if lane.is_empty() {
+        return None;
+    }
+
+    // Find how many tasks share the earliest deadline at the front
+    let front_deadline = lane.front().unwrap().deadline;
+    let tie_count = lane
+        .iter()
+        .take_while(|e| e.deadline == front_deadline)
+        .count();
+
+    if tie_count == 1 {
+        // No tie, just pop the front
+        return lane.pop_front().map(|e| e.task);
+    }
+
+    // Use rng_hint to select among the tied tasks
+    let selected_idx = (rng_hint as usize) % tie_count;
+    let entry = lane.remove(selected_idx).unwrap();
+    Some(entry.task)
+}
+
 /// The three-lane scheduler.
 #[derive(Debug, Default)]
 pub struct Scheduler {
@@ -118,6 +169,36 @@ impl Scheduler {
         if let Some(entry) = self.ready_lane.pop_front() {
             self.scheduled.remove(&entry.task);
             return Some(entry.task);
+        }
+
+        None
+    }
+
+    /// Pops the next task to run, using `rng_hint` for tie-breaking among equal-priority tasks.
+    ///
+    /// This method provides deterministic but seed-varying scheduling for the lab runtime.
+    /// When multiple tasks have the same priority at the head of a lane, the `rng_hint`
+    /// determines which one is selected, enabling different seeds to produce different
+    /// execution orderings while remaining deterministic for the same seed.
+    ///
+    /// Order: cancel lane > timed lane > ready lane.
+    pub fn pop_with_rng_hint(&mut self, rng_hint: u64) -> Option<TaskId> {
+        // Try cancel lane first
+        if let Some(task) = pop_from_priority_lane_with_hint(&mut self.cancel_lane, rng_hint) {
+            self.scheduled.remove(&task);
+            return Some(task);
+        }
+
+        // Try timed lane (EDF - equal deadlines get tie-broken)
+        if let Some(task) = pop_from_timed_lane_with_hint(&mut self.timed_lane, rng_hint) {
+            self.scheduled.remove(&task);
+            return Some(task);
+        }
+
+        // Try ready lane
+        if let Some(task) = pop_from_priority_lane_with_hint(&mut self.ready_lane, rng_hint) {
+            self.scheduled.remove(&task);
+            return Some(task);
         }
 
         None

@@ -235,8 +235,8 @@ impl LabRuntime {
         self.replay_recorder.record_rng_value(rng_value);
         self.check_futurelocks();
 
-        // 1. Pop a task from the scheduler
-        let Some(task_id) = self.scheduler.lock().unwrap().pop() else {
+        // 1. Pop a task from the scheduler (using RNG hint for tie-breaking)
+        let Some(task_id) = self.scheduler.lock().unwrap().pop_with_rng_hint(rng_value) else {
             self.check_deadline_monitor();
             return;
         };
