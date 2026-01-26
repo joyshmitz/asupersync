@@ -17,8 +17,6 @@ use asupersync::net::UdpSocket;
 use common::*;
 use futures_lite::future::block_on;
 use std::io;
-use std::net::SocketAddr;
-use std::thread;
 use std::time::Duration;
 
 fn init_test(test_name: &str) {
@@ -195,13 +193,7 @@ async fn tokio_timeout<F: std::future::Future>(
 ) -> Result<F::Output, ()> {
     use std::future::poll_fn;
     use std::pin::pin;
-    use std::sync::Arc;
-    use std::task::{Context, Poll, Wake, Waker};
-
-    struct NoopWaker;
-    impl Wake for NoopWaker {
-        fn wake(self: Arc<Self>) {}
-    }
+    use std::task::Poll;
 
     let start = std::time::Instant::now();
     let mut fut = pin!(future);

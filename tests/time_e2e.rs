@@ -16,10 +16,8 @@
 #[macro_use]
 mod common;
 
-use asupersync::lab::{LabConfig, LabRuntime};
 use asupersync::time::{
-    interval, interval_at, sleep, sleep_until, timeout, timeout_at, Elapsed, Interval,
-    MissedTickBehavior, Sleep,
+    interval, interval_at, timeout, timeout_at, Elapsed, Interval, MissedTickBehavior, Sleep,
 };
 use asupersync::types::{Budget, Time};
 use common::*;

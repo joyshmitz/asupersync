@@ -17,12 +17,7 @@ mod common;
 
 use asupersync::channel::{broadcast, mpsc, watch};
 use asupersync::cx::Cx;
-use asupersync::lab::{LabConfig, LabRuntime};
-use asupersync::stream::{
-    iter, merge, BroadcastStream, Chain, Collect, Filter, Fuse, Map, Merge, ReceiverStream, Skip,
-    Stream, StreamExt, Take, WatchStream, Zip,
-};
-use asupersync::types::{Budget, CancelReason, Outcome, Time};
+use asupersync::stream::{iter, merge, BroadcastStream, ReceiverStream, Stream, StreamExt, WatchStream};
 use common::*;
 use std::cell::RefCell;
 use std::future::Future;
@@ -300,7 +295,7 @@ fn test_filter_map_combinator() {
     tracing::info!("Testing filter_map combinator");
 
     let stream = iter(vec!["1", "two", "3", "four", "5"]);
-    let mut parsed = stream.filter_map(|s| s.parse::<i32>().ok());
+    let parsed = stream.filter_map(|s| s.parse::<i32>().ok());
 
     let waker = noop_waker();
     let mut cx = Context::from_waker(&waker);
@@ -421,7 +416,7 @@ fn test_receiver_stream_basic() {
 
     let cx = Cx::for_testing();
     let (tx, rx) = mpsc::channel(10);
-    let mut stream = ReceiverStream::new(cx.clone(), rx);
+    let stream = ReceiverStream::new(cx.clone(), rx);
 
     // Send items
     tx.send(&cx, 1).unwrap();

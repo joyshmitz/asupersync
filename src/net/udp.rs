@@ -507,7 +507,7 @@ mod tests {
 
         let mut socket = UdpSocket::from(std_server);
         let waker = noop_waker();
-        let mut cx = Context::from_waker(&waker);
+        let cx = Context::from_waker(&waker);
         let mut buf = [0u8; 8];
 
         // poll_recv_from should return Pending and register with reactor
