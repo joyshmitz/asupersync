@@ -14,10 +14,13 @@ use asupersync::lab::oracle::{
 };
 use asupersync::lab::{LabConfig, LabRuntime};
 use asupersync::record::task::TaskState;
-use asupersync::record::{ObligationKind, ObligationState};
+use asupersync::record::{Finalizer, ObligationKind, ObligationState};
+use asupersync::runtime::RuntimeState;
 use asupersync::trace::{TraceData, TraceEvent, TraceEventKind};
 use asupersync::types::{Budget, CancelReason, Outcome, RegionId, TaskId, Time};
 use common::*;
+use futures_lite::future;
+use std::sync::{Arc, Mutex};
 
 fn region(n: u32) -> RegionId {
     RegionId::new_for_test(n, 0)
@@ -266,6 +269,67 @@ fn e2e_finalizer_lifo_runs_after_cancel() {
     test_complete!("e2e_finalizer_lifo_runs_after_cancel");
 }
 
+#[test]
+fn e2e_finalizer_lifo_async_masked_execution() {
+    init_test("e2e_finalizer_lifo_async_masked_execution");
+
+    let mut state = RuntimeState::new();
+    let region = state.create_root_region(Budget::INFINITE);
+    let order: Arc<Mutex<Vec<&'static str>>> = Arc::new(Mutex::new(Vec::new()));
+
+    let cx = Cx::for_testing();
+    cx.set_cancel_reason(CancelReason::timeout());
+    let unmasked = cx.checkpoint().is_err();
+    assert_with_log!(unmasked, "cancel observed when unmasked", true, unmasked);
+
+    let o1 = order.clone();
+    state.register_sync_finalizer(region, move || o1.lock().unwrap().push("f1"));
+
+    let o2 = order.clone();
+    let cx_async = cx.clone();
+    state.register_async_finalizer(region, async move {
+        o2.lock().unwrap().push("f2");
+        let ok = cx_async.checkpoint().is_ok();
+        assert_with_log!(ok, "async finalizer masked", true, ok);
+    });
+
+    let o3 = order.clone();
+    state.register_sync_finalizer(region, move || o3.lock().unwrap().push("f3"));
+
+    let mut finalizers = Vec::new();
+    while let Some(finalizer) = state.pop_region_finalizer(region) {
+        finalizers.push(finalizer);
+    }
+
+    for finalizer in finalizers {
+        match finalizer {
+            Finalizer::Sync(f) => f(),
+            Finalizer::Async(fut) => {
+                let cx_mask = cx.clone();
+                cx_mask.masked(|| future::block_on(fut));
+            }
+        }
+    }
+
+    let order = order.lock().unwrap().clone();
+    assert_with_log!(
+        order == vec!["f3", "f2", "f1"],
+        "finalizer LIFO order (sync + async)",
+        vec!["f3", "f2", "f1"],
+        order
+    );
+
+    let post_mask = cx.checkpoint().is_err();
+    assert_with_log!(
+        post_mask,
+        "cancel observed after finalizers",
+        true,
+        post_mask
+    );
+
+    test_complete!("e2e_finalizer_lifo_async_masked_execution");
+}
+
 // ============================================================================
 // Determinism oracle scenarios (trace-based)
 // ============================================================================
@@ -463,10 +527,14 @@ fn e2e_obligation_abort_on_cancellation() {
 
     // Cancellation is requested while holding the permit
     let reason = CancelReason::timeout();
-    suite.cancellation_protocol.on_region_cancel(root, reason.clone(), t(15));
+    suite
+        .cancellation_protocol
+        .on_region_cancel(root, reason.clone(), t(15));
 
     // Obligation is aborted (not leaked) due to cancellation
-    suite.obligation_leak.on_resolve(obligation, ObligationState::Aborted);
+    suite
+        .obligation_leak
+        .on_resolve(obligation, ObligationState::Aborted);
 
     // Task completes as cancelled
     suite.task_leak.on_complete(worker, t(25));
