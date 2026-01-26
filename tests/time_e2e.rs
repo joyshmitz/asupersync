@@ -670,9 +670,13 @@ fn test_timeout_cancel_propagation() {
         }
     }
 
-    // Create a future that tracks when it's dropped
+    // Create tracker BEFORE the async block so it exists when the future is dropped.
+    // Note: Variables created INSIDE an async block only exist after the future is polled.
+    let tracker = DropTracker(dropped_clone);
+
+    // Create a future that holds the tracker
     let inner = async move {
-        let _tracker = DropTracker(dropped_clone);
+        let _tracker = tracker; // Move tracker into the future
         std::future::pending::<()>().await;
     };
 
@@ -710,22 +714,13 @@ fn test_sleep_max_duration() {
 }
 
 #[test]
+#[should_panic(expected = "interval period must be non-zero")]
 fn test_interval_zero_period_behavior() {
     init_test("test_interval_zero_period_behavior");
-    tracing::info!("Testing interval with zero period");
+    tracing::info!("Testing interval with zero period - expected to panic");
 
-    let mut int = interval(Time::ZERO, Duration::ZERO);
-
-    // Zero period means every tick returns immediately at current time
-    let t1 = int.tick(Time::ZERO);
-    let t2 = int.tick(Time::ZERO);
-
-    tracing::debug!(t1 = ?t1, t2 = ?t2, "zero period ticks");
-
-    // Both should be at the same time (or consecutive depending on implementation)
-    assert_eq!(t1, Time::ZERO, "first tick at zero");
-
-    test_complete!("test_interval_zero_period_behavior");
+    // Zero period is not allowed - the implementation correctly panics
+    let _ = interval(Time::ZERO, Duration::ZERO);
 }
 
 #[test]
