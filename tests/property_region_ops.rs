@@ -942,24 +942,24 @@ impl RegionOp {
 
             Self::SpawnTask { region } => harness
                 .resolve_region(region)
-                .map_or(false, |region_id| harness.spawn_task(region_id).is_some()),
+                .is_some_and(|region_id| harness.spawn_task(region_id).is_some()),
 
             Self::Cancel { region, reason } => {
-                harness.resolve_region(region).map_or(false, |region_id| {
+                harness.resolve_region(region).is_some_and(|region_id| {
                     harness.cancel_region(region_id, *reason);
                     true
                 })
             }
 
             Self::CompleteTask { task, outcome } => {
-                harness.resolve_task(task).map_or(false, |task_id| {
+                harness.resolve_task(task).is_some_and(|task_id| {
                     harness.complete_task(task_id, *outcome);
                     true
                 })
             }
 
             Self::CloseRegion { region } => {
-                harness.resolve_region(region).map_or(false, |region_id| {
+                harness.resolve_region(region).is_some_and(|region_id| {
                     harness.close_region(region_id);
                     true
                 })
@@ -972,7 +972,7 @@ impl RegionOp {
 
             Self::SetDeadline { region, millis } => harness
                 .resolve_region(region)
-                .map_or(false, |region_id| harness.set_deadline(region_id, *millis)),
+                .is_some_and(|region_id| harness.set_deadline(region_id, *millis)),
         }
     }
 }

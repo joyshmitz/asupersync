@@ -25,7 +25,7 @@ mod common;
 use asupersync::cx::Cx;
 use asupersync::types::{CancelKind, CancelReason, RegionId, TaskId};
 use common::*;
-use std::collections::HashMap;
+use std::collections::{HashMap, HashSet};
 
 fn init_test(test_name: &str) {
     init_test_logging();
@@ -262,7 +262,7 @@ fn cancel_reason_root_cause() {
         .with_region(RegionId::new_for_test(1, 0));
     let level2 = CancelReason::parent_cancelled()
         .with_region(RegionId::new_for_test(2, 0))
-        .with_cause(deep_root.clone());
+        .with_cause(deep_root);
     let level3 = CancelReason::parent_cancelled()
         .with_region(RegionId::new_for_test(3, 0))
         .with_cause(level2);
@@ -357,8 +357,6 @@ fn cancel_kind_all_variants_constructible() {
 fn cancel_kind_eq_and_hash() {
     init_test("cancel_kind_eq_and_hash");
 
-    use std::collections::HashSet;
-
     test_section!("equality");
     assert_eq!(CancelKind::User, CancelKind::User);
     assert_ne!(CancelKind::User, CancelKind::Timeout);
@@ -447,8 +445,7 @@ fn cx_cancel_chain_api() {
     let cx = Cx::for_testing();
 
     test_section!("empty chain when not cancelled");
-    let chain: Vec<_> = cx.cancel_chain().collect();
-    assert!(chain.is_empty());
+    assert!(cx.cancel_chain().next().is_none());
     tracing::info!("Empty chain when not cancelled");
 
     test_section!("chain with set reason");

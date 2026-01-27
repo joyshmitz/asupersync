@@ -47,6 +47,12 @@ impl Drop for DropTracker {
     }
 }
 
+static VIRTUAL_TIME: AtomicUsize = AtomicUsize::new(0);
+
+fn get_virtual_time() -> Time {
+    Time::from_secs(VIRTUAL_TIME.load(Ordering::SeqCst) as u64)
+}
+
 fn noop_waker() -> Waker {
     Waker::from(Arc::new(NoopWaker))
 }
@@ -376,7 +382,7 @@ fn test_timeout_completes_before_deadline() {
         Poll::Ready(Ok(value)) => {
             assert_with_log!(value == 42, "timeout returns inner value", 42, value);
         }
-        other => panic!("expected Ready(Ok(42)), got {:?}", other),
+        other => panic!("expected Ready(Ok(42)), got {other:?}"),
     }
     test_complete!("test_timeout_completes_before_deadline");
 }
@@ -403,7 +409,7 @@ fn test_timeout_at_with_absolute_deadline() {
                 value
             );
         }
-        other => panic!("expected Ready(Ok), got {:?}", other),
+        other => panic!("expected Ready(Ok), got {other:?}"),
     }
     test_complete!("test_timeout_at_with_absolute_deadline");
 }
@@ -414,13 +420,13 @@ fn test_elapsed_error_display() {
     tracing::info!("Testing Elapsed error type display");
 
     let elapsed = Elapsed::new(Time::from_secs(5));
-    let display_str = format!("{}", elapsed);
+    let display_str = format!("{elapsed}");
 
     assert_with_log!(
         display_str.contains("timeout")
             || display_str.contains("elapsed")
             || display_str.contains("deadline")
-            || display_str.contains("5"),
+            || display_str.contains('5'),
         "Elapsed display describes timeout",
         "timeout/elapsed/deadline/5",
         display_str
@@ -438,14 +444,7 @@ fn test_sleep_with_virtual_time_getter() {
     tracing::info!("Testing Sleep with custom time getter (virtual time simulation)");
 
     let deadline = Time::from_secs(5);
-    // Note: Sleep::with_time_getter requires a function pointer, not a closure
-    // So we use a static atomic for this test
-    static VIRTUAL_TIME: AtomicUsize = AtomicUsize::new(0);
     VIRTUAL_TIME.store(0, Ordering::SeqCst);
-
-    fn get_virtual_time() -> Time {
-        Time::from_secs(VIRTUAL_TIME.load(Ordering::SeqCst) as u64)
-    }
 
     let mut s = Sleep::with_time_getter(deadline, get_virtual_time);
 
@@ -513,8 +512,7 @@ fn test_sleep_deterministic_completion() {
         let poll = s.poll_with_time(deadline);
         assert!(
             poll.is_ready(),
-            "seed {}: sleep completes at exact deadline",
-            seed
+            "seed {seed}: sleep completes at exact deadline"
         );
     }
 

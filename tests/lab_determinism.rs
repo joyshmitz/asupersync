@@ -302,7 +302,6 @@ fn run_with_time_advancement(seed: u64) -> Vec<(u64, String)> {
             .state
             .create_task(region, Budget::INFINITE, async move {
                 yield_now().await;
-                let _time = asupersync::types::Time::ZERO; // Would use Cx::current().now() in real code
                 events_clone
                     .lock()
                     .unwrap()

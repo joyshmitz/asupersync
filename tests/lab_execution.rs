@@ -144,7 +144,7 @@ fn test_parallel_lab_completes_without_loss() {
         "> 0",
         steps
     );
-    for (_idx, count) in completions.iter().enumerate() {
+    for count in completions.iter() {
         let value = count.load(Ordering::SeqCst);
         assert_with_log!(value == 1, "task completed exactly once", 1usize, value);
     }
@@ -342,6 +342,7 @@ fn test_deadline_monitor_warns_on_approaching_deadline() {
         WarningReason::ApproachingDeadline,
         recorded[0].reason
     );
+    drop(recorded);
     test_complete!("test_deadline_monitor_warns_on_approaching_deadline");
 }
 
@@ -392,6 +393,7 @@ fn test_deadline_monitor_warns_at_threshold_boundary() {
         WarningReason::ApproachingDeadline,
         recorded[0].reason
     );
+    drop(recorded);
     test_complete!("test_deadline_monitor_warns_at_threshold_boundary");
 }
 
@@ -442,6 +444,7 @@ fn test_deadline_monitor_warns_on_no_progress() {
         WarningReason::NoProgress,
         recorded[0].reason
     );
+    drop(recorded);
     test_complete!("test_deadline_monitor_warns_on_no_progress");
 }
 
@@ -495,6 +498,7 @@ fn test_deadline_monitor_includes_checkpoint_message() {
         Some("checkpoint message"),
         recorded[0].last_checkpoint_message.as_deref()
     );
+    drop(recorded);
     test_complete!("test_deadline_monitor_includes_checkpoint_message");
 }
 

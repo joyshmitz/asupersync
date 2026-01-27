@@ -35,6 +35,7 @@ fn init_test(test_name: &str) {
 }
 
 const NET_UDS_DATA_SIZE: usize = 1024 * 1024; // 1 MB
+#[allow(dead_code)]
 const NET_UDS_NUM_CLIENTS: usize = 5;
 
 /// Create a unique socket path in a temp directory.

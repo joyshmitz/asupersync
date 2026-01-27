@@ -164,7 +164,7 @@ fn e2e_sync_002_mutex_cancel_during_wait() {
     let cx_holder = Cx::for_testing();
 
     // Hold the lock
-    let _guard = futures_lite::future::block_on(mutex.lock(&cx_holder)).unwrap();
+    let guard = futures_lite::future::block_on(mutex.lock(&cx_holder)).unwrap();
 
     // Try to acquire with a cancelled context
     let cx_waiter = Cx::for_testing();
@@ -182,7 +182,7 @@ fn e2e_sync_002_mutex_cancel_during_wait() {
     );
 
     // Mutex should still be usable after cancellation
-    drop(_guard);
+    drop(guard);
     let result2 = mutex.try_lock();
     let is_ok = result2.is_ok();
     assert_with_log!(is_ok, "mutex should be usable after cancel", true, is_ok);
