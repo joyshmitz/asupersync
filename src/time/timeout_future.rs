@@ -255,8 +255,10 @@ mod tests {
     use super::*;
     use crate::test_utils::init_test_logging;
     use std::future::{pending, ready};
+    use std::future::Future;
+    use std::pin::Pin;
     use std::sync::atomic::{AtomicU64, Ordering};
-    use std::task::Waker;
+    use std::task::{Context, Poll, Waker};
 
     // =========================================================================
     // Construction Tests
@@ -266,6 +268,28 @@ mod tests {
         init_test_logging();
         crate::test_phase!(name);
     }
+
+    static CURRENT_TIME: AtomicU64 = AtomicU64::new(0);
+
+    struct CountingFuture {
+        count: u32,
+        ready_at: u32,
+    }
+
+    impl Future for CountingFuture {
+        type Output = &'static str;
+
+        fn poll(mut self: Pin<&mut Self>, _cx: &mut Context<'_>) -> Poll<Self::Output> {
+            self.count += 1;
+            if self.count >= self.ready_at {
+                Poll::Ready("done")
+            } else {
+                Poll::Pending
+            }
+        }
+    }
+
+    impl Unpin for CountingFuture {}
 
     #[test]
     fn new_creates_timeout() {
@@ -551,7 +575,6 @@ mod tests {
     fn simulated_timeout_scenario() {
         init_test("simulated_timeout_scenario");
         // Simulate a scenario where we poll multiple times as time advances
-        static CURRENT_TIME: AtomicU64 = AtomicU64::new(0);
 
         let mut t = TimeoutFuture::new(pending::<i32>(), Time::from_secs(5));
         let waker = noop_waker();
@@ -587,26 +610,6 @@ mod tests {
     fn simulated_success_scenario() {
         init_test("simulated_success_scenario");
         // Future that completes on the 3rd poll
-        struct CountingFuture {
-            count: u32,
-            ready_at: u32,
-        }
-
-        impl Future for CountingFuture {
-            type Output = &'static str;
-
-            fn poll(mut self: Pin<&mut Self>, _cx: &mut Context<'_>) -> Poll<Self::Output> {
-                self.count += 1;
-                if self.count >= self.ready_at {
-                    Poll::Ready("done")
-                } else {
-                    Poll::Pending
-                }
-            }
-        }
-
-        impl Unpin for CountingFuture {}
-
         let future = CountingFuture {
             count: 0,
             ready_at: 3,

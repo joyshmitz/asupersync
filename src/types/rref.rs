@@ -237,7 +237,6 @@ mod tests {
         assert_eq!(rref.region_id(), rref2.region_id());
 
         // Clone is implied by Copy, assert the trait bound explicitly.
-        fn assert_clone<T: Clone>() {}
         assert_clone::<RRef<u32>>();
     }
 
@@ -316,6 +315,7 @@ mod tests {
     }
 
     // Compile-time test for Send/Sync bounds
+    fn assert_clone<T: Clone>() {}
     fn assert_send<T: Send>() {}
     fn assert_sync<T: Sync>() {}
 
