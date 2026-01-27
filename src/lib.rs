@@ -36,6 +36,7 @@
 //! - [`net`]: Async networking primitives (Phase 0: synchronous wrappers)
 //! - [`bytes`]: Zero-copy buffer types (Bytes, BytesMut, Buf, BufMut)
 //! - [`tracing_compat`]: Optional tracing integration (requires `tracing-integration` feature)
+//! - [`plan`]: Plan DAG IR for join/race/timeout rewrites
 
 // Default to deny for unsafe code - specific modules (like epoll reactor) can use #[allow(unsafe_code)]
 // when they need to interface with FFI or low-level system APIs
@@ -72,6 +73,7 @@ pub mod io;
 pub mod lab;
 pub mod net;
 pub mod observability;
+pub mod plan;
 #[cfg(unix)]
 pub mod process;
 pub mod record;
