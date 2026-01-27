@@ -15,11 +15,11 @@ fn test_epoch_barrier_overflow_race() {
     test_phase!("test_epoch_barrier_overflow_race");
     test_section!("setup");
     // 10 expected, but 20 arrive
-    let expected = 10;
-    let actual = 20;
+    let expected = 10_usize;
+    let actual = 20_usize;
     let barrier = Arc::new(EpochBarrier::new(EpochId(1), expected, Time::ZERO));
 
-    let start_gate = Arc::new(Barrier::new(actual as usize));
+    let start_gate = Arc::new(Barrier::new(actual));
 
     let mut handles = Vec::new();
 
@@ -35,10 +35,8 @@ fn test_epoch_barrier_overflow_race() {
             // arrive() checks is_triggered() at the start!
 
             // If checking is_triggered() is racey (read lock), multiple might pass it.
-            match b.arrive(&id, Time::ZERO) {
-                Ok(res) => res.is_some(),
-                Err(_) => false, // Already triggered error counts as "did not trigger"
-            }
+            b.arrive(&id, Time::ZERO)
+                .map_or(false, |res| res.is_some())
         }));
     }
 

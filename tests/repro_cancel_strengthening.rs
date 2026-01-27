@@ -40,15 +40,18 @@ fn repro_cancel_strengthening_bug() {
 
     // Verify inner has loose budget
     test_section!("verify_loose_budget");
-    {
+    let loose_quota = {
         let guard = inner.read().unwrap();
-        assert_with_log!(
-            guard.budget.poll_quota == 1000,
-            "cx inner should start with loose budget",
-            1000,
-            guard.budget.poll_quota
-        );
-    }
+        let quota = guard.budget.poll_quota;
+        drop(guard);
+        quota
+    };
+    assert_with_log!(
+        loose_quota == 1000,
+        "cx inner should start with loose budget",
+        1000,
+        loose_quota
+    );
 
     // 4. Request stronger cancel (Shutdown) with tight budget
     test_section!("request_tight_cancel");
@@ -67,15 +70,18 @@ fn repro_cancel_strengthening_bug() {
 
     // 6. Verify inner has tight budget (The Bug)
     test_section!("verify_inner_budget");
-    {
+    let tight_quota = {
         let guard = inner.read().unwrap();
-        // This assertion fails if the bug exists
-        assert_with_log!(
-            guard.budget.poll_quota == 10,
-            "cx inner should have tight budget but likely has 1000",
-            10,
-            guard.budget.poll_quota
-        );
-    }
+        let quota = guard.budget.poll_quota;
+        drop(guard);
+        quota
+    };
+    // This assertion fails if the bug exists
+    assert_with_log!(
+        tight_quota == 10,
+        "cx inner should have tight budget but likely has 1000",
+        10,
+        tight_quota
+    );
     test_complete!("repro_cancel_strengthening_bug");
 }

@@ -394,7 +394,7 @@ fn run_channel_conformance_tests() {
             message = %message,
             "conformance test result"
         );
-        assert!(result.passed, "Test {} failed: {}", test.meta.name, message)
+        assert!(result.passed, "Test {} failed: {}", test.meta.name, message);
     }
     test_complete!("run_channel_conformance_tests");
 }

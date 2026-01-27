@@ -529,7 +529,7 @@ fn e2e_obligation_abort_on_cancellation() {
     let reason = CancelReason::timeout();
     suite
         .cancellation_protocol
-        .on_region_cancel(root, reason.clone(), t(15));
+        .on_region_cancel(root, reason, t(15));
 
     // Obligation is aborted (not leaked) due to cancellation
     suite

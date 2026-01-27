@@ -12,6 +12,14 @@ use std::sync::Arc;
 use std::task::Context;
 use std::time::Duration;
 
+struct NotifyWaker(Arc<std::sync::atomic::AtomicBool>);
+
+impl std::task::Wake for NotifyWaker {
+    fn wake(self: Arc<Self>) {
+        self.0.store(true, std::sync::atomic::Ordering::SeqCst);
+    }
+}
+
 #[test]
 fn sleep_spawns_thread_and_wakes() {
     init_test_logging();
@@ -24,13 +32,6 @@ fn sleep_spawns_thread_and_wakes() {
     let duration = Duration::from_millis(200);
     // Use Sleep::after(Time::ZERO, duration) effectively creates a sleep starting "now".
     let mut s = Sleep::after(Time::ZERO, duration);
-
-    struct NotifyWaker(Arc<std::sync::atomic::AtomicBool>);
-    impl std::task::Wake for NotifyWaker {
-        fn wake(self: Arc<Self>) {
-            self.0.store(true, std::sync::atomic::Ordering::SeqCst);
-        }
-    }
 
     let flag = Arc::new(std::sync::atomic::AtomicBool::new(false));
     let waker = std::task::Waker::from(Arc::new(NotifyWaker(flag.clone())));
@@ -55,7 +56,7 @@ fn sleep_spawns_thread_and_wakes() {
         assert!(
             wait_start.elapsed().as_secs() <= 5,
             "Timed out waiting for waker"
-        )
+        );
     }
 
     // Verify delay

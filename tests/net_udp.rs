@@ -59,11 +59,7 @@ fn net_udp_001_basic_send_recv() {
         Ok::<_, io::Error>(())
     });
 
-    assert!(
-        result.is_ok(),
-        "basic send/recv should succeed: {:?}",
-        result
-    );
+    assert!(result.is_ok(), "basic send/recv should succeed: {result:?}");
     test_complete!("net_udp_001_basic_send_recv");
 }
 
@@ -115,11 +111,7 @@ fn net_udp_002_connected_mode() {
         Ok::<_, io::Error>(())
     });
 
-    assert!(
-        result.is_ok(),
-        "connected mode should succeed: {:?}",
-        result
-    );
+    assert!(result.is_ok(), "connected mode should succeed: {result:?}");
     test_complete!("net_udp_002_connected_mode");
 }
 
@@ -128,9 +120,8 @@ fn net_udp_002_connected_mode() {
 /// Verifies that multiple datagrams can be sent and received.
 #[test]
 fn net_udp_003_multiple_datagrams() {
-    init_test("net_udp_003_multiple_datagrams");
-
     const NUM_DATAGRAMS: usize = 10;
+    init_test("net_udp_003_multiple_datagrams");
 
     let result = block_on(async {
         let mut server = UdpSocket::bind("127.0.0.1:0").await?;
@@ -140,7 +131,7 @@ fn net_udp_003_multiple_datagrams() {
 
         // Send multiple datagrams
         for i in 0..NUM_DATAGRAMS {
-            let msg = format!("datagram {}", i);
+            let msg = format!("datagram {i}");
             let sent = client.send_to(msg.as_bytes(), server_addr).await?;
             assert_eq!(sent, msg.len());
             tracing::debug!(i, "sent datagram");
@@ -163,7 +154,7 @@ fn net_udp_003_multiple_datagrams() {
                     tracing::warn!(?e, "recv error");
                     break;
                 }
-                Err(_) => {
+                Err(()) => {
                     tracing::debug!("timeout waiting for datagram");
                     break;
                 }
@@ -178,11 +169,7 @@ fn net_udp_003_multiple_datagrams() {
         Ok::<_, io::Error>(())
     });
 
-    assert!(
-        result.is_ok(),
-        "multiple datagrams test should complete: {:?}",
-        result
-    );
+    assert!(result.is_ok(), "multiple datagrams test should complete: {result:?}");
     test_complete!("net_udp_003_multiple_datagrams");
 }
 
@@ -244,11 +231,7 @@ fn net_udp_004_local_addr() {
         Ok::<_, io::Error>(())
     });
 
-    assert!(
-        result.is_ok(),
-        "local addr test should complete: {:?}",
-        result
-    );
+    assert!(result.is_ok(), "local addr test should complete: {result:?}");
     test_complete!("net_udp_004_local_addr");
 }
 
@@ -257,10 +240,9 @@ fn net_udp_004_local_addr() {
 /// Verifies that larger datagrams (within typical MTU) work correctly.
 #[test]
 fn net_udp_005_large_datagram() {
-    init_test("net_udp_005_large_datagram");
-
     // Use a size that's within typical MTU (1500 bytes Ethernet, ~1472 for UDP)
     const DATAGRAM_SIZE: usize = 1400;
+    init_test("net_udp_005_large_datagram");
 
     let result = block_on(async {
         let mut server = UdpSocket::bind("127.0.0.1:0").await?;
@@ -289,8 +271,7 @@ fn net_udp_005_large_datagram() {
 
     assert!(
         result.is_ok(),
-        "large datagram test should complete: {:?}",
-        result
+        "large datagram test should complete: {result:?}"
     );
     test_complete!("net_udp_005_large_datagram");
 }
@@ -337,8 +318,7 @@ fn net_udp_006_bidirectional() {
 
     assert!(
         result.is_ok(),
-        "bidirectional test should complete: {:?}",
-        result
+        "bidirectional test should complete: {result:?}"
     );
     test_complete!("net_udp_006_bidirectional");
 }

@@ -316,7 +316,8 @@ impl MockConnection {
     }
 
     /// Simulate a query.
-    pub async fn query(&self, _sql: &str) -> Result<(), MockError> {
+    #[allow(clippy::unnecessary_wraps)]
+    pub fn query(&self, _sql: &str) -> Result<(), MockError> {
         self.query_count
             .fetch_add(1, std::sync::atomic::Ordering::SeqCst);
         Ok(())
@@ -347,7 +348,7 @@ pub fn record_failure<T: serde::Serialize>(
     input: &T,
     regression_dir: Option<&std::path::Path>,
 ) -> std::io::Result<std::path::PathBuf> {
-    let dir = regression_dir.unwrap_or(std::path::Path::new("tests/regressions"));
+    let dir = regression_dir.unwrap_or_else(|| std::path::Path::new("tests/regressions"));
 
     // Ensure directory exists
     std::fs::create_dir_all(dir)?;
@@ -390,7 +391,7 @@ pub fn find_regressions(
     test_name: &str,
     regression_dir: Option<&std::path::Path>,
 ) -> std::io::Result<Vec<std::path::PathBuf>> {
-    let dir = regression_dir.unwrap_or(std::path::Path::new("tests/regressions"));
+    let dir = regression_dir.unwrap_or_else(|| std::path::Path::new("tests/regressions"));
 
     if !dir.exists() {
         return Ok(Vec::new());
@@ -405,7 +406,11 @@ pub fn find_regressions(
 
         if path.is_file() {
             if let Some(name) = path.file_name().and_then(|n| n.to_str()) {
-                if name.starts_with(&prefix) && name.ends_with(".json") {
+                if name.starts_with(&prefix)
+                    && path
+                        .extension()
+                        .is_some_and(|ext| ext.eq_ignore_ascii_case("json"))
+                {
                     files.push(path);
                 }
             }

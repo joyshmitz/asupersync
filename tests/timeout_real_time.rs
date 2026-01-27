@@ -12,6 +12,14 @@ use std::sync::Arc;
 use std::task::{Context, Waker};
 use std::time::Duration;
 
+struct NotifyWaker(Arc<std::sync::atomic::AtomicBool>);
+
+impl std::task::Wake for NotifyWaker {
+    fn wake(self: Arc<Self>) {
+        self.0.store(true, std::sync::atomic::Ordering::SeqCst);
+    }
+}
+
 #[test]
 fn timeout_wakes_up_pending_future() {
     init_test_logging();
@@ -23,13 +31,6 @@ fn timeout_wakes_up_pending_future() {
     // Use logical time 0 start (will use wall clock internally via Sleep fix)
     let duration = Duration::from_millis(200);
     let mut t = timeout(Time::ZERO, duration, std::future::pending::<()>());
-
-    struct NotifyWaker(Arc<std::sync::atomic::AtomicBool>);
-    impl std::task::Wake for NotifyWaker {
-        fn wake(self: Arc<Self>) {
-            self.0.store(true, std::sync::atomic::Ordering::SeqCst);
-        }
-    }
 
     let flag = Arc::new(std::sync::atomic::AtomicBool::new(false));
     let waker = Waker::from(Arc::new(NotifyWaker(flag.clone())));
@@ -56,7 +57,7 @@ fn timeout_wakes_up_pending_future() {
         assert!(
             wait_start.elapsed().as_secs() <= 5,
             "Timeout future failed to wake up within 5 seconds (expected ~200ms)"
-        )
+        );
     }
 
     // Poll again: should be Ready(Err(Elapsed))

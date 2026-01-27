@@ -263,8 +263,8 @@ fn io_e2e_split_read_write() {
     let write_ok = matches!(write_poll, Poll::Ready(Ok(5)));
     assert_with_log!(write_ok, "write half poll", true, write_ok);
 
-    drop(read_half);
-    drop(write_half);
+    let _ = read_half;
+    let _ = write_half;
 
     let inner = wrapper.get_ref();
     assert_with_log!(
