@@ -15,7 +15,7 @@ fn test_epoch_barrier_overflow_race() {
     test_phase!("test_epoch_barrier_overflow_race");
     test_section!("setup");
     // 10 expected, but 20 arrive
-    let expected = 10_usize;
+    let expected = 10_u32;
     let actual = 20_usize;
     let barrier = Arc::new(EpochBarrier::new(EpochId(1), expected, Time::ZERO));
 
