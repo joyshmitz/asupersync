@@ -666,7 +666,7 @@ fn e2e_stress_many_tasks_no_leaks() {
     let mut suite = OracleSuite::new();
 
     let root = region(0);
-    let num_tasks = 100;
+    let num_tasks: u32 = 100;
 
     // Create root region
     suite.region_tree.on_region_create(root, None, t(0));
@@ -675,7 +675,7 @@ fn e2e_stress_many_tasks_no_leaks() {
     // Spawn many tasks
     for i in 1..=num_tasks {
         let worker = task(i);
-        let spawn_time = t((i * 10) as u64);
+        let spawn_time = t(u64::from(i * 10));
         suite.task_leak.on_spawn(worker, root, spawn_time);
         suite.quiescence.on_spawn(worker, root);
     }
@@ -683,7 +683,7 @@ fn e2e_stress_many_tasks_no_leaks() {
     // All tasks complete
     for i in 1..=num_tasks {
         let worker = task(i);
-        let complete_time = t((1000 + i * 10) as u64);
+        let complete_time = t(u64::from(1000 + i * 10));
         suite.task_leak.on_complete(worker, complete_time);
         suite.quiescence.on_task_complete(worker);
     }
@@ -713,8 +713,8 @@ fn e2e_stress_nested_regions_multiple_children() {
     let mut suite = OracleSuite::new();
 
     let root = region(0);
-    let num_children = 10;
-    let tasks_per_child = 5;
+    let num_children: u32 = 10;
+    let tasks_per_child: u32 = 5;
 
     // Create root region
     suite.region_tree.on_region_create(root, None, t(0));
@@ -723,7 +723,7 @@ fn e2e_stress_nested_regions_multiple_children() {
     // Create multiple child regions, each with multiple tasks
     for child_idx in 1..=num_children {
         let child = region(child_idx);
-        let child_create_time = t((child_idx * 100) as u64);
+        let child_create_time = t(u64::from(child_idx * 100));
 
         suite
             .region_tree
@@ -732,9 +732,9 @@ fn e2e_stress_nested_regions_multiple_children() {
 
         // Spawn tasks in this child region
         for task_idx in 1..=tasks_per_child {
-            let task_id = (child_idx * 100 + task_idx) as u32;
+            let task_id = child_idx * 100 + task_idx;
             let worker = task(task_id);
-            let spawn_time = t((child_idx * 100 + task_idx * 10) as u64);
+            let spawn_time = t(u64::from(child_idx * 100 + task_idx * 10));
 
             suite.task_leak.on_spawn(worker, child, spawn_time);
             suite.quiescence.on_spawn(worker, child);
@@ -742,16 +742,16 @@ fn e2e_stress_nested_regions_multiple_children() {
 
         // All tasks in this child complete
         for task_idx in 1..=tasks_per_child {
-            let task_id = (child_idx * 100 + task_idx) as u32;
+            let task_id = child_idx * 100 + task_idx;
             let worker = task(task_id);
-            let complete_time = t((5000 + child_idx * 100 + task_idx * 10) as u64);
+            let complete_time = t(u64::from(5000 + child_idx * 100 + task_idx * 10));
 
             suite.task_leak.on_complete(worker, complete_time);
             suite.quiescence.on_task_complete(worker);
         }
 
         // Child region closes
-        let child_close_time = t((10000 + child_idx * 100) as u64);
+        let child_close_time = t(u64::from(10000 + child_idx * 100));
         suite.quiescence.on_region_close(child, child_close_time);
         suite.task_leak.on_region_close(child, child_close_time);
     }
