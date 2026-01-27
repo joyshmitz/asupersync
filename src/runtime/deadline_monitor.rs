@@ -318,12 +318,15 @@ mod tests {
 
         monitor.check(Time::from_secs(90), std::iter::once(&task));
 
-        let recorded = warnings.lock().unwrap();
+        let recorded = {
+            let recorded = warnings.lock().unwrap();
+            recorded.clone()
+        };
         crate::assert_with_log!(
             recorded.as_slice() == [WarningReason::ApproachingDeadline],
             "approaching deadline warned",
             vec![WarningReason::ApproachingDeadline],
-            recorded.clone()
+            recorded
         );
         crate::test_complete!("warns_on_approaching_deadline");
     }
@@ -357,12 +360,15 @@ mod tests {
 
         monitor.check(Time::from_secs(100), std::iter::once(&task));
 
-        let recorded = warnings.lock().unwrap();
+        let recorded = {
+            let recorded = warnings.lock().unwrap();
+            recorded.clone()
+        };
         crate::assert_with_log!(
             recorded.as_slice() == [WarningReason::NoProgress],
             "no progress warned",
             vec![WarningReason::NoProgress],
-            recorded.clone()
+            recorded
         );
         crate::test_complete!("warns_on_no_progress");
     }
@@ -396,8 +402,8 @@ mod tests {
         monitor.check(Time::from_secs(9), std::iter::once(&task));
         monitor.check(Time::from_secs(9), std::iter::once(&task));
 
-        let recorded = warnings.lock().unwrap();
-        crate::assert_with_log!(recorded.len() == 1, "warned once", 1usize, recorded.len());
+        let count = warnings.lock().unwrap().len();
+        crate::assert_with_log!(count == 1, "warned once", 1usize, count);
         crate::test_complete!("warns_only_once_per_task");
     }
 
@@ -430,13 +436,17 @@ mod tests {
 
         monitor.check(Time::from_secs(9), std::iter::once(&task));
 
-        let recorded = warnings.lock().unwrap();
+        let recorded = {
+            let recorded = warnings.lock().unwrap();
+            recorded.clone()
+        };
         crate::assert_with_log!(
             recorded.as_slice() == [WarningReason::ApproachingDeadlineNoProgress],
             "warned for both conditions",
             vec![WarningReason::ApproachingDeadlineNoProgress],
-            recorded.clone()
+            recorded
         );
+        drop(recorded);
         crate::test_complete!("warns_on_both_conditions");
     }
 
@@ -468,8 +478,7 @@ mod tests {
 
         monitor.check(Time::from_secs(10), std::iter::once(&task));
 
-        let recorded = warnings.lock().unwrap();
-        let empty = recorded.is_empty();
+        let empty = warnings.lock().unwrap().is_empty();
         crate::assert_with_log!(empty, "no warnings", true, empty);
         crate::test_complete!("no_warning_with_recent_checkpoint");
     }
@@ -502,8 +511,12 @@ mod tests {
 
         monitor.check(Time::from_secs(10), std::iter::once(&task));
 
-        let recorded = warnings.lock().unwrap();
-        let warning = recorded.first().cloned().expect("expected warning");
+        let warning = warnings
+            .lock()
+            .unwrap()
+            .first()
+            .cloned()
+            .expect("expected warning");
         crate::assert_with_log!(
             warning.reason == WarningReason::NoProgress,
             "reason",
