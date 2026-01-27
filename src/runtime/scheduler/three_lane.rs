@@ -400,10 +400,10 @@ mod tests {
         // Worker 1 should only be able to steal ready work
         let mut workers = scheduler.take_workers().into_iter();
         let _ = workers.next().unwrap(); // Skip worker 0
-        let mut worker1 = workers.next().unwrap();
+        let mut thief_worker = workers.next().unwrap();
 
         // Stealing should only get ready tasks
-        let stolen = worker1.try_steal();
+        let stolen = thief_worker.try_steal();
         assert!(stolen.is_some());
 
         // The stolen task should be from ready lane (2 or 3)

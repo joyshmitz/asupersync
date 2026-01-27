@@ -5,10 +5,12 @@ use crate::runtime::scheduler::local_queue::{LocalQueue, Stealer};
 use crate::runtime::scheduler::stealing;
 use crate::runtime::RuntimeState;
 use crate::tracing_compat::trace;
+use crate::types::Outcome;
 use crate::types::TaskId;
 use crate::util::DetRng;
 use std::sync::atomic::{AtomicBool, Ordering};
 use std::sync::{Arc, Condvar, Mutex};
+use std::task::{Context, Poll, Wake, Waker};
 use std::time::Duration;
 
 /// Identifier for a scheduler worker.
@@ -83,15 +85,82 @@ impl Worker {
         }
     }
 
-    #[allow(clippy::unused_self)]
-    fn execute(&self, _task: TaskId) {
-        trace!(task_id = ?_task, worker_id = self.id, "executing task (placeholder)");
-        // Placeholder for execution logic.
-        // In real implementation, this would:
-        // 1. Get stored future from RuntimeState
-        // 2. Create Waker pointing to this Scheduler/Worker
-        // 3. Poll future
-        // 4. Handle Ready/Pending
+    fn execute(&self, task_id: TaskId) {
+        trace!(task_id = ?task_id, worker_id = self.id, "executing task");
+
+        let (mut stored, task_cx, wake_state) = {
+            let mut state = self.state.lock().expect("runtime state lock poisoned");
+            let stored = match state.remove_stored_future(task_id) {
+                Some(stored) => stored,
+                None => return,
+            };
+            let Some(record) = state.tasks.get_mut(task_id.arena_index()) else {
+                return;
+            };
+            record.start_running();
+            record.wake_state.clear();
+            (stored, record.cx.clone(), Arc::clone(&record.wake_state))
+        };
+
+        let waker = Waker::from(Arc::new(WorkStealingWaker {
+            task_id,
+            wake_state,
+            global: Arc::clone(&self.global),
+            parker: self.parker.clone(),
+        }));
+        let mut cx = Context::from_waker(&waker);
+        let _cx_guard = crate::cx::Cx::set_current(task_cx);
+
+        match stored.poll(&mut cx) {
+            Poll::Ready(()) => {
+                let mut state = self.state.lock().expect("runtime state lock poisoned");
+                if let Some(record) = state.tasks.get_mut(task_id.arena_index()) {
+                    if !record.state.is_terminal() {
+                        record.complete(Outcome::Ok(()));
+                    }
+                }
+
+                let waiters = state.task_completed(task_id);
+                for waiter in waiters {
+                    state
+                        .tasks
+                        .get(waiter.arena_index())
+                        .map(|record| record.wake_state.notify())
+                        .unwrap_or(true)
+                        .then(|| self.global.push(waiter));
+                }
+            }
+            Poll::Pending => {
+                let mut state = self.state.lock().expect("runtime state lock poisoned");
+                state.store_spawned_task(task_id, stored);
+            }
+        }
+    }
+}
+
+struct WorkStealingWaker {
+    task_id: TaskId,
+    wake_state: Arc<crate::record::task::TaskWakeState>,
+    global: Arc<GlobalQueue>,
+    parker: Parker,
+}
+
+impl WorkStealingWaker {
+    fn schedule(&self) {
+        if self.wake_state.notify() {
+            self.global.push(self.task_id);
+            self.parker.unpark();
+        }
+    }
+}
+
+impl Wake for WorkStealingWaker {
+    fn wake(self: Arc<Self>) {
+        self.schedule();
+    }
+
+    fn wake_by_ref(self: &Arc<Self>) {
+        self.schedule();
     }
 }
 
