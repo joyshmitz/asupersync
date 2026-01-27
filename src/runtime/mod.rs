@@ -30,6 +30,7 @@ pub mod waker;
 /// Yield points for cooperative multitasking.
 pub mod yield_now;
 
+pub use crate::record::RegionLimits;
 pub use builder::{DeadlineMonitoringBuilder, JoinHandle, Runtime, RuntimeBuilder, RuntimeHandle};
 pub use config::{BlockingPoolConfig, RuntimeConfig};
 pub use deadline_monitor::{

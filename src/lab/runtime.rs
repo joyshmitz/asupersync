@@ -1365,7 +1365,8 @@ mod tests {
         runtime.advance_time_to(Time::from_nanos(10));
         let ob1 = runtime
             .state
-            .create_obligation(ObligationKind::SendPermit, task_id, root, None);
+            .create_obligation(ObligationKind::SendPermit, task_id, root, None)
+            .unwrap();
 
         runtime.advance_time_to(Time::from_nanos(25));
         runtime.state.commit_obligation(ob1).unwrap();
@@ -1373,7 +1374,8 @@ mod tests {
         runtime.advance_time_to(Time::from_nanos(30));
         let ob2 = runtime
             .state
-            .create_obligation(ObligationKind::Ack, task_id, root, None);
+            .create_obligation(ObligationKind::Ack, task_id, root, None)
+            .unwrap();
 
         runtime.advance_time_to(Time::from_nanos(50));
         runtime
@@ -1490,10 +1492,10 @@ mod tests {
         runtime.state.tasks.get_mut(task_idx).unwrap().id = task_id;
 
         runtime.advance_time_to(Time::from_nanos(100));
-        let obligation =
-            runtime
-                .state
-                .create_obligation(ObligationKind::Lease, task_id, root, None);
+        let obligation = runtime
+            .state
+            .create_obligation(ObligationKind::Lease, task_id, root, None)
+            .unwrap();
 
         runtime.advance_time_to(Time::from_nanos(140));
         runtime

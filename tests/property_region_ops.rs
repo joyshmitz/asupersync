@@ -771,7 +771,7 @@ impl TestHarness {
             parent.new_for_test_index(),
             parent.new_for_test_generation(),
         )) {
-            parent_record.add_child(child_id);
+            let _ = parent_record.add_child(child_id);
         }
 
         self.regions.push(child_id);

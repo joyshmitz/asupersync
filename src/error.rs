@@ -74,6 +74,8 @@ pub enum ErrorKind {
     RegionClosed,
     /// Task not owned by region.
     TaskNotOwned,
+    /// Region admission/backpressure limit reached.
+    AdmissionDenied,
 
     // === Encoding (RaptorQ) ===
     /// Invalid encoding parameters (symbol size, block count, etc.).
@@ -151,7 +153,9 @@ impl ErrorKind {
             }
             Self::ChannelClosed | Self::ChannelFull | Self::ChannelEmpty => ErrorCategory::Channel,
             Self::ObligationLeak | Self::ObligationAlreadyResolved => ErrorCategory::Obligation,
-            Self::RegionClosed | Self::TaskNotOwned => ErrorCategory::Region,
+            Self::RegionClosed | Self::TaskNotOwned | Self::AdmissionDenied => {
+                ErrorCategory::Region
+            }
             Self::InvalidEncodingParams
             | Self::DataTooLarge
             | Self::EncodingFailed
@@ -189,6 +193,7 @@ impl ErrorKind {
             // Transient errors - safe to retry
             Self::ChannelFull
             | Self::ChannelEmpty
+            | Self::AdmissionDenied
             | Self::ConnectionLost
             | Self::NodeUnavailable
             | Self::QuorumNotReached
@@ -249,9 +254,10 @@ impl ErrorKind {
             Self::ChannelFull | Self::ChannelEmpty => RecoveryAction::RetryImmediately,
 
             // Backoff retry - transient but may need time to clear
-            Self::ThresholdTimeout | Self::QuorumNotReached | Self::LeaseRenewalFailed => {
-                RecoveryAction::RetryWithBackoff(BackoffHint::DEFAULT)
-            }
+            Self::AdmissionDenied
+            | Self::ThresholdTimeout
+            | Self::QuorumNotReached
+            | Self::LeaseRenewalFailed => RecoveryAction::RetryWithBackoff(BackoffHint::DEFAULT),
             Self::NodeUnavailable => RecoveryAction::RetryWithBackoff(BackoffHint::AGGRESSIVE),
 
             // Reconnect - connection is likely broken

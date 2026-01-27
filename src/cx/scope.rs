@@ -99,7 +99,7 @@
 use crate::channel::oneshot;
 use crate::combinator::{Either, Select};
 use crate::cx::Cx;
-use crate::record::TaskRecord;
+use crate::record::{AdmissionError, TaskRecord};
 use crate::runtime::task_handle::{JoinError, TaskHandle};
 use crate::runtime::{RuntimeState, SpawnError, StoredTask};
 use crate::tracing_compat::{debug, debug_span};
@@ -779,10 +779,19 @@ impl<P: Policy> Scope<'_, P> {
 
         // Add task to the owning region
         if let Some(region) = state.regions.get(self.region.arena_index()) {
-            if !region.add_task(task_id) {
+            if let Err(err) = region.add_task(task_id) {
                 // Rollback task creation
                 state.tasks.remove(idx);
-                return Err(SpawnError::RegionClosed(self.region));
+                return Err(match err {
+                    AdmissionError::Closed => SpawnError::RegionClosed(self.region),
+                    AdmissionError::LimitReached { limit, live, .. } => {
+                        SpawnError::RegionAtCapacity {
+                            region: self.region,
+                            limit,
+                            live,
+                        }
+                    }
+                });
             }
         } else {
             // Rollback task creation

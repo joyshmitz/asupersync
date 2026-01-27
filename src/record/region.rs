@@ -95,6 +95,65 @@ impl RegionState {
     }
 }
 
+/// Admission limits for a region.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub struct RegionLimits {
+    /// Maximum number of live child regions.
+    pub max_children: Option<usize>,
+    /// Maximum number of live tasks in the region.
+    pub max_tasks: Option<usize>,
+    /// Maximum number of pending obligations in the region.
+    pub max_obligations: Option<usize>,
+}
+
+impl RegionLimits {
+    /// No admission limits.
+    pub const UNLIMITED: Self = Self {
+        max_children: None,
+        max_tasks: None,
+        max_obligations: None,
+    };
+
+    /// Returns an unlimited limits configuration.
+    #[must_use]
+    pub const fn unlimited() -> Self {
+        Self::UNLIMITED
+    }
+}
+
+impl Default for RegionLimits {
+    fn default() -> Self {
+        Self::UNLIMITED
+    }
+}
+
+/// The kind of admission that was denied.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum AdmissionKind {
+    /// Admission for child regions.
+    Child,
+    /// Admission for tasks.
+    Task,
+    /// Admission for obligations.
+    Obligation,
+}
+
+/// Admission control failure reasons.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum AdmissionError {
+    /// The region is closed or not accepting new work.
+    Closed,
+    /// A configured limit has been reached.
+    LimitReached {
+        /// The kind of admission that was denied.
+        kind: AdmissionKind,
+        /// The configured limit that was exceeded.
+        limit: usize,
+        /// The current live count at the time of admission.
+        live: usize,
+    },
+}
+
 /// Atomic region state wrapper for thread-safe state transitions.
 #[derive(Debug)]
 pub struct AtomicRegionState {
@@ -141,6 +200,8 @@ struct RegionInner {
     tasks: Vec<TaskId>,
     finalizers: FinalizerStack,
     cancel_reason: Option<CancelReason>,
+    limits: RegionLimits,
+    pending_obligations: usize,
     /// Region-owned heap for task allocations.
     /// Reclaimed when the region closes to quiescence.
     heap: RegionHeap,
@@ -213,6 +274,8 @@ impl RegionRecord {
                 tasks: Vec::new(),
                 finalizers: FinalizerStack::new(),
                 cancel_reason: None,
+                limits: RegionLimits::UNLIMITED,
+                pending_obligations: 0,
                 heap: RegionHeap::new(),
             }),
             span,
@@ -235,6 +298,26 @@ impl RegionRecord {
     #[must_use]
     pub fn budget(&self) -> Budget {
         self.inner.read().expect("lock poisoned").budget
+    }
+
+    /// Returns the current admission limits for this region.
+    #[must_use]
+    pub fn limits(&self) -> RegionLimits {
+        self.inner.read().expect("lock poisoned").limits
+    }
+
+    /// Updates the admission limits for this region.
+    pub fn set_limits(&self, limits: RegionLimits) {
+        self.inner.write().expect("lock poisoned").limits = limits;
+    }
+
+    /// Returns the number of pending obligations tracked for this region.
+    #[must_use]
+    pub fn pending_obligations(&self) -> usize {
+        self.inner
+            .read()
+            .expect("lock poisoned")
+            .pending_obligations
     }
 
     /// Returns the current cancel reason, if any.
@@ -278,24 +361,38 @@ impl RegionRecord {
 
     /// Adds a child region.
     ///
-    /// Returns `true` if the child was added, `false` if the region is not accepting work.
-    pub fn add_child(&self, child: RegionId) -> bool {
+    /// Returns `Ok(())` if the child was added or already present, or an
+    /// admission error if the region is closed or at capacity.
+    pub fn add_child(&self, child: RegionId) -> Result<(), AdmissionError> {
         // Optimistic check (atomic)
         if !self.state.load().can_accept_work() {
-            return false;
+            return Err(AdmissionError::Closed);
         }
 
         let mut inner = self.inner.write().expect("lock poisoned");
 
         // Double check under lock (though state is atomic, consistency matters)
         if !self.state.load().can_accept_work() {
-            return false;
+            return Err(AdmissionError::Closed);
         }
 
-        if !inner.children.contains(&child) {
-            inner.children.push(child);
+        if inner.children.contains(&child) {
+            return Ok(());
         }
-        true
+
+        if let Some(limit) = inner.limits.max_children {
+            if inner.children.len() >= limit {
+                return Err(AdmissionError::LimitReached {
+                    kind: AdmissionKind::Child,
+                    limit,
+                    live: inner.children.len(),
+                });
+            }
+        }
+
+        inner.children.push(child);
+        drop(inner);
+        Ok(())
     }
 
     /// Removes a child region.
@@ -306,30 +403,76 @@ impl RegionRecord {
 
     /// Adds a task to this region.
     ///
-    /// Returns `true` if the task was added, `false` if the region is not accepting work.
-    pub fn add_task(&self, task: TaskId) -> bool {
+    /// Returns `Ok(())` if the task was added or already present, or an
+    /// admission error if the region is closed or at capacity.
+    pub fn add_task(&self, task: TaskId) -> Result<(), AdmissionError> {
         // Optimistic check
         if !self.state.load().can_accept_work() {
-            return false;
+            return Err(AdmissionError::Closed);
         }
 
         let mut inner = self.inner.write().expect("lock poisoned");
 
         // Double check
         if !self.state.load().can_accept_work() {
-            return false;
+            return Err(AdmissionError::Closed);
         }
 
-        if !inner.tasks.contains(&task) {
-            inner.tasks.push(task);
+        if inner.tasks.contains(&task) {
+            return Ok(());
         }
-        true
+
+        if let Some(limit) = inner.limits.max_tasks {
+            if inner.tasks.len() >= limit {
+                return Err(AdmissionError::LimitReached {
+                    kind: AdmissionKind::Task,
+                    limit,
+                    live: inner.tasks.len(),
+                });
+            }
+        }
+
+        inner.tasks.push(task);
+        drop(inner);
+        Ok(())
     }
 
     /// Removes a task from this region.
     pub fn remove_task(&self, task: TaskId) {
         let mut inner = self.inner.write().expect("lock poisoned");
         inner.tasks.retain(|&t| t != task);
+    }
+
+    /// Reserves an obligation slot for this region.
+    pub fn try_reserve_obligation(&self) -> Result<(), AdmissionError> {
+        if !self.state.load().can_accept_work() {
+            return Err(AdmissionError::Closed);
+        }
+
+        let mut inner = self.inner.write().expect("lock poisoned");
+        if !self.state.load().can_accept_work() {
+            return Err(AdmissionError::Closed);
+        }
+
+        if let Some(limit) = inner.limits.max_obligations {
+            if inner.pending_obligations >= limit {
+                return Err(AdmissionError::LimitReached {
+                    kind: AdmissionKind::Obligation,
+                    limit,
+                    live: inner.pending_obligations,
+                });
+            }
+        }
+
+        inner.pending_obligations += 1;
+        drop(inner);
+        Ok(())
+    }
+
+    /// Marks an obligation slot as resolved for this region.
+    pub fn resolve_obligation(&self) {
+        let mut inner = self.inner.write().expect("lock poisoned");
+        inner.pending_obligations = inner.pending_obligations.saturating_sub(1);
     }
 
     /// Adds a finalizer to run when the region closes.
@@ -653,6 +796,77 @@ mod tests {
 
         assert!(region.complete_close());
         assert_eq!(region.state(), RegionState::Closed);
+    }
+
+    #[test]
+    fn region_task_limit_enforced() {
+        let region = RegionRecord::new(test_region_id(), None, Budget::default());
+        region.set_limits(RegionLimits {
+            max_tasks: Some(1),
+            ..RegionLimits::unlimited()
+        });
+
+        let task1 = TaskId::from_arena(ArenaIndex::new(1, 0));
+        let task2 = TaskId::from_arena(ArenaIndex::new(2, 0));
+
+        assert!(region.add_task(task1).is_ok());
+        let err = region.add_task(task2).expect_err("task limit enforced");
+        assert!(matches!(
+            err,
+            AdmissionError::LimitReached {
+                kind: AdmissionKind::Task,
+                limit: 1,
+                live: 1
+            }
+        ));
+    }
+
+    #[test]
+    fn region_child_limit_enforced() {
+        let region = RegionRecord::new(test_region_id(), None, Budget::default());
+        region.set_limits(RegionLimits {
+            max_children: Some(1),
+            ..RegionLimits::unlimited()
+        });
+
+        let child1 = RegionId::from_arena(ArenaIndex::new(1, 0));
+        let child2 = RegionId::from_arena(ArenaIndex::new(2, 0));
+
+        assert!(region.add_child(child1).is_ok());
+        let err = region.add_child(child2).expect_err("child limit enforced");
+        assert!(matches!(
+            err,
+            AdmissionError::LimitReached {
+                kind: AdmissionKind::Child,
+                limit: 1,
+                live: 1
+            }
+        ));
+    }
+
+    #[test]
+    fn region_obligation_limit_enforced() {
+        let region = RegionRecord::new(test_region_id(), None, Budget::default());
+        region.set_limits(RegionLimits {
+            max_obligations: Some(1),
+            ..RegionLimits::unlimited()
+        });
+
+        assert!(region.try_reserve_obligation().is_ok());
+        let err = region
+            .try_reserve_obligation()
+            .expect_err("obligation limit enforced");
+        assert!(matches!(
+            err,
+            AdmissionError::LimitReached {
+                kind: AdmissionKind::Obligation,
+                limit: 1,
+                live: 1
+            }
+        ));
+
+        region.resolve_obligation();
+        assert!(region.try_reserve_obligation().is_ok());
     }
 
     #[test]

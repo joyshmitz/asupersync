@@ -8,8 +8,9 @@
 
 use crate::error::{Error, ErrorKind};
 use crate::record::{
-    finalizer::Finalizer, region::RegionState, task::TaskState, ObligationAbortReason,
-    ObligationKind, ObligationRecord, ObligationState, RegionRecord, TaskRecord,
+    finalizer::Finalizer, region::RegionState, task::TaskState, AdmissionError,
+    ObligationAbortReason, ObligationKind, ObligationRecord, ObligationState, RegionLimits,
+    RegionRecord, TaskRecord,
 };
 use crate::runtime::io_driver::{IoDriver, IoDriverHandle};
 use crate::runtime::reactor::Reactor;
@@ -34,6 +35,15 @@ pub enum SpawnError {
     RegionNotFound(RegionId),
     /// The target region is closed or draining and cannot accept new tasks.
     RegionClosed(RegionId),
+    /// The target region has reached its admission limit.
+    RegionAtCapacity {
+        /// The region that rejected the spawn.
+        region: RegionId,
+        /// The configured admission limit.
+        limit: usize,
+        /// The number of live tasks at the time of rejection.
+        live: usize,
+    },
 }
 
 impl std::fmt::Display for SpawnError {
@@ -41,6 +51,14 @@ impl std::fmt::Display for SpawnError {
         match self {
             Self::RegionNotFound(id) => write!(f, "region not found: {id:?}"),
             Self::RegionClosed(id) => write!(f, "region closed: {id:?}"),
+            Self::RegionAtCapacity {
+                region,
+                limit,
+                live,
+            } => write!(
+                f,
+                "region admission limit reached: region={region:?} limit={limit} live={live}"
+            ),
         }
     }
 }
@@ -267,6 +285,25 @@ impl RuntimeState {
         id
     }
 
+    /// Updates admission limits for a region.
+    ///
+    /// Returns `false` if the region does not exist.
+    pub fn set_region_limits(&mut self, region: RegionId, limits: RegionLimits) -> bool {
+        let Some(record) = self.regions.get(region.arena_index()) else {
+            return false;
+        };
+        record.set_limits(limits);
+        true
+    }
+
+    /// Returns the current admission limits for a region.
+    #[must_use]
+    pub fn region_limits(&self, region: RegionId) -> Option<RegionLimits> {
+        self.regions
+            .get(region.arena_index())
+            .map(RegionRecord::limits)
+    }
+
     /// Creates a task and stores its future for polling.
     ///
     /// This is the core spawn primitive. It:
@@ -321,10 +358,19 @@ impl RuntimeState {
 
         // Add task to the region's task list
         if let Some(region_record) = self.regions.get(region.arena_index()) {
-            if !region_record.add_task(task_id) {
+            if let Err(err) = region_record.add_task(task_id) {
                 // Rollback task creation
                 self.tasks.remove(idx);
-                return Err(SpawnError::RegionClosed(region));
+                return Err(match err {
+                    AdmissionError::Closed => SpawnError::RegionClosed(region),
+                    AdmissionError::LimitReached { limit, live, .. } => {
+                        SpawnError::RegionAtCapacity {
+                            region,
+                            limit,
+                            live,
+                        }
+                    }
+                });
             }
         } else {
             // Rollback task creation
@@ -377,13 +423,32 @@ impl RuntimeState {
     /// Creates and registers an obligation for the given task and region.
     ///
     /// This records the obligation in the registry and emits a trace event.
+    /// Returns an error if the region is closed or admission limits are reached.
+    #[allow(clippy::result_large_err)]
     pub fn create_obligation(
         &mut self,
         kind: ObligationKind,
         holder: TaskId,
         region: RegionId,
         description: Option<String>,
-    ) -> ObligationId {
+    ) -> Result<ObligationId, Error> {
+        let Some(region_record) = self.regions.get(region.arena_index()) else {
+            return Err(Error::new(ErrorKind::RegionClosed).with_message("region not found"));
+        };
+
+        if let Err(err) = region_record.try_reserve_obligation() {
+            return Err(match err {
+                AdmissionError::Closed => {
+                    Error::new(ErrorKind::RegionClosed).with_message("region closed")
+                }
+                AdmissionError::LimitReached { limit, live, .. } => {
+                    Error::new(ErrorKind::RegionClosed).with_message(format!(
+                        "region {region:?} obligation limit {limit} reached (live {live})"
+                    ))
+                }
+            });
+        }
+
         let reserved_at = self.now;
         let idx = if let Some(desc) = description {
             self.obligations.insert(ObligationRecord::with_description(
@@ -434,7 +499,7 @@ impl RuntimeState {
             kind,
         ));
 
-        obligation_id
+        Ok(obligation_id)
     }
 
     /// Marks an obligation as committed and emits a trace event.
@@ -488,6 +553,10 @@ impl RuntimeState {
         self.trace.push(TraceEvent::obligation_commit(
             seq, self.now, id, holder, region, kind, duration,
         ));
+
+        if let Some(region_record) = self.regions.get(region.arena_index()) {
+            region_record.resolve_obligation();
+        }
 
         Ok(duration)
     }
@@ -550,6 +619,10 @@ impl RuntimeState {
             seq, self.now, id, holder, region, kind, duration, reason,
         ));
 
+        if let Some(region_record) = self.regions.get(region.arena_index()) {
+            region_record.resolve_obligation();
+        }
+
         Ok(duration)
     }
 
@@ -604,6 +677,10 @@ impl RuntimeState {
             duration_ns = duration,
             "obligation leaked"
         );
+
+        if let Some(region_record) = self.regions.get(region.arena_index()) {
+            region_record.resolve_obligation();
+        }
 
         Ok(duration)
     }
@@ -2036,7 +2113,7 @@ pub struct HeldObligationSnapshot {
 mod tests {
     use super::*;
     use crate::record::task::TaskState;
-    use crate::record::{ObligationKind, ObligationRecord};
+    use crate::record::{ObligationKind, ObligationRecord, RegionLimits};
     use crate::runtime::reactor::LabReactor;
     use crate::test_utils::init_test_logging;
     use crate::trace::event::TRACE_EVENT_SCHEMA_VERSION;
@@ -2072,7 +2149,7 @@ mod tests {
             .get_mut(region.arena_index())
             .expect("region missing")
             .add_task(id);
-        crate::assert_with_log!(added, "task added to region", true, added);
+        crate::assert_with_log!(added.is_ok(), "task added to region", true, added.is_ok());
         id
     }
 
@@ -2312,7 +2389,7 @@ mod tests {
             .get_mut(parent.arena_index())
             .expect("parent missing")
             .add_child(id);
-        crate::assert_with_log!(added, "child added to parent", true, added);
+        crate::assert_with_log!(added.is_ok(), "child added to parent", true, added.is_ok());
         id
     }
 
@@ -3083,6 +3160,27 @@ mod tests {
         let empty = region_record.task_ids().is_empty();
         crate::assert_with_log!(empty, "region tasks empty", true, empty);
         crate::test_complete!("task_completed_removes_task_from_region");
+    }
+
+    #[test]
+    fn spawn_rejected_when_task_limit_reached() {
+        init_test("spawn_rejected_when_task_limit_reached");
+        let mut state = RuntimeState::new();
+        let region = state.create_root_region(Budget::INFINITE);
+        let limits = RegionLimits {
+            max_tasks: Some(1),
+            ..RegionLimits::unlimited()
+        };
+        let set = state.set_region_limits(region, limits);
+        crate::assert_with_log!(set, "limits set", true, set);
+
+        let _ = state
+            .create_task(region, Budget::INFINITE, async { 1_u8 })
+            .expect("first task");
+        let result = state.create_task(region, Budget::INFINITE, async { 2_u8 });
+        let rejected = matches!(result, Err(SpawnError::RegionAtCapacity { .. }));
+        crate::assert_with_log!(rejected, "spawn rejected", true, rejected);
+        crate::test_complete!("spawn_rejected_when_task_limit_reached");
     }
 
     #[test]

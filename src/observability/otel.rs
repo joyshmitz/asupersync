@@ -928,6 +928,7 @@ impl MetricsProvider for OtelMetrics {
     }
 
     fn deadline_warning(&self, task_type: &str, reason: &'static str, remaining: Duration) {
+        let task_type = task_type.to_string();
         let labels = [
             KeyValue::new("task_type", task_type),
             KeyValue::new("reason", reason),
@@ -941,6 +942,7 @@ impl MetricsProvider for OtelMetrics {
     }
 
     fn deadline_violation(&self, task_type: &str, _over_by: Duration) {
+        let task_type = task_type.to_string();
         let labels = [KeyValue::new("task_type", task_type)];
         if let Some(filtered) =
             self.check_cardinality("asupersync.deadline.violations_total", &labels)
@@ -951,6 +953,7 @@ impl MetricsProvider for OtelMetrics {
 
     fn deadline_remaining(&self, task_type: &str, remaining: Duration) {
         if self.should_sample("asupersync.deadline.remaining_seconds") {
+            let task_type = task_type.to_string();
             let labels = [KeyValue::new("task_type", task_type)];
             if let Some(filtered) =
                 self.check_cardinality("asupersync.deadline.remaining_seconds", &labels)
@@ -963,6 +966,7 @@ impl MetricsProvider for OtelMetrics {
 
     fn checkpoint_interval(&self, task_type: &str, interval: Duration) {
         if self.should_sample("asupersync.checkpoint.interval_seconds") {
+            let task_type = task_type.to_string();
             let labels = [KeyValue::new("task_type", task_type)];
             if let Some(filtered) =
                 self.check_cardinality("asupersync.checkpoint.interval_seconds", &labels)
@@ -974,6 +978,7 @@ impl MetricsProvider for OtelMetrics {
     }
 
     fn task_stuck_detected(&self, task_type: &str) {
+        let task_type = task_type.to_string();
         let labels = [KeyValue::new("task_type", task_type)];
         if let Some(filtered) =
             self.check_cardinality("asupersync.task.stuck_detected_total", &labels)
@@ -1034,6 +1039,7 @@ mod tests {
     use super::*;
     use crate::runtime::RuntimeBuilder;
     use crate::test_utils::init_test_logging;
+    use opentelemetry::metrics::MeterProvider;
     use opentelemetry_sdk::metrics::{
         data::ResourceMetrics, InMemoryMetricExporter as OtelInMemoryExporter, PeriodicReader,
         SdkMeterProvider,
