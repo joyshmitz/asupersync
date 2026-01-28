@@ -1271,8 +1271,11 @@ impl RuntimeState {
             return false;
         }
 
-        // All obligations must be resolved (to be implemented with obligation tracking)
-        // For now, we assume obligations are resolved if we got to this point
+        // All obligations must be resolved
+        if region.pending_obligations() > 0 {
+            return false;
+        }
+
         true
     }
 }

@@ -260,15 +260,26 @@ impl LabRuntime {
             return;
         }
 
-        // 3. Prepare context
-        let priority = self
-            .state
-            .tasks
-            .get(task_id.arena_index())
-            .and_then(|t| t.cx_inner.as_ref())
-            .map_or(0, |inner| {
-                inner.read().expect("lock poisoned").budget.priority
-            });
+        // 3. Prepare context and enforce budget
+        let priority = if let Some(record) = self.state.tasks.get(task_id.arena_index()) {
+            if let Some(inner) = &record.cx_inner {
+                let mut guard = inner.write().expect("lock poisoned");
+
+                // Enforce poll quota
+                if guard.budget.consume_poll().is_none() {
+                    guard.cancel_requested = true;
+                    if guard.cancel_reason.is_none() {
+                        guard.cancel_reason = Some(crate::types::CancelReason::poll_quota());
+                    }
+                }
+
+                guard.budget.priority
+            } else {
+                0
+            }
+        } else {
+            0
+        };
 
         let waker = Waker::from(Arc::new(TaskWaker {
             task_id,

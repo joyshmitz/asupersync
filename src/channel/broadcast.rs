@@ -1,4 +1,4 @@
-//! Two-phase broadcast channel.
+//! Two-phase broadcast channel (Async).
 //!
 //! A multi-producer, multi-consumer channel where each message is sent to all
 //! active receivers. Useful for event buses, chat systems, and fan-out updates.
@@ -15,24 +15,13 @@
 //!
 //! - `reserve` is cancel-safe: if cancelled, no slot is consumed.
 //! - `recv` is cancel-safe: if cancelled, no message is consumed (cursor not advanced).
-//!
-//! # Example
-//!
-//! ```ignore
-//! use asupersync::channel::broadcast;
-//!
-//! let (tx, mut rx1) = broadcast::channel(16);
-//! let mut rx2 = tx.subscribe();
-//!
-//! tx.send(&cx, 10).expect("send failed");
-//!
-//! assert_eq!(rx1.recv(&cx).await?, 10);
-//! assert_eq!(rx2.recv(&cx).await?, 10);
-//! ```
 
 use crate::cx::Cx;
 use std::collections::VecDeque;
-use std::sync::{Arc, Condvar, Mutex};
+use std::future::Future;
+use std::pin::Pin;
+use std::sync::{Arc, Mutex};
+use std::task::{Context, Poll, Waker};
 
 /// Error returned when sending fails.
 #[derive(Debug, Clone, PartialEq, Eq)]
@@ -88,6 +77,8 @@ struct Shared<T> {
     receiver_count: usize,
     /// Number of active senders.
     sender_count: usize,
+    /// Waiting receivers.
+    wakers: Vec<Waker>,
 }
 
 #[derive(Debug)]
@@ -97,11 +88,9 @@ struct Slot<T> {
     index: u64,
 }
 
-/// Shared wrapper with condition variable.
+/// Shared wrapper.
 struct Channel<T> {
     inner: Mutex<Shared<T>>,
-    /// Notifies receivers when new messages arrive.
-    notify: Condvar,
 }
 
 impl<T: std::fmt::Debug> std::fmt::Debug for Channel<T> {
@@ -126,10 +115,10 @@ pub fn channel<T: Clone>(capacity: usize) -> (Sender<T>, Receiver<T>) {
             buffer: VecDeque::with_capacity(capacity),
             capacity,
             total_sent: 0,
-            receiver_count: 1, // Start with one receiver
-            sender_count: 1,   // Start with one sender
+            receiver_count: 1,
+            sender_count: 1,
+            wakers: Vec::new(),
         }),
-        notify: Condvar::new(),
     });
 
     let sender = Sender {
@@ -171,14 +160,6 @@ impl<T: Clone> Sender<T> {
             }
         }
 
-        // We don't really "reserve" space in the ring buffer in the same way
-        // as MPSC because we always have space (by dropping old items).
-        // But to maintain the API consistency and two-phase commit, we return
-        // a permit that holds the lock? No, holding lock across await is bad.
-        //
-        // Actually, broadcast sends are non-blocking for senders (except lock contention).
-        // So `reserve` is just a check for receivers.
-
         Ok(SendPermit { sender: self })
     }
 
@@ -203,11 +184,6 @@ impl<T: Clone> Sender<T> {
             inner.receiver_count += 1;
             inner.total_sent
         };
-
-        // New receiver starts at the *current* tail of the buffer?
-        // Typically broadcast receivers start seeing *future* messages.
-        // Or they can see buffered messages.
-        // Tokio's subscribe sees future messages.
 
         Receiver {
             channel: Arc::clone(&self.channel),
@@ -234,7 +210,9 @@ impl<T> Drop for Sender<T> {
         let mut inner = self.channel.inner.lock().expect("broadcast lock poisoned");
         inner.sender_count -= 1;
         if inner.sender_count == 0 {
-            self.channel.notify.notify_all();
+            for waker in inner.wakers.drain(..) {
+                waker.wake();
+            }
         }
     }
 }
@@ -268,9 +246,13 @@ impl<T: Clone> SendPermit<'_, T> {
         inner.total_sent += 1;
 
         let receiver_count = inner.receiver_count;
+        
+        // Wake everyone waiting for messages
+        for waker in inner.wakers.drain(..) {
+            waker.wake();
+        }
+        
         drop(inner);
-        self.sender.channel.notify.notify_all();
-
         receiver_count
     }
 }
@@ -289,50 +271,55 @@ impl<T: Clone> Receiver<T> {
     ///
     /// - `RecvError::Lagged(n)`: The receiver fell behind.
     /// - `RecvError::Closed`: All senders dropped.
-    pub fn recv(&mut self, cx: &Cx) -> Result<T, RecvError> {
-        let mut inner = self.channel.inner.lock().expect("broadcast lock poisoned");
+    pub fn recv<'a>(&'a mut self, cx: &'a Cx) -> Recv<'a, T> {
+        Recv { receiver: self, cx }
+    }
+}
 
-        loop {
-            // 1. Check for lag
-            // The earliest available index is:
-            let earliest = inner.buffer.front().map_or(inner.total_sent, |s| s.index);
+/// Future returned by [`Receiver::recv`].
+pub struct Recv<'a, T> {
+    receiver: &'a mut Receiver<T>,
+    cx: &'a Cx,
+}
 
-            if self.next_index < earliest {
-                let missed = earliest - self.next_index;
-                self.next_index = earliest;
-                return Err(RecvError::Lagged(missed));
-            }
+impl<'a, T: Clone> Future for Recv<'a, T> {
+    type Output = Result<T, RecvError>;
 
-            // 2. Try to get message
-            // We want the message with index == self.next_index
-            // Since buffer is ordered, we can calculate offset
-            let offset = self.next_index.saturating_sub(earliest) as usize;
-
-            if let Some(slot) = inner.buffer.get(offset) {
-                // Found it
-                self.next_index += 1;
-                return Ok(slot.msg.clone());
-            }
-
-            // 3. Check if closed
-            if inner.sender_count == 0 {
-                return Err(RecvError::Closed);
-            }
-
-            // 4. Wait
-            if let Err(_e) = cx.checkpoint() {
-                cx.trace("broadcast::recv cancelled while waiting");
-                // Don't consume anything
-                return Err(RecvError::Cancelled);
-            }
-
-            let (guard, _) = self
-                .channel
-                .notify
-                .wait_timeout(inner, std::time::Duration::from_millis(10))
-                .expect("broadcast lock poisoned");
-            inner = guard;
+    fn poll(mut self: Pin<&mut Self>, ctx: &mut Context<'_>) -> Poll<Self::Output> {
+        let this = &mut *self;
+        
+        if this.cx.checkpoint().is_err() {
+            this.cx.trace("broadcast::recv cancelled");
+            return Poll::Ready(Err(RecvError::Cancelled));
         }
+
+        let mut inner = this.receiver.channel.inner.lock().expect("broadcast lock poisoned");
+
+        // 1. Check for lag
+        let earliest = inner.buffer.front().map_or(inner.total_sent, |s| s.index);
+
+        if this.receiver.next_index < earliest {
+            let missed = earliest - this.receiver.next_index;
+            this.receiver.next_index = earliest;
+            return Poll::Ready(Err(RecvError::Lagged(missed)));
+        }
+
+        // 2. Try to get message
+        let offset = this.receiver.next_index.saturating_sub(earliest) as usize;
+
+        if let Some(slot) = inner.buffer.get(offset) {
+            this.receiver.next_index += 1;
+            return Poll::Ready(Ok(slot.msg.clone()));
+        }
+
+        // 3. Check if closed
+        if inner.sender_count == 0 {
+            return Poll::Ready(Err(RecvError::Closed));
+        }
+
+        // 4. Wait
+        inner.wakers.push(ctx.waker().clone());
+        Poll::Pending
     }
 }
 
@@ -363,6 +350,8 @@ mod tests {
     use crate::types::Budget;
     use crate::util::ArenaIndex;
     use crate::{RegionId, TaskId};
+    use std::future::Future;
+    use std::task::{Context, Poll, Waker};
 
     fn init_test(name: &str) {
         crate::test_utils::init_test_logging();
@@ -377,6 +366,22 @@ mod tests {
         )
     }
 
+    fn block_on<F: Future>(f: F) -> F::Output {
+        struct NoopWaker;
+        impl std::task::Wake for NoopWaker {
+            fn wake(self: std::sync::Arc<Self>) {}
+        }
+        let waker = Waker::from(std::sync::Arc::new(NoopWaker));
+        let mut cx = Context::from_waker(&waker);
+        let mut pinned = Box::pin(f);
+        loop {
+            match pinned.as_mut().poll(&mut cx) {
+                Poll::Ready(v) => return v,
+                Poll::Pending => std::thread::yield_now(),
+            }
+        }
+    }
+
     #[test]
     fn basic_send_recv() {
         init_test("basic_send_recv");
@@ -387,14 +392,14 @@ mod tests {
         tx.send(&cx, 10).expect("send failed");
         tx.send(&cx, 20).expect("send failed");
 
-        let rx1_first = rx1.recv(&cx).unwrap();
+        let rx1_first = block_on(rx1.recv(&cx)).unwrap();
         crate::assert_with_log!(rx1_first == 10, "rx1 first", 10, rx1_first);
-        let rx1_second = rx1.recv(&cx).unwrap();
+        let rx1_second = block_on(rx1.recv(&cx)).unwrap();
         crate::assert_with_log!(rx1_second == 20, "rx1 second", 20, rx1_second);
 
-        let rx2_first = rx2.recv(&cx).unwrap();
+        let rx2_first = block_on(rx2.recv(&cx)).unwrap();
         crate::assert_with_log!(rx2_first == 10, "rx2 first", 10, rx2_first);
-        let rx2_second = rx2.recv(&cx).unwrap();
+        let rx2_second = block_on(rx2.recv(&cx)).unwrap();
         crate::assert_with_log!(rx2_second == 20, "rx2 second", 20, rx2_second);
         crate::test_complete!("basic_send_recv");
     }
@@ -410,7 +415,7 @@ mod tests {
         tx.send(&cx, 3).unwrap(); // overwrites 1
 
         // rx expected 1 (index 0), but earliest is 2 (index 1)
-        let result = rx.recv(&cx);
+        let result = block_on(rx.recv(&cx));
         match result {
             Err(RecvError::Lagged(n)) => {
                 crate::assert_with_log!(n == 1, "lagged count", 1, n);
@@ -419,9 +424,9 @@ mod tests {
         }
 
         // next should be 2
-        let second = rx.recv(&cx).unwrap();
+        let second = block_on(rx.recv(&cx)).unwrap();
         crate::assert_with_log!(second == 2, "second", 2, second);
-        let third = rx.recv(&cx).unwrap();
+        let third = block_on(rx.recv(&cx)).unwrap();
         crate::assert_with_log!(third == 3, "third", 3, third);
         crate::test_complete!("lag_detection");
     }
@@ -448,7 +453,7 @@ mod tests {
         let cx = test_cx();
         let (tx, mut rx) = channel::<i32>(10);
         drop(tx);
-        let result = rx.recv(&cx);
+        let result = block_on(rx.recv(&cx));
         crate::assert_with_log!(
             matches!(result, Err(RecvError::Closed)),
             "recv after close",
@@ -470,13 +475,13 @@ mod tests {
 
         tx.send(&cx, 2).unwrap();
 
-        let rx1_first = rx1.recv(&cx).unwrap();
+        let rx1_first = block_on(rx1.recv(&cx)).unwrap();
         crate::assert_with_log!(rx1_first == 1, "rx1 first", 1, rx1_first);
-        let rx1_second = rx1.recv(&cx).unwrap();
+        let rx1_second = block_on(rx1.recv(&cx)).unwrap();
         crate::assert_with_log!(rx1_second == 2, "rx1 second", 2, rx1_second);
 
         // rx2 should skip 1
-        let rx2_first = rx2.recv(&cx).unwrap();
+        let rx2_first = block_on(rx2.recv(&cx)).unwrap();
         crate::assert_with_log!(rx2_first == 2, "rx2 first", 2, rx2_first);
         crate::test_complete!("subscribe_sees_future");
     }
