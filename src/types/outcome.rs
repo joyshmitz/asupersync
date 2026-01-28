@@ -15,10 +15,10 @@
 //!             Ok
 //! ```
 //!
-//! - [`Outcome::Ok(T)`] - Success with value
-//! - [`Outcome::Err(E)`] - Application error (recoverable business logic failure)
-//! - [`Outcome::Cancelled(CancelReason)`] - Operation was cancelled (external interruption)
-//! - [`Outcome::Panicked(PanicPayload)`] - Task panicked (unrecoverable failure)
+//! - [`Outcome::Ok`] - Success with value
+//! - [`Outcome::Err`] - Application error (recoverable business logic failure)
+//! - [`Outcome::Cancelled`] - Operation was cancelled (external interruption)
+//! - [`Outcome::Panicked`] - Task panicked (unrecoverable failure)
 //!
 //! # Severity Lattice
 //!
