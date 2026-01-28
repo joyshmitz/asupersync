@@ -5,7 +5,7 @@
 //! - [`id`]: Identifier types (`RegionId`, `TaskId`, `ObligationId`, `Time`)
 //! - [`outcome`]: Four-valued outcome type with severity lattice
 //! - [`cancel`]: Cancellation reason and kind types
-//! - [`budget`]: Budget type with product semiring semantics
+//! - [`budget`]: Budget type with product semiring semantics + min-plus curves
 //! - [`policy`]: Policy trait for outcome aggregation
 //! - [`symbol`]: Symbol types for RaptorQ-based distributed layer
 //! - [`resource`]: Resource limits and symbol buffer pools
@@ -23,7 +23,7 @@ pub mod symbol_set;
 pub mod task_context;
 pub mod typed_symbol;
 
-pub use budget::Budget;
+pub use budget::{backlog_bound, delay_bound, Budget, CurveBudget, CurveError, MinPlusCurve};
 pub use cancel::{CancelAttributionConfig, CancelKind, CancelReason};
 pub use id::{ObligationId, RegionId, TaskId, Time};
 pub use outcome::{join_outcomes, Outcome, OutcomeError, PanicPayload, Severity};

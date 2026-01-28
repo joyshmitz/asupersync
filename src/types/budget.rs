@@ -583,6 +583,227 @@ impl fmt::Debug for Budget {
     }
 }
 
+// ============================================================================
+// Min-Plus Network Calculus Curves (Hard Bounds)
+// ============================================================================
+
+/// Errors returned when constructing a min-plus curve.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub enum CurveError {
+    /// Curve samples must not be empty.
+    EmptySamples,
+    /// Curve samples must be nondecreasing.
+    NonMonotone {
+        /// Index where monotonicity was violated.
+        index: usize,
+        /// Previous sample value.
+        prev: u64,
+        /// Next sample value.
+        next: u64,
+    },
+}
+
+/// A discrete min-plus curve with a linear tail.
+///
+/// Curves are defined for nonnegative integer time `t` with:
+/// - `samples[t]` for `t <= horizon`
+/// - `samples[horizon] + tail_rate * (t - horizon)` for `t > horizon`
+///
+/// Samples must be nondecreasing.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct MinPlusCurve {
+    samples: Vec<u64>,
+    tail_rate: u64,
+}
+
+impl MinPlusCurve {
+    /// Creates a curve from samples and a tail rate.
+    ///
+    /// # Errors
+    /// Returns [`CurveError::EmptySamples`] if `samples` is empty, or
+    /// [`CurveError::NonMonotone`] if samples are not nondecreasing.
+    pub fn new(samples: Vec<u64>, tail_rate: u64) -> Result<Self, CurveError> {
+        if samples.is_empty() {
+            return Err(CurveError::EmptySamples);
+        }
+
+        for idx in 1..samples.len() {
+            if samples[idx] < samples[idx - 1] {
+                return Err(CurveError::NonMonotone {
+                    index: idx,
+                    prev: samples[idx - 1],
+                    next: samples[idx],
+                });
+            }
+        }
+
+        Ok(Self { samples, tail_rate })
+    }
+
+    /// Creates a curve with a flat tail from samples.
+    ///
+    /// # Errors
+    /// Returns an error if samples are empty or not nondecreasing.
+    pub fn from_samples(samples: Vec<u64>) -> Result<Self, CurveError> {
+        Self::new(samples, 0)
+    }
+
+    /// Creates a token-bucket arrival curve `burst + rate * t`.
+    #[must_use]
+    pub fn from_token_bucket(burst: u64, rate: u64, horizon: usize) -> Self {
+        let mut samples = Vec::with_capacity(horizon.saturating_add(1));
+        for t in 0..=horizon {
+            let inc = rate.saturating_mul(t as u64);
+            samples.push(burst.saturating_add(inc));
+        }
+        Self {
+            samples,
+            tail_rate: rate,
+        }
+    }
+
+    /// Creates a rate-latency service curve `max(0, rate * (t - latency))`.
+    #[must_use]
+    pub fn from_rate_latency(rate: u64, latency: usize, horizon: usize) -> Self {
+        let mut samples = Vec::with_capacity(horizon.saturating_add(1));
+        for t in 0..=horizon {
+            if t <= latency {
+                samples.push(0);
+            } else {
+                let dt = (t - latency) as u64;
+                samples.push(rate.saturating_mul(dt));
+            }
+        }
+        Self {
+            samples,
+            tail_rate: rate,
+        }
+    }
+
+    /// Returns the discrete horizon (last sample index).
+    #[must_use]
+    pub fn horizon(&self) -> usize {
+        self.samples.len().saturating_sub(1)
+    }
+
+    /// Returns the tail rate used for extrapolation beyond the horizon.
+    #[must_use]
+    pub fn tail_rate(&self) -> u64 {
+        self.tail_rate
+    }
+
+    /// Returns the curve value at integer time `t`.
+    #[must_use]
+    pub fn value_at(&self, t: usize) -> u64 {
+        let horizon = self.horizon();
+        if t <= horizon {
+            self.samples[t]
+        } else {
+            let extra = (t - horizon) as u64;
+            self.samples[horizon].saturating_add(self.tail_rate.saturating_mul(extra))
+        }
+    }
+
+    /// Returns the underlying samples.
+    #[must_use]
+    pub fn samples(&self) -> &[u64] {
+        &self.samples
+    }
+
+    /// Computes the min-plus convolution `(self ⊗ other)` over a horizon.
+    ///
+    /// This is O(horizon^2) and intended for small horizons/demonstrations.
+    #[must_use]
+    pub fn min_plus_convolution(&self, other: &Self, horizon: usize) -> Self {
+        let mut samples = Vec::with_capacity(horizon.saturating_add(1));
+        for t in 0..=horizon {
+            let mut best = u64::MAX;
+            for s in 0..=t {
+                let a = self.value_at(s);
+                let b = other.value_at(t - s);
+                let sum = a.saturating_add(b);
+                if sum < best {
+                    best = sum;
+                }
+            }
+            samples.push(best);
+        }
+
+        Self {
+            samples,
+            tail_rate: self.tail_rate.min(other.tail_rate),
+        }
+    }
+}
+
+/// Arrival/service curve pair for admission control hard bounds.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct CurveBudget {
+    /// Arrival curve (demand).
+    pub arrival: MinPlusCurve,
+    /// Service curve (supply).
+    pub service: MinPlusCurve,
+}
+
+impl CurveBudget {
+    /// Computes the backlog bound `sup_t (arrival(t) - service(t))` over a horizon.
+    #[must_use]
+    pub fn backlog_bound(&self, horizon: usize) -> u64 {
+        backlog_bound(&self.arrival, &self.service, horizon)
+    }
+
+    /// Computes the delay bound over a horizon with a max delay search window.
+    ///
+    /// Returns `None` if no delay bound is found within `max_delay`.
+    #[must_use]
+    pub fn delay_bound(&self, horizon: usize, max_delay: usize) -> Option<usize> {
+        delay_bound(&self.arrival, &self.service, horizon, max_delay)
+    }
+}
+
+/// Computes the backlog bound `sup_t (arrival(t) - service(t))` over a horizon.
+#[must_use]
+pub fn backlog_bound(arrival: &MinPlusCurve, service: &MinPlusCurve, horizon: usize) -> u64 {
+    let mut worst = 0;
+    for t in 0..=horizon {
+        let demand = arrival.value_at(t);
+        let supply = service.value_at(t);
+        let backlog = demand.saturating_sub(supply);
+        if backlog > worst {
+            worst = backlog;
+        }
+    }
+    worst
+}
+
+/// Computes a delay bound `d` such that `arrival(t) <= service(t + d)` for all `t`.
+///
+/// Returns `None` if no bound is found within `max_delay`.
+#[must_use]
+pub fn delay_bound(
+    arrival: &MinPlusCurve,
+    service: &MinPlusCurve,
+    horizon: usize,
+    max_delay: usize,
+) -> Option<usize> {
+    let mut worst_delay = 0;
+    for t in 0..=horizon {
+        let demand = arrival.value_at(t);
+        let mut found = None;
+        for d in 0..=max_delay {
+            if service.value_at(t + d) >= demand {
+                found = Some(d);
+                break;
+            }
+        }
+        let delay = found?;
+        if delay > worst_delay {
+            worst_delay = delay;
+        }
+    }
+    Some(worst_delay)
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
@@ -1067,5 +1288,43 @@ mod tests {
         let now = Time::from_secs(10);
 
         assert_eq!(budget.to_timeout(now), budget.remaining_time(now));
+    }
+
+    // =========================================================================
+    // Min-Plus Network Calculus Tests
+    // =========================================================================
+
+    #[test]
+    fn min_plus_curve_validation_rejects_non_monotone() {
+        let err = MinPlusCurve::new(vec![0, 2, 1], 0).expect_err("non-monotone samples");
+        assert!(matches!(
+            err,
+            CurveError::NonMonotone {
+                index: 2,
+                prev: 2,
+                next: 1
+            }
+        ));
+    }
+
+    #[test]
+    fn min_plus_convolution_basic() {
+        let a = MinPlusCurve::new(vec![0, 1, 2], 1).expect("valid curve");
+        let b = MinPlusCurve::new(vec![0, 0, 1], 1).expect("valid curve");
+        let conv = a.min_plus_convolution(&b, 2);
+        assert_eq!(conv.samples(), &[0, 0, 1]);
+    }
+
+    #[test]
+    fn min_plus_backlog_delay_demo() {
+        let arrival = MinPlusCurve::from_token_bucket(5, 2, 10);
+        let service = MinPlusCurve::from_rate_latency(3, 2, 10);
+        let budget = CurveBudget { arrival, service };
+
+        let backlog = budget.backlog_bound(10);
+        let delay = budget.delay_bound(10, 10);
+
+        assert_eq!(backlog, 9);
+        assert_eq!(delay, Some(4));
     }
 }

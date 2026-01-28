@@ -7,7 +7,7 @@ use crate::record::finalizer::{Finalizer, FinalizerStack};
 use crate::runtime::region_heap::{HeapIndex, RegionHeap};
 use crate::tracing_compat::{debug, info_span, Span};
 use crate::types::rref::{RRef, RRefAccess, RRefError};
-use crate::types::{Budget, CancelReason, RegionId, TaskId, Time};
+use crate::types::{Budget, CancelReason, CurveBudget, RegionId, TaskId, Time};
 use std::sync::atomic::{AtomicU8, Ordering};
 use std::sync::RwLock;
 
@@ -96,7 +96,7 @@ impl RegionState {
 }
 
 /// Admission limits for a region.
-#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+#[derive(Debug, Clone, PartialEq, Eq)]
 pub struct RegionLimits {
     /// Maximum number of live child regions.
     pub max_children: Option<usize>,
@@ -104,6 +104,8 @@ pub struct RegionLimits {
     pub max_tasks: Option<usize>,
     /// Maximum number of pending obligations in the region.
     pub max_obligations: Option<usize>,
+    /// Optional min-plus curve budget for hard admission bounds.
+    pub curve_budget: Option<CurveBudget>,
 }
 
 impl RegionLimits {
@@ -112,12 +114,27 @@ impl RegionLimits {
         max_children: None,
         max_tasks: None,
         max_obligations: None,
+        curve_budget: None,
     };
 
     /// Returns an unlimited limits configuration.
     #[must_use]
     pub const fn unlimited() -> Self {
         Self::UNLIMITED
+    }
+
+    /// Attaches a curve budget for admission control bounds.
+    #[must_use]
+    pub fn with_curve_budget(mut self, curve_budget: CurveBudget) -> Self {
+        self.curve_budget = Some(curve_budget);
+        self
+    }
+
+    /// Clears any curve budget from the limits.
+    #[must_use]
+    pub fn without_curve_budget(mut self) -> Self {
+        self.curve_budget = None;
+        self
     }
 }
 
@@ -303,7 +320,7 @@ impl RegionRecord {
     /// Returns the current admission limits for this region.
     #[must_use]
     pub fn limits(&self) -> RegionLimits {
-        self.inner.read().expect("lock poisoned").limits
+        self.inner.read().expect("lock poisoned").limits.clone()
     }
 
     /// Updates the admission limits for this region.

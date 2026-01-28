@@ -246,12 +246,12 @@ impl<T: Clone> SendPermit<'_, T> {
         inner.total_sent += 1;
 
         let receiver_count = inner.receiver_count;
-        
+
         // Wake everyone waiting for messages
         for waker in inner.wakers.drain(..) {
             waker.wake();
         }
-        
+
         drop(inner);
         receiver_count
     }
@@ -287,13 +287,18 @@ impl<'a, T: Clone> Future for Recv<'a, T> {
 
     fn poll(mut self: Pin<&mut Self>, ctx: &mut Context<'_>) -> Poll<Self::Output> {
         let this = &mut *self;
-        
+
         if this.cx.checkpoint().is_err() {
             this.cx.trace("broadcast::recv cancelled");
             return Poll::Ready(Err(RecvError::Cancelled));
         }
 
-        let mut inner = this.receiver.channel.inner.lock().expect("broadcast lock poisoned");
+        let mut inner = this
+            .receiver
+            .channel
+            .inner
+            .lock()
+            .expect("broadcast lock poisoned");
 
         // 1. Check for lag
         let earliest = inner.buffer.front().map_or(inner.total_sent, |s| s.index);

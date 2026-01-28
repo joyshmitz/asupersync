@@ -55,7 +55,14 @@ mod platform {
     /// 1. The file descriptor remains valid for the lifetime of registration
     /// 2. The same fd is not registered with multiple reactors concurrently
     /// 3. The fd supports non-blocking operations
-    pub trait Source: AsRawFd + Send + Sync {}
+    pub trait Source: AsRawFd + Send + Sync {
+        /// Returns the raw file descriptor for this source.
+        ///
+        /// This is a convenience method that delegates to [`AsRawFd::as_raw_fd`].
+        fn raw_fd(&self) -> RawFd {
+            self.as_raw_fd()
+        }
+    }
 
     // Blanket implementation for backward compatibility
     impl<T: AsRawFd + Send + Sync> Source for T {}
@@ -167,7 +174,14 @@ mod platform {
     /// 1. The socket handle remains valid for the lifetime of registration
     /// 2. The same socket is not registered with multiple reactors concurrently
     /// 3. The socket supports non-blocking operations
-    pub trait Source: AsRawSocket + Send + Sync {}
+    pub trait Source: AsRawSocket + Send + Sync {
+        /// Returns the raw socket handle for this source.
+        ///
+        /// This is a convenience method that delegates to [`AsRawSocket::as_raw_socket`].
+        fn raw_socket(&self) -> RawSocket {
+            self.as_raw_socket()
+        }
+    }
 
     // Blanket implementation for backward compatibility
     impl<T: AsRawSocket + Send + Sync> Source for T {}

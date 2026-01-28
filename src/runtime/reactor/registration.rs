@@ -151,6 +151,22 @@ impl Registration {
         self.reactor.strong_count() > 0
     }
 
+    /// Updates the waker to be notified when I/O is ready.
+    ///
+    /// This method stores the waker so that when the reactor detects
+    /// that the registered source is ready for the requested operations,
+    /// the associated task can be woken.
+    ///
+    /// # Note
+    ///
+    /// This is a stub implementation - full reactor integration is pending.
+    /// Currently this is a no-op that allows compilation.
+    pub fn update_waker(&self, _waker: std::task::Waker) {
+        // TODO: Implement proper waker storage and notification
+        // once reactor integration is complete.
+        // For now, this is a no-op stub to unblock compilation.
+    }
+
     /// Explicitly deregisters without waiting for drop.
     ///
     /// This is useful when you want to handle deregistration errors

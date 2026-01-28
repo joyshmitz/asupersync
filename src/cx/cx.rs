@@ -54,6 +54,7 @@
 use crate::combinator::select::SelectAll;
 use crate::observability::{DiagnosticContext, LogCollector, LogEntry, SpanId};
 use crate::runtime::io_driver::IoDriverHandle;
+use crate::runtime::reactor::{Interest, Registration, Source};
 use crate::runtime::task_handle::JoinError;
 use crate::time::{timeout, TimeSource, WallClock};
 use crate::tracing_compat::{debug, info, trace};
@@ -345,6 +346,45 @@ impl Cx {
     #[must_use]
     pub(crate) fn io_driver_handle(&self) -> Option<IoDriverHandle> {
         self.io_driver.clone()
+    }
+
+    /// Registers an I/O source with the reactor for the given interest.
+    ///
+    /// This method registers a source (such as a socket or file descriptor) with
+    /// the reactor so that the task can be woken when I/O operations are ready.
+    ///
+    /// # Arguments
+    ///
+    /// * `source` - The I/O source to register (must implement [`Source`])
+    /// * `interest` - The I/O operations to monitor for (read, write, or both)
+    ///
+    /// # Returns
+    ///
+    /// Returns a [`Registration`] handle that represents the active registration.
+    /// When dropped, the registration is automatically deregistered from the reactor.
+    ///
+    /// # Errors
+    ///
+    /// Returns an error if:
+    /// - No reactor is available (reactor not initialized or not present)
+    /// - The reactor fails to register the source
+    ///
+    /// # Note
+    ///
+    /// This is a stub implementation - full reactor integration is pending.
+    /// Currently returns an error indicating reactor is not available.
+    #[cfg(unix)]
+    pub fn register_io<S: Source>(
+        &self,
+        _source: &S,
+        _interest: Interest,
+    ) -> std::io::Result<Registration> {
+        // TODO: Implement proper reactor registration when I/O driver integration is complete.
+        // This stub allows compilation while the reactor infrastructure is being built.
+        Err(std::io::Error::new(
+            std::io::ErrorKind::NotConnected,
+            "reactor not available (I/O driver integration pending)",
+        ))
     }
 
     /// Returns the current region ID.
