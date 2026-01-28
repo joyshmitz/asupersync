@@ -418,7 +418,7 @@ fn test_receiver_stream_basic() {
 
     let cx = Cx::for_testing();
     let (tx, rx) = mpsc::channel(10);
-    let stream = ReceiverStream::new(cx.clone(), rx);
+    let stream = ReceiverStream::new(cx, rx);
 
     // Send items
     tx.try_send(1).expect("send 1");

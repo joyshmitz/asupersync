@@ -162,6 +162,7 @@ pub struct Sender<T> {
 
 impl<T> Sender<T> {
     /// Reserves a slot in the channel for sending.
+    #[must_use]
     pub fn reserve<'a>(&'a self, cx: &'a Cx) -> Reserve<'a, T> {
         Reserve { sender: self, cx }
     }
@@ -189,6 +190,7 @@ impl<T> Sender<T> {
 
         if inner.has_capacity() {
             inner.reserved += 1;
+            drop(inner);
             Ok(SendPermit {
                 sender: self,
                 sent: false,
@@ -322,6 +324,7 @@ impl<T> WeakSender<T> {
     /// Attempts to upgrade this weak sender to a strong sender.
     ///
     /// Returns `None` if all senders have been dropped.
+    #[must_use]
     pub fn upgrade(&self) -> Option<Sender<T>> {
         self.shared.upgrade().and_then(|shared| {
             {
@@ -422,6 +425,7 @@ impl<T: std::fmt::Debug> std::fmt::Debug for Receiver<T> {
 
 impl<T> Receiver<T> {
     /// Creates a receive future for the next value.
+    #[must_use]
     pub fn recv<'a>(&'a self, cx: &'a Cx) -> Recv<'a, T> {
         Recv { receiver: self, cx }
     }
@@ -448,6 +452,7 @@ impl<T> Receiver<T> {
     }
 
     /// Returns true if all senders have been dropped.
+    #[must_use]
     pub fn is_closed(&self) -> bool {
         self.shared
             .inner
@@ -457,6 +462,7 @@ impl<T> Receiver<T> {
     }
 
     /// Returns true if there are any queued messages.
+    #[must_use]
     pub fn has_messages(&self) -> bool {
         !self
             .shared
@@ -468,6 +474,7 @@ impl<T> Receiver<T> {
     }
 
     /// Returns the number of queued messages.
+    #[must_use]
     pub fn len(&self) -> usize {
         self.shared
             .inner
@@ -478,6 +485,7 @@ impl<T> Receiver<T> {
     }
 
     /// Returns true if the queue is empty.
+    #[must_use]
     pub fn is_empty(&self) -> bool {
         self.shared
             .inner
@@ -488,6 +496,7 @@ impl<T> Receiver<T> {
     }
 
     /// Returns the channel capacity.
+    #[must_use]
     pub fn capacity(&self) -> usize {
         self.shared
             .inner
@@ -503,7 +512,7 @@ pub struct Recv<'a, T> {
     cx: &'a Cx,
 }
 
-impl<'a, T> Future for Recv<'a, T> {
+impl<T> Future for Recv<'_, T> {
     type Output = Result<T, RecvError>;
 
     fn poll(self: Pin<&mut Self>, ctx: &mut Context<'_>) -> Poll<Self::Output> {

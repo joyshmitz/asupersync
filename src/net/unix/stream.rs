@@ -83,7 +83,7 @@ pub struct UnixStream {
 // Wrapper to implement Source for net::UnixStream
 struct UnixStreamSource<'a>(&'a net::UnixStream);
 
-impl<'a> std::os::unix::io::AsRawFd for UnixStreamSource<'a> {
+impl std::os::unix::io::AsRawFd for UnixStreamSource<'_> {
     fn as_raw_fd(&self) -> std::os::unix::io::RawFd {
         self.0.as_raw_fd()
     }
@@ -326,6 +326,7 @@ impl UnixStream {
     ///
     /// let n = tx.send_with_ancillary(b"file attached", &mut ancillary).await?;
     /// ```
+    #[allow(clippy::future_not_send)]
     pub async fn send_with_ancillary(
         &self,
         buf: &[u8],
@@ -422,6 +423,7 @@ impl UnixStream {
     /// ```
     ///
     /// [`SocketAncillary::messages`]: crate::net::unix::SocketAncillary::messages
+    #[allow(clippy::future_not_send)]
     pub async fn recv_with_ancillary(
         &self,
         buf: &mut [u8],
@@ -509,14 +511,12 @@ impl AsyncRead for UnixStream {
                 Poll::Ready(Ok(()))
             }
             Err(ref e) if e.kind() == io::ErrorKind::WouldBlock => {
-                if let Some(reg) = &self.registration {
-                    reg.update_waker(cx.waker().clone());
-                    Poll::Pending
-                } else {
-                    // Fallback for unregistered streams (e.g. from pair())
-                    cx.waker().wake_by_ref();
-                    Poll::Pending
-                }
+                // Fallback for unregistered streams (e.g. from pair())
+                self.registration.as_ref().map_or_else(
+                    || cx.waker().wake_by_ref(),
+                    |reg| reg.update_waker(cx.waker().clone()),
+                );
+                Poll::Pending
             }
             Err(e) => Poll::Ready(Err(e)),
         }
@@ -533,13 +533,11 @@ impl AsyncReadVectored for UnixStream {
         match (&*inner).read_vectored(bufs) {
             Ok(n) => Poll::Ready(Ok(n)),
             Err(ref e) if e.kind() == io::ErrorKind::WouldBlock => {
-                if let Some(reg) = &self.registration {
-                    reg.update_waker(cx.waker().clone());
-                    Poll::Pending
-                } else {
-                    cx.waker().wake_by_ref();
-                    Poll::Pending
-                }
+                self.registration.as_ref().map_or_else(
+                    || cx.waker().wake_by_ref(),
+                    |reg| reg.update_waker(cx.waker().clone()),
+                );
+                Poll::Pending
             }
             Err(e) => Poll::Ready(Err(e)),
         }
@@ -556,13 +554,11 @@ impl AsyncWrite for UnixStream {
         match (&*inner).write(buf) {
             Ok(n) => Poll::Ready(Ok(n)),
             Err(ref e) if e.kind() == io::ErrorKind::WouldBlock => {
-                if let Some(reg) = &self.registration {
-                    reg.update_waker(cx.waker().clone());
-                    Poll::Pending
-                } else {
-                    cx.waker().wake_by_ref();
-                    Poll::Pending
-                }
+                self.registration.as_ref().map_or_else(
+                    || cx.waker().wake_by_ref(),
+                    |reg| reg.update_waker(cx.waker().clone()),
+                );
+                Poll::Pending
             }
             Err(e) => Poll::Ready(Err(e)),
         }
@@ -577,13 +573,11 @@ impl AsyncWrite for UnixStream {
         match (&*inner).write_vectored(bufs) {
             Ok(n) => Poll::Ready(Ok(n)),
             Err(ref e) if e.kind() == io::ErrorKind::WouldBlock => {
-                if let Some(reg) = &self.registration {
-                    reg.update_waker(cx.waker().clone());
-                    Poll::Pending
-                } else {
-                    cx.waker().wake_by_ref();
-                    Poll::Pending
-                }
+                self.registration.as_ref().map_or_else(
+                    || cx.waker().wake_by_ref(),
+                    |reg| reg.update_waker(cx.waker().clone()),
+                );
+                Poll::Pending
             }
             Err(e) => Poll::Ready(Err(e)),
         }
@@ -598,13 +592,11 @@ impl AsyncWrite for UnixStream {
         match (&*inner).flush() {
             Ok(()) => Poll::Ready(Ok(())),
             Err(ref e) if e.kind() == io::ErrorKind::WouldBlock => {
-                if let Some(reg) = &self.registration {
-                    reg.update_waker(cx.waker().clone());
-                    Poll::Pending
-                } else {
-                    cx.waker().wake_by_ref();
-                    Poll::Pending
-                }
+                self.registration.as_ref().map_or_else(
+                    || cx.waker().wake_by_ref(),
+                    |reg| reg.update_waker(cx.waker().clone()),
+                );
+                Poll::Pending
             }
             Err(e) => Poll::Ready(Err(e)),
         }

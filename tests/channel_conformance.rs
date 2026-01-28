@@ -43,7 +43,9 @@ impl<T: Send + 'static> MpscSender<T> for MpscSenderWrapper<T> {
             let cx = Cx::for_testing();
             // Use the async send method directly
             sender.send(&cx, value).await.map_err(|e| match e {
-                mpsc::SendError::Disconnected(v) | mpsc::SendError::Cancelled(v) | mpsc::SendError::Full(v) => v,
+                mpsc::SendError::Disconnected(v)
+                | mpsc::SendError::Cancelled(v)
+                | mpsc::SendError::Full(v) => v,
             })
         })
     }

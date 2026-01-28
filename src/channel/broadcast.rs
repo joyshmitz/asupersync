@@ -282,7 +282,7 @@ pub struct Recv<'a, T> {
     cx: &'a Cx,
 }
 
-impl<'a, T: Clone> Future for Recv<'a, T> {
+impl<T: Clone> Future for Recv<'_, T> {
     type Output = Result<T, RecvError>;
 
     fn poll(mut self: Pin<&mut Self>, ctx: &mut Context<'_>) -> Poll<Self::Output> {

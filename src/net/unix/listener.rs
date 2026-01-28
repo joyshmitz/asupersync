@@ -67,7 +67,7 @@ pub struct UnixListener {
 // Wrapper to implement Source for net::UnixListener
 struct UnixListenerSource<'a>(&'a net::UnixListener);
 
-impl<'a> std::os::unix::io::AsRawFd for UnixListenerSource<'a> {
+impl std::os::unix::io::AsRawFd for UnixListenerSource<'_> {
     fn as_raw_fd(&self) -> std::os::unix::io::RawFd {
         self.0.as_raw_fd()
     }
@@ -180,6 +180,7 @@ impl UnixListener {
     ///     println!("New connection from {:?}", addr);
     /// }
     /// ```
+    #[allow(clippy::future_not_send)]
     pub async fn accept(&self) -> io::Result<(UnixStream, SocketAddr)> {
         poll_fn(|cx| {
             match self.inner.accept() {
