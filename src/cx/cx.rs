@@ -848,12 +848,25 @@ impl Cx {
     /// Generates a random `u64` using the context entropy source.
     #[must_use]
     pub fn random_u64(&self) -> u64 {
-        self.entropy.next_u64()
+        let value = self.entropy.next_u64();
+        trace!(
+            source = self.entropy.source_id(),
+            task_id = ?self.task_id(),
+            value,
+            "entropy_u64"
+        );
+        value
     }
 
     /// Fills a buffer with random bytes using the context entropy source.
     pub fn random_bytes(&self, dest: &mut [u8]) {
         self.entropy.fill_bytes(dest);
+        trace!(
+            source = self.entropy.source_id(),
+            task_id = ?self.task_id(),
+            len = dest.len(),
+            "entropy_bytes"
+        );
     }
 
     /// Generates a random `usize` in `[0, bound)` with rejection sampling.

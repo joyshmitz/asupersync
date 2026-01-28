@@ -549,6 +549,19 @@ let now = std::time::Instant::now();
 let now = cx.now();
 ```
 
+Also check for ambient randomness:
+
+```rust
+// WRONG: ambient entropy breaks determinism
+let id = rand::random::<u64>();
+
+// RIGHT: use capability-based entropy
+let id = cx.random_u64();
+```
+
+To enforce deterministic collections in lab code, consider a clippy rule that
+disallows `std::collections::HashMap/HashSet` in favor of `util::DetHashMap/DetHashSet`.
+
 ---
 
 ## Limitations

@@ -56,6 +56,9 @@ pub mod replay;
 pub mod runtime;
 pub mod virtual_time_wheel;
 
+pub use crate::util::{
+    disable_strict_entropy, enable_strict_entropy, strict_entropy_enabled, StrictEntropyGuard,
+};
 pub use config::LabConfig;
 pub use injection::{
     lab, LabBuilder, LabInjectionConfig, LabInjectionReport, LabInjectionResult, LabInjectionRunner,

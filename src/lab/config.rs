@@ -2,6 +2,7 @@
 //!
 //! The lab configuration controls deterministic execution:
 //! - Random seed for scheduling decisions
+//! - Entropy seed for capability-based randomness
 //! - Whether to panic on obligation leaks
 //! - Trace buffer size
 //! - Futurelock detection settings

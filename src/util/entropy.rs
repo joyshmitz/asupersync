@@ -5,7 +5,10 @@
 
 use crate::types::TaskId;
 use crate::util::DetRng;
-use std::sync::{Arc, Mutex};
+use std::sync::{
+    atomic::{AtomicBool, Ordering},
+    Arc, Mutex,
+};
 
 /// Core trait for entropy providers.
 pub trait EntropySource: std::fmt::Debug + Send + Sync + 'static {
@@ -28,6 +31,7 @@ pub struct OsEntropy;
 
 impl EntropySource for OsEntropy {
     fn fill_bytes(&self, dest: &mut [u8]) {
+        check_ambient_entropy("os");
         getrandom::getrandom(dest).expect("OS entropy failed");
     }
 
@@ -150,6 +154,63 @@ impl ThreadLocalEntropy {
             .wrapping_mul(0x517c_c1b7_2722_0a95)
             .wrapping_add(thread_index as u64);
         DetEntropy::new(seed)
+    }
+}
+
+// ============================================================================
+// Strict entropy isolation (lab tooling)
+// ============================================================================
+
+static STRICT_ENTROPY: AtomicBool = AtomicBool::new(false);
+
+/// Enable strict entropy isolation globally.
+pub fn enable_strict_entropy() {
+    STRICT_ENTROPY.store(true, Ordering::SeqCst);
+}
+
+/// Disable strict entropy isolation globally.
+pub fn disable_strict_entropy() {
+    STRICT_ENTROPY.store(false, Ordering::SeqCst);
+}
+
+/// Returns true if strict entropy isolation is enabled.
+#[must_use]
+pub fn strict_entropy_enabled() -> bool {
+    STRICT_ENTROPY.load(Ordering::SeqCst)
+}
+
+/// Panic if strict entropy isolation is enabled.
+pub fn check_ambient_entropy(source: &str) {
+    assert!(
+        !strict_entropy_enabled(),
+        "ambient entropy source \"{source}\" used in strict mode; use Cx::random_* instead"
+    );
+}
+
+/// RAII guard to enable strict entropy isolation for a scope.
+#[derive(Debug)]
+pub struct StrictEntropyGuard {
+    previous: bool,
+}
+
+impl StrictEntropyGuard {
+    /// Enables strict entropy isolation until dropped.
+    #[must_use]
+    pub fn new() -> Self {
+        let previous = STRICT_ENTROPY.swap(true, Ordering::SeqCst);
+        Self { previous }
+    }
+}
+
+impl Default for StrictEntropyGuard {
+    fn default() -> Self {
+        Self::new()
+    }
+}
+
+impl Drop for StrictEntropyGuard {
+    fn drop(&mut self) {
+        STRICT_ENTROPY.store(self.previous, Ordering::SeqCst);
     }
 }
 

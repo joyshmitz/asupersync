@@ -15,6 +15,7 @@
 //! - [`map_reduce`]: Parallel map followed by monoid-based reduction
 //! - [`circuit_breaker`]: Failure detection and prevention
 //! - [`bulkhead`]: Resource isolation and concurrency limiting
+//! - [`rate_limit`]: Throughput control with token bucket algorithm
 
 pub mod bracket;
 pub mod bulkhead;
@@ -26,6 +27,7 @@ pub mod map_reduce;
 pub mod pipeline;
 pub mod quorum;
 pub mod race;
+pub mod rate_limit;
 pub mod retry;
 pub mod select;
 pub mod timeout;
@@ -67,6 +69,10 @@ pub use quorum::{
 pub use race::{
     make_race_all_result, race2_outcomes, race2_to_result, race_all_outcomes, race_all_to_result,
     Race, Race2Result, RaceAll, RaceAllError, RaceAllResult, RaceError, RaceResult, RaceWinner,
+};
+pub use rate_limit::{
+    RateLimitAlgorithm, RateLimitError, RateLimitMetrics, RateLimitPolicy, RateLimitPolicyBuilder,
+    RateLimiter, RateLimiterRegistry, SlidingWindowRateLimiter, WaitStrategy,
 };
 pub use retry::{
     calculate_deadline as retry_deadline, calculate_delay, make_retry_result, total_delay_budget,
