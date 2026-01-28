@@ -287,9 +287,9 @@ impl<A: ToSocketAddrs + Send + 'static> TcpListenerBuilder<A> {
 ///
 /// Provides convenient methods for common accept loop patterns.
 pub trait TcpListenerExt: TcpListenerApi {
-    /// Accept connections and spawn a handler for each.
+    /// Accept connections and handle them sequentially.
     ///
-    /// This method runs an infinite accept loop, spawning a new task for each
+    /// This method runs an infinite accept loop and awaits the handler for each
     /// incoming connection. The loop continues until cancelled or an error occurs.
     ///
     /// # Example
@@ -311,9 +311,7 @@ pub trait TcpListenerExt: TcpListenerApi {
             loop {
                 let (stream, addr) = self.accept().await?;
                 let handler = handler.clone();
-                // Note: In production code, this would use cx.spawn() for structured concurrency.
-                // For now we just call the handler directly since we don't have Cx here.
-                tokio_like_spawn(handler(stream, addr));
+                handler(stream, addr).await;
             }
         }
     }
@@ -362,33 +360,6 @@ impl<L: TcpListenerApi> crate::stream::Stream for IncomingStream<'_, L> {
             Poll::Pending => Poll::Pending,
         }
     }
-}
-
-// Placeholder for spawn until we have proper Cx integration
-fn tokio_like_spawn<F: Future<Output = ()> + Send + 'static>(f: F) {
-    // In the future, this would integrate with the asupersync runtime's spawn mechanism.
-    // For now, spawn a thread that runs the future using a minimal executor.
-    std::thread::spawn(move || {
-        // Use a simple block_on approach with std::task primitives
-        use std::sync::Arc;
-        use std::task::{Wake, Waker};
-
-        struct ThreadWaker;
-        impl Wake for ThreadWaker {
-            fn wake(self: Arc<Self>) {}
-        }
-
-        let waker = Waker::from(Arc::new(ThreadWaker));
-        let mut cx = Context::from_waker(&waker);
-        let mut f = std::pin::pin!(f);
-
-        loop {
-            match f.as_mut().poll(&mut cx) {
-                Poll::Ready(()) => break,
-                Poll::Pending => std::thread::yield_now(),
-            }
-        }
-    });
 }
 
 #[cfg(test)]

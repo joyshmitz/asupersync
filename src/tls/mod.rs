@@ -38,9 +38,11 @@
 mod acceptor;
 mod connector;
 mod error;
+mod stream;
 mod types;
 
 pub use acceptor::{ClientAuth, TlsAcceptor, TlsAcceptorBuilder};
 pub use connector::{TlsConnector, TlsConnectorBuilder};
 pub use error::TlsError;
+pub use stream::TlsStream;
 pub use types::{Certificate, CertificateChain, PrivateKey, RootCertStore};

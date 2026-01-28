@@ -1,14 +1,14 @@
 //! Deadline propagation utilities.
 
 use crate::cx::Scope;
-use crate::types::Time;
+use crate::types::{Policy, Time};
 use std::time::Duration;
 
 /// Updates a scope with a new deadline.
 ///
 /// If the scope already has a tighter deadline, it is preserved.
 #[must_use]
-pub fn with_deadline<'a>(scope: &Scope<'a>, deadline: Time) -> Scope<'a> {
+pub fn with_deadline<'a, P: Policy>(scope: &Scope<'a, P>, deadline: Time) -> Scope<'a, P> {
     let current_budget = scope.budget();
     // Budget::with_deadline replaces it. We want min.
     let new_deadline = current_budget
@@ -22,7 +22,11 @@ pub fn with_deadline<'a>(scope: &Scope<'a>, deadline: Time) -> Scope<'a> {
 
 /// Updates a scope with a timeout relative to a start time.
 #[must_use]
-pub fn with_timeout<'a>(scope: &Scope<'a>, duration: Duration, now: Time) -> Scope<'a> {
+pub fn with_timeout<'a, P: Policy>(
+    scope: &Scope<'a, P>,
+    duration: Duration,
+    now: Time,
+) -> Scope<'a, P> {
     let deadline = now.saturating_add_nanos(duration.as_nanos() as u64);
     with_deadline(scope, deadline)
 }
