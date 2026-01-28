@@ -21,9 +21,8 @@
 //!
 //! This model allows for proper cancellation tracking and budget accounting.
 
-use std::future::Future;
+use std::fmt::Debug;
 use std::io;
-use std::pin::Pin;
 
 /// The I/O capability trait.
 ///
@@ -50,7 +49,7 @@ use std::pin::Pin;
 ///     Ok(buf)
 /// }
 /// ```
-pub trait IoCap: Send + Sync {
+pub trait IoCap: Send + Sync + Debug {
     /// Returns true if this I/O capability supports real system I/O.
     ///
     /// Lab/test implementations return false.

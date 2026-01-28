@@ -133,6 +133,7 @@ pub struct Cx {
     pub(crate) inner: Arc<std::sync::RwLock<CxInner>>,
     observability: Arc<std::sync::RwLock<ObservabilityState>>,
     io_driver: Option<IoDriverHandle>,
+    io_cap: Option<Arc<dyn crate::io::IoCap>>,
     entropy: Arc<dyn EntropySource>,
 }
 
@@ -216,6 +217,7 @@ impl Cx {
                 region, task,
             ))),
             io_driver: None,
+            io_cap: None,
             entropy: Arc::new(OsEntropy),
         }
     }
@@ -228,6 +230,20 @@ impl Cx {
         budget: Budget,
         observability: Option<ObservabilityState>,
         io_driver: Option<IoDriverHandle>,
+        entropy: Option<Arc<dyn EntropySource>>,
+    ) -> Self {
+        Self::new_with_io(region, task, budget, observability, io_driver, None, entropy)
+    }
+
+    /// Creates a new capability context with optional I/O capability (internal use).
+    #[cfg_attr(feature = "test-internals", visibility::make(pub))]
+    pub(crate) fn new_with_io(
+        region: RegionId,
+        task: TaskId,
+        budget: Budget,
+        observability: Option<ObservabilityState>,
+        io_driver: Option<IoDriverHandle>,
+        io_cap: Option<Arc<dyn crate::io::IoCap>>,
         entropy: Option<Arc<dyn EntropySource>>,
     ) -> Self {
         let inner = Arc::new(std::sync::RwLock::new(CxInner::new(region, task, budget)));
@@ -251,6 +267,7 @@ impl Cx {
             inner,
             observability,
             io_driver,
+            io_cap,
             entropy,
         }
     }
@@ -313,6 +330,37 @@ impl Cx {
         )
     }
 
+    /// Creates a test-only capability context with lab I/O capability.
+    ///
+    /// This constructor creates a Cx with a [`LabIoCap`] for testing I/O code paths
+    /// without performing real I/O.
+    ///
+    /// # Example
+    ///
+    /// ```ignore
+    /// use asupersync::Cx;
+    ///
+    /// let cx = Cx::for_testing_with_io();
+    /// assert!(cx.has_io());
+    /// assert!(!cx.io().unwrap().is_real_io());
+    /// ```
+    ///
+    /// # Note
+    ///
+    /// This API is intended for testing only.
+    #[must_use]
+    pub fn for_testing_with_io() -> Self {
+        Self::new_with_io(
+            RegionId::new_for_test(0, 0),
+            TaskId::new_for_test(0, 0),
+            Budget::INFINITE,
+            None,
+            None,
+            Some(Arc::new(crate::io::LabIoCap::new())),
+            None,
+        )
+    }
+
     /// Creates a request-scoped capability context with a specified budget.
     ///
     /// This is intended for production request handling that needs unique
@@ -352,6 +400,43 @@ impl Cx {
     #[must_use]
     pub(crate) fn io_driver_handle(&self) -> Option<IoDriverHandle> {
         self.io_driver.clone()
+    }
+
+    /// Returns the I/O capability, if one is configured.
+    ///
+    /// The I/O capability provides access to async I/O operations. If no capability
+    /// is configured, this returns `None` and I/O operations are not available.
+    ///
+    /// # Capability Model
+    ///
+    /// Asupersync uses explicit capability-based I/O:
+    /// - Production runtime configures real I/O capability (via reactor)
+    /// - Lab runtime can configure virtual I/O for deterministic testing
+    /// - Code that needs I/O must explicitly check for and use this capability
+    ///
+    /// # Example
+    ///
+    /// ```ignore
+    /// async fn read_data(cx: &Cx) -> io::Result<Vec<u8>> {
+    ///     let io = cx.io().ok_or_else(|| {
+    ///         io::Error::new(io::ErrorKind::Unsupported, "I/O not available")
+    ///     })?;
+    ///
+    ///     // Use io capability...
+    ///     Ok(vec![])
+    /// }
+    /// ```
+    #[must_use]
+    pub fn io(&self) -> Option<&dyn crate::io::IoCap> {
+        self.io_cap.as_ref().map(|cap| cap.as_ref())
+    }
+
+    /// Returns true if I/O capability is available.
+    ///
+    /// Convenience method to check if I/O operations can be performed.
+    #[must_use]
+    pub fn has_io(&self) -> bool {
+        self.io_cap.is_some()
     }
 
     /// Registers an I/O source with the reactor for the given interest.
