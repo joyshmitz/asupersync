@@ -116,6 +116,9 @@ pub mod uring;
 ))]
 pub mod kqueue;
 
+#[cfg(target_os = "windows")]
+pub mod windows;
+
 pub use interest::Interest;
 pub use lab::{FaultConfig, LabReactor};
 #[allow(unused_imports)]
@@ -126,6 +129,9 @@ pub use token::{SlabToken, TokenSlab};
 
 #[cfg(target_os = "linux")]
 pub use epoll::EpollReactor;
+
+#[cfg(target_os = "windows")]
+pub use windows::IocpReactor;
 
 use std::io;
 use std::time::Duration;
