@@ -542,7 +542,6 @@ impl<IO: std::fmt::Debug> std::fmt::Debug for TlsStream<IO> {
 
 #[cfg(test)]
 mod tests {
-    #[cfg(feature = "tls")]
     use super::*;
 
     #[test]

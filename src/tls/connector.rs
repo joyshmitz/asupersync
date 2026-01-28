@@ -135,10 +135,19 @@ impl TlsConnectorBuilder {
     /// Requires the `tls-native-roots` feature.
     #[cfg(feature = "tls-native-roots")]
     pub fn with_native_roots(mut self) -> Result<Self, TlsError> {
-        for cert in rustls_native_certs::load_native_certs()? {
-            // Ignore individual cert errors
+        let result = rustls_native_certs::load_native_certs();
+
+        // Log any errors but continue with successfully loaded certs
+        #[cfg(feature = "tracing-integration")]
+        for err in &result.errors {
+            tracing::warn!(error = %err, "Error loading native certificate");
+        }
+
+        for cert in result.certs {
+            // Ignore individual cert add errors
             let _ = self.root_certs.add(&Certificate::from_der(cert.to_vec()));
         }
+
         #[cfg(feature = "tracing-integration")]
         tracing::debug!(
             count = self.root_certs.len(),
@@ -162,13 +171,12 @@ impl TlsConnectorBuilder {
     /// Requires the `tls-webpki-roots` feature.
     #[cfg(feature = "tls-webpki-roots")]
     pub fn with_webpki_roots(mut self) -> Self {
-        for cert in webpki_roots::TLS_SERVER_ROOTS.iter() {
-            let _ = self.root_certs.add(&Certificate::from_der(
-                cert.subject_public_key_info.to_vec(),
-            ));
-        }
+        self.root_certs.extend_from_webpki_roots();
         #[cfg(feature = "tracing-integration")]
-        tracing::debug!("Added webpki root certificates");
+        tracing::debug!(
+            count = self.root_certs.len(),
+            "Added webpki root certificates"
+        );
         self
     }
 

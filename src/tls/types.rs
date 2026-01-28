@@ -341,6 +341,21 @@ impl RootCertStore {
         Ok(count)
     }
 
+    /// Extend with webpki root certificates.
+    ///
+    /// Requires the `tls-webpki-roots` feature.
+    #[cfg(feature = "tls-webpki-roots")]
+    pub fn extend_from_webpki_roots(&mut self) {
+        self.inner
+            .extend(webpki_roots::TLS_SERVER_ROOTS.iter().cloned());
+    }
+
+    /// Extend with webpki root certificates (stub when feature is disabled).
+    #[cfg(not(feature = "tls-webpki-roots"))]
+    pub fn extend_from_webpki_roots(&mut self) {
+        // No-op when feature is disabled
+    }
+
     /// Convert to rustls root cert store.
     #[cfg(feature = "tls")]
     pub(crate) fn into_inner(self) -> rustls::RootCertStore {

@@ -1,8 +1,17 @@
-//! Async I/O traits and adapters.
+//! Async I/O traits, adapters, and capability infrastructure.
 //!
 //! This module provides minimal `AsyncRead` and `AsyncWrite` traits, a safe
 //! `ReadBuf` type, and common adapters and extension futures. The design
 //! mirrors `std::io` and `futures::io` but is intentionally small and cancel-aware.
+//!
+//! # I/O Capability Model
+//!
+//! Asupersync uses explicit capability-based I/O access. The [`IoCap`] trait
+//! defines the I/O capability boundary - tasks can only perform I/O when they
+//! have access to an implementation:
+//!
+//! - Production: Real I/O via reactor (epoll/kqueue/IOCP)
+//! - Lab: Virtual I/O for deterministic testing (see [`LabIoCap`])
 //!
 //! # Cancel Safety
 //!
@@ -26,6 +35,7 @@
 
 mod buf_reader;
 mod buf_writer;
+pub mod cap;
 mod copy;
 pub mod ext;
 mod lines;
@@ -53,5 +63,6 @@ pub use write_permit::WritePermit;
 
 pub use buf_reader::BufReader;
 pub use buf_writer::BufWriter;
+pub use cap::{IoCap, IoNotAvailable, LabIoCap};
 pub use lines::Lines;
 pub use std::io::SeekFrom;
