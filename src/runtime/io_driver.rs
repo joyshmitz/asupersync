@@ -381,6 +381,11 @@ impl IoDriverHandle {
     pub fn lock(&self) -> std::sync::MutexGuard<'_, IoDriver> {
         self.inner.lock().expect("lock poisoned")
     }
+
+    /// Attempts to acquire the lock for direct access to the driver.
+    pub fn try_lock(&self) -> std::sync::TryLockResult<std::sync::MutexGuard<'_, IoDriver>> {
+        self.inner.try_lock()
+    }
 }
 
 /// RAII handle for a registered I/O source.

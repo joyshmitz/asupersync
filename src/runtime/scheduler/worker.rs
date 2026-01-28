@@ -3,6 +3,7 @@
 use crate::runtime::scheduler::global_queue::GlobalQueue;
 use crate::runtime::scheduler::local_queue::{LocalQueue, Stealer};
 use crate::runtime::scheduler::stealing;
+use crate::runtime::io_driver::IoDriverHandle;
 use crate::runtime::RuntimeState;
 use crate::tracing_compat::trace;
 use crate::types::Outcome;
@@ -35,6 +36,8 @@ pub struct Worker {
     pub rng: DetRng,
     /// Shutdown signal.
     pub shutdown: Arc<AtomicBool>,
+    /// I/O driver handle (optional).
+    pub io_driver: Option<IoDriverHandle>,
 }
 
 impl Worker {
@@ -46,6 +49,11 @@ impl Worker {
         state: Arc<Mutex<RuntimeState>>,
         shutdown: Arc<AtomicBool>,
     ) -> Self {
+        let io_driver = state
+            .lock()
+            .expect("runtime state lock poisoned")
+            .io_driver_handle();
+
         Self {
             id,
             local: LocalQueue::new(),
@@ -55,6 +63,7 @@ impl Worker {
             parker: Parker::new(),
             rng: DetRng::new(id as u64 + 1), // Simple seed
             shutdown,
+            io_driver,
         }
     }
 
@@ -79,7 +88,25 @@ impl Worker {
                 continue;
             }
 
-            // 4. Park until woken
+            // 4. Drive I/O (Leader/Follower pattern)
+            // If we can acquire the IO driver lock, we become the I/O leader.
+            // The leader polls the reactor with a short timeout.
+            if let Some(io) = &self.io_driver {
+                if let Ok(mut driver) = io.try_lock() {
+                    // Poll with a short timeout to check for I/O events without
+                    // spinning too hot, but returning frequently to check for new tasks.
+                    //
+                    // Note: Ideally we would block indefinitely and be woken by `spawn`,
+                    // but that requires integrating the Parker with the Reactor.
+                    // For now, a short timeout (1ms) serves as a "busy-wait with sleep".
+                    let _ = driver.turn(Some(Duration::from_millis(1)));
+
+                    // Loop back to check queues (tasks might have been woken by I/O)
+                    continue;
+                }
+            }
+
+            // 5. Park until woken
             // TODO: exponential backoff before parking
             self.parker.park();
         }

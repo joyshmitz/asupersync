@@ -20,8 +20,10 @@
 //! }
 //! ```
 
+use crate::cx::Cx;
 use crate::io::{AsyncRead, AsyncReadVectored, AsyncWrite, ReadBuf};
 use crate::net::unix::split::{OwnedReadHalf, OwnedWriteHalf, ReadHalf, WriteHalf};
+use crate::runtime::reactor::{Interest, Registration, Source};
 use std::io::{self, IoSlice, IoSliceMut, Read, Write};
 use std::net::Shutdown;
 use std::os::unix::net::{self, SocketAddr};
@@ -74,8 +76,17 @@ pub struct UCred {
 pub struct UnixStream {
     /// The underlying standard library stream.
     pub(crate) inner: Arc<net::UnixStream>,
-    // TODO: Add Registration when reactor integration is complete
-    // registration: Option<Registration>,
+    /// Reactor registration for I/O events.
+    registration: Option<Registration>,
+}
+
+// Wrapper to implement Source for net::UnixStream
+struct UnixStreamSource<'a>(&'a net::UnixStream);
+
+impl<'a> Source for UnixStreamSource<'a> {
+    fn raw_fd(&self) -> std::os::unix::io::RawFd {
+        std::os::unix::io::AsRawFd::as_raw_fd(self.0)
+    }
 }
 
 impl UnixStream {
@@ -103,8 +114,16 @@ impl UnixStream {
         let inner = net::UnixStream::connect(path)?;
         inner.set_nonblocking(true)?;
 
+        // Register with reactor
+        let cx = Cx::current();
+        let registration = cx.register_io(
+            &UnixStreamSource(&inner),
+            Interest::READABLE | Interest::WRITABLE,
+        )?;
+
         Ok(Self {
             inner: Arc::new(inner),
+            registration: Some(registration),
         })
     }
 
@@ -134,8 +153,16 @@ impl UnixStream {
         let inner = net::UnixStream::connect_addr(&addr)?;
         inner.set_nonblocking(true)?;
 
+        // Register with reactor
+        let cx = Cx::current();
+        let registration = cx.register_io(
+            &UnixStreamSource(&inner),
+            Interest::READABLE | Interest::WRITABLE,
+        )?;
+
         Ok(Self {
             inner: Arc::new(inner),
+            registration: Some(registration),
         })
     }
 
@@ -158,12 +185,19 @@ impl UnixStream {
         s1.set_nonblocking(true)?;
         s2.set_nonblocking(true)?;
 
+        // We can't easily register here because we might not be in an async context (Cx::current() would fail).
+        // The user will have to register them manually or we rely on lazy registration (not implemented yet).
+        // For now, we return them unregistered. This mirrors UnixListener::accept behavior in current implementation phase.
+        // Ideally, we would have `pair_async().await` or similar.
+
         Ok((
             Self {
                 inner: Arc::new(s1),
+                registration: None,
             },
             Self {
                 inner: Arc::new(s2),
+                registration: None,
             },
         ))
     }
@@ -181,6 +215,7 @@ impl UnixStream {
         // Non-blocking is set by caller for streams from accept()
         Self {
             inner: Arc::new(stream),
+            registration: None,
         }
     }
 
@@ -280,13 +315,43 @@ impl UnixStream {
     ) -> io::Result<usize> {
         use std::os::unix::io::AsRawFd;
 
+        // Ensure registered
+        if self.registration.is_none() {
+             // In a real implementation we would lazily register here using Cx::current().
+             // But self is immutable.
+             // For now we assume registered or fail? Or busy loop?
+             // Falling back to busy loop if not registered is a safe compatibility path.
+        }
+
         loop {
             let result = send_with_ancillary_impl(self.inner.as_raw_fd(), buf, ancillary);
             match result {
                 Ok(n) => return Ok(n),
                 Err(ref e) if e.kind() == io::ErrorKind::WouldBlock => {
-                    // TODO: Replace with proper reactor wait when integration is complete
-                    crate::runtime::yield_now().await;
+                    if let Some(reg) = &self.registration {
+                        // TODO: We need access to the current task's waker.
+                        // Since this is an async method, we don't have &mut Context directly.
+                        // We need to use poll_fn.
+                        // This method should be rewritten to use poll_fn like accept().
+                        // For now, retaining busy loop if not registered, but this is suboptimal.
+                        
+                        // BUT wait, we can't update waker without &mut Context.
+                        // We need to rewrite this method to use poll_fn.
+                        
+                        // Refactoring to use poll_fn below...
+                        return std::future::poll_fn(|cx| {
+                             match send_with_ancillary_impl(self.inner.as_raw_fd(), buf, ancillary) {
+                                Ok(n) => Poll::Ready(Ok(n)),
+                                Err(ref e) if e.kind() == io::ErrorKind::WouldBlock => {
+                                    reg.update_waker(cx.waker().clone());
+                                    Poll::Pending
+                                }
+                                Err(e) => Poll::Ready(Err(e)),
+                             }
+                        }).await;
+                    } else {
+                        crate::runtime::yield_now().await;
+                    }
                 }
                 Err(e) => return Err(e),
             }
@@ -351,8 +416,20 @@ impl UnixStream {
             match result {
                 Ok(n) => return Ok(n),
                 Err(ref e) if e.kind() == io::ErrorKind::WouldBlock => {
-                    // TODO: Replace with proper reactor wait when integration is complete
-                    crate::runtime::yield_now().await;
+                    if let Some(reg) = &self.registration {
+                        return std::future::poll_fn(|cx| {
+                             match recv_with_ancillary_impl(self.inner.as_raw_fd(), buf, ancillary) {
+                                Ok(n) => Poll::Ready(Ok(n)),
+                                Err(ref e) if e.kind() == io::ErrorKind::WouldBlock => {
+                                    reg.update_waker(cx.waker().clone());
+                                    Poll::Pending
+                                }
+                                Err(e) => Poll::Ready(Err(e)),
+                             }
+                        }).await;
+                    } else {
+                        crate::runtime::yield_now().await;
+                    }
                 }
                 Err(e) => return Err(e),
             }
@@ -414,9 +491,14 @@ impl AsyncRead for UnixStream {
                 Poll::Ready(Ok(()))
             }
             Err(ref e) if e.kind() == io::ErrorKind::WouldBlock => {
-                // TODO: Register with reactor for proper wakeup
-                cx.waker().wake_by_ref();
-                Poll::Pending
+                if let Some(reg) = &self.registration {
+                    reg.update_waker(cx.waker().clone());
+                    Poll::Pending
+                } else {
+                    // Fallback for unregistered streams (e.g. from pair())
+                    cx.waker().wake_by_ref();
+                    Poll::Pending
+                }
             }
             Err(e) => Poll::Ready(Err(e)),
         }
@@ -433,9 +515,13 @@ impl AsyncReadVectored for UnixStream {
         match (&*inner).read_vectored(bufs) {
             Ok(n) => Poll::Ready(Ok(n)),
             Err(ref e) if e.kind() == io::ErrorKind::WouldBlock => {
-                // TODO: Register with reactor for proper wakeup
-                cx.waker().wake_by_ref();
-                Poll::Pending
+                if let Some(reg) = &self.registration {
+                    reg.update_waker(cx.waker().clone());
+                    Poll::Pending
+                } else {
+                    cx.waker().wake_by_ref();
+                    Poll::Pending
+                }
             }
             Err(e) => Poll::Ready(Err(e)),
         }
@@ -452,9 +538,13 @@ impl AsyncWrite for UnixStream {
         match (&*inner).write(buf) {
             Ok(n) => Poll::Ready(Ok(n)),
             Err(ref e) if e.kind() == io::ErrorKind::WouldBlock => {
-                // TODO: Register with reactor for proper wakeup
-                cx.waker().wake_by_ref();
-                Poll::Pending
+                if let Some(reg) = &self.registration {
+                    reg.update_waker(cx.waker().clone());
+                    Poll::Pending
+                } else {
+                    cx.waker().wake_by_ref();
+                    Poll::Pending
+                }
             }
             Err(e) => Poll::Ready(Err(e)),
         }
@@ -469,9 +559,13 @@ impl AsyncWrite for UnixStream {
         match (&*inner).write_vectored(bufs) {
             Ok(n) => Poll::Ready(Ok(n)),
             Err(ref e) if e.kind() == io::ErrorKind::WouldBlock => {
-                // TODO: Register with reactor for proper wakeup
-                cx.waker().wake_by_ref();
-                Poll::Pending
+                if let Some(reg) = &self.registration {
+                    reg.update_waker(cx.waker().clone());
+                    Poll::Pending
+                } else {
+                    cx.waker().wake_by_ref();
+                    Poll::Pending
+                }
             }
             Err(e) => Poll::Ready(Err(e)),
         }
@@ -486,8 +580,13 @@ impl AsyncWrite for UnixStream {
         match (&*inner).flush() {
             Ok(()) => Poll::Ready(Ok(())),
             Err(ref e) if e.kind() == io::ErrorKind::WouldBlock => {
-                cx.waker().wake_by_ref();
-                Poll::Pending
+                if let Some(reg) = &self.registration {
+                    reg.update_waker(cx.waker().clone());
+                    Poll::Pending
+                } else {
+                    cx.waker().wake_by_ref();
+                    Poll::Pending
+                }
             }
             Err(e) => Poll::Ready(Err(e)),
         }
