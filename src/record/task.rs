@@ -369,12 +369,12 @@ impl TaskRecord {
                 false
             }
             TaskState::Created | TaskState::Running => {
-                let old_state = self.state_name();
+                let prev_state = self.state_name();
                 let requested_reason = reason.clone();
                 debug!(
                     task_id = ?self.id,
                     region_id = ?self.owner,
-                    old_state = old_state,
+                    old_state = prev_state,
                     new_state = "CancelRequested",
                     cancel_kind = ?reason.kind,
                     cleanup_poll_quota = cleanup_budget.poll_quota,
@@ -428,8 +428,8 @@ impl TaskRecord {
         if self.state.is_terminal() {
             return false;
         }
-        let old_state = self.state_name();
-        let outcome_kind = match &outcome {
+        let prev_state = self.state_name();
+        let outcome_label = match &outcome {
             Outcome::Ok(()) => "Ok",
             Outcome::Err(_) => "Err",
             Outcome::Cancelled(_) => "Cancelled",
@@ -438,9 +438,9 @@ impl TaskRecord {
         debug!(
             task_id = ?self.id,
             region_id = ?self.owner,
-            old_state = old_state,
+            old_state = prev_state,
             new_state = "Completed",
-            outcome_kind = outcome_kind,
+            outcome_kind = outcome_label,
             "task completed"
         );
         self.state = TaskState::Completed(outcome);
