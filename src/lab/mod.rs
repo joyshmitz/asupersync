@@ -52,6 +52,7 @@ pub mod config;
 pub mod injection;
 pub mod instrumented_future;
 pub mod meta;
+pub mod network;
 pub mod oracle;
 pub mod replay;
 pub mod runtime;
@@ -72,6 +73,10 @@ pub use instrumented_future::{
 pub use meta::{
     builtin_mutations, invariant_from_violation, BuiltinMutation, MetaCoverageEntry,
     MetaCoverageReport, MetaReport, MetaResult, MetaRunner, ALL_ORACLE_INVARIANTS,
+};
+pub use network::{
+    Fault as NetworkFault, JitterModel, LatencyModel, NetworkConditions, NetworkConfig,
+    NetworkMetrics, NetworkTraceEvent, NetworkTraceKind, Packet, SimulatedNetwork,
 };
 pub use oracle::{
     assert_deterministic, assert_deterministic_multi, DeterminismOracle, DeterminismViolation,

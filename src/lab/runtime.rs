@@ -1014,6 +1014,27 @@ mod tests {
     use std::task::{Wake, Waker};
     use std::time::Duration;
 
+    #[cfg(unix)]
+    struct MockSource;
+    #[cfg(unix)]
+    impl std::os::fd::AsRawFd for MockSource {
+        fn as_raw_fd(&self) -> std::os::fd::RawFd {
+            0
+        }
+    }
+
+    #[cfg(unix)]
+    struct NoopWaker;
+    #[cfg(unix)]
+    impl Wake for NoopWaker {
+        fn wake(self: Arc<Self>) {}
+    }
+
+    #[cfg(unix)]
+    fn noop_waker() -> Waker {
+        Waker::from(Arc::new(NoopWaker))
+    }
+
     fn init_test(name: &str) {
         crate::test_utils::init_test_logging();
         crate::test_phase!(name);
@@ -1051,21 +1072,9 @@ mod tests {
     fn lab_runtime_records_io_ready_trace() {
         init_test("lab_runtime_records_io_ready_trace");
 
-        struct MockSource;
-        impl std::os::fd::AsRawFd for MockSource {
-            fn as_raw_fd(&self) -> std::os::fd::RawFd {
-                0
-            }
-        }
-
-        struct NoopWaker;
-        impl Wake for NoopWaker {
-            fn wake(self: Arc<Self>) {}
-        }
-
         let mut runtime = LabRuntime::with_seed(42);
         let handle = runtime.state.io_driver_handle().expect("io driver");
-        let waker = Waker::from(Arc::new(NoopWaker));
+        let waker = noop_waker();
         let source = MockSource;
 
         let registration = handle
