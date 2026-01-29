@@ -432,7 +432,7 @@ mod tests {
         ];
         for (phase, expected) in cases {
             let actual = format!("{phase}");
-            crate::assert_with_log!(actual == expected, "display", expected, actual);
+            crate::assert_with_log!(actual == expected, "phase display", expected, actual);
         }
         crate::test_complete!("display_formatting");
     }
