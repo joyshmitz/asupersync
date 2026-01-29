@@ -760,7 +760,11 @@ mod tests {
         runtime.scheduler.lock().unwrap().schedule(task_id, 0);
         runtime.run_until_quiescent();
 
-        assert_eq!(on_stop_count.load(Ordering::SeqCst), 5, "all messages processed");
+        assert_eq!(
+            on_stop_count.load(Ordering::SeqCst),
+            5,
+            "all messages processed"
+        );
         assert!(started.load(Ordering::SeqCst), "on_start was called");
         assert!(stopped.load(Ordering::SeqCst), "on_stop was called");
 
@@ -801,7 +805,11 @@ mod tests {
         runtime.run_until_quiescent();
 
         // All 5 messages processed during drain phase
-        assert_eq!(on_stop_count.load(Ordering::SeqCst), 5, "drain processed all messages");
+        assert_eq!(
+            on_stop_count.load(Ordering::SeqCst),
+            5,
+            "drain processed all messages"
+        );
         assert!(started.load(Ordering::SeqCst), "on_start was called");
         assert!(stopped.load(Ordering::SeqCst), "on_stop was called");
 
@@ -813,8 +821,6 @@ mod tests {
     /// After restart, actor processes subsequent normal messages.
     #[test]
     fn supervised_actor_restarts_on_panic() {
-        init_test("supervised_actor_restarts_on_panic");
-
         use std::sync::atomic::AtomicU32;
 
         struct PanickingCounter {
@@ -832,9 +838,7 @@ mod tests {
                 _cx: &Cx,
                 msg: u64,
             ) -> Pin<Box<dyn Future<Output = ()> + Send + '_>> {
-                if msg == self.panic_on {
-                    panic!("threshold exceeded: {}", msg);
-                }
+                assert!(msg != self.panic_on, "threshold exceeded: {msg}");
                 self.count += msg;
                 Box::pin(async {})
             }
@@ -844,6 +848,8 @@ mod tests {
                 Box::pin(async {})
             }
         }
+
+        init_test("supervised_actor_restarts_on_panic");
 
         let mut runtime = crate::lab::LabRuntime::new(crate::lab::LabConfig::default());
         let region = runtime.state.create_root_region(Budget::INFINITE);
@@ -915,8 +921,6 @@ mod tests {
     /// E2E: Deterministic replay — same seed produces same actor execution.
     #[test]
     fn actor_deterministic_replay() {
-        init_test("actor_deterministic_replay");
-
         fn run_scenario(seed: u64) -> u64 {
             let config = crate::lab::LabConfig::new(seed);
             let mut runtime = crate::lab::LabRuntime::new(config);
@@ -925,8 +929,7 @@ mod tests {
             let scope = crate::cx::Scope::<FailFast>::new(region, Budget::INFINITE);
 
             let (on_stop_count, started, stopped) = observable_state();
-            let actor =
-                ObservableCounter::new(on_stop_count.clone(), started.clone(), stopped.clone());
+            let actor = ObservableCounter::new(on_stop_count.clone(), started, stopped);
 
             let (handle, stored) = scope
                 .spawn_actor(&mut runtime.state, &cx, actor, 32)
@@ -945,11 +948,16 @@ mod tests {
             on_stop_count.load(Ordering::SeqCst)
         }
 
+        init_test("actor_deterministic_replay");
+
         // Run the same scenario twice with the same seed
         let result1 = run_scenario(0xDEAD_BEEF);
         let result2 = run_scenario(0xDEAD_BEEF);
 
-        assert_eq!(result1, result2, "deterministic replay: same seed → same result");
+        assert_eq!(
+            result1, result2,
+            "deterministic replay: same seed → same result"
+        );
         assert_eq!(result1, 55, "sum of 1..=10");
 
         crate::test_complete!("actor_deterministic_replay");

@@ -65,6 +65,7 @@ pub struct NodeSnapshot {
 
 impl NodeSnapshot {
     /// Creates a new snapshot for a node.
+    #[must_use]
     pub fn new(node: NodeId) -> Self {
         Self {
             node,
@@ -174,6 +175,7 @@ pub struct SagaConsistencyChecker {
 
 impl SagaConsistencyChecker {
     /// Creates a new checker with the given node snapshots and constraints.
+    #[must_use]
     pub fn new(snapshots: Vec<NodeSnapshot>, constraints: Vec<SagaConstraint>) -> Self {
         Self {
             snapshots,
@@ -271,9 +273,7 @@ impl SagaConsistencyChecker {
         for constraint in &self.constraints {
             match constraint {
                 SagaConstraint::AllOrNothing { name, obligations } => {
-                    if let Some(violation) =
-                        self.check_all_or_nothing(name, obligations)
-                    {
+                    if let Some(violation) = self.check_all_or_nothing(name, obligations) {
                         violations.push(violation);
                     }
                 }
@@ -335,7 +335,11 @@ impl SagaConsistencyChecker {
         if let Some(&terminal) = terminal_states.first() {
             let any_node_witnesses_all = self.snapshots.iter().any(|snap| {
                 obligations.iter().all(|oid| {
-                    snap.states.get(oid).copied().unwrap_or(LatticeState::Unknown) == terminal
+                    snap.states
+                        .get(oid)
+                        .copied()
+                        .unwrap_or(LatticeState::Unknown)
+                        == terminal
                 })
             });
 
@@ -483,8 +487,7 @@ mod tests {
             obligations: [o1, o2, o3].into_iter().collect(),
         };
 
-        let checker =
-            SagaConsistencyChecker::new(vec![snap_a, snap_b, snap_c], vec![constraint]);
+        let checker = SagaConsistencyChecker::new(vec![snap_a, snap_b, snap_c], vec![constraint]);
         let report = checker.check();
 
         // No pairwise conflicts (Reserved ⊔ Committed = Committed)
@@ -565,7 +568,7 @@ mod tests {
         let o1 = oid(1);
         let constraint = SagaConstraint::AllOrNothing {
             name: "empty-saga".into(),
-            obligations: [o1].into_iter().collect(),
+            obligations: std::iter::once(o1).collect(),
         };
 
         let snap = NodeSnapshot::new(node("A"));

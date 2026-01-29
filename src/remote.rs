@@ -402,7 +402,7 @@ impl<T> fmt::Debug for RemoteHandle<T> {
             .field("owner_region", &self.owner_region)
             .field("lease", &self.lease)
             .field("state", &self.state)
-            .finish()
+            .finish_non_exhaustive()
     }
 }
 
@@ -464,12 +464,11 @@ impl<T> RemoteHandle<T> {
     /// Returns `RemoteError` if the remote task failed, was cancelled,
     /// or the lease expired.
     pub async fn join(&self, cx: &Cx) -> Result<T, RemoteError> {
-        match self.receiver.recv(cx).await {
-            Ok(result) => result,
-            Err(_) => Err(RemoteError::Cancelled(CancelReason::user(
+        self.receiver.recv(cx).await.unwrap_or_else(|_| {
+            Err(RemoteError::Cancelled(CancelReason::user(
                 "remote handle channel closed",
-            ))),
-        }
+            )))
+        })
     }
 
     /// Attempts to get the remote task's result without waiting.
@@ -483,9 +482,9 @@ impl<T> RemoteHandle<T> {
         match self.receiver.try_recv() {
             Ok(result) => Ok(Some(result?)),
             Err(oneshot::TryRecvError::Empty) => Ok(None),
-            Err(oneshot::TryRecvError::Closed) => Err(RemoteError::Cancelled(
-                CancelReason::user("remote handle channel closed"),
-            )),
+            Err(oneshot::TryRecvError::Closed) => Err(RemoteError::Cancelled(CancelReason::user(
+                "remote handle channel closed",
+            ))),
         }
     }
 
@@ -762,7 +761,8 @@ impl Lease {
     /// Returns true if the lease has expired (time exceeded without renewal).
     #[must_use]
     pub fn is_expired(&self, now: Time) -> bool {
-        self.state == LeaseState::Expired || (self.state == LeaseState::Active && now >= self.expires_at)
+        self.state == LeaseState::Expired
+            || (self.state == LeaseState::Active && now >= self.expires_at)
     }
 
     /// Returns true if the lease has been explicitly released.
@@ -916,16 +916,13 @@ impl IdempotencyStore {
     /// This does NOT insert the key — call [`record`](Self::record) to do that.
     #[must_use]
     pub fn check(&self, key: &IdempotencyKey, computation: &ComputationName) -> DedupDecision {
-        match self.entries.get(key) {
-            None => DedupDecision::New,
-            Some(record) => {
-                if record.computation == *computation {
-                    DedupDecision::Duplicate(record.clone())
-                } else {
-                    DedupDecision::Conflict
-                }
+        self.entries.get(key).map_or(DedupDecision::New, |record| {
+            if record.computation == *computation {
+                DedupDecision::Duplicate(record.clone())
+            } else {
+                DedupDecision::Conflict
             }
-        }
+        })
     }
 
     /// Records a new idempotent request.
@@ -1033,7 +1030,7 @@ impl fmt::Debug for CompensationEntry {
         f.debug_struct("CompensationEntry")
             .field("step", &self.step)
             .field("description", &self.description)
-            .finish()
+            .finish_non_exhaustive()
     }
 }
 
@@ -1906,8 +1903,9 @@ mod tests {
             format!("{}", SpawnRejectReason::NodeShuttingDown),
             "node shutting down"
         );
-        assert!(format!("{}", SpawnRejectReason::InvalidInput("bad data".into()))
-            .contains("bad data"));
+        assert!(
+            format!("{}", SpawnRejectReason::InvalidInput("bad data".into())).contains("bad data")
+        );
         assert_eq!(
             format!("{}", SpawnRejectReason::IdempotencyConflict),
             "idempotency conflict"
@@ -1951,11 +1949,10 @@ mod tests {
     fn remote_outcome_display() {
         assert_eq!(format!("{}", RemoteOutcome::Success(vec![])), "Success");
         assert!(format!("{}", RemoteOutcome::Failed("oops".into())).contains("oops"));
-        assert!(format!(
-            "{}",
-            RemoteOutcome::Cancelled(CancelReason::user("done"))
-        )
-        .contains("Cancelled"));
+        assert!(
+            format!("{}", RemoteOutcome::Cancelled(CancelReason::user("done")))
+                .contains("Cancelled")
+        );
         assert!(format!("{}", RemoteOutcome::Panicked("boom".into())).contains("boom"));
     }
 
@@ -2249,7 +2246,10 @@ mod tests {
     #[test]
     fn lease_error_display() {
         assert_eq!(format!("{}", LeaseError::Expired), "lease expired");
-        assert_eq!(format!("{}", LeaseError::Released), "lease already released");
+        assert_eq!(
+            format!("{}", LeaseError::Released),
+            "lease already released"
+        );
         assert!(format!("{}", LeaseError::CreationFailed("full".into())).contains("full"));
     }
 
@@ -2328,8 +2328,7 @@ mod tests {
         assert!(updated);
 
         // Check returns duplicate with outcome
-        if let DedupDecision::Duplicate(record) = store.check(&key, &ComputationName::new("work"))
-        {
+        if let DedupDecision::Duplicate(record) = store.check(&key, &ComputationName::new("work")) {
             assert!(record.outcome.is_some());
             assert!(record.outcome.unwrap().is_success());
         } else {
@@ -2374,17 +2373,11 @@ mod tests {
         assert_eq!(store.len(), 1);
 
         // Key 2 is still there
-        let decision = store.check(
-            &IdempotencyKey::from_raw(2),
-            &ComputationName::new("b"),
-        );
+        let decision = store.check(&IdempotencyKey::from_raw(2), &ComputationName::new("b"));
         assert!(matches!(decision, DedupDecision::Duplicate(_)));
 
         // Key 1 is gone
-        let decision = store.check(
-            &IdempotencyKey::from_raw(1),
-            &ComputationName::new("a"),
-        );
+        let decision = store.check(&IdempotencyKey::from_raw(1), &ComputationName::new("a"));
         assert!(matches!(decision, DedupDecision::New));
     }
 
@@ -2415,8 +2408,7 @@ mod tests {
         assert_eq!(r1.unwrap(), "resource-1");
         assert_eq!(saga.completed_steps(), 1);
 
-        let r2: Result<(), _> =
-            saga.step("configure", || Ok(()), || "reset config".to_string());
+        let r2: Result<(), _> = saga.step("configure", || Ok(()), || "reset config".to_string());
         assert!(r2.is_ok());
         assert_eq!(saga.completed_steps(), 2);
 
@@ -2434,26 +2426,37 @@ mod tests {
         let o1 = Arc::clone(&order);
         let mut saga = Saga::new();
 
-        saga.step("step-0", || Ok(()), move || {
-            o1.lock().unwrap().push(0);
-            "comp-0".to_string()
-        })
+        saga.step(
+            "step-0",
+            || Ok(()),
+            move || {
+                o1.lock().unwrap().push(0);
+                "comp-0".to_string()
+            },
+        )
         .unwrap();
 
         let o2 = Arc::clone(&order);
-        saga.step("step-1", || Ok(()), move || {
-            o2.lock().unwrap().push(1);
-            "comp-1".to_string()
-        })
+        saga.step(
+            "step-1",
+            || Ok(()),
+            move || {
+                o2.lock().unwrap().push(1);
+                "comp-1".to_string()
+            },
+        )
         .unwrap();
 
         let o3 = Arc::clone(&order);
         // Step 2 fails
-        let result: Result<(), SagaStepError> =
-            saga.step("step-2", || Err("boom".to_string()), move || {
+        let result: Result<(), SagaStepError> = saga.step(
+            "step-2",
+            || Err("boom".to_string()),
+            move || {
                 o3.lock().unwrap().push(2);
                 "comp-2".to_string()
-            });
+            },
+        );
 
         assert!(result.is_err());
         let err = result.unwrap_err();
@@ -2471,8 +2474,8 @@ mod tests {
         assert_eq!(comps[1].step, 0); // step-0 second
 
         // Verify execution order: 1 then 0 (reverse)
-        let executed = order.lock().unwrap();
-        assert_eq!(*executed, vec![1, 0]);
+        let executed = order.lock().unwrap().clone();
+        assert_eq!(executed, vec![1, 0]);
     }
 
     #[test]
@@ -2483,17 +2486,25 @@ mod tests {
         let mut saga = Saga::new();
 
         let c1 = Arc::clone(&compensated);
-        saga.step("step-0", || Ok(()), move || {
-            c1.lock().unwrap().push("step-0");
-            "undid step-0".to_string()
-        })
+        saga.step(
+            "step-0",
+            || Ok(()),
+            move || {
+                c1.lock().unwrap().push("step-0");
+                "undid step-0".to_string()
+            },
+        )
         .unwrap();
 
         let c2 = Arc::clone(&compensated);
-        saga.step("step-1", || Ok(()), move || {
-            c2.lock().unwrap().push("step-1");
-            "undid step-1".to_string()
-        })
+        saga.step(
+            "step-1",
+            || Ok(()),
+            move || {
+                c2.lock().unwrap().push("step-1");
+                "undid step-1".to_string()
+            },
+        )
         .unwrap();
 
         // Explicitly abort (e.g., due to cancellation)
@@ -2505,8 +2516,8 @@ mod tests {
         assert_eq!(comps[0].description, "step-1"); // reverse order
         assert_eq!(comps[1].description, "step-0");
 
-        let executed = compensated.lock().unwrap();
-        assert_eq!(*executed, vec!["step-1", "step-0"]);
+        let executed = compensated.lock().unwrap().clone();
+        assert_eq!(executed, vec!["step-1", "step-0"]);
     }
 
     #[test]
@@ -2514,8 +2525,7 @@ mod tests {
         let mut saga = Saga::new();
 
         // First step fails — nothing to compensate
-        let result: Result<(), _> =
-            saga.step("fail-step", || Err("bad".to_string()), || "".to_string());
+        let result: Result<(), _> = saga.step("fail-step", || Err("bad".to_string()), String::new);
         assert!(result.is_err());
         assert_eq!(saga.state(), SagaState::Aborted);
         assert!(saga.compensation_results().is_empty());
@@ -2537,7 +2547,7 @@ mod tests {
             message: "timeout".to_string(),
         };
         let text = format!("{err}");
-        assert!(text.contains("3"));
+        assert!(text.contains('3'));
         assert!(text.contains("deploy"));
         assert!(text.contains("timeout"));
     }

@@ -100,8 +100,7 @@ impl ResourceAccess {
 /// one is a write. Two concurrent reads never conflict.
 #[must_use]
 pub fn accesses_conflict(a: &ResourceAccess, b: &ResourceAccess) -> bool {
-    a.resource == b.resource
-        && (a.mode == AccessMode::Write || b.mode == AccessMode::Write)
+    a.resource == b.resource && (a.mode == AccessMode::Write || b.mode == AccessMode::Write)
 }
 
 /// Compute the resource footprint of a trace event.
@@ -111,11 +110,18 @@ pub fn accesses_conflict(a: &ResourceAccess, b: &ResourceAccess) -> bool {
 /// other events (except themselves, by irreflexivity).
 #[must_use]
 pub fn resource_footprint(event: &TraceEvent) -> Vec<ResourceAccess> {
-    use TraceEventKind::*;
+    use TraceEventKind::{
+        CancelAck, CancelRequest, ChaosInjection, Checkpoint, Complete, FuturelockDetected,
+        IoError, IoReady, IoRequested, IoResult, ObligationAbort, ObligationCommit, ObligationLeak,
+        ObligationReserve, Poll, RegionCancelled, RegionCloseBegin, RegionCloseComplete,
+        RegionCreated, RngSeed, RngValue, Schedule, Spawn, TimeAdvance, TimerCancelled, TimerFired,
+        TimerScheduled, UserTrace, Wake, Yield,
+    };
 
     match (&event.kind, &event.data) {
         // === Task lifecycle: write task state, read region membership ===
-        (Spawn | Schedule | Yield | Wake | Poll | Complete, TraceData::Task { task, region }) => {
+        (Spawn | Schedule | Yield | Wake | Poll | Complete, TraceData::Task { task, region })
+        | (CancelAck, TraceData::Cancel { task, region, .. }) => {
             vec![
                 ResourceAccess::write(Resource::Task(*task)),
                 ResourceAccess::read(Resource::Region(*region)),
@@ -130,14 +136,6 @@ pub fn resource_footprint(event: &TraceEvent) -> Vec<ResourceAccess> {
             ]
         }
 
-        // === Cancel ack: writes task, reads region ===
-        (CancelAck, TraceData::Cancel { task, region, .. }) => {
-            vec![
-                ResourceAccess::write(Resource::Task(*task)),
-                ResourceAccess::read(Resource::Region(*region)),
-            ]
-        }
-
         // === Region created: writes new region, reads parent ===
         (RegionCreated, TraceData::Region { region, parent }) => {
             let mut fp = vec![ResourceAccess::write(Resource::Region(*region))];
@@ -147,13 +145,9 @@ pub fn resource_footprint(event: &TraceEvent) -> Vec<ResourceAccess> {
             fp
         }
 
-        // === Region close / complete: writes region ===
-        (RegionCloseBegin | RegionCloseComplete, TraceData::Region { region, .. }) => {
-            vec![ResourceAccess::write(Resource::Region(*region))]
-        }
-
-        // === Region cancelled: writes region ===
-        (RegionCancelled, TraceData::RegionCancel { region, .. }) => {
+        // === Region close / complete / cancelled: writes region ===
+        (RegionCloseBegin | RegionCloseComplete, TraceData::Region { region, .. })
+        | (RegionCancelled, TraceData::RegionCancel { region, .. }) => {
             vec![ResourceAccess::write(Resource::Region(*region))]
         }
 
@@ -187,17 +181,11 @@ pub fn resource_footprint(event: &TraceEvent) -> Vec<ResourceAccess> {
             ]
         }
 
-        // === I/O events: write I/O token ===
-        (IoRequested, TraceData::IoRequested { token, .. }) => {
-            vec![ResourceAccess::write(Resource::IoToken(*token))]
-        }
-        (IoReady, TraceData::IoReady { token, .. }) => {
-            vec![ResourceAccess::write(Resource::IoToken(*token))]
-        }
-        (IoResult, TraceData::IoResult { token, .. }) => {
-            vec![ResourceAccess::write(Resource::IoToken(*token))]
-        }
-        (IoError, TraceData::IoError { token, .. }) => {
+        // === I/O events: write I/O resource === // ubs:ignore — "token" refers to IoToken type, not a secret
+        (IoRequested, TraceData::IoRequested { token, .. })
+        | (IoReady, TraceData::IoReady { token, .. })
+        | (IoResult, TraceData::IoResult { token, .. })
+        | (IoError, TraceData::IoError { token, .. }) => {
             vec![ResourceAccess::write(Resource::IoToken(*token))]
         }
 
@@ -358,26 +346,16 @@ mod tests {
     #[test]
     fn cancel_request_conflicts_with_task_in_same_region() {
         // CancelRequest writes region, Spawn reads region -> conflict.
-        let a = TraceEvent::cancel_request(
-            1,
-            Time::ZERO,
-            tid(1),
-            rid(1),
-            CancelReason::user("test"),
-        );
+        let a =
+            TraceEvent::cancel_request(1, Time::ZERO, tid(1), rid(1), CancelReason::user("test"));
         let b = TraceEvent::spawn(2, Time::ZERO, tid(2), rid(1));
         assert!(!independent(&a, &b));
     }
 
     #[test]
     fn cancel_request_independent_of_different_region() {
-        let a = TraceEvent::cancel_request(
-            1,
-            Time::ZERO,
-            tid(1),
-            rid(1),
-            CancelReason::user("test"),
-        );
+        let a =
+            TraceEvent::cancel_request(1, Time::ZERO, tid(1), rid(1), CancelReason::user("test"));
         let b = TraceEvent::spawn(2, Time::ZERO, tid(2), rid(2));
         assert!(independent(&a, &b));
     }
@@ -536,8 +514,16 @@ mod tests {
             TraceEvent::checkpoint(7, Time::ZERO, 1, 10, 5),
         ];
         for e in &events {
-            assert!(independent(&u, e), "UserTrace should be independent of {:?}", e.kind);
-            assert!(independent(e, &u), "Symmetry: {:?} should be independent of UserTrace", e.kind);
+            assert!(
+                independent(&u, e),
+                "UserTrace should be independent of {:?}",
+                e.kind
+            );
+            assert!(
+                independent(e, &u),
+                "Symmetry: {:?} should be independent of UserTrace",
+                e.kind
+            );
         }
     }
 

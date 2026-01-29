@@ -214,7 +214,7 @@ impl LatencyModel {
             }
             Self::LogNormal { mu, sigma } => {
                 let z = sample_standard_normal(rng);
-                let sample = (mu + sigma * z).exp();
+                let sample = sigma.mul_add(z, *mu).exp();
                 duration_from_secs_f64(sample)
             }
             Self::Bimodal {

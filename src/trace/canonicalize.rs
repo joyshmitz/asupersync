@@ -52,7 +52,7 @@ impl FoataTrace {
     /// Returns the total number of events across all layers.
     #[must_use]
     pub fn len(&self) -> usize {
-        self.layers.iter().map(|l| l.len()).sum()
+        self.layers.iter().map(Vec::len).sum()
     }
 
     /// Returns `true` if the trace contains no events.
@@ -189,45 +189,44 @@ pub fn trace_fingerprint(events: &[TraceEvent]) -> u64 {
 /// Stable discriminant for `TraceEventKind`.
 ///
 /// These values are fixed for fingerprint stability across versions.
-fn kind_discriminant(kind: &TraceEventKind) -> u8 {
-    use TraceEventKind::*;
+fn kind_discriminant(kind: TraceEventKind) -> u8 {
     match kind {
-        Spawn => 0,
-        Schedule => 1,
-        Yield => 2,
-        Wake => 3,
-        Poll => 4,
-        Complete => 5,
-        CancelRequest => 6,
-        CancelAck => 7,
-        RegionCloseBegin => 8,
-        RegionCloseComplete => 9,
-        RegionCreated => 10,
-        RegionCancelled => 11,
-        ObligationReserve => 12,
-        ObligationCommit => 13,
-        ObligationAbort => 14,
-        ObligationLeak => 15,
-        TimeAdvance => 16,
-        TimerScheduled => 17,
-        TimerFired => 18,
-        TimerCancelled => 19,
-        IoRequested => 20,
-        IoReady => 21,
-        IoResult => 22,
-        IoError => 23,
-        RngSeed => 24,
-        RngValue => 25,
-        Checkpoint => 26,
-        FuturelockDetected => 27,
-        ChaosInjection => 28,
-        UserTrace => 29,
+        TraceEventKind::Spawn => 0,
+        TraceEventKind::Schedule => 1,
+        TraceEventKind::Yield => 2,
+        TraceEventKind::Wake => 3,
+        TraceEventKind::Poll => 4,
+        TraceEventKind::Complete => 5,
+        TraceEventKind::CancelRequest => 6,
+        TraceEventKind::CancelAck => 7,
+        TraceEventKind::RegionCloseBegin => 8,
+        TraceEventKind::RegionCloseComplete => 9,
+        TraceEventKind::RegionCreated => 10,
+        TraceEventKind::RegionCancelled => 11,
+        TraceEventKind::ObligationReserve => 12,
+        TraceEventKind::ObligationCommit => 13,
+        TraceEventKind::ObligationAbort => 14,
+        TraceEventKind::ObligationLeak => 15,
+        TraceEventKind::TimeAdvance => 16,
+        TraceEventKind::TimerScheduled => 17,
+        TraceEventKind::TimerFired => 18,
+        TraceEventKind::TimerCancelled => 19,
+        TraceEventKind::IoRequested => 20,
+        TraceEventKind::IoReady => 21,
+        TraceEventKind::IoResult => 22,
+        TraceEventKind::IoError => 23,
+        TraceEventKind::RngSeed => 24,
+        TraceEventKind::RngValue => 25,
+        TraceEventKind::Checkpoint => 26,
+        TraceEventKind::FuturelockDetected => 27,
+        TraceEventKind::ChaosInjection => 28,
+        TraceEventKind::UserTrace => 29,
     }
 }
 
 /// Pack an ArenaIndex into a u64 for deterministic ordering.
 fn pack_arena(idx: crate::util::ArenaIndex) -> u64 {
-    (idx.index() as u64) << 32 | idx.generation() as u64
+    (u64::from(idx.index()) << 32) | u64::from(idx.generation())
 }
 
 /// Compute a sort key for deterministic intra-layer ordering.
@@ -236,13 +235,19 @@ fn pack_arena(idx: crate::util::ArenaIndex) -> u64 {
 /// component is a fixed-width integer. This ensures total, deterministic
 /// ordering within a Foata layer.
 fn event_sort_key(event: &TraceEvent) -> (u8, u64, u64, u64) {
-    let k = kind_discriminant(&event.kind);
+    let k = kind_discriminant(event.kind);
     match &event.data {
-        TraceData::Task { task, region } => (k, pack_arena(task.0), pack_arena(region.0), 0),
-        TraceData::Cancel { task, region, .. } => (k, pack_arena(task.0), pack_arena(region.0), 0),
-        TraceData::Region { region, parent } => {
-            (k, pack_arena(region.0), parent.map_or(0, |p| pack_arena(p.0)), 0)
+        TraceData::Task { task, region }
+        | TraceData::Cancel { task, region, .. }
+        | TraceData::Futurelock { task, region, .. } => {
+            (k, pack_arena(task.0), pack_arena(region.0), 0)
         }
+        TraceData::Region { region, parent } => (
+            k,
+            pack_arena(region.0),
+            parent.map_or(0, |p| pack_arena(p.0)),
+            0,
+        ),
         TraceData::RegionCancel { region, .. } => (k, pack_arena(region.0), 0, 0),
         TraceData::Obligation {
             obligation,
@@ -257,20 +262,26 @@ fn event_sort_key(event: &TraceEvent) -> (u8, u64, u64, u64) {
         ),
         TraceData::Time { old, new } => (k, old.as_nanos(), new.as_nanos(), 0),
         TraceData::Timer { timer_id, .. } => (k, *timer_id, 0, 0),
-        TraceData::IoRequested { token, .. } => (k, *token, 0, 0),
-        TraceData::IoReady { token, .. } => (k, *token, 0, 0),
-        TraceData::IoResult { token, bytes } => (k, *token, *bytes as u64, 0),
-        TraceData::IoError { token, kind } => (k, *token, *kind as u64, 0),
+        TraceData::IoRequested { token, .. } | TraceData::IoReady { token, .. } => {
+            (k, *token, 0, 0)
+        }
+        TraceData::IoResult { token, bytes } => {
+            let bytes_key = u64::try_from((*bytes).max(0)).unwrap_or(0);
+            (k, *token, bytes_key, 0)
+        }
+        TraceData::IoError { token, kind } => (k, *token, u64::from(*kind), 0),
         TraceData::RngSeed { seed } => (k, *seed, 0, 0),
         TraceData::RngValue { value } => (k, *value, 0, 0),
         TraceData::Checkpoint {
             sequence,
             active_tasks,
             active_regions,
-        } => (k, *sequence, *active_tasks as u64, *active_regions as u64),
-        TraceData::Futurelock { task, region, .. } => {
-            (k, pack_arena(task.0), pack_arena(region.0), 0)
-        }
+        } => (
+            k,
+            *sequence,
+            u64::from(*active_tasks),
+            u64::from(*active_regions),
+        ),
         TraceData::Chaos { task, .. } => {
             let task_key = task.map_or(0, |t| pack_arena(t.0));
             (k, task_key, 0, 0)
@@ -451,7 +462,7 @@ mod tests {
             vec![e2.clone(), e1.clone(), e3.clone()],
             vec![e2.clone(), e3.clone(), e1.clone()],
             vec![e3.clone(), e1.clone(), e2.clone()],
-            vec![e3.clone(), e2.clone(), e1.clone()],
+            vec![e3, e2, e1],
         ];
 
         let fp0 = trace_fingerprint(&permutations[0]);

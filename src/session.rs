@@ -129,7 +129,7 @@ pub trait Session: std::marker::Send + 'static {
 // ---------- Session implementations ----------
 
 impl Session for End {
-    type Dual = End;
+    type Dual = Self;
 }
 
 impl<T: std::marker::Send + 'static, Next: Session> Session for self::Send<T, Next> {
@@ -205,6 +205,7 @@ pub enum SessionError {
 /// // client: Endpoint<Send<String, End>>
 /// // server: Endpoint<Recv<String, End>>
 /// ```
+#[must_use]
 pub fn channel<S: Session>() -> (Endpoint<S>, Endpoint<Dual<S>>) {
     let (tx1, rx1) = crate::channel::mpsc::channel(1);
     let (tx2, rx2) = crate::channel::mpsc::channel(1);
@@ -223,7 +224,6 @@ pub fn channel<S: Session>() -> (Endpoint<S>, Endpoint<Dual<S>>) {
     (ep1, ep2)
 }
 
-
 impl<T, Next> Endpoint<self::Send<T, Next>>
 where
     T: std::marker::Send + 'static,
@@ -233,12 +233,8 @@ where
     ///
     /// Consumes this endpoint and returns a new one at state `Next`.
     /// Uses the crate's two-phase send (reserve/commit) for cancel-safety.
-    pub async fn send(
-        self,
-        cx: &crate::cx::Cx,
-        value: T,
-    ) -> Result<Endpoint<Next>, SessionError> {
-        let Endpoint { tx, rx, .. } = self;
+    pub async fn send(self, cx: &crate::cx::Cx, value: T) -> Result<Endpoint<Next>, SessionError> {
+        let Self { tx, rx, .. } = self;
         let boxed: Box<dyn std::any::Any + std::marker::Send> = Box::new(value);
         tx.send(cx, boxed)
             .await
@@ -259,27 +255,24 @@ where
     /// Receive a value from the peer, advancing the protocol to the next state.
     ///
     /// Consumes this endpoint and returns the value plus a new endpoint at state `Next`.
-    pub async fn recv(
-        self,
-        cx: &crate::cx::Cx,
-    ) -> Result<(T, Endpoint<Next>), SessionError> {
-        let Endpoint { tx, rx, .. } = self;
-        let boxed = rx
-            .recv(cx)
-            .await
-            .map_err(|e| match e {
-                crate::channel::mpsc::RecvError::Disconnected => SessionError::Disconnected,
-                crate::channel::mpsc::RecvError::Cancelled => SessionError::Cancelled,
-                crate::channel::mpsc::RecvError::Empty => SessionError::Disconnected,
-            })?;
+    pub async fn recv(self, cx: &crate::cx::Cx) -> Result<(T, Endpoint<Next>), SessionError> {
+        let Self { tx, rx, .. } = self;
+        let boxed = rx.recv(cx).await.map_err(|e| match e {
+            crate::channel::mpsc::RecvError::Cancelled => SessionError::Cancelled,
+            crate::channel::mpsc::RecvError::Disconnected
+            | crate::channel::mpsc::RecvError::Empty => SessionError::Disconnected,
+        })?;
         let value = boxed
             .downcast::<T>()
             .map_err(|_| SessionError::TypeMismatch)?;
-        Ok((*value, Endpoint {
-            _session: PhantomData,
-            tx,
-            rx,
-        }))
+        Ok((
+            *value,
+            Endpoint {
+                _session: PhantomData,
+                tx,
+                rx,
+            },
+        ))
     }
 }
 
@@ -287,11 +280,8 @@ impl<A: Session, B: Session> Endpoint<Choose<A, B>> {
     /// Choose the left branch of the protocol.
     ///
     /// Sends the choice to the peer and returns an endpoint at state `A`.
-    pub async fn choose_left(
-        self,
-        cx: &crate::cx::Cx,
-    ) -> Result<Endpoint<A>, SessionError> {
-        let Endpoint { tx, rx, .. } = self;
+    pub async fn choose_left(self, cx: &crate::cx::Cx) -> Result<Endpoint<A>, SessionError> {
+        let Self { tx, rx, .. } = self;
         let boxed: Box<dyn std::any::Any + std::marker::Send> = Box::new(Branch::Left);
         tx.send(cx, boxed)
             .await
@@ -306,11 +296,8 @@ impl<A: Session, B: Session> Endpoint<Choose<A, B>> {
     /// Choose the right branch of the protocol.
     ///
     /// Sends the choice to the peer and returns an endpoint at state `B`.
-    pub async fn choose_right(
-        self,
-        cx: &crate::cx::Cx,
-    ) -> Result<Endpoint<B>, SessionError> {
-        let Endpoint { tx, rx, .. } = self;
+    pub async fn choose_right(self, cx: &crate::cx::Cx) -> Result<Endpoint<B>, SessionError> {
+        let Self { tx, rx, .. } = self;
         let boxed: Box<dyn std::any::Any + std::marker::Send> = Box::new(Branch::Right);
         tx.send(cx, boxed)
             .await
@@ -335,19 +322,13 @@ impl<A: Session, B: Session> Endpoint<Offer<A, B>> {
     /// Wait for the peer to choose a branch.
     ///
     /// Returns the chosen branch as an `Offered` enum.
-    pub async fn offer(
-        self,
-        cx: &crate::cx::Cx,
-    ) -> Result<Offered<A, B>, SessionError> {
-        let Endpoint { tx, rx, .. } = self;
-        let boxed = rx
-            .recv(cx)
-            .await
-            .map_err(|e| match e {
-                crate::channel::mpsc::RecvError::Disconnected => SessionError::Disconnected,
-                crate::channel::mpsc::RecvError::Cancelled => SessionError::Cancelled,
-                crate::channel::mpsc::RecvError::Empty => SessionError::Disconnected,
-            })?;
+    pub async fn offer(self, cx: &crate::cx::Cx) -> Result<Offered<A, B>, SessionError> {
+        let Self { tx, rx, .. } = self;
+        let boxed = rx.recv(cx).await.map_err(|e| match e {
+            crate::channel::mpsc::RecvError::Cancelled => SessionError::Cancelled,
+            crate::channel::mpsc::RecvError::Disconnected
+            | crate::channel::mpsc::RecvError::Empty => SessionError::Disconnected,
+        })?;
         let branch = boxed
             .downcast::<Branch>()
             .map_err(|_| SessionError::TypeMismatch)?;
@@ -409,13 +390,14 @@ mod tests {
 
     #[test]
     fn duality_end() {
+        fn _check() -> Dual<End> {
+            End
+        }
+
         init_test("duality_end");
 
         assert_dual::<End>();
         // Dual<End> = End
-        fn _check() -> Dual<End> {
-            End
-        }
 
         crate::test_complete!("duality_end");
     }
@@ -448,8 +430,6 @@ mod tests {
 
     #[test]
     fn duality_is_involutive() {
-        init_test("duality_is_involutive");
-
         // Dual<Dual<S>> = S for all S
         // This is enforced by the Session trait bound: Dual: Session<Dual = Self>
         // The fact that these compile proves involution:
@@ -457,19 +437,19 @@ mod tests {
             End
         }
 
-        fn _roundtrip_send(
-            _: Dual<Dual<Send<u32, End>>>,
-        ) -> Send<u32, End> {
-            Send { _phantom: PhantomData }
+        fn _roundtrip_send(_: Dual<Dual<Send<u32, End>>>) -> Send<u32, End> {
+            Send {
+                _phantom: PhantomData,
+            }
         }
+
+        init_test("duality_is_involutive");
 
         crate::test_complete!("duality_is_involutive");
     }
 
     #[test]
     fn duality_complex_protocol() {
-        init_test("duality_complex_protocol");
-
         // ATM-like protocol:
         // Client: Send<Card, Recv<Pin, Choose<
         //           Send<Amount, Recv<Cash, End>>,   -- withdraw
@@ -481,10 +461,8 @@ mod tests {
         type Cash = u64;
         type Balance = u64;
 
-        type ClientProtocol = Send<Card, Recv<Pin, Choose<
-            Send<Amount, Recv<Cash, End>>,
-            Recv<Balance, End>,
-        >>>;
+        type ClientProtocol =
+            Send<Card, Recv<Pin, Choose<Send<Amount, Recv<Cash, End>>, Recv<Balance, End>>>>;
 
         // Server (dual):
         // Recv<Card, Send<Pin, Offer<
@@ -493,20 +471,22 @@ mod tests {
         // >>>
         type ServerProtocol = Dual<ClientProtocol>;
 
-        assert_dual::<ClientProtocol>();
-        assert_dual::<ServerProtocol>();
-
         // Verify the dual structure compiles correctly
         fn _accept_server(_: ServerProtocol) {}
+
+        init_test("duality_complex_protocol");
+
+        assert_dual::<ClientProtocol>();
+        assert_dual::<ServerProtocol>();
 
         crate::test_complete!("duality_complex_protocol");
     }
 
     #[test]
     fn channel_creates_dual_endpoints() {
-        init_test("channel_creates_dual_endpoints");
-
         type P = Send<u32, Recv<bool, End>>;
+
+        init_test("channel_creates_dual_endpoints");
         let (_client, _server) = channel::<P>();
 
         // _client: Endpoint<Send<u32, Recv<bool, End>>>
@@ -547,13 +527,16 @@ mod tests {
     /// E2E: Simple request-response protocol over session-typed endpoints.
     #[test]
     fn session_send_recv_e2e() {
+        // Protocol: Send<u64, Recv<u64, End>>
+        type ClientP = Send<u64, Recv<u64, End>>;
+
         init_test("session_send_recv_e2e");
 
         let mut runtime = crate::lab::LabRuntime::new(crate::lab::LabConfig::default());
-        let region = runtime.state.create_root_region(crate::types::Budget::INFINITE);
+        let region = runtime
+            .state
+            .create_root_region(crate::types::Budget::INFINITE);
 
-        // Protocol: Send<u64, Recv<u64, End>>
-        type ClientP = Send<u64, Recv<u64, End>>;
         let (client_ep, server_ep) = channel::<ClientP>();
 
         let client_result = Arc::new(AtomicU64::new(0));
@@ -589,8 +572,16 @@ mod tests {
         runtime.scheduler.lock().unwrap().schedule(server_id, 0);
         runtime.run_until_quiescent();
 
-        assert_eq!(server_result.load(Ordering::SeqCst), 42, "server received 42");
-        assert_eq!(client_result.load(Ordering::SeqCst), 84, "client received 84");
+        assert_eq!(
+            server_result.load(Ordering::SeqCst),
+            42,
+            "server received 42"
+        );
+        assert_eq!(
+            client_result.load(Ordering::SeqCst),
+            84,
+            "client received 84"
+        );
 
         crate::test_complete!("session_send_recv_e2e");
     }
@@ -598,13 +589,16 @@ mod tests {
     /// E2E: Choose/Offer protocol — client chooses left branch.
     #[test]
     fn session_choose_offer_e2e() {
+        // Protocol: Choose<Send<u64, End>, Recv<u64, End>>
+        type ClientP = Choose<Send<u64, End>, Recv<u64, End>>;
+
         init_test("session_choose_offer_e2e");
 
         let mut runtime = crate::lab::LabRuntime::new(crate::lab::LabConfig::default());
-        let region = runtime.state.create_root_region(crate::types::Budget::INFINITE);
+        let region = runtime
+            .state
+            .create_root_region(crate::types::Budget::INFINITE);
 
-        // Protocol: Choose<Send<u64, End>, Recv<u64, End>>
-        type ClientP = Choose<Send<u64, End>, Recv<u64, End>>;
         let (client_ep, server_ep) = channel::<ClientP>();
 
         let left_taken = Arc::new(AtomicBool::new(false));
@@ -657,14 +651,14 @@ mod tests {
     /// E2E: Deterministic session execution — same seed, same result.
     #[test]
     fn session_deterministic() {
-        init_test("session_deterministic");
-
         fn run_protocol(seed: u64) -> u64 {
+            type P = Send<u64, Recv<u64, End>>;
+
             let config = crate::lab::LabConfig::new(seed);
             let mut runtime = crate::lab::LabRuntime::new(config);
-            let region = runtime.state.create_root_region(crate::types::Budget::INFINITE);
-
-            type P = Send<u64, Recv<u64, End>>;
+            let region = runtime
+                .state
+                .create_root_region(crate::types::Budget::INFINITE);
             let (client_ep, server_ep) = channel::<P>();
 
             let result = Arc::new(AtomicU64::new(0));
@@ -697,6 +691,8 @@ mod tests {
 
             result.load(Ordering::SeqCst)
         }
+
+        init_test("session_deterministic");
 
         let r1 = run_protocol(0xCAFE);
         let r2 = run_protocol(0xCAFE);

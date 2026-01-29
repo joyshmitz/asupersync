@@ -65,26 +65,19 @@ impl LatticeState {
             // Identity: Unknown is the bottom element
             (Unknown, x) | (x, Unknown) => x,
             // Absorb: Conflict is the top element
-            (Conflict, _) | (_, Conflict) => Conflict,
+            (Conflict, _) | (_, Conflict) | (Committed, Aborted) | (Aborted, Committed) => Conflict,
             // Idempotent
             (Reserved, Reserved) => Reserved,
-            (Committed, Committed) => Committed,
-            (Aborted, Aborted) => Aborted,
             // Progressing from Reserved
-            (Reserved, Committed) | (Committed, Reserved) => Committed,
-            (Reserved, Aborted) | (Aborted, Reserved) => Aborted,
-            // Incompatible terminal states
-            (Committed, Aborted) | (Aborted, Committed) => Conflict,
+            (Committed | Reserved, Committed) | (Committed, Reserved) => Committed,
+            (Aborted | Reserved, Aborted) | (Aborted, Reserved) => Aborted,
         }
     }
 
     /// Returns true if this state is a terminal state (Committed, Aborted, or Conflict).
     #[must_use]
     pub fn is_terminal(self) -> bool {
-        matches!(
-            self,
-            Self::Committed | Self::Aborted | Self::Conflict
-        )
+        matches!(self, Self::Committed | Self::Aborted | Self::Conflict)
     }
 
     /// Returns true if this state indicates a protocol violation.
@@ -161,26 +154,19 @@ impl LeaseLatticeState {
         use LeaseLatticeState::{Active, Conflict, Expired, Released, Unknown};
         match (self, other) {
             (Unknown, x) | (x, Unknown) => x,
-            (Conflict, _) | (_, Conflict) => Conflict,
+            (Conflict, _) | (_, Conflict) | (Released, Expired) | (Expired, Released) => Conflict,
             // Idempotent
             (Active, Active) => Active,
-            (Released, Released) => Released,
-            (Expired, Expired) => Expired,
             // Active can progress to Released or Expired
-            (Active, Released) | (Released, Active) => Released,
-            (Active, Expired) | (Expired, Active) => Expired,
-            // Released and Expired are terminal; seeing both is a conflict
-            (Released, Expired) | (Expired, Released) => Conflict,
+            (Released | Active, Released) | (Released, Active) => Released,
+            (Expired | Active, Expired) | (Expired, Active) => Expired,
         }
     }
 
     /// Returns true if this is a terminal state.
     #[must_use]
     pub fn is_terminal(self) -> bool {
-        matches!(
-            self,
-            Self::Released | Self::Expired | Self::Conflict
-        )
+        matches!(self, Self::Released | Self::Expired | Self::Conflict)
     }
 
     /// Returns true if this indicates a protocol violation.
@@ -599,10 +585,10 @@ mod tests {
         let id = oid(1);
 
         let mut a = ObligationLattice::new();
-        a.observe(id, na.clone(), LatticeState::Committed);
+        a.observe(id, na, LatticeState::Committed);
 
         let mut b = ObligationLattice::new();
-        b.observe(id, nb.clone(), LatticeState::Reserved);
+        b.observe(id, nb, LatticeState::Reserved);
 
         let mut ab = a.clone();
         ab.merge(&b);

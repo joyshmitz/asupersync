@@ -20,12 +20,10 @@ pub mod vclock;
 pub use collector::{SymbolTraceCollector, TraceRecord, TraceSummary};
 pub use context::{RegionTag, SymbolTraceContext, TraceFlags};
 pub use id::{SymbolSpanId, TraceId};
-pub use lattice::{
-    LatticeState, LeaseLatticeState, ObligationEntry, ObligationLattice,
-};
+pub use lattice::{LatticeState, LeaseLatticeState, ObligationEntry, ObligationLattice};
 pub use sheaf::{
-    ConsistencyReport, ConstraintViolation, NodeSnapshot, PhantomState, SagaConstraint,
-    SagaConsistencyChecker,
+    ConsistencyReport, ConstraintViolation, NodeSnapshot, PhantomState, SagaConsistencyChecker,
+    SagaConstraint,
 };
 pub use span::{SymbolSpan, SymbolSpanKind, SymbolSpanStatus};
 pub use vclock::{CausalEvent, CausalOrder, CausalTracker, VectorClock};

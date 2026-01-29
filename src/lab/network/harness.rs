@@ -91,24 +91,49 @@ pub struct RunningTask {
 #[derive(Debug, Clone)]
 pub enum NodeEvent {
     /// Received a spawn request.
-    SpawnReceived { task_id: RemoteTaskId, from: NodeId },
+    SpawnReceived {
+        /// Task id in the spawn request.
+        task_id: RemoteTaskId,
+        /// Originating node.
+        from: NodeId,
+    },
     /// Accepted a spawn request.
-    SpawnAccepted { task_id: RemoteTaskId },
+    SpawnAccepted {
+        /// Task id that was accepted.
+        task_id: RemoteTaskId,
+    },
     /// Rejected a spawn request.
     SpawnRejected {
+        /// Task id that was rejected.
         task_id: RemoteTaskId,
+        /// Rejection reason.
         reason: SpawnRejectReason,
     },
     /// Task completed.
-    TaskCompleted { task_id: RemoteTaskId },
+    TaskCompleted {
+        /// Task id that completed.
+        task_id: RemoteTaskId,
+    },
     /// Task cancelled.
-    TaskCancelled { task_id: RemoteTaskId },
+    TaskCancelled {
+        /// Task id that was cancelled.
+        task_id: RemoteTaskId,
+    },
     /// Received a cancellation request.
-    CancelReceived { task_id: RemoteTaskId },
+    CancelReceived {
+        /// Task id for the cancellation request.
+        task_id: RemoteTaskId,
+    },
     /// Received a lease renewal.
-    LeaseRenewed { task_id: RemoteTaskId },
+    LeaseRenewed {
+        /// Task id for the lease renewal.
+        task_id: RemoteTaskId,
+    },
     /// Duplicate spawn detected.
-    DuplicateSpawn { task_id: RemoteTaskId },
+    DuplicateSpawn {
+        /// Task id that was duplicated.
+        task_id: RemoteTaskId,
+    },
     /// Node crashed.
     Crashed,
     /// Node restarted.
@@ -117,6 +142,7 @@ pub enum NodeEvent {
 
 impl SimNode {
     /// Creates a new simulated node.
+    #[must_use]
     pub fn new(node_id: NodeId, host_id: HostId) -> Self {
         Self {
             causal: CausalTracker::new(node_id.clone()),
@@ -139,9 +165,9 @@ impl SimNode {
         match msg {
             RemoteMessage::SpawnRequest(req) => self.handle_spawn(req),
             RemoteMessage::SpawnAck(ack) => self.handle_spawn_ack(ack),
-            RemoteMessage::CancelRequest(cancel) => self.handle_cancel(cancel),
+            RemoteMessage::CancelRequest(cancel) => self.handle_cancel(&cancel),
             RemoteMessage::ResultDelivery(result) => self.handle_result(result),
-            RemoteMessage::LeaseRenewal(renewal) => self.handle_lease_renewal(renewal),
+            RemoteMessage::LeaseRenewal(renewal) => self.handle_lease_renewal(&renewal),
         }
     }
 
@@ -215,7 +241,7 @@ impl SimNode {
         // update the RemoteHandle state. For harness testing, we log only.
     }
 
-    fn handle_cancel(&mut self, cancel: CancelRequest) {
+    fn handle_cancel(&mut self, cancel: &CancelRequest) {
         self.causal.record_local_event();
         self.event_log.push(NodeEvent::CancelReceived {
             task_id: cancel.remote_task_id,
@@ -231,7 +257,7 @@ impl SimNode {
         // Result delivery handling — logged by origin node
     }
 
-    fn handle_lease_renewal(&mut self, renewal: LeaseRenewal) {
+    fn handle_lease_renewal(&mut self, renewal: &LeaseRenewal) {
         self.causal.record_local_event();
         self.event_log.push(NodeEvent::LeaseRenewed {
             task_id: renewal.remote_task_id,
@@ -254,11 +280,14 @@ impl SimNode {
                     task.origin.clone(),
                     RemoteMessage::ResultDelivery(ResultDelivery {
                         remote_task_id: *id,
-                        outcome: RemoteOutcome::Cancelled(crate::types::CancelReason::user("harness cancel")),
+                        outcome: RemoteOutcome::Cancelled(crate::types::CancelReason::user(
+                            "harness cancel",
+                        )),
                         execution_time: Duration::ZERO,
                     }),
                 ));
-                self.event_log.push(NodeEvent::TaskCancelled { task_id: *id });
+                self.event_log
+                    .push(NodeEvent::TaskCancelled { task_id: *id });
                 to_remove.push(*id);
             } else if task.work_remaining <= elapsed {
                 completed.push((
@@ -269,7 +298,8 @@ impl SimNode {
                         execution_time: Duration::ZERO,
                     }),
                 ));
-                self.event_log.push(NodeEvent::TaskCompleted { task_id: *id });
+                self.event_log
+                    .push(NodeEvent::TaskCompleted { task_id: *id });
                 to_remove.push(*id);
             } else {
                 task.work_remaining -= elapsed;
@@ -358,6 +388,7 @@ impl FaultScript {
     }
 
     /// Adds a fault at the given time offset.
+    #[must_use]
     pub fn at(mut self, offset: Duration, fault: HarnessFault) -> Self {
         self.events.push(FaultEvent { at: offset, fault });
         self
@@ -409,24 +440,36 @@ pub struct HarnessTraceEvent {
 pub enum HarnessTraceKind {
     /// A message was sent between nodes.
     MessageSent {
+        /// Sender node.
         from: NodeId,
+        /// Recipient node.
         to: NodeId,
+        /// Message type label.
         msg_type: String,
     },
     /// A message was delivered.
     MessageDelivered {
+        /// Sender node.
         from: NodeId,
+        /// Recipient node.
         to: NodeId,
+        /// Message type label.
         msg_type: String,
     },
     /// A fault was injected.
     FaultInjected(String),
     /// A task completed on a node.
-    TaskCompleted { node: NodeId, task_id: RemoteTaskId },
+    TaskCompleted {
+        /// Node that completed the task.
+        node: NodeId,
+        /// Completed task id.
+        task_id: RemoteTaskId,
+    },
 }
 
 impl DistributedHarness {
     /// Creates a new harness with the given network configuration.
+    #[must_use]
     pub fn new(config: NetworkConfig) -> Self {
         Self {
             network: SimulatedNetwork::new(config),
@@ -462,18 +505,13 @@ impl DistributedHarness {
     }
 
     /// Injects a spawn request from `origin` to `target`.
-    pub fn inject_spawn(
-        &mut self,
-        origin: &NodeId,
-        target: &NodeId,
-        task_id: RemoteTaskId,
-    ) {
+    pub fn inject_spawn(&mut self, origin: &NodeId, target: &NodeId, task_id: RemoteTaskId) {
         let req = SpawnRequest {
             remote_task_id: task_id,
             computation: crate::remote::ComputationName::new("test-computation"),
             input: crate::remote::RemoteInput::new(vec![]),
             lease: Duration::from_secs(30),
-            idempotency_key: IdempotencyKey::from_raw(task_id.raw() as u128),
+            idempotency_key: IdempotencyKey::from_raw(u128::from(task_id.raw())),
             budget: None,
             origin_node: origin.clone(),
             origin_region: crate::types::RegionId::new_for_test(0, 0),
@@ -481,31 +519,26 @@ impl DistributedHarness {
         };
 
         let msg = RemoteMessage::SpawnRequest(req);
-        self.send_message(origin, target, msg);
+        self.send_message(origin, target, &msg);
     }
 
     /// Injects a cancel request from `origin` to `target`.
-    pub fn inject_cancel(
-        &mut self,
-        origin: &NodeId,
-        target: &NodeId,
-        task_id: RemoteTaskId,
-    ) {
+    pub fn inject_cancel(&mut self, origin: &NodeId, target: &NodeId, task_id: RemoteTaskId) {
         let cancel = CancelRequest {
             remote_task_id: task_id,
             reason: crate::types::CancelReason::user("harness cancel"),
             origin_node: origin.clone(),
         };
         let msg = RemoteMessage::CancelRequest(cancel);
-        self.send_message(origin, target, msg);
+        self.send_message(origin, target, &msg);
     }
 
     /// Sends a remote message between nodes via the simulated network.
-    fn send_message(&mut self, from: &NodeId, to: &NodeId, msg: RemoteMessage) {
+    fn send_message(&mut self, from: &NodeId, to: &NodeId, msg: &RemoteMessage) {
         let src = self.node_to_host[from];
         let dst = self.node_to_host[to];
 
-        let msg_type = msg_type_name(&msg);
+        let msg_type = msg_type_name(msg);
         self.trace.push(HarnessTraceEvent {
             time: self.sim_time,
             kind: HarnessTraceKind::MessageSent {
@@ -517,7 +550,7 @@ impl DistributedHarness {
 
         // Serialize message as opaque bytes for the simulated network.
         // In Phase 0, we use a simple encoding: message type tag + task ID.
-        let encoded = encode_message(&msg);
+        let encoded = encode_message(msg);
         self.network.send(src, dst, Bytes::from(encoded));
     }
 
@@ -609,7 +642,7 @@ impl DistributedHarness {
         }
 
         for (from, to, msg) in result_messages {
-            self.send_message(&from, &to, msg);
+            self.send_message(&from, &to, &msg);
         }
     }
 
@@ -624,7 +657,7 @@ impl DistributedHarness {
         }
 
         for (from, to, msg) in outgoing {
-            self.send_message(&from, &to, msg);
+            self.send_message(&from, &to, &msg);
         }
     }
 
@@ -643,23 +676,20 @@ impl DistributedHarness {
                 if let Some(node) = self.nodes.get_mut(node_id) {
                     let host = node.host_id;
                     node.crash();
-                    self.network
-                        .inject_fault(&Fault::HostCrash { host });
+                    self.network.inject_fault(&Fault::HostCrash { host });
                 }
             }
             HarnessFault::RestartNode(node_id) => {
                 if let Some(node) = self.nodes.get_mut(node_id) {
                     let host = node.host_id;
                     node.restart();
-                    self.network
-                        .inject_fault(&Fault::HostRestart { host });
+                    self.network.inject_fault(&Fault::HostRestart { host });
                 }
             }
             HarnessFault::ExpireLeases(node_id) => {
                 // Clear all running tasks (simulates lease expiry)
                 if let Some(node) = self.nodes.get_mut(node_id) {
-                    let task_ids: Vec<RemoteTaskId> =
-                        node.running_tasks.keys().copied().collect();
+                    let task_ids: Vec<RemoteTaskId> = node.running_tasks.keys().copied().collect();
                     for tid in task_ids {
                         if let Some(task) = node.running_tasks.remove(&tid) {
                             node.outbox.push_back((
@@ -708,7 +738,7 @@ impl fmt::Debug for DistributedHarness {
             .field("sim_time", &self.sim_time)
             .field("nodes", &self.nodes.keys().collect::<Vec<_>>())
             .field("trace_len", &self.trace.len())
-            .finish()
+            .finish_non_exhaustive()
     }
 }
 
@@ -748,8 +778,12 @@ fn init_msg_store() {
 fn encode_message(msg: &RemoteMessage) -> Vec<u8> {
     init_msg_store();
     let id = NEXT_MSG_ID.fetch_add(1, std::sync::atomic::Ordering::Relaxed);
-    let mut store = MSG_STORE.lock().unwrap();
-    store.as_mut().unwrap().insert(id, msg.clone());
+    MSG_STORE
+        .lock()
+        .unwrap()
+        .as_mut()
+        .unwrap()
+        .insert(id, msg.clone());
     id.to_le_bytes().to_vec()
 }
 
@@ -910,7 +944,10 @@ mod tests {
         let b = harness.add_node("node-b");
 
         let script = FaultScript::new()
-            .at(Duration::from_millis(50), HarnessFault::CrashNode(b.clone()))
+            .at(
+                Duration::from_millis(50),
+                HarnessFault::CrashNode(b.clone()),
+            )
             .at(
                 Duration::from_millis(150),
                 HarnessFault::RestartNode(b.clone()),
@@ -923,7 +960,10 @@ mod tests {
         harness.run_for(Duration::from_millis(200));
 
         let node_b = harness.node(&b).unwrap();
-        assert!(node_b.events().iter().any(|e| matches!(e, NodeEvent::Crashed)));
+        assert!(node_b
+            .events()
+            .iter()
+            .any(|e| matches!(e, NodeEvent::Crashed)));
         assert!(node_b
             .events()
             .iter()

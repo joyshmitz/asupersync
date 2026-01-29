@@ -481,7 +481,7 @@ fn bytes_to_nanos(len: usize, bandwidth: u64) -> u64 {
     if len == 0 || bandwidth == 0 {
         return 0;
     }
-    let nanos = (len as u128)
+    let nanos = u128::from(len as u64)
         .saturating_mul(1_000_000_000u128)
         .saturating_div(u128::from(bandwidth));
     nanos.min(u128::from(u64::MAX)) as u64
