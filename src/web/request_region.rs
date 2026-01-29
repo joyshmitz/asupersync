@@ -32,9 +32,8 @@ use std::fmt;
 
 use crate::cx::Cx;
 use crate::error::Error;
-use crate::types::outcome::Outcome;
 use crate::web::extract::Request;
-use crate::web::response::{IntoResponse, Response, StatusCode};
+use crate::web::response::{Response, StatusCode};
 
 // ─── RequestRegion ──────────────────────────────────────────────────────────
 
@@ -294,7 +293,7 @@ impl RegionOutcome {
 impl fmt::Display for RegionOutcome {
     fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
         match self {
-            Self::Ok(resp) => write!(f, "Ok({})", resp.status.code()),
+            Self::Ok(resp) => write!(f, "Ok({})", resp.status.as_u16()),
             Self::Error(err) => write!(f, "Error({err})"),
             Self::Cancelled => write!(f, "Cancelled"),
             Self::Panicked(msg) => write!(f, "Panicked({msg})"),

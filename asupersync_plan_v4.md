@@ -152,6 +152,30 @@ There is an even deeper view (useful later, not required day‑1): the space of 
 
 *Practical note:* For finite discrete systems, Mazurkiewicz trace equivalence *is* the discrete version of dihomotopy equivalence—optimal DPOR already achieves the topological reduction. The d‑space perspective is a cleaner mathematical lens, not a more powerful algorithm.
 
+#### Experiment: geodesic schedule normalization (Phase 5+)
+
+**Goal:** define a canonical representative per trace class that reduces context switches while preserving observable meaning.
+
+**Normalization procedure (small model):**
+
+1. Define an independence relation `I` on observable labels (same notion as DPOR).
+2. Build a dependency DAG: for each pair `i < j`, add edge `i → j` if `(label_i, label_j) ∉ I`.
+3. Compute the Foata normal form by repeatedly taking all minimal elements (no incoming edges) as a "parallel layer".
+4. Linearize each layer with a stable order (task id, then original index). This yields a deterministic schedule.
+5. Optional refinement: define switch cost (# of task changes) and choose the minimum-switch linear extension. The geodesic is the shortest path in the "swap graph" of adjacent independent swaps.
+
+**Toy example (two tasks, independent steps):**
+
+* Task A steps: `a1, a2`; Task B steps: `b1, b2`.
+* Raw schedule `S = a1 b1 a2 b2` has 3 task switches.
+* Foata layers: `[a1 b1][a2 b2]`.
+* Canonical linearization (stable by task id): `a1 a2 b1 b2` has 1 switch.
+* Both schedules are trace-equivalent; normalization reduces switches without changing observable outcomes.
+
+**Comparison metrics:** switch count, swap distance to normal form, and trace length (should be identical). Normalized traces should be shorter in "visual entropy" and more stable for diff/replay.
+
+**Tie-in to DPOR/Mazurkiewicz:** adjacent swaps of independent actions are 2-cells; the space of schedules is a cubical complex. Geodesic normalization picks a shortest path in that complex. DPOR already picks one representative per trace class; this normalization makes that representative deterministic and human-readable for replay and debugging.
+
 ### 3.3 Budgets compose by a product semiring (min core)
 
 Budgets propagate by “stricter wins”:
