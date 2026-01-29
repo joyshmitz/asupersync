@@ -250,6 +250,7 @@ impl<IO: AsyncRead + AsyncWrite + Unpin> TlsStream<IO> {
             while self.conn.wants_write() {
                 match self.poll_write_tls(cx) {
                     Poll::Ready(Ok(0)) => {
+                        self.state = TlsState::Closed;
                         return Poll::Ready(Err(TlsError::Handshake(
                             "connection closed during handshake".into(),
                         )));
@@ -269,6 +270,7 @@ impl<IO: AsyncRead + AsyncWrite + Unpin> TlsStream<IO> {
             if self.conn.wants_read() {
                 match self.poll_read_tls(cx) {
                     Poll::Ready(Ok(0)) => {
+                        self.state = TlsState::Closed;
                         return Poll::Ready(Err(TlsError::Handshake(
                             "connection closed during handshake".into(),
                         )));
@@ -398,6 +400,7 @@ impl<IO: AsyncRead + AsyncWrite + Unpin> AsyncRead for TlsStream<IO> {
             match self.poll_handshake(cx) {
                 Poll::Ready(Ok(())) => {}
                 Poll::Ready(Err(e)) => {
+                    // poll_handshake already updates state to Closed on failure
                     return Poll::Ready(Err(io::Error::other(e)));
                 }
                 Poll::Pending => return Poll::Pending,
@@ -422,12 +425,14 @@ impl<IO: AsyncRead + AsyncWrite + Unpin> AsyncRead for TlsStream<IO> {
             // Need more data - read from underlying IO
             match self.poll_read_tls(cx) {
                 Poll::Ready(Ok(0)) => {
-                    // EOF
+                    // EOF - mark as closed
+                    self.state = TlsState::Closed;
                     return Poll::Ready(Ok(()));
                 }
                 Poll::Ready(Ok(_)) => {
                     // Process the new TLS data
                     if let Err(e) = self.conn.process_new_packets() {
+                        self.state = TlsState::Closed;
                         return Poll::Ready(Err(io::Error::new(
                             io::ErrorKind::InvalidData,
                             e.to_string(),
