@@ -414,8 +414,8 @@ mod tests {
     fn connection_id_display() {
         init_test("connection_id_display");
         let id = ConnectionId(42);
-        let display = format!("{id}");
-        crate::assert_with_log!(display == "conn-42", "display", "conn-42", display);
+        let formatted = format!("{id}");
+        crate::assert_with_log!(formatted == "conn-42", "formatted id", "conn-42", formatted);
         crate::test_complete!("connection_id_display");
     }
 

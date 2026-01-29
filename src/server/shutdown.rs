@@ -386,12 +386,7 @@ mod tests {
             ShutdownPhase::Stopped,
             signal.phase()
         );
-        crate::assert_with_log!(
-            signal.is_stopped(),
-            "is stopped",
-            true,
-            signal.is_stopped()
-        );
+        crate::assert_with_log!(signal.is_stopped(), "is stopped", true, signal.is_stopped());
         crate::test_complete!("mark_stopped");
     }
 
@@ -437,12 +432,7 @@ mod tests {
         ];
         for (phase, expected) in cases {
             let actual = format!("{phase}");
-            crate::assert_with_log!(
-                actual == expected,
-                "display",
-                expected,
-                actual
-            );
+            crate::assert_with_log!(actual == expected, "display", expected, actual);
         }
         crate::test_complete!("display_formatting");
     }
