@@ -19,6 +19,7 @@
 //! - [`integrity`]: Trace file integrity verification
 //! - [`filter`]: Trace event filtering during recording
 //! - [`compat`]: Forward/backward compatibility and migration support
+//! - [`independence`]: Independence relation over trace events for DPOR
 
 pub mod buffer;
 pub mod compat;
@@ -27,6 +28,7 @@ pub mod event;
 pub mod file;
 pub mod filter;
 pub mod format;
+pub mod independence;
 pub mod integrity;
 pub mod recorder;
 pub mod replay;
@@ -55,6 +57,9 @@ pub use recorder::{
 pub use replay::{
     CompactRegionId, CompactTaskId, ReplayEvent, ReplayTrace, ReplayTraceError, TraceMetadata,
     REPLAY_SCHEMA_VERSION,
+};
+pub use independence::{
+    accesses_conflict, independent, resource_footprint, AccessMode, Resource, ResourceAccess,
 };
 pub use replayer::{Breakpoint, DivergenceError, ReplayError, ReplayMode, TraceReplayer};
 pub use streaming::{
