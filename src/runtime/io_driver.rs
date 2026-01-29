@@ -38,7 +38,7 @@
 //! }
 //! ```
 
-use crate::runtime::reactor::{Events, Interest, Reactor, Source, Token};
+use crate::runtime::reactor::{Event, Events, Interest, Reactor, Source, Token};
 use slab::Slab;
 use std::io;
 use std::sync::{Arc, Mutex, Weak};
@@ -248,6 +248,17 @@ impl IoDriver {
     ///
     /// Returns an error if the reactor poll fails.
     pub fn turn(&mut self, timeout: Option<Duration>) -> io::Result<usize> {
+        self.turn_with(timeout, |_| {})
+    }
+
+    /// Processes pending I/O events, invoking a callback per event.
+    ///
+    /// This is useful for recording traces or metrics alongside normal
+    /// waker dispatch. The callback is invoked before waking the task.
+    pub fn turn_with<F>(&mut self, timeout: Option<Duration>, mut on_event: F) -> io::Result<usize>
+    where
+        F: FnMut(&Event),
+    {
         // Clear previous events
         self.events.clear();
 
@@ -258,6 +269,7 @@ impl IoDriver {
 
         // Dispatch wakers for ready events
         for event in &self.events {
+            on_event(event);
             if let Some(waker) = self.wakers.get(event.token.0) {
                 waker.wake_by_ref();
                 self.stats.wakers_dispatched += 1;
@@ -375,6 +387,15 @@ impl IoDriverHandle {
     pub fn stats(&self) -> IoStats {
         let driver = self.inner.lock().expect("lock poisoned");
         driver.stats().clone()
+    }
+
+    /// Processes pending I/O events with a per-event callback.
+    pub fn turn_with<F>(&self, timeout: Option<Duration>, on_event: F) -> io::Result<usize>
+    where
+        F: FnMut(&Event),
+    {
+        let mut driver = self.inner.lock().expect("lock poisoned");
+        driver.turn_with(timeout, on_event)
     }
 
     /// Returns a lock guard for direct access to the driver.

@@ -403,11 +403,28 @@ impl LabRuntime {
         }
     }
 
-    fn poll_io(&self) {
-        let Some(mut driver) = self.state.io_driver_mut() else {
+    fn poll_io(&mut self) {
+        let Some(handle) = self.state.io_driver_handle() else {
             return;
         };
-        if let Err(_error) = driver.turn(Some(Duration::ZERO)) {
+        let now = self.state.now;
+        let (state, recorder) = (&mut self.state, &mut self.replay_recorder);
+        if let Err(_error) = handle.turn_with(Some(Duration::ZERO), |event| {
+            let seq = state.next_trace_seq();
+            state.trace.push(TraceEvent::io_ready(
+                seq,
+                now,
+                event.token.0 as u64,
+                event.ready.bits(),
+            ));
+            recorder.record_io_ready(
+                event.token.0 as u64,
+                event.is_readable(),
+                event.is_writable(),
+                event.is_error(),
+                event.is_hangup(),
+            );
+        }) {
             crate::tracing_compat::warn!(
                 error = ?_error,
                 "lab runtime io_driver poll failed"
@@ -990,9 +1007,11 @@ mod tests {
     use crate::record::TaskRecord;
     use crate::record::{ObligationAbortReason, ObligationKind, ObligationRecord};
     use crate::runtime::deadline_monitor::{AdaptiveDeadlineConfig, WarningReason};
+    use crate::runtime::reactor::{Event, Interest};
     use crate::types::{Budget, CxInner, ObligationId, Outcome, TaskId};
     use crate::util::ArenaIndex;
     use std::sync::{Arc, Mutex, RwLock};
+    use std::task::{Wake, Waker};
     use std::time::Duration;
 
     fn init_test(name: &str) {
@@ -1025,6 +1044,48 @@ mod tests {
             now
         );
         crate::test_complete!("advance_time");
+    }
+
+    #[cfg(unix)]
+    #[test]
+    fn lab_runtime_records_io_ready_trace() {
+        init_test("lab_runtime_records_io_ready_trace");
+
+        struct MockSource;
+        impl std::os::fd::AsRawFd for MockSource {
+            fn as_raw_fd(&self) -> std::os::fd::RawFd {
+                0
+            }
+        }
+
+        struct NoopWaker;
+        impl Wake for NoopWaker {
+            fn wake(self: Arc<Self>) {}
+        }
+
+        let mut runtime = LabRuntime::with_seed(42);
+        let handle = runtime.state.io_driver_handle().expect("io driver");
+        let waker = Waker::from(Arc::new(NoopWaker));
+        let source = MockSource;
+
+        let registration = handle
+            .register(&source, Interest::READABLE, waker)
+            .expect("register source");
+        let token = registration.token();
+
+        runtime
+            .lab_reactor()
+            .inject_event(token, Event::readable(token), Duration::from_millis(1));
+        runtime.advance_time(1_000_000);
+        runtime.step_for_test();
+
+        let recorded = runtime
+            .state
+            .trace
+            .iter()
+            .any(|event| event.kind == TraceEventKind::IoReady);
+        crate::assert_with_log!(recorded, "io ready trace recorded", true, recorded);
+        crate::test_complete!("lab_runtime_records_io_ready_trace");
     }
 
     #[test]
