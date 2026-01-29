@@ -126,7 +126,7 @@ pub struct Scope<'r, P: Policy = crate::types::policy::FailFast> {
     pub(crate) _policy: PhantomData<&'r P>,
 }
 
-struct CatchUnwind<F>(Pin<Box<F>>);
+pub(crate) struct CatchUnwind<F>(pub(crate) Pin<Box<F>>);
 
 impl<F: Future> Future for CatchUnwind<F> {
     type Output = std::thread::Result<F::Output>;
@@ -142,7 +142,7 @@ impl<F: Future> Future for CatchUnwind<F> {
     }
 }
 
-fn payload_to_string(payload: &Box<dyn std::any::Any + Send>) -> String {
+pub(crate) fn payload_to_string(payload: &Box<dyn std::any::Any + Send>) -> String {
     payload
         .downcast_ref::<&str>()
         .map(ToString::to_string)
@@ -767,7 +767,10 @@ impl<P: Policy> Scope<'_, P> {
     /// Creates a task record in the runtime state.
     ///
     /// This is a helper method used by all spawn variants.
-    fn create_task_record(&self, state: &mut RuntimeState) -> Result<TaskId, SpawnError> {
+    pub(crate) fn create_task_record(
+        &self,
+        state: &mut RuntimeState,
+    ) -> Result<TaskId, SpawnError> {
         use crate::util::ArenaIndex;
 
         // Create placeholder task record

@@ -53,6 +53,7 @@
 
 use crate::combinator::select::SelectAll;
 use crate::observability::{DiagnosticContext, LogCollector, LogEntry, SpanId};
+use crate::remote::RemoteCap;
 use crate::runtime::io_driver::IoDriverHandle;
 use crate::runtime::reactor::{Interest, Registration, Source};
 use crate::runtime::task_handle::JoinError;
@@ -135,6 +136,7 @@ pub struct Cx {
     io_driver: Option<IoDriverHandle>,
     io_cap: Option<Arc<dyn crate::io::IoCap>>,
     entropy: Arc<dyn EntropySource>,
+    remote_cap: Option<Arc<RemoteCap>>,
 }
 
 /// Internal observability state shared by `Cx` clones.
@@ -219,6 +221,7 @@ impl Cx {
             io_driver: None,
             io_cap: None,
             entropy: Arc::new(OsEntropy),
+            remote_cap: None,
         }
     }
 
@@ -278,6 +281,7 @@ impl Cx {
             io_driver,
             io_cap,
             entropy,
+            remote_cap: None,
         }
     }
 
@@ -385,6 +389,21 @@ impl Cx {
         Self::for_request_with_budget(Budget::INFINITE)
     }
 
+    /// Creates a test-only capability context with a remote capability.
+    ///
+    /// This constructor creates a Cx with a [`RemoteCap`] for testing remote
+    /// task spawning without a real network transport.
+    ///
+    /// # Note
+    ///
+    /// This API is intended for testing only.
+    #[must_use]
+    pub fn for_testing_with_remote(cap: RemoteCap) -> Self {
+        let mut cx = Self::for_testing();
+        cx.remote_cap = Some(Arc::new(cap));
+        cx
+    }
+
     /// Returns the current task context, if one is set.
     ///
     /// This is set by the runtime while polling a task.
@@ -447,6 +466,31 @@ impl Cx {
     #[must_use]
     pub fn has_io(&self) -> bool {
         self.io_cap.is_some()
+    }
+
+    /// Returns the remote capability, if one is configured.
+    ///
+    /// The remote capability authorizes spawning tasks on remote nodes.
+    /// Without this capability, [`spawn_remote`](crate::remote::spawn_remote)
+    /// returns [`RemoteError::NoCapability`](crate::remote::RemoteError::NoCapability).
+    ///
+    /// # Capability Model
+    ///
+    /// Remote execution is an explicit capability:
+    /// - Production runtime configures remote capability with transport config
+    /// - Lab runtime can configure it for deterministic distributed testing
+    /// - Code that needs remote spawning must check for this capability
+    #[must_use]
+    pub fn remote(&self) -> Option<&RemoteCap> {
+        self.remote_cap.as_ref().map(AsRef::as_ref)
+    }
+
+    /// Returns true if the remote capability is available.
+    ///
+    /// Convenience method to check if remote task operations can be performed.
+    #[must_use]
+    pub fn has_remote(&self) -> bool {
+        self.remote_cap.is_some()
     }
 
     /// Registers an I/O source with the reactor for the given interest.

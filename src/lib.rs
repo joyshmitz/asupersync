@@ -78,6 +78,7 @@ pub mod plan;
 #[cfg(unix)]
 pub mod process;
 pub mod record;
+pub mod remote;
 pub mod runtime;
 pub mod security;
 pub mod service;
@@ -122,6 +123,13 @@ pub use error::{
     RecvError, Result, ResultExt, SendError,
 };
 pub use lab::{LabConfig, LabRuntime};
+pub use remote::{
+    spawn_remote, CancelRequest, CompensationResult, ComputationName, DedupDecision,
+    IdempotencyKey, IdempotencyRecord, IdempotencyStore, Lease, LeaseError, LeaseRenewal,
+    LeaseState, NodeId, RemoteCap, RemoteError, RemoteHandle, RemoteMessage, RemoteOutcome,
+    RemoteTaskId, ResultDelivery, Saga, SagaState, SagaStepError, SpawnAck, SpawnAckStatus,
+    SpawnRejectReason, SpawnRequest,
+};
 pub use types::{
     join_outcomes, Budget, CancelKind, CancelReason, ObligationId, Outcome, OutcomeError,
     PanicPayload, Policy, RegionId, Severity, TaskId, Time,
