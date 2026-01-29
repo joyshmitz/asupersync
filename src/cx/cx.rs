@@ -1087,6 +1087,7 @@ impl Cx {
 
             inner.cancel_requested = true;
             inner.cancel_reason = Some(reason);
+            drop(inner);
             (region, task)
         };
 

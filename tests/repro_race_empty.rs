@@ -29,8 +29,7 @@ fn test_race_empty_is_never() {
 
         assert!(
             result.is_err(),
-            "race([]) should hang (timeout), but it returned {:?}",
-            result
+            "race([]) should hang (timeout), but it returned {result:?}"
         );
     });
 

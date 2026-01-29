@@ -672,6 +672,7 @@ impl OtelMetrics {
     /// Constructs a new OpenTelemetry metrics provider with configuration.
     #[must_use]
     #[allow(clippy::too_many_lines)]
+    #[allow(clippy::needless_pass_by_value)] // Meter is consumed by builder pattern
     pub fn new_with_config(meter: Meter, config: MetricsConfig) -> Self {
         let state = Arc::new(MetricsState::default());
 
@@ -877,6 +878,8 @@ impl OtelMetrics {
 
         // Use counter-based sampling for determinism
         let count = self.sample_counter.fetch_add(1, Ordering::Relaxed);
+        // sample_rate is always 0.0..=1.0, so the cast is safe
+        #[allow(clippy::cast_sign_loss)]
         let threshold = (sampling.sample_rate * 100.0) as u64;
         (count % 100) < threshold
     }
@@ -1016,6 +1019,8 @@ impl MetricsProvider for OtelMetrics {
     fn scheduler_tick(&self, tasks_polled: usize, duration: Duration) {
         if self.should_sample("asupersync.scheduler") {
             self.scheduler_poll_time.record(duration.as_secs_f64(), &[]);
+            // Precision loss is acceptable for metrics (only affects counts > 2^52)
+            #[allow(clippy::cast_precision_loss)]
             self.scheduler_tasks_polled.record(tasks_polled as f64, &[]);
         }
     }

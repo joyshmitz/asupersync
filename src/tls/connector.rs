@@ -297,15 +297,16 @@ impl TlsConnectorBuilder {
                 }
             }
 
-            let mut versions = Vec::new();
-            for v in rustls::ALL_VERSIONS {
-                let ordinal = version_ordinal(v.version);
-                let within_min = min.map_or(true, |m| ordinal >= m);
-                let within_max = max.map_or(true, |m| ordinal <= m);
-                if within_min && within_max {
-                    versions.push(v);
-                }
-            }
+            let versions: Vec<&'static rustls::SupportedProtocolVersion> = rustls::ALL_VERSIONS
+                .iter()
+                .filter(|v| {
+                    let ordinal = version_ordinal(v.version);
+                    let within_min = min.map_or(true, |m| ordinal >= m);
+                    let within_max = max.map_or(true, |m| ordinal <= m);
+                    within_min && within_max
+                })
+                .copied()
+                .collect();
 
             if versions.is_empty() {
                 return Err(TlsError::Configuration(
