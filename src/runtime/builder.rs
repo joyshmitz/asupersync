@@ -1,4 +1,131 @@
-//! Runtime builder and handles.
+//! Runtime builder, handles, and configuration.
+//!
+//! This module provides [`RuntimeBuilder`] for constructing an Asupersync runtime
+//! with customizable threading, scheduling, and deadline monitoring. The builder
+//! follows a move-based fluent pattern where each method consumes `self` and
+//! returns `Self`, enabling natural chaining.
+//!
+//! # Quick Start
+//!
+//! ```ignore
+//! use asupersync::runtime::RuntimeBuilder;
+//!
+//! // Minimal — uses all defaults (available parallelism, 128 poll budget, etc.)
+//! let runtime = RuntimeBuilder::new().build()?;
+//!
+//! runtime.block_on(async {
+//!     println!("Hello from asupersync!");
+//! });
+//! ```
+//!
+//! # Common Configurations
+//!
+//! ## High-Throughput Server
+//!
+//! ```ignore
+//! let runtime = RuntimeBuilder::high_throughput()
+//!     .blocking_threads(4, 256)
+//!     .build()?;
+//! ```
+//!
+//! ## Low-Latency Application
+//!
+//! ```ignore
+//! let runtime = RuntimeBuilder::low_latency()
+//!     .worker_threads(2)
+//!     .build()?;
+//! ```
+//!
+//! ## Single-Threaded (Phase 0 / Testing)
+//!
+//! ```ignore
+//! let runtime = RuntimeBuilder::current_thread().build()?;
+//! ```
+//!
+//! ## With Deadline Monitoring
+//!
+//! ```ignore
+//! use std::time::Duration;
+//!
+//! let runtime = RuntimeBuilder::new()
+//!     .deadline_monitoring(|m| {
+//!         m.enabled(true)
+//!          .check_interval(Duration::from_secs(1))
+//!          .warning_threshold_fraction(0.2)
+//!          .checkpoint_timeout(Duration::from_secs(30))
+//!     })
+//!     .build()?;
+//! ```
+//!
+//! ## With Environment Variable Overrides
+//!
+//! The builder supports 12-factor app style environment variable configuration.
+//! Environment variables override defaults but are themselves overridden by
+//! programmatic settings applied after the call:
+//!
+//! ```ignore
+//! // ASUPERSYNC_WORKER_THREADS=8 in environment
+//! let runtime = RuntimeBuilder::new()
+//!     .with_env_overrides()?     // reads env vars
+//!     .steal_batch_size(32)      // programmatic override (highest priority)
+//!     .build()?;
+//!
+//! assert_eq!(runtime.config().worker_threads, 8);  // from env
+//! assert_eq!(runtime.config().steal_batch_size, 32); // from code
+//! ```
+//!
+//! See [`env_config`](super::env_config) for the full list of supported variables.
+//!
+//! ## With TOML Config File (requires `config-file` feature)
+//!
+//! ```ignore
+//! let runtime = RuntimeBuilder::from_toml("config/runtime.toml")?
+//!     .with_env_overrides()?   // env vars override file values
+//!     .worker_threads(4)       // programmatic override (highest priority)
+//!     .build()?;
+//! ```
+//!
+//! # Configuration Precedence
+//!
+//! When multiple sources set the same field, the highest-priority source wins:
+//!
+//! 1. **Programmatic** — `builder.worker_threads(4)` (highest)
+//! 2. **Environment** — `ASUPERSYNC_WORKER_THREADS=8`
+//! 3. **Config file** — `worker_threads = 16` in TOML
+//! 4. **Defaults** — `RuntimeConfig::default()` (lowest)
+//!
+//! # Configuration Reference
+//!
+//! | Method | Default | Description |
+//! |--------|---------|-------------|
+//! | [`worker_threads`](RuntimeBuilder::worker_threads) | available parallelism | Number of async worker threads |
+//! | [`thread_stack_size`](RuntimeBuilder::thread_stack_size) | 2 MiB | Stack size per worker |
+//! | [`thread_name_prefix`](RuntimeBuilder::thread_name_prefix) | `"asupersync-worker"` | Thread name prefix |
+//! | [`global_queue_limit`](RuntimeBuilder::global_queue_limit) | 0 (unbounded) | Global queue depth |
+//! | [`steal_batch_size`](RuntimeBuilder::steal_batch_size) | 16 | Work-stealing batch size |
+//! | [`blocking_threads`](RuntimeBuilder::blocking_threads) | 0, 0 | Blocking pool min/max |
+//! | [`enable_parking`](RuntimeBuilder::enable_parking) | true | Park idle workers |
+//! | [`poll_budget`](RuntimeBuilder::poll_budget) | 128 | Polls before cooperative yield |
+//!
+//! # Error Handling
+//!
+//! The `build()` method returns `Result<Runtime, Error>`. Configuration values
+//! are normalized (e.g., `worker_threads = 0` becomes 1) rather than rejected,
+//! so `build()` rarely fails in practice:
+//!
+//! ```ignore
+//! match RuntimeBuilder::new().build() {
+//!     Ok(runtime) => { /* ready */ }
+//!     Err(e) => eprintln!("runtime build failed: {e}"),
+//! }
+//! ```
+//!
+//! Environment variable and config file errors are returned eagerly:
+//!
+//! ```ignore
+//! // Returns Err immediately if ASUPERSYNC_WORKER_THREADS contains "abc"
+//! let builder = RuntimeBuilder::new().with_env_overrides()?;
+//! ```
 
 use crate::error::Error;
 use crate::observability::metrics::MetricsProvider;
@@ -16,7 +143,28 @@ use std::sync::{Arc, Mutex, MutexGuard};
 use std::task::{Context, Poll, Wake, Waker};
 use std::time::Duration;
 
-/// Builder for constructing a runtime with custom configuration.
+/// Builder for constructing an Asupersync [`Runtime`] with custom configuration.
+///
+/// Use the fluent API to set fields, then call [`build()`](Self::build) to
+/// produce a [`Runtime`]. Each setter takes `self` by value and returns `Self`,
+/// so the builder cannot be partially consumed.
+///
+/// # Example
+///
+/// ```ignore
+/// use asupersync::runtime::RuntimeBuilder;
+/// use std::time::Duration;
+///
+/// let runtime = RuntimeBuilder::new()
+///     .worker_threads(4)
+///     .poll_budget(256)
+///     .steal_batch_size(32)
+///     .deadline_monitoring(|m| {
+///         m.enabled(true)
+///          .check_interval(Duration::from_secs(1))
+///     })
+///     .build()?;
+/// ```
 #[derive(Clone)]
 pub struct RuntimeBuilder {
     config: RuntimeConfig,
@@ -265,19 +413,39 @@ impl RuntimeBuilder {
         Runtime::with_config(self.config)
     }
 
-    /// Single-threaded runtime (Phase 0 compatible).
+    /// Preset: single-threaded runtime.
+    ///
+    /// Equivalent to `RuntimeBuilder::new().worker_threads(1)`.
+    /// Suitable for testing, deterministic replay, and Phase 0 usage.
+    ///
+    /// ```ignore
+    /// let rt = RuntimeBuilder::current_thread().build()?;
+    /// rt.block_on(async { /* single-threaded execution */ });
+    /// ```
     #[must_use]
     pub fn current_thread() -> Self {
         Self::new().worker_threads(1)
     }
 
-    /// Multi-threaded runtime with defaults.
+    /// Preset: multi-threaded runtime with default parallelism.
+    ///
+    /// Equivalent to `RuntimeBuilder::new()`. Worker count defaults to
+    /// the available CPU parallelism.
     #[must_use]
     pub fn multi_thread() -> Self {
         Self::new()
     }
 
-    /// High-throughput preset: more workers, larger steal batches.
+    /// Preset: high-throughput server.
+    ///
+    /// Uses 2x the available parallelism for workers and a larger
+    /// steal batch size (32) to amortize scheduling overhead.
+    ///
+    /// ```ignore
+    /// let rt = RuntimeBuilder::high_throughput()
+    ///     .blocking_threads(4, 256)
+    ///     .build()?;
+    /// ```
     #[must_use]
     pub fn high_throughput() -> Self {
         let workers = RuntimeConfig::default_worker_threads()
@@ -286,14 +454,45 @@ impl RuntimeBuilder {
         Self::new().worker_threads(workers).steal_batch_size(32)
     }
 
-    /// Low-latency preset: smaller batches and tighter budgets.
+    /// Preset: low-latency interactive application.
+    ///
+    /// Uses smaller steal batches (4) and tighter poll budgets (32)
+    /// to reduce tail latency at the cost of throughput.
+    ///
+    /// ```ignore
+    /// let rt = RuntimeBuilder::low_latency()
+    ///     .worker_threads(2)
+    ///     .build()?;
+    /// ```
     #[must_use]
     pub fn low_latency() -> Self {
         Self::new().steal_batch_size(4).poll_budget(32)
     }
 }
 
-/// Builder for deadline monitoring configuration.
+/// Sub-builder for deadline monitoring configuration.
+///
+/// Obtained through [`RuntimeBuilder::deadline_monitoring`]. Allows fine-grained
+/// control over deadline checking intervals, warning thresholds, and adaptive
+/// deadline behavior.
+///
+/// # Example
+///
+/// ```ignore
+/// use std::time::Duration;
+///
+/// RuntimeBuilder::new()
+///     .deadline_monitoring(|m| {
+///         m.enabled(true)
+///          .check_interval(Duration::from_secs(1))
+///          .warning_threshold_fraction(0.2) // warn at 80% of deadline
+///          .checkpoint_timeout(Duration::from_secs(30))
+///          .adaptive_enabled(true)
+///          .adaptive_warning_percentile(0.95)
+///          .on_warning(|w| eprintln!("deadline warning: {w:?}"))
+///     })
+///     .build()?;
+/// ```
 pub struct DeadlineMonitoringBuilder {
     config: MonitorConfig,
     on_warning: Option<Arc<dyn Fn(DeadlineWarning) + Send + Sync>>,
@@ -411,7 +610,25 @@ impl Default for RuntimeBuilder {
     }
 }
 
-/// Runtime instance created from a [`RuntimeBuilder`].
+/// A configured Asupersync runtime.
+///
+/// Created via [`RuntimeBuilder`]. The runtime owns worker threads and a
+/// three-lane priority scheduler. Clone is cheap (shared `Arc`).
+///
+/// # Example
+///
+/// ```ignore
+/// let runtime = RuntimeBuilder::new().worker_threads(2).build()?;
+///
+/// // Run a future to completion on the current thread.
+/// let result = runtime.block_on(async { 1 + 1 });
+/// assert_eq!(result, 2);
+///
+/// // Spawn from outside async context via a handle.
+/// let handle = runtime.handle().spawn(async { 42u32 });
+/// let value = runtime.block_on(handle);
+/// assert_eq!(value, 42);
+/// ```
 #[derive(Clone)]
 pub struct Runtime {
     inner: Arc<RuntimeInner>,
@@ -454,7 +671,18 @@ impl Runtime {
     }
 }
 
-/// Handle for spawning tasks onto a runtime.
+/// Handle for spawning tasks onto a runtime from outside async context.
+///
+/// Cheap to clone (shared `Arc`). Use [`Runtime::handle`] to obtain one.
+///
+/// ```ignore
+/// let runtime = RuntimeBuilder::new().build()?;
+/// let handle = runtime.handle();
+///
+/// // Spawn from any thread.
+/// let join = handle.spawn(async { compute_result().await });
+/// let result = runtime.block_on(join);
+/// ```
 #[derive(Clone)]
 pub struct RuntimeHandle {
     inner: Arc<RuntimeInner>,

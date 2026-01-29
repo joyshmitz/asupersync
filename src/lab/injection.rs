@@ -612,9 +612,27 @@ impl LabInjectionRunner {
     }
 }
 
-/// Builder for creating Lab injection test configurations.
+/// Builder for creating lab injection test configurations.
 ///
-/// This provides a fluent API similar to the example in the task description.
+/// This provides a fluent API for configuring cancellation injection, oracle
+/// coverage, and run limits.
+///
+/// # Example
+///
+/// ```ignore
+/// use asupersync::lab::{lab, InjectionStrategy, InstrumentedFuture};
+///
+/// let report = lab(42)
+///     .with_cancellation_injection(InjectionStrategy::AllPoints)
+///     .with_all_oracles()
+///     .max_steps(10_000)
+///     .run(|injector| {
+///         let fut = async { 42 };
+///         InstrumentedFuture::new(fut, injector)
+///     });
+///
+/// assert!(report.all_passed());
+/// ```
 #[derive(Debug)]
 pub struct LabBuilder {
     config: LabInjectionConfig,

@@ -54,6 +54,60 @@
 //!     .futurelock_max_idle_steps(5000)  // Trigger after 5000 idle steps
 //!     .panic_on_futurelock(true);       // Panic when detected
 //! ```
+//!
+//! # Builder Style
+//!
+//! `LabConfig` uses a fluent, move-based builder style. Each method consumes
+//! `self` and returns an updated configuration so you can chain options safely.
+//!
+//! # Configuration Examples
+//!
+//! ## Deterministic Multi-Worker Simulation
+//!
+//! ```ignore
+//! use asupersync::lab::{LabConfig, LabRuntime};
+//!
+//! let config = LabConfig::new(7)
+//!     .worker_count(4)
+//!     .trace_capacity(16_384);
+//! let mut lab = LabRuntime::new(config);
+//! lab.run_until_quiescent();
+//! ```
+//!
+//! ## Replay Capture for Debugging
+//!
+//! ```ignore
+//! use asupersync::lab::{LabConfig, LabRuntime};
+//!
+//! let config = LabConfig::new(42).with_default_replay_recording();
+//! let mut lab = LabRuntime::new(config);
+//! lab.run_until_quiescent();
+//! ```
+//!
+//! ## Entropy Decoupling
+//!
+//! ```ignore
+//! use asupersync::lab::LabConfig;
+//!
+//! // Keep scheduling deterministic but vary entropy-derived behavior.
+//! let config = LabConfig::new(42).entropy_seed(7);
+//! ```
+//!
+//! # Migration Guide (Struct Updates → Builder Style)
+//!
+//! ```ignore
+//! use asupersync::lab::LabConfig;
+//!
+//! // Old style: struct update
+//! let config = LabConfig {
+//!     seed: 42,
+//!     worker_count: 4,
+//!     ..LabConfig::new(42)
+//! };
+//!
+//! // New style: builder methods
+//! let config = LabConfig::new(42).worker_count(4);
+//! ```
 
 use super::chaos::ChaosConfig;
 use crate::trace::RecorderConfig;

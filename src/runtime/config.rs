@@ -1,4 +1,20 @@
 //! Runtime configuration types.
+//!
+//! These types hold the concrete values that drive runtime behavior. In most
+//! cases you should use [`RuntimeBuilder`](super::builder::RuntimeBuilder) to
+//! construct a runtime rather than creating a [`RuntimeConfig`] directly.
+//!
+//! # Defaults
+//!
+//! | Field | Default |
+//! |-------|---------|
+//! | `worker_threads` | available CPU parallelism |
+//! | `thread_stack_size` | 2 MiB |
+//! | `thread_name_prefix` | `"asupersync-worker"` |
+//! | `global_queue_limit` | 0 (unbounded) |
+//! | `steal_batch_size` | 16 |
+//! | `enable_parking` | true |
+//! | `poll_budget` | 128 |
 
 use crate::observability::metrics::{MetricsProvider, NoOpMetrics};
 use crate::runtime::deadline_monitor::{DeadlineWarning, MonitorConfig};

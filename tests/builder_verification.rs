@@ -11,6 +11,13 @@
 //!
 //! Bead: asupersync-f74u
 
+#![allow(
+    clippy::items_after_statements,
+    clippy::redundant_clone,
+    clippy::should_panic_without_expect,
+    clippy::single_char_pattern
+)]
+
 #[macro_use]
 mod common;
 
