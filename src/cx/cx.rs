@@ -1442,6 +1442,17 @@ impl Cx {
     /// This method is used by the `race!` macro. It runs the provided futures
     /// concurrently (inline, not spawned) and returns the result of the first
     /// one to complete. Losers are dropped (cancelled).
+    ///
+    /// # Cancellation vs Draining
+    ///
+    /// This method **drops** the losing futures, which cancels them. However,
+    /// unlike [`Scope::race`](crate::cx::Scope::race), it does not await the
+    /// losers to ensure they have fully cleaned up ("drained").
+    ///
+    /// If you are racing [`TaskHandle`](crate::runtime::TaskHandle)s and require
+    /// the "Losers are drained" invariant (parent waits for losers to terminate),
+    /// use [`Scope::race`](crate::cx::Scope::race) or
+    /// [`Scope::race_all`](crate::cx::Scope::race_all) instead.
     pub async fn race<T>(
         &self,
         futures: Vec<Pin<Box<dyn Future<Output = T> + Send>>>,
@@ -1453,6 +1464,12 @@ impl Cx {
     /// Races multiple named futures.
     ///
     /// Similar to `race`, but accepts names for tracing purposes.
+    ///
+    /// # Cancellation vs Draining
+    ///
+    /// This method **drops** the losing futures, which cancels them. However,
+    /// unlike [`Scope::race`](crate::cx::Scope::race), it does not await the
+    /// losers to ensure they have fully cleaned up ("drained").
     pub async fn race_named<T>(&self, futures: NamedFutures<T>) -> Result<T, JoinError> {
         let futures: Vec<_> = futures.into_iter().map(|(_, f)| f).collect();
         self.race(futures).await
@@ -1461,6 +1478,12 @@ impl Cx {
     /// Races multiple futures with a timeout.
     ///
     /// If the timeout expires before any future completes, returns a cancellation error.
+    ///
+    /// # Cancellation vs Draining
+    ///
+    /// This method **drops** the losing futures (or all futures on timeout),
+    /// which cancels them. However, it does not await the losers to ensure
+    /// they have fully cleaned up ("drained").
     pub async fn race_timeout<T>(
         &self,
         duration: Duration,
@@ -1473,6 +1496,12 @@ impl Cx {
     }
 
     /// Races multiple named futures with a timeout.
+    ///
+    /// # Cancellation vs Draining
+    ///
+    /// This method **drops** the losing futures (or all futures on timeout),
+    /// which cancels them. However, it does not await the losers to ensure
+    /// they have fully cleaned up ("drained").
     pub async fn race_timeout_named<T>(
         &self,
         duration: Duration,
