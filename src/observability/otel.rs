@@ -1221,6 +1221,11 @@ mod tests {
             "asupersync_tasks_duration_bucket",
             "asupersync_regions_active",
             "asupersync_cancellations_total",
+            "asupersync_deadline_warnings_total",
+            "asupersync_deadline_violations_total",
+            "asupersync_deadline_remaining_seconds_bucket",
+            "asupersync_checkpoint_interval_seconds_bucket",
+            "asupersync_task_stuck_detected_total",
         ];
         for metric in expected {
             assert!(

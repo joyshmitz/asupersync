@@ -13,12 +13,21 @@ use std::sync::atomic::{AtomicUsize, Ordering};
 use std::sync::Arc;
 use std::time::Duration;
 
-use asupersync::observability::{
-    Counter, Gauge, Histogram, Metrics, MetricsProvider, NoOpMetrics, OutcomeKind,
-};
-use asupersync::test_utils::init_test_logging;
+use asupersync::observability::{Metrics, MetricsProvider, NoOpMetrics, OutcomeKind};
 use asupersync::types::cancel::CancelKind;
 use asupersync::types::id::{RegionId, TaskId};
+
+/// Lightweight logging init for integration tests (no test_utils dependency).
+fn init_test_logging() {
+    use std::sync::Once;
+    static INIT: Once = Once::new();
+    INIT.call_once(|| {
+        let _ = tracing_subscriber::fmt()
+            .with_max_level(tracing::Level::TRACE)
+            .with_test_writer()
+            .try_init();
+    });
+}
 
 // ─── Test Spy MetricsProvider ────────────────────────────────────────────────
 
@@ -283,15 +292,16 @@ fn test_noop_metrics_object_safe() {
 
 #[test]
 fn test_noop_metrics_is_default() {
-    let _: NoOpMetrics = Default::default();
+    fn assert_default<T: Default>() {}
+    assert_default::<NoOpMetrics>();
 }
 
 #[test]
 fn test_noop_metrics_is_clone_copy() {
-    let a = NoOpMetrics;
-    let _b = a;
-    let _c = a; // Copy
-    let _d = a.clone(); // Clone
+    fn assert_clone<T: Clone>() {}
+    fn assert_copy<T: Copy>() {}
+    assert_clone::<NoOpMetrics>();
+    assert_copy::<NoOpMetrics>();
 }
 
 // ─── Thread safety ──────────────────────────────────────────────────────────
@@ -340,12 +350,13 @@ fn test_arc_dyn_provider_send_sync() {
     handle.join().expect("thread join");
 }
 
-// ─── Built-in Counter / Gauge / Histogram ───────────────────────────────────
+// ─── Built-in Counter / Gauge / Histogram (via Metrics registry) ────────────
 
 #[test]
 fn test_counter_monotonic() {
     init_test_logging();
-    let c = Counter::new("test_counter");
+    let mut metrics = Metrics::new();
+    let c = metrics.counter("test_counter");
     assert_eq!(c.get(), 0);
     c.increment();
     assert_eq!(c.get(), 1);
@@ -356,7 +367,8 @@ fn test_counter_monotonic() {
 #[test]
 fn test_gauge_bidirectional() {
     init_test_logging();
-    let g = Gauge::new("test_gauge");
+    let mut metrics = Metrics::new();
+    let g = metrics.gauge("test_gauge");
     g.set(50);
     assert_eq!(g.get(), 50);
     g.increment();
@@ -373,7 +385,8 @@ fn test_gauge_bidirectional() {
 #[allow(clippy::float_cmp)]
 fn test_histogram_records_observations() {
     init_test_logging();
-    let h = Histogram::new("latency", vec![1.0, 5.0, 10.0, 50.0]);
+    let mut metrics = Metrics::new();
+    let h = metrics.histogram("latency", vec![1.0, 5.0, 10.0, 50.0]);
     h.observe(0.5);
     h.observe(3.0);
     h.observe(8.0);
@@ -461,7 +474,7 @@ mod otel_integration {
     use super::*;
     use asupersync::observability::{
         ExportError, InMemoryExporter, MetricsConfig, MetricsExporter, MetricsSnapshot,
-        MultiExporter, NullExporter, OtelMetrics, StdoutExporter,
+        MultiExporter, NullExporter, OtelMetrics,
     };
     use opentelemetry::metrics::MeterProvider;
     use opentelemetry_sdk::metrics::{
@@ -706,7 +719,10 @@ mod otel_integration {
 
         provider.force_flush().expect("flush");
         let finished = exporter.get_finished_metrics().expect("finished");
-        assert!(!finished.is_empty(), "expected metrics after concurrent emission");
+        assert!(
+            !finished.is_empty(),
+            "expected metrics after concurrent emission"
+        );
 
         provider.shutdown().expect("shutdown");
     }
