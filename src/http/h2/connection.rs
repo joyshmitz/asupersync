@@ -772,7 +772,7 @@ pub enum ReceivedFrame {
 #[cfg(test)]
 mod tests {
     use super::*;
-    use bytes::Bytes;
+    use crate::bytes::Bytes;
 
     #[test]
     fn data_frame_triggers_connection_window_update_on_low_watermark() {
