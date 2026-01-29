@@ -88,6 +88,7 @@ pub mod record;
 pub mod remote;
 pub mod runtime;
 pub mod security;
+pub mod server;
 pub mod service;
 pub mod session;
 pub mod signal;
