@@ -273,7 +273,7 @@ impl SymbolCancelToken {
     ///
     /// Note: This creates a new token state; it does not link to the original.
     #[must_use]
-    
+
     pub fn from_bytes(data: &[u8]) -> Option<Self> {
         if data.len() < TOKEN_WIRE_SIZE {
             return None;
@@ -461,7 +461,7 @@ impl CancelMessage {
     }
 
     /// Deserializes from bytes.
-    #[must_use] 
+    #[must_use]
     pub fn from_bytes(data: &[u8]) -> Option<Self> {
         if data.len() < MESSAGE_WIRE_SIZE {
             return None;

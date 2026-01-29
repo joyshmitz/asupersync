@@ -288,7 +288,7 @@ impl Router {
     ///
     /// Routes are checked in registration order. Nested routers are checked
     /// after top-level routes.
-    #[must_use] 
+    #[must_use]
     pub fn handle(&self, mut req: Request) -> Response {
         // Check top-level routes.
         for (pattern, method_router) in &self.routes {

@@ -42,12 +42,8 @@ impl MigrationMode {
     pub fn should_use_raptorq(&self, hint: Option<bool>, data_size: usize) -> bool {
         match (self, hint) {
             // Explicit hints always win; otherwise prefer symbol-native modes.
-            (_, Some(true)) | (Self::SymbolNativeOnly | Self::PreferSymbolNative, None) => {
-                true
-            }
-            (_, Some(false)) | (Self::TraditionalOnly | Self::PreferTraditional, None) => {
-                false
-            }
+            (_, Some(true)) | (Self::SymbolNativeOnly | Self::PreferSymbolNative, None) => true,
+            (_, Some(false)) | (Self::TraditionalOnly | Self::PreferTraditional, None) => false,
             // Adaptive mode uses size heuristic
             (Self::Adaptive, None) => data_size > 1024,
         }

@@ -52,7 +52,10 @@ fn bind_ephemeral() -> std::io::Result<TcpListener> {
 #[test]
 fn reactor_creates_successfully() {
     let reactor = IoUringReactor::new();
-    assert!(reactor.is_ok(), "io_uring reactor should create on Linux 5.1+");
+    assert!(
+        reactor.is_ok(),
+        "io_uring reactor should create on Linux 5.1+"
+    );
     let r = reactor.unwrap();
     assert!(r.is_empty());
     assert_eq!(r.registration_count(), 0);
@@ -74,7 +77,9 @@ fn register_and_deregister_socket() {
         .expect("register should succeed");
     assert_eq!(reactor.registration_count(), 1);
 
-    reactor.deregister(token).expect("deregister should succeed");
+    reactor
+        .deregister(token)
+        .expect("deregister should succeed");
     assert_eq!(reactor.registration_count(), 0);
 }
 
@@ -176,7 +181,10 @@ fn poll_detects_listener_readable_on_connect() {
         }
     }
 
-    assert!(found, "should detect listener readable after client connect");
+    assert!(
+        found,
+        "should detect listener readable after client connect"
+    );
 
     handle.join().unwrap();
     reactor.deregister(token).unwrap();
@@ -215,10 +223,7 @@ fn poll_detects_stream_writable() {
         }
     }
 
-    assert!(
-        found,
-        "connected TCP socket should be writable immediately"
-    );
+    assert!(found, "connected TCP socket should be writable immediately");
     reactor.deregister(token).unwrap();
 }
 
@@ -384,7 +389,9 @@ fn wake_interrupts_blocking_poll() {
 fn wake_without_registrations() {
     let reactor = IoUringReactor::new().unwrap();
     // wake() should succeed even with no registrations.
-    reactor.wake().expect("wake should succeed with no registrations");
+    reactor
+        .wake()
+        .expect("wake should succeed with no registrations");
 }
 
 // =========================================================================
@@ -541,13 +548,7 @@ fn pipe_read_write_via_reactor() {
 
     // Write data to the pipe.
     let msg = b"pipe via io_uring";
-    let written = unsafe {
-        libc::write(
-            write_fd,
-            msg.as_ptr().cast::<libc::c_void>(),
-            msg.len(),
-        )
-    };
+    let written = unsafe { libc::write(write_fd, msg.as_ptr().cast::<libc::c_void>(), msg.len()) };
     assert_eq!(written as usize, msg.len());
 
     // Poll should detect readable.
