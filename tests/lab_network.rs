@@ -1,3 +1,5 @@
+//! Deterministic network simulation integration tests.
+
 use asupersync::bytes::Bytes;
 use asupersync::lab::{NetworkConditions, NetworkConfig, SimulatedNetwork};
 use std::time::Duration;
@@ -19,7 +21,7 @@ fn network_respects_latency_bounds() {
     assert_eq!(inbox.len(), 1);
     let packet = &inbox[0];
     let latency_ms = packet.received_at.duration_since(packet.sent_at) / 1_000_000;
-    assert!(latency_ms >= 1 && latency_ms <= 5);
+    assert!((1..=5).contains(&latency_ms));
 }
 
 #[test]

@@ -13,11 +13,13 @@ use std::time::Duration;
 pub struct HostId(u64);
 
 impl HostId {
+    /// Creates a host id from a raw integer.
     #[must_use]
     pub const fn new(id: u64) -> Self {
         Self(id)
     }
 
+    /// Returns the raw host identifier.
     #[must_use]
     pub const fn raw(self) -> u64 {
         self.0
@@ -27,11 +29,17 @@ impl HostId {
 /// A simulated packet.
 #[derive(Debug, Clone)]
 pub struct Packet {
+    /// Source host.
     pub src: HostId,
+    /// Destination host.
     pub dst: HostId,
+    /// Packet payload.
     pub payload: Bytes,
+    /// Time when the packet was sent.
     pub sent_at: Time,
+    /// Time when the packet was delivered.
     pub received_at: Time,
+    /// Whether corruption was injected.
     pub corrupted: bool,
 }
 
@@ -40,42 +48,64 @@ pub struct Packet {
 pub enum Fault {
     /// Partition hosts into two sets.
     Partition {
+        /// First host set.
         hosts_a: Vec<HostId>,
+        /// Second host set.
         hosts_b: Vec<HostId>,
     },
     /// Heal a partition between two sets.
     Heal {
+        /// First host set.
         hosts_a: Vec<HostId>,
+        /// Second host set.
         hosts_b: Vec<HostId>,
     },
     /// Crash a host (clears inbox, drops future deliveries).
-    HostCrash { host: HostId },
+    HostCrash {
+        /// Host to crash.
+        host: HostId,
+    },
     /// Restart a host (clears crash flag, keeps inbox empty).
-    HostRestart { host: HostId },
+    HostRestart {
+        /// Host to restart.
+        host: HostId,
+    },
 }
 
 /// Network metrics for diagnostics.
 #[derive(Debug, Default, Clone)]
 pub struct NetworkMetrics {
+    /// Total packets submitted.
     pub packets_sent: u64,
+    /// Total packets delivered.
     pub packets_delivered: u64,
+    /// Total packets dropped.
     pub packets_dropped: u64,
+    /// Total packets corrupted.
     pub packets_corrupted: u64,
 }
 
 /// Simple trace event for network simulation.
 #[derive(Debug, Clone)]
 pub struct NetworkTraceEvent {
+    /// Event timestamp.
     pub time: Time,
+    /// Event kind.
     pub kind: NetworkTraceKind,
+    /// Source host.
     pub src: HostId,
+    /// Destination host.
     pub dst: HostId,
 }
 
+/// Trace event kind.
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub enum NetworkTraceKind {
+    /// Packet send attempt.
     Send,
+    /// Packet delivered.
     Deliver,
+    /// Packet dropped.
     Drop,
 }
 
@@ -258,8 +288,7 @@ impl SimulatedNetwork {
         let jitter = conditions
             .jitter
             .as_ref()
-            .map(|j| j.sample(&mut self.rng))
-            .unwrap_or(Duration::ZERO);
+            .map_or(Duration::ZERO, |j| j.sample(&mut self.rng));
         let mut deliver_at = self.now + base_latency + jitter;
 
         if self.config.enable_bandwidth {
@@ -282,7 +311,7 @@ impl SimulatedNetwork {
         }
 
         if self.should_drop(conditions.packet_reorder) {
-            let reorder_jitter = Duration::from_micros((self.rng.next_u64() % 1000) as u64);
+            let reorder_jitter = Duration::from_micros(self.rng.next_u64() % 1000);
             deliver_at = deliver_at + reorder_jitter;
         }
 
@@ -371,28 +400,27 @@ impl SimulatedNetwork {
             return;
         }
 
-        let Some(host) = self.hosts.get_mut(&packet.dst) else {
-            self.metrics.packets_dropped = self.metrics.packets_dropped.saturating_add(1);
-            return;
+        let (trace_src, trace_dst) = {
+            let Some(host) = self.hosts.get_mut(&packet.dst) else {
+                self.metrics.packets_dropped = self.metrics.packets_dropped.saturating_add(1);
+                return;
+            };
+
+            if host.crashed {
+                self.metrics.packets_dropped = self.metrics.packets_dropped.saturating_add(1);
+                self.trace_event(NetworkTraceKind::Drop, packet.src, packet.dst);
+                return;
+            }
+
+            let src = packet.src;
+            let dst = packet.dst;
+            host.inbox.push(packet);
+            self.metrics.packets_delivered = self.metrics.packets_delivered.saturating_add(1);
+            host.inbox
+                .last()
+                .map_or((src, dst), |last| (last.src, last.dst))
         };
-
-        if host.crashed {
-            self.metrics.packets_dropped = self.metrics.packets_dropped.saturating_add(1);
-            self.trace_event(NetworkTraceKind::Drop, packet.src, packet.dst);
-            return;
-        }
-
-        let src = packet.src;
-        let dst = packet.dst;
-        host.inbox.push(packet);
-        self.metrics.packets_delivered = self.metrics.packets_delivered.saturating_add(1);
-        let (src, dst) = host
-            .inbox
-            .last()
-            .map(|last| (last.src, last.dst))
-            .unwrap_or((src, dst));
-        drop(host);
-        self.trace_event(NetworkTraceKind::Deliver, src, dst);
+        self.trace_event(NetworkTraceKind::Deliver, trace_src, trace_dst);
     }
 
     fn link_conditions(&self, src: HostId, dst: HostId) -> NetworkConditions {
@@ -406,6 +434,7 @@ impl SimulatedNetwork {
         self.partitions.contains(&LinkKey::new(src, dst))
     }
 
+    #[allow(clippy::cast_precision_loss)]
     fn should_drop(&mut self, prob: f64) -> bool {
         if prob <= 0.0 {
             return false;
@@ -413,7 +442,7 @@ impl SimulatedNetwork {
         if prob >= 1.0 {
             return true;
         }
-        let sample = (self.rng.next_u64() as f64) / (u64::MAX as f64);
+        let sample = (self.rng.next_u64() >> 11) as f64 / (1u64 << 53) as f64;
         sample < prob
     }
 
@@ -454,8 +483,8 @@ fn bytes_to_nanos(len: usize, bandwidth: u64) -> u64 {
     }
     let nanos = (len as u128)
         .saturating_mul(1_000_000_000u128)
-        .saturating_div(bandwidth as u128);
-    nanos.min(u64::MAX as u128) as u64
+        .saturating_div(u128::from(bandwidth));
+    nanos.min(u128::from(u64::MAX)) as u64
 }
 
 #[cfg(test)]

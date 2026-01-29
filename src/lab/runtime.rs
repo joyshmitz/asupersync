@@ -40,6 +40,8 @@ pub struct LabRuntime {
     pub state: RuntimeState,
     /// Lab reactor for deterministic I/O simulation.
     lab_reactor: Arc<LabReactor>,
+    /// Tokens seen for I/O submissions (for trace emission).
+    seen_io_tokens: HashSet<usize>,
     /// Scheduler.
     pub scheduler: Arc<Mutex<LabScheduler>>,
     /// Configuration.
@@ -87,6 +89,7 @@ impl LabRuntime {
         Self {
             state,
             lab_reactor,
+            seen_io_tokens: HashSet::new(),
             scheduler: Arc::new(Mutex::new(LabScheduler::new(config.worker_count))),
             config,
             rng,
@@ -408,17 +411,32 @@ impl LabRuntime {
             return;
         };
         let now = self.state.now;
-        let (state, recorder) = (&mut self.state, &mut self.replay_recorder);
-        if let Err(_error) = handle.turn_with(Some(Duration::ZERO), |event| {
+        let (state, recorder, seen) = (
+            &mut self.state,
+            &mut self.replay_recorder,
+            &mut self.seen_io_tokens,
+        );
+        if let Err(_error) = handle.turn_with(Some(Duration::ZERO), |event, interest| {
+            let token = event.token.0;
+            let interest = interest.unwrap_or(event.ready);
+            if seen.insert(token) {
+                let seq = state.next_trace_seq();
+                state.trace.push(TraceEvent::io_requested(
+                    seq,
+                    now,
+                    token as u64,
+                    interest.bits(),
+                ));
+            }
             let seq = state.next_trace_seq();
             state.trace.push(TraceEvent::io_ready(
                 seq,
                 now,
-                event.token.0 as u64,
+                token as u64,
                 event.ready.bits(),
             ));
             recorder.record_io_ready(
-                event.token.0 as u64,
+                token as u64,
                 event.is_readable(),
                 event.is_writable(),
                 event.is_error(),
@@ -1088,12 +1106,23 @@ mod tests {
         runtime.advance_time(1_000_000);
         runtime.step_for_test();
 
-        let recorded = runtime
-            .state
-            .trace
-            .iter()
-            .any(|event| event.kind == TraceEventKind::IoReady);
-        crate::assert_with_log!(recorded, "io ready trace recorded", true, recorded);
+        let mut saw_requested = false;
+        let mut saw_ready = false;
+        for event in runtime.state.trace.iter() {
+            if event.kind == TraceEventKind::IoRequested {
+                saw_requested = true;
+            }
+            if event.kind == TraceEventKind::IoReady {
+                saw_ready = true;
+            }
+        }
+        crate::assert_with_log!(
+            saw_requested,
+            "io requested trace recorded",
+            true,
+            saw_requested
+        );
+        crate::assert_with_log!(saw_ready, "io ready trace recorded", true, saw_ready);
         crate::test_complete!("lab_runtime_records_io_ready_trace");
     }
 

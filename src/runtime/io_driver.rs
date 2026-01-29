@@ -40,6 +40,7 @@
 
 use crate::runtime::reactor::{Event, Events, Interest, Reactor, Source, Token};
 use slab::Slab;
+use std::collections::HashMap;
 use std::io;
 use std::sync::{Arc, Mutex, Weak};
 use std::task::Waker;
@@ -81,6 +82,8 @@ pub struct IoDriver {
     reactor: Arc<dyn Reactor>,
     /// Slab mapping tokens to wakers.
     wakers: Slab<Waker>,
+    /// Interest sets for registered tokens.
+    interests: HashMap<Token, Interest>,
     /// Pre-allocated events buffer to avoid allocation per turn.
     events: Events,
     /// Statistics for diagnostics.
@@ -98,6 +101,7 @@ impl IoDriver {
         Self {
             reactor,
             wakers: Slab::new(),
+            interests: HashMap::new(),
             events: Events::with_capacity(DEFAULT_EVENTS_CAPACITY),
             stats: IoStats::default(),
         }
@@ -111,6 +115,7 @@ impl IoDriver {
         Self {
             reactor,
             wakers: Slab::new(),
+            interests: HashMap::new(),
             events: Events::with_capacity(events_capacity),
             stats: IoStats::default(),
         }
@@ -154,6 +159,7 @@ impl IoDriver {
         // Register with the reactor
         match self.reactor.register(source, token, interest) {
             Ok(()) => {
+                self.interests.insert(token, interest);
                 self.stats.registrations += 1;
                 Ok(token)
             }
@@ -194,7 +200,9 @@ impl IoDriver {
     ///
     /// This forwards to the underlying reactor and does not touch waker state.
     pub fn modify_interest(&mut self, token: Token, interest: Interest) -> io::Result<()> {
-        self.reactor.modify(token, interest)
+        self.reactor.modify(token, interest)?;
+        self.interests.insert(token, interest);
+        Ok(())
     }
 
     /// Deregisters an I/O source.
@@ -213,6 +221,7 @@ impl IoDriver {
             self.wakers.remove(token.0);
             self.stats.deregistrations += 1;
         }
+        self.interests.remove(&token);
 
         Ok(())
     }
@@ -248,7 +257,7 @@ impl IoDriver {
     ///
     /// Returns an error if the reactor poll fails.
     pub fn turn(&mut self, timeout: Option<Duration>) -> io::Result<usize> {
-        self.turn_with(timeout, |_| {})
+        self.turn_with(timeout, |_, _| {})
     }
 
     /// Processes pending I/O events, invoking a callback per event.
@@ -257,7 +266,7 @@ impl IoDriver {
     /// waker dispatch. The callback is invoked before waking the task.
     pub fn turn_with<F>(&mut self, timeout: Option<Duration>, mut on_event: F) -> io::Result<usize>
     where
-        F: FnMut(&Event),
+        F: FnMut(&Event, Option<Interest>),
     {
         // Clear previous events
         self.events.clear();
@@ -269,7 +278,8 @@ impl IoDriver {
 
         // Dispatch wakers for ready events
         for event in &self.events {
-            on_event(event);
+            let interest = self.interests.get(&event.token).copied();
+            on_event(event, interest);
             if let Some(waker) = self.wakers.get(event.token.0) {
                 waker.wake_by_ref();
                 self.stats.wakers_dispatched += 1;
@@ -392,7 +402,7 @@ impl IoDriverHandle {
     /// Processes pending I/O events with a per-event callback.
     pub fn turn_with<F>(&self, timeout: Option<Duration>, on_event: F) -> io::Result<usize>
     where
-        F: FnMut(&Event),
+        F: FnMut(&Event, Option<Interest>),
     {
         let mut driver = self.inner.lock().expect("lock poisoned");
         driver.turn_with(timeout, on_event)

@@ -162,15 +162,33 @@ pub enum LatencyModel {
     /// Fixed latency.
     Fixed(Duration),
     /// Uniform distribution between min and max.
-    Uniform { min: Duration, max: Duration },
+    Uniform {
+        /// Minimum latency for the range.
+        min: Duration,
+        /// Maximum latency for the range.
+        max: Duration,
+    },
     /// Normal (Gaussian) distribution.
-    Normal { mean: Duration, std_dev: Duration },
+    Normal {
+        /// Mean latency.
+        mean: Duration,
+        /// Standard deviation of latency.
+        std_dev: Duration,
+    },
     /// Log-normal distribution (common in real networks).
-    LogNormal { mu: f64, sigma: f64 },
+    LogNormal {
+        /// Mean of the underlying normal distribution.
+        mu: f64,
+        /// Std dev of the underlying normal distribution.
+        sigma: f64,
+    },
     /// Bimodal - two peaks (models route switching).
     Bimodal {
+        /// Low-latency mode.
         low: Duration,
+        /// High-latency mode.
         high: Duration,
+        /// Probability of sampling the high-latency mode.
         high_probability: f64,
     },
 }
@@ -186,12 +204,12 @@ impl LatencyModel {
                     return *min;
                 }
                 let range = max.as_nanos().saturating_sub(min.as_nanos());
-                let offset = (rng.next_u64() as u128) % (range + 1);
+                let offset = u128::from(rng.next_u64()) % (range + 1);
                 Duration::from_nanos((min.as_nanos() + offset) as u64)
             }
             Self::Normal { mean, std_dev } => {
                 let z = sample_standard_normal(rng);
-                let sample = mean.as_secs_f64() + std_dev.as_secs_f64() * z;
+                let sample = std_dev.as_secs_f64().mul_add(z, mean.as_secs_f64());
                 duration_from_secs_f64(sample)
             }
             Self::LogNormal { mu, sigma } => {
@@ -219,11 +237,17 @@ impl LatencyModel {
 #[derive(Clone, Debug)]
 pub enum JitterModel {
     /// Uniform jitter in [0, max].
-    Uniform { max: Duration },
+    Uniform {
+        /// Maximum jitter to apply.
+        max: Duration,
+    },
     /// Bursty jitter with rare large spikes.
     Bursty {
+        /// Typical jitter range.
         normal_jitter: Duration,
+        /// Burst jitter range.
         burst_jitter: Duration,
+        /// Probability of applying a burst jitter.
         burst_probability: f64,
     },
 }
@@ -238,7 +262,7 @@ impl JitterModel {
                     return Duration::ZERO;
                 }
                 let nanos = max.as_nanos();
-                let offset = (rng.next_u64() as u128) % (nanos + 1);
+                let offset = u128::from(rng.next_u64()) % (nanos + 1);
                 Duration::from_nanos(offset as u64)
             }
             Self::Bursty {
@@ -256,7 +280,7 @@ impl JitterModel {
                     Duration::ZERO
                 } else {
                     let nanos = range.as_nanos();
-                    let offset = (rng.next_u64() as u128) % (nanos + 1);
+                    let offset = u128::from(rng.next_u64()) % (nanos + 1);
                     Duration::from_nanos(offset as u64)
                 }
             }
@@ -264,10 +288,10 @@ impl JitterModel {
     }
 }
 
+#[allow(clippy::cast_precision_loss)]
 fn next_unit_f64(rng: &mut DetRng) -> f64 {
-    let raw = rng.next_u64();
-    let denom = (u64::MAX as f64) + 1.0;
-    let mut v = (raw as f64) / denom;
+    let raw = rng.next_u64() >> 11;
+    let mut v = raw as f64 / (1u64 << 53) as f64;
     if v <= 0.0 {
         v = f64::MIN_POSITIVE;
     }
@@ -282,6 +306,7 @@ fn sample_standard_normal(rng: &mut DetRng) -> f64 {
     r * theta.cos()
 }
 
+#[allow(clippy::cast_precision_loss)]
 fn duration_from_secs_f64(secs: f64) -> Duration {
     if !secs.is_finite() || secs <= 0.0 {
         return Duration::ZERO;
