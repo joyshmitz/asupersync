@@ -237,33 +237,50 @@ mod tests {
     use super::*;
     use crate::runtime::config::RuntimeConfig;
 
+    fn with_clean_env<F, R>(f: F) -> R
+    where
+        F: FnOnce() -> R,
+    {
+        let _guard = crate::test_utils::env_lock();
+        clean_env_locked();
+        f()
+    }
+
     // Helper: set env var for the duration of a closure, then unset.
-    // Not thread-safe, but our tests use unique var names or serial execution.
     fn with_env<F, R>(var: &str, val: &str, f: F) -> R
     where
         F: FnOnce() -> R,
     {
-        std::env::set_var(var, val);
-        let result = f();
-        std::env::remove_var(var);
-        result
+        with_clean_env(|| {
+            std::env::set_var(var, val);
+            let result = f();
+            std::env::remove_var(var);
+            result
+        })
     }
 
     fn with_envs<F, R>(vars: &[(&str, &str)], f: F) -> R
     where
         F: FnOnce() -> R,
     {
-        for (k, v) in vars {
-            std::env::set_var(k, v);
-        }
-        let result = f();
-        for (k, _) in vars {
-            std::env::remove_var(k);
-        }
-        result
+        with_clean_env(|| {
+            for (k, v) in vars {
+                std::env::set_var(k, v);
+            }
+            let result = f();
+            for (k, _) in vars {
+                std::env::remove_var(k);
+            }
+            result
+        })
     }
 
     fn clean_env() {
+        let _guard = crate::test_utils::env_lock();
+        clean_env_locked();
+    }
+
+    fn clean_env_locked() {
         for var in &[
             ENV_WORKER_THREADS,
             ENV_TASK_QUEUE_DEPTH,
@@ -337,7 +354,6 @@ mod tests {
 
     #[test]
     fn env_overrides_worker_threads() {
-        clean_env();
         with_env(ENV_WORKER_THREADS, "8", || {
             let mut config = RuntimeConfig::default();
             apply_env_overrides(&mut config).unwrap();
@@ -347,7 +363,6 @@ mod tests {
 
     #[test]
     fn env_overrides_task_queue_depth() {
-        clean_env();
         with_env(ENV_TASK_QUEUE_DEPTH, "2048", || {
             let mut config = RuntimeConfig::default();
             apply_env_overrides(&mut config).unwrap();
@@ -357,7 +372,6 @@ mod tests {
 
     #[test]
     fn env_overrides_thread_stack_size() {
-        clean_env();
         with_env(ENV_THREAD_STACK_SIZE, "4194304", || {
             let mut config = RuntimeConfig::default();
             apply_env_overrides(&mut config).unwrap();
@@ -367,7 +381,6 @@ mod tests {
 
     #[test]
     fn env_overrides_thread_name_prefix() {
-        clean_env();
         with_env(ENV_THREAD_NAME_PREFIX, "myapp-worker", || {
             let mut config = RuntimeConfig::default();
             apply_env_overrides(&mut config).unwrap();
@@ -377,7 +390,6 @@ mod tests {
 
     #[test]
     fn env_overrides_steal_batch_size() {
-        clean_env();
         with_env(ENV_STEAL_BATCH_SIZE, "32", || {
             let mut config = RuntimeConfig::default();
             apply_env_overrides(&mut config).unwrap();
@@ -387,7 +399,6 @@ mod tests {
 
     #[test]
     fn env_overrides_blocking_threads() {
-        clean_env();
         with_envs(
             &[
                 (ENV_BLOCKING_MIN_THREADS, "2"),
@@ -404,7 +415,6 @@ mod tests {
 
     #[test]
     fn env_overrides_enable_parking() {
-        clean_env();
         with_env(ENV_ENABLE_PARKING, "false", || {
             let mut config = RuntimeConfig::default();
             apply_env_overrides(&mut config).unwrap();
@@ -414,7 +424,6 @@ mod tests {
 
     #[test]
     fn env_overrides_poll_budget() {
-        clean_env();
         with_env(ENV_POLL_BUDGET, "64", || {
             let mut config = RuntimeConfig::default();
             apply_env_overrides(&mut config).unwrap();
@@ -424,7 +433,6 @@ mod tests {
 
     #[test]
     fn env_overrides_multiple() {
-        clean_env();
         with_envs(
             &[
                 (ENV_WORKER_THREADS, "4"),
@@ -443,18 +451,18 @@ mod tests {
 
     #[test]
     fn env_overrides_unset_vars_leave_defaults() {
-        clean_env();
-        let defaults = RuntimeConfig::default();
-        let mut config = RuntimeConfig::default();
-        apply_env_overrides(&mut config).unwrap();
-        assert_eq!(config.worker_threads, defaults.worker_threads);
-        assert_eq!(config.poll_budget, defaults.poll_budget);
-        assert_eq!(config.enable_parking, defaults.enable_parking);
+        with_clean_env(|| {
+            let defaults = RuntimeConfig::default();
+            let mut config = RuntimeConfig::default();
+            apply_env_overrides(&mut config).unwrap();
+            assert_eq!(config.worker_threads, defaults.worker_threads);
+            assert_eq!(config.poll_budget, defaults.poll_budget);
+            assert_eq!(config.enable_parking, defaults.enable_parking);
+        });
     }
 
     #[test]
     fn env_overrides_invalid_value_returns_error() {
-        clean_env();
         with_env(ENV_WORKER_THREADS, "not_a_number", || {
             let mut config = RuntimeConfig::default();
             let result = apply_env_overrides(&mut config);
@@ -474,7 +482,6 @@ mod tests {
 
     #[test]
     fn env_overrides_invalid_bool_returns_error() {
-        clean_env();
         with_env(ENV_ENABLE_PARKING, "maybe", || {
             let mut config = RuntimeConfig::default();
             let result = apply_env_overrides(&mut config);

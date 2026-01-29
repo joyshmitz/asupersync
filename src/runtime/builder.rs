@@ -967,22 +967,38 @@ mod tests {
         assert!(flag.load(Ordering::SeqCst));
     }
 
+    fn with_clean_env<F, R>(f: F) -> R
+    where
+        F: FnOnce() -> R,
+    {
+        let _guard = crate::test_utils::env_lock();
+        clean_env_locked();
+        f()
+    }
+
     /// Helper: set env vars for a closure, then clean up.
     fn with_envs<F, R>(vars: &[(&str, &str)], f: F) -> R
     where
         F: FnOnce() -> R,
     {
-        for (k, v) in vars {
-            std::env::set_var(k, v);
-        }
-        let result = f();
-        for (k, _) in vars {
-            std::env::remove_var(k);
-        }
-        result
+        with_clean_env(|| {
+            for (k, v) in vars {
+                std::env::set_var(k, v);
+            }
+            let result = f();
+            for (k, _) in vars {
+                std::env::remove_var(k);
+            }
+            result
+        })
     }
 
     fn clean_env() {
+        let _guard = crate::test_utils::env_lock();
+        clean_env_locked();
+    }
+
+    fn clean_env_locked() {
         use crate::runtime::env_config::*;
         for var in &[
             ENV_WORKER_THREADS,
@@ -1002,7 +1018,6 @@ mod tests {
     #[test]
     fn with_env_overrides_applies_env_vars() {
         use crate::runtime::env_config::*;
-        clean_env();
         with_envs(
             &[(ENV_WORKER_THREADS, "4"), (ENV_POLL_BUDGET, "64")],
             || {
@@ -1020,7 +1035,6 @@ mod tests {
     #[test]
     fn programmatic_overrides_env_vars() {
         use crate::runtime::env_config::*;
-        clean_env();
         with_envs(&[(ENV_WORKER_THREADS, "8")], || {
             // Env says 8, but programmatic says 2 — programmatic wins.
             let runtime = RuntimeBuilder::new()
@@ -1036,7 +1050,6 @@ mod tests {
     #[test]
     fn with_env_overrides_invalid_var_returns_error() {
         use crate::runtime::env_config::*;
-        clean_env();
         with_envs(&[(ENV_WORKER_THREADS, "not_a_number")], || {
             let result = RuntimeBuilder::new().with_env_overrides();
             assert!(result.is_err());
@@ -1045,14 +1058,15 @@ mod tests {
 
     #[test]
     fn with_env_overrides_no_vars_uses_defaults() {
-        clean_env();
-        let defaults = RuntimeConfig::default();
-        let runtime = RuntimeBuilder::new()
-            .with_env_overrides()
-            .expect("env overrides")
-            .build()
-            .expect("runtime build");
-        assert_eq!(runtime.config().poll_budget, defaults.poll_budget);
+        with_clean_env(|| {
+            let defaults = RuntimeConfig::default();
+            let runtime = RuntimeBuilder::new()
+                .with_env_overrides()
+                .expect("env overrides")
+                .build()
+                .expect("runtime build");
+            assert_eq!(runtime.config().poll_budget, defaults.poll_budget);
+        });
     }
 
     #[cfg(feature = "config-file")]
@@ -1097,7 +1111,6 @@ worker_threads = 8
     #[test]
     fn precedence_programmatic_over_env_over_toml() {
         use crate::runtime::env_config::*;
-        clean_env();
         // TOML says 16, env says 8, programmatic says 2.
         with_envs(&[(ENV_WORKER_THREADS, "8")], || {
             let toml = r#"
@@ -1119,7 +1132,6 @@ worker_threads = 16
     #[test]
     fn precedence_env_over_toml() {
         use crate::runtime::env_config::*;
-        clean_env();
         // TOML says 16, env says 8.
         with_envs(&[(ENV_WORKER_THREADS, "8")], || {
             let toml = r#"

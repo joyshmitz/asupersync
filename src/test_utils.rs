@@ -26,11 +26,12 @@ use crate::runtime::RuntimeBuilder;
 use crate::time::timeout;
 use crate::types::Time;
 use std::future::Future;
-use std::sync::Once;
+use std::sync::{Mutex, Once};
 use std::time::Duration;
 use tracing_subscriber::fmt::format::FmtSpan;
 
 static INIT_LOGGING: Once = Once::new();
+static ENV_LOCK: Mutex<()> = Mutex::new(());
 
 /// Default seed used by test lab helpers.
 pub const DEFAULT_TEST_SEED: u64 = 0xDEAD_BEEF;
@@ -58,6 +59,11 @@ pub fn init_test_logging_with_level(level: tracing::Level) {
             .with_ansi(false)
             .try_init();
     });
+}
+
+/// Acquire the global environment lock for tests that mutate env vars.
+pub(crate) fn env_lock() -> std::sync::MutexGuard<'static, ()> {
+    ENV_LOCK.lock().expect("env lock poisoned")
 }
 
 /// Create a deterministic lab runtime for testing.
