@@ -17,14 +17,20 @@
 #![allow(clippy::cast_sign_loss)]
 #![allow(clippy::explicit_iter_loop)]
 
-use criterion::{black_box, criterion_group, criterion_main, BenchmarkId, Criterion, Throughput};
+use criterion::{
+    black_box, criterion_group, criterion_main, BatchSize, BenchmarkId, Criterion, Throughput,
+};
 
 use asupersync::combinator::race::{race2_outcomes, RaceWinner};
 use asupersync::combinator::{effective_deadline, join2_outcomes, TimeoutConfig};
+use asupersync::config::RaptorQConfig;
 use asupersync::lab::{LabConfig, LabRuntime};
+use asupersync::raptorq::{RaptorQReceiverBuilder, RaptorQSenderBuilder};
 use asupersync::runtime::RuntimeState;
-use asupersync::types::{Budget, CancelKind, CancelReason, Outcome, Time};
+use asupersync::transport::mock::{mock_channel, MockTransportConfig};
+use asupersync::types::{Budget, CancelKind, CancelReason, ObjectId, ObjectParams, Outcome, Time};
 use asupersync::util::Arena;
+use asupersync::Cx;
 
 // =============================================================================
 // CORE TYPE BENCHMARKS
@@ -412,6 +418,77 @@ fn bench_time_operations(c: &mut Criterion) {
 }
 
 // =============================================================================
+// RAPTORQ PIPELINE BENCHMARKS
+// =============================================================================
+
+fn bench_raptorq_pipeline(c: &mut Criterion) {
+    let mut group = c.benchmark_group("raptorq/pipeline");
+
+    let sizes = [64_usize * 1024, 256 * 1024, 1024 * 1024];
+    let cx = Cx::for_testing();
+
+    for &size in &sizes {
+        group.throughput(Throughput::Bytes(size as u64));
+        group.bench_with_input(BenchmarkId::new("send_receive", size), &size, |b, &size| {
+            let data = vec![0_u8; size];
+            let config = raptorq_config_for_size(size);
+            let params = object_params_for(&config, size);
+            let object_id = params.object_id;
+
+            b.iter_batched(
+                || {
+                    let (sink, stream) = mock_channel(MockTransportConfig::reliable());
+                    let sender = RaptorQSenderBuilder::new()
+                        .config(config.clone())
+                        .transport(sink)
+                        .build()
+                        .expect("build sender");
+                    let receiver = RaptorQReceiverBuilder::new()
+                        .config(config.clone())
+                        .source(stream)
+                        .build()
+                        .expect("build receiver");
+                    (sender, receiver)
+                },
+                |(mut sender, mut receiver)| {
+                    let send_outcome = sender
+                        .send_object(&cx, object_id, &data)
+                        .expect("send object");
+                    let recv_outcome = receiver
+                        .receive_object(&cx, &params)
+                        .expect("receive object");
+                    black_box(send_outcome);
+                    black_box(recv_outcome);
+                },
+                BatchSize::SmallInput,
+            )
+        });
+    }
+
+    group.finish();
+}
+
+fn raptorq_config_for_size(size: usize) -> RaptorQConfig {
+    let mut config = RaptorQConfig::default();
+    if size > config.encoding.max_block_size {
+        config.encoding.max_block_size = size;
+    }
+    config
+}
+
+fn object_params_for(config: &RaptorQConfig, size: usize) -> ObjectParams {
+    let symbol_size = usize::from(config.encoding.symbol_size);
+    let symbols_per_block = ((size + symbol_size.saturating_sub(1)) / symbol_size) as u16;
+    ObjectParams::new(
+        ObjectId::new_for_test(1),
+        size as u64,
+        config.encoding.symbol_size,
+        1,
+        symbols_per_block,
+    )
+}
+
+// =============================================================================
 // MAIN
 // =============================================================================
 
@@ -426,6 +503,7 @@ criterion_group!(
     bench_lab_runtime_operations,
     bench_throughput,
     bench_time_operations,
+    bench_raptorq_pipeline,
 );
 
 criterion_main!(benches);

@@ -204,6 +204,77 @@ There is an even deeper view (useful later, not required day‑1): the space of 
 
 **Success metric:** compared to uniform exploration, the heuristic reaches known deadlock or ordering bugs in fewer schedules (lower expected exploration count) in a deterministic lab benchmark.
 
+#### Prototype: static obligation leak checker (Phase 5+)
+
+**Goal:** conservatively flag code paths that may exit a scope while still holding unresolved obligations.
+
+**Abstract domain (flow-sensitive, may-analysis):**
+
+* `Held ⊆ ObligationKind` — the set of obligation kinds that may be pending at a program point.
+* `⊔` (join) is set union, `⊥` is empty set.
+
+**Transfer rules (core subset):**
+
+* `reserve(kind)` ⇒ `Held := Held ∪ {kind}`
+* `commit(kind)` / `abort(kind)` ⇒ `Held := Held \\ {kind}`
+* unknown call ⇒ `Held := Held ∪ Summary(call)` (conservative summary)
+* scope exit / function return: if `Held` non-empty ⇒ emit warning.
+
+**Prototype scope (small model):**
+
+* Model only a restricted IR: a list of operations `{reserve, commit, abort, call, branch, loop}`.
+* Provide summaries for a small set of functions that manipulate obligations (e.g., semaphore acquire/release, pool checkout/return).
+* Diagnostics sorted by (file, line, obligation kind) for determinism.
+
+**Toy example:**
+
+```
+reserve(permit)
+if cond { commit(permit) }
+return
+```
+
+* The analysis reports: `permit` may be leaked on the `cond = false` branch.
+* If both branches commit/abort, no warning is emitted.
+
+**Prototype deliverable:** a deterministic checker that runs on a hand-written IR (or a tiny subset extracted from `sync/` primitives), emits stable warnings, and is wired into CI as a non-flaky report (warning-only at first).
+
+**Tie-in:** complements the dynamic `ObligationLeakOracle` by catching obvious leaks earlier, without compromising determinism.
+
+#### Experiment: graded / quantitative types for obligations and budgets (Phase 5+)
+
+**Goal:** make “no obligation leaks” a type error in an opt-in surface and encode budget usage as a resource grade.
+
+**Sketch (obligations):**
+
+* `Obligation<K, n>` where `n` is a type-level natural (how many unresolved obligations of kind `K` are held).
+* `reserve<K>() -> Obligation<K, 1>`
+* `commit(ob: Obligation<K, 1>) -> Obligation<K, 0>`
+* `abort(ob: Obligation<K, 1>) -> Obligation<K, 0>`
+* `scope` requires all `Obligation<*, n>` to be `n = 0` at exit.
+
+**Sketch (budgets):**
+
+* `Budget<d, q, c>` where grades track deadline/quotas (or a single scalar for now).
+* `spend(b: Budget<d, q, c>, cost) -> Budget<d', q', c'>` with `d' ≤ d`, `q' ≤ q`, `c' ≤ c`.
+* `fork`/`join` operations require grades to satisfy the semiring laws (min on constraints, add on sequential cost).
+
+**Toy API (leak is untypeable):**
+
+```
+fn safe_path() {
+    let permit: Obligation<Permit, 1> = reserve::<Permit>();
+    let _done: Obligation<Permit, 0> = commit(permit);
+}
+
+fn leak_path() {
+    let _permit: Obligation<Permit, 1> = reserve::<Permit>();
+    // no commit/abort => does not type-check at scope exit
+}
+```
+
+**Prototype plan:** implement a tiny opt-in module using const generics or typenum (no runtime cost), and prove with compile-fail tests that leaking obligations is rejected. Extend later to encode budget grades.
+
 ### 3.3 Budgets compose by a product semiring (min core)
 
 Budgets propagate by “stricter wins”:

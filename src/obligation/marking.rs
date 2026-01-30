@@ -36,12 +36,11 @@
 //! ```
 //! use asupersync::obligation::marking::{MarkingAnalyzer, MarkingEvent, MarkingEventKind};
 //! use asupersync::record::ObligationKind;
-//! use asupersync::types::{RegionId, ObligationId, TaskId, Time};
-//! use asupersync::util::ArenaIndex;
+//! use asupersync::types::{ObligationId, RegionId, TaskId, Time};
 //!
-//! let r0 = RegionId::from_arena(ArenaIndex::new(0, 0));
-//! let t0 = TaskId::from_arena(ArenaIndex::new(0, 0));
-//! let o0 = ObligationId::from_arena(ArenaIndex::new(0, 0));
+//! let r0 = RegionId::new_for_test(0, 0);
+//! let t0 = TaskId::new_for_test(0, 0);
+//! let o0 = ObligationId::new_for_test(0, 0);
 //!
 //! let events = vec![
 //!     MarkingEvent::new(Time::ZERO, MarkingEventKind::Reserve {

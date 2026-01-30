@@ -228,7 +228,8 @@ impl ConnectionManager {
                 if let Some(remaining) = deadline.checked_duration_since(now) {
                     std::thread::sleep(remaining);
                 }
-                notify.notify_waiters();
+                // notify_one stores a permit if no waiters yet, avoiding missed deadlines.
+                notify.notify_one();
             })
         });
 

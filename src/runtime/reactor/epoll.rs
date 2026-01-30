@@ -275,7 +275,6 @@ impl std::fmt::Debug for EpollReactor {
 mod tests {
     use super::*;
     use crate::test_utils::init_test_logging;
-    use nix::unistd::{close, dup};
     use std::io::{self, Read, Write};
     use std::os::unix::io::{AsRawFd, RawFd};
     use std::os::unix::net::UnixStream;
@@ -674,12 +673,8 @@ mod tests {
     fn register_invalid_fd_fails() {
         init_test("register_invalid_fd_fails");
         let reactor = EpollReactor::new().expect("failed to create reactor");
-        let (sock1, _sock2) = UnixStream::pair().expect("failed to create unix stream pair");
 
-        let dup_fd = dup(sock1.as_raw_fd()).expect("dup failed");
-        close(dup_fd).expect("close failed");
-
-        let invalid = RawFdSource(dup_fd);
+        let invalid = RawFdSource(-1);
         let result = reactor.register(&invalid, Token::new(99), Interest::READABLE);
         crate::assert_with_log!(
             result.is_err(),

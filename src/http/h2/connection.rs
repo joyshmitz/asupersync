@@ -781,8 +781,10 @@ mod tests {
         let payload_len_usize = usize::try_from(payload_len).expect("payload_len non-negative");
         let payload_len_u32 = u32::try_from(payload_len).expect("payload_len fits u32");
         let data = Bytes::from(vec![0_u8; payload_len_usize]);
+        let headers = Frame::Headers(HeadersFrame::new(1, Bytes::new(), false, true));
         let frame = Frame::Data(DataFrame::new(1, data, false));
 
+        conn.process_frame(headers).expect("process headers frame");
         conn.process_frame(frame).expect("process data frame");
 
         assert!(conn.has_pending_frames(), "expected WINDOW_UPDATE");
