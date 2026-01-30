@@ -18,7 +18,7 @@
 //!
 //! # Determinism
 //!
-//! All non-determinism flows through the lab runtime's [`DetRng`]:
+//! All non-determinism flows through the lab runtime's `DetRng`:
 //! - Request ordering in concurrent batches
 //! - Fault injection decisions
 //! - Simulated latency jitter

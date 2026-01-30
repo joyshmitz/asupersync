@@ -6,7 +6,7 @@
 //! - [`race`]: Run multiple operations in parallel, first wins
 //! - [`select`]: Wait for the first of two futures
 //! - [`timeout`]: Add a deadline to an operation
-//! - [`bracket`]: Acquire/use/release resource safety pattern
+//! - [`bracket`](mod@bracket): Acquire/use/release resource safety pattern
 //! - [`retry`]: Retry with exponential backoff
 //! - [`quorum`]: M-of-N completion semantics for consensus patterns
 //! - [`hedge`]: Latency hedging - start backup after delay, first wins

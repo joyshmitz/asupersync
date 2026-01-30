@@ -346,7 +346,7 @@ impl Cx {
 
     /// Creates a test-only capability context with lab I/O capability.
     ///
-    /// This constructor creates a Cx with a [`LabIoCap`] for testing I/O code paths
+    /// This constructor creates a Cx with a `LabIoCap` for testing I/O code paths
     /// without performing real I/O.
     ///
     /// # Example
@@ -1512,7 +1512,7 @@ impl Cx {
         self.race_timeout(duration, futures).await
     }
 
-    /// Creates a [`Scope`] bound to this context's region.
+    /// Creates a [`Scope`](super::Scope) bound to this context's region.
     ///
     /// The returned `Scope` can be used to spawn tasks, create child regions,
     /// and register finalizers. All spawned tasks will be owned by this
@@ -1553,7 +1553,7 @@ impl Cx {
         crate::cx::Scope::new(self.region_id(), budget)
     }
 
-    /// Creates a [`Scope`] bound to this context's region with a custom budget.
+    /// Creates a [`Scope`](super::Scope) bound to this context's region with a custom budget.
     ///
     /// This is used by the `scope!` macro when a budget is specified:
     /// ```ignore

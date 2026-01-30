@@ -194,7 +194,7 @@ impl ConnectionManager {
     /// 1. Records the active connection count at drain start
     /// 2. Waits for connections to close or the drain deadline to expire
     /// 3. If deadline expires, transitions to force-close phase
-    /// 4. Returns [`ShutdownStats`] with drained vs force-closed counts
+    /// 4. Returns `ShutdownStats` with drained vs force-closed counts
     ///
     /// The caller must have already called [`ShutdownSignal::begin_drain`] before
     /// calling this method. The caller is responsible for force-closing connections

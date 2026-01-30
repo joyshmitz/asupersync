@@ -327,7 +327,7 @@ impl TraceFilter {
     /// Excludes a specific region from recording.
     ///
     /// Note: This removes the region from the include set. If no include set exists,
-    /// this method has no effect. Use [`exclude_region_explicit`] if you need
+    /// this method has no effect. Use `exclude_region_explicit` if you need
     /// explicit exclusion.
     #[must_use]
     pub fn exclude_region(mut self, region: RegionId) -> Self {

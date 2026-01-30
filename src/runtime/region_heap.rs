@@ -12,7 +12,7 @@
 //! # Determinism
 //!
 //! Allocation addresses are not exposed as observable identifiers. Instead, we use
-//! generation-based indices (like [`Arena`]) to provide stable handles that don't
+//! generation-based indices (like `Arena`) to provide stable handles that don't
 //! leak memory addresses into the computation.
 //!
 //! # Example

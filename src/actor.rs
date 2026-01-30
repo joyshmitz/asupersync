@@ -390,7 +390,7 @@ impl<P: crate::types::Policy> crate::cx::Scope<'_, P> {
 
     /// Spawns a supervised actor with automatic restart on failure.
     ///
-    /// Unlike [`spawn_actor`], this method takes a factory closure that can
+    /// Unlike `spawn_actor`, this method takes a factory closure that can
     /// produce new actor instances for restarts. The mailbox persists across
     /// restarts, so messages sent during restart are buffered and processed
     /// by the new instance.

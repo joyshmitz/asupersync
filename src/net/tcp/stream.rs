@@ -27,7 +27,7 @@ pub struct TcpStream {
 
 /// Builder for configuring TCP stream options before connecting.
 ///
-/// This mirrors [`TcpListenerBuilder`] for client connections.
+/// This mirrors [`TcpListenerBuilder`](super::traits::TcpListenerBuilder) for client connections.
 /// Options are applied after a successful connect.
 #[derive(Debug, Clone)]
 pub struct TcpStreamBuilder<A> {

@@ -12,7 +12,7 @@ pub mod sys;
 /// TCP networking primitives.
 pub mod tcp;
 mod udp;
-/// Unix domain socket networking primitives.
+/// Unix domain socket networking primitives (includes `UnixListener`, `UnixStream`).
 #[cfg(unix)]
 pub mod unix;
 

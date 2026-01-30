@@ -6,7 +6,7 @@
 //! - **No closure shipping**: Remote execution uses *named computations*, not closures.
 //!   The caller specifies a computation name (string) and serialized inputs.
 //! - **Explicit capability**: All remote operations require [`RemoteCap`], a capability
-//!   token held in [`Cx`](crate::cx::Cx). Without it, remote spawning is impossible.
+//!   token held in [`Cx`]. Without it, remote spawning is impossible.
 //! - **Region ownership**: Remote handles are owned by the local region and participate
 //!   in region close/quiescence. Cancellation propagates to remote nodes.
 //! - **Lease-based liveness**: Remote tasks maintain liveness via leases. If a lease

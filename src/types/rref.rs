@@ -66,7 +66,7 @@ pub struct RRef<T> {
     index: HeapIndex,
     /// Marker for the referenced type.
     ///
-    /// Using `PhantomData<T>` ensures RRef<T> is:
+    /// Using `PhantomData<T>` ensures `RRef<T>` is:
     /// - Send when T: Send
     /// - Sync when T: Sync
     ///

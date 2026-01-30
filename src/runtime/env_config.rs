@@ -1,4 +1,4 @@
-//! Environment variable and config file support for [`RuntimeBuilder`].
+//! Environment variable and config file support for [`RuntimeBuilder`](super::builder::RuntimeBuilder).
 //!
 //! # Configuration Precedence
 //!

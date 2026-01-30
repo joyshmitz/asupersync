@@ -72,7 +72,7 @@ pub enum SupervisionStrategy {
     /// Escalate the failure to the parent region.
     ///
     /// The parent region's supervision policy handles the failure.
-    /// If there is no parent (root region), this behaves like [`Stop`].
+    /// If there is no parent (root region), this behaves like [`SupervisionStrategy::Stop`].
     Escalate,
 }
 

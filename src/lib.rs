@@ -20,13 +20,13 @@
 //!
 //! - [`types`]: Core types (identifiers, outcomes, budgets, policies)
 //! - [`record`]: Internal records for tasks, regions, obligations
-//! - [`trace`]: Tracing infrastructure for deterministic replay
+//! - [`trace`](mod@trace): Tracing infrastructure for deterministic replay
 //! - [`runtime`]: Scheduler and runtime state
 //! - [`cx`]: Capability context and scope API
 //! - [`combinator`]: Join, race, timeout combinators
 //! - [`lab`]: Deterministic lab runtime for testing
 //! - [`util`]: Internal utilities (deterministic RNG, arenas)
-//! - [`error`]: Error types
+//! - [`error`](mod@error): Error types
 //! - [`channel`]: Two-phase channel primitives (MPSC, etc.)
 //! - [`encoding`]: RaptorQ encoding pipeline
 //! - [`observability`]: Structured logging, metrics, and diagnostic context
@@ -37,6 +37,13 @@
 //! - [`bytes`]: Zero-copy buffer types (Bytes, BytesMut, Buf, BufMut)
 //! - [`tracing_compat`]: Optional tracing integration (requires `tracing-integration` feature)
 //! - [`plan`]: Plan DAG IR for join/race/timeout rewrites
+//!
+//! # API Stability
+//!
+//! Asupersync is currently in the 0.x series. Unless explicitly noted in
+//! [`docs/api_audit.md`], public items should be treated as **unstable** and
+//! subject to change. Core types like [`Cx`], [`Outcome`], and [`Budget`] are
+//! intended to stabilize first.
 
 // Default to deny for unsafe code - specific modules (like epoll reactor) can use #[allow(unsafe_code)]
 // when they need to interface with FFI or low-level system APIs

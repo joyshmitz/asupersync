@@ -93,7 +93,7 @@ impl ColorChoice {
     /// Detect appropriate color setting based on environment.
     ///
     /// Respects:
-    /// - `NO_COLOR` environment variable (https://no-color.org/)
+    /// - `NO_COLOR` environment variable (<https://no-color.org/>)
     /// - `CLICOLOR_FORCE` environment variable
     /// - Terminal detection
     #[must_use]

@@ -7,7 +7,7 @@
 //!
 //! - [`UnixListener`]: Accepts incoming Unix socket connections
 //! - [`UnixStream`]: Bidirectional byte stream for client connections
-//! - [`UnixDatagram`]: Connectionless datagram socket for local IPC
+//! - `UnixDatagram`: Connectionless datagram socket for local IPC
 //!
 //! # Example
 //!

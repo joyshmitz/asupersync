@@ -12,15 +12,15 @@
 //! - [`replay`]: Compact replay events for deterministic record/replay
 //! - [`recorder`]: Trace recorder for Lab runtime instrumentation
 //! - [`replayer`]: Trace replayer for deterministic replay with stepping support
-//! - [`file`]: Binary file format for trace persistence
+//! - [`file`](mod@file): Binary file format for trace persistence
 //! - [`buffer`]: Ring buffer for recent events
-//! - [`format`]: Output formatting utilities
+//! - [`format`](mod@format): Output formatting utilities
 //! - [`streaming`]: Streaming replay for large traces with O(1) memory
 //! - [`integrity`]: Trace file integrity verification
 //! - [`filter`]: Trace event filtering during recording
 //! - [`compat`]: Forward/backward compatibility and migration support
 //! - [`independence`]: Independence relation over trace events for DPOR
-//! - [`canonicalize`]: Foata normal form for trace equivalence classes
+//! - [`canonicalize`](mod@canonicalize): Foata normal form for trace equivalence classes
 //! - [`dpor`]: DPOR race detection and backtracking
 //! - [`tla_export`]: TLA+ export for model checking
 

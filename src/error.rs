@@ -250,7 +250,7 @@ impl ErrorKind {
 
     /// Returns the recommended recovery action for this error kind.
     ///
-    /// This provides more specific guidance than [`recoverability()`]
+    /// This provides more specific guidance than [`recoverability()`](Self::recoverability)
     /// about how to handle the error.
     #[must_use]
     pub const fn recovery_action(&self) -> RecoveryAction {

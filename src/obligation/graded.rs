@@ -95,7 +95,7 @@ impl fmt::Display for Resolution {
 ///
 /// Each `GradedObligation` represents exactly 1 unit of resource.
 /// Resolving it (via `resolve()`) consumes the resource and returns
-/// a [`Resolved<K>`] proof token. Dropping without resolving panics.
+/// a `Resolved<K>` proof token. Dropping without resolving panics.
 ///
 /// # Type-Level Encoding
 ///

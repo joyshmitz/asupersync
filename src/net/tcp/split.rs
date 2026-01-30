@@ -20,7 +20,7 @@ use std::task::{Context, Poll};
 ///
 /// This half does not participate in reactor registration - it uses
 /// busy-loop polling on WouldBlock. For proper async I/O with reactor
-/// integration, use the owned split via [`TcpStream::into_split()`].
+/// integration, use the owned split via [`TcpStream::into_split()`](super::stream::TcpStream::into_split).
 #[derive(Debug)]
 pub struct ReadHalf<'a> {
     inner: &'a net::TcpStream,
@@ -59,7 +59,7 @@ impl AsyncRead for ReadHalf<'_> {
 ///
 /// This half does not participate in reactor registration - it uses
 /// busy-loop polling on WouldBlock. For proper async I/O with reactor
-/// integration, use the owned split via [`TcpStream::into_split()`].
+/// integration, use the owned split via [`TcpStream::into_split()`](super::stream::TcpStream::into_split).
 #[derive(Debug)]
 pub struct WriteHalf<'a> {
     inner: &'a net::TcpStream,

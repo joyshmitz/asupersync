@@ -75,7 +75,7 @@ impl<'a> RequestRegion<'a> {
     ///
     /// # Returns
     ///
-    /// An [`Outcome`] that is:
+    /// An [`Outcome`](crate::types::Outcome) that is:
     /// - `Ok(Response)` on success
     /// - `Err(Error)` on application-level error
     /// - `Cancelled(reason)` if the request was cancelled
@@ -217,7 +217,7 @@ impl RequestContext<'_> {
 
 /// The outcome of executing a handler within a [`RequestRegion`].
 ///
-/// Maps the four-valued [`Outcome`] lattice to HTTP semantics:
+/// Maps the four-valued [`Outcome`](crate::types::Outcome) lattice to HTTP semantics:
 ///
 /// | Variant | HTTP Status | Meaning |
 /// |---------|-------------|---------|

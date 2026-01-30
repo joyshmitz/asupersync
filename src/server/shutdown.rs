@@ -2,7 +2,7 @@
 //!
 //! This module provides [`ShutdownSignal`] for coordinating graceful server shutdown
 //! with drain timeouts and phase tracking. It builds on the lower-level
-//! [`ShutdownController`](crate::signal::ShutdownController) by adding drain-phase
+//! [`ShutdownController`] by adding drain-phase
 //! awareness and timeout semantics.
 
 use crate::signal::{ShutdownController, ShutdownReceiver};

@@ -10,8 +10,8 @@
 //! # Memory Guarantees
 //!
 //! - [`StreamingReplayer`]: O(1) memory - only buffers current event
-//! - Reading: Uses [`TraceReader`][super::file::TraceReader] with streaming reads
-//! - Writing: Uses [`TraceWriter`][super::file::TraceWriter] with streaming writes
+//! - Reading: Uses [`TraceReader`] with streaming reads
+//! - Writing: Uses `TraceWriter` with streaming writes
 //!
 //! # Example
 //!

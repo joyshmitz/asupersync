@@ -99,12 +99,12 @@ impl CancelAttributionConfig {
     /// This is approximately:
     /// - 8 bytes: kind (enum)
     /// - 8 bytes: origin_region (RegionId)
-    /// - 16 bytes: origin_task (Option<TaskId>)
+    /// - 16 bytes: origin_task (`Option<TaskId>`)
     /// - 8 bytes: timestamp (Time)
-    /// - 16 bytes: message (Option<&'static str>)
-    /// - 8 bytes: cause (Option<Box<...>> pointer, not content)
+    /// - 16 bytes: message (`Option<&'static str>`)
+    /// - 8 bytes: cause (`Option<Box<...>>` pointer, not content)
     /// - 1 byte: truncated flag
-    /// - 8 bytes: truncated_at_depth (Option<usize>)
+    /// - 8 bytes: truncated_at_depth (`Option<usize>`)
     /// - Total: ~80 bytes (rounded up for alignment)
     #[must_use]
     pub const fn single_reason_cost() -> usize {

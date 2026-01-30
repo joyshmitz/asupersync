@@ -31,7 +31,7 @@
 //! - [`Query<T>`]: Query string parameters
 //! - [`Json<T>`]: JSON request body
 //! - [`State<T>`]: Shared application state
-//! - [`HeaderMap`]: All request headers
+//! - `HeaderMap`: All request headers
 //!
 //! # Responses
 //!
