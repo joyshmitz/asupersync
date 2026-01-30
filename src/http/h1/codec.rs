@@ -452,6 +452,12 @@ impl Encoder<Response> for Http1Codec {
             &resp.reason
         };
 
+        let chunked = header_value(&resp.headers, "Transfer-Encoding").is_some_and(|value| {
+            value
+                .split(',')
+                .any(|token| token.trim().eq_ignore_ascii_case("chunked"))
+        });
+
         // Status line
         let mut head = String::with_capacity(256);
         let _ = write!(head, "{} {} {}\r\n", resp.version, resp.status, reason);
@@ -461,8 +467,27 @@ impl Encoder<Response> for Http1Codec {
         for (name, value) in &resp.headers {
             if name.eq_ignore_ascii_case("content-length") {
                 has_content_length = true;
+                if chunked {
+                    continue;
+                }
             }
             let _ = write!(head, "{name}: {value}\r\n");
+        }
+
+        if chunked {
+            head.push_str("\r\n");
+            dst.extend_from_slice(head.as_bytes());
+
+            if resp.body.is_empty() {
+                dst.extend_from_slice(b"0\r\n\r\n");
+            } else {
+                let mut chunk_line = String::with_capacity(16);
+                let _ = write!(chunk_line, "{:X}\r\n", resp.body.len());
+                dst.extend_from_slice(chunk_line.as_bytes());
+                dst.extend_from_slice(&resp.body);
+                dst.extend_from_slice(b"\r\n0\r\n\r\n");
+            }
+            return Ok(());
         }
 
         // Auto-add Content-Length if not present
@@ -644,6 +669,18 @@ mod tests {
         let bytes = encode_one(&mut codec, resp);
         let s = String::from_utf8(bytes).unwrap();
         assert!(s.starts_with("HTTP/1.1 404 Not Found\r\n"));
+    }
+
+    #[test]
+    fn encode_chunked_response() {
+        let mut codec = Http1Codec::new();
+        let resp =
+            Response::new(200, "OK", b"hello".to_vec()).with_header("Transfer-Encoding", "chunked");
+        let bytes = encode_one(&mut codec, resp);
+        let s = String::from_utf8(bytes).unwrap();
+        assert!(s.contains("Transfer-Encoding: chunked\r\n"));
+        assert!(!s.contains("Content-Length"));
+        assert!(s.ends_with("5\r\nhello\r\n0\r\n\r\n"));
     }
 
     #[test]

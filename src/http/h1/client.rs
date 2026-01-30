@@ -11,13 +11,30 @@ use crate::stream::Stream;
 use std::fmt::Write;
 use std::pin::Pin;
 
+/// Maximum allowed header block size (64 KiB).
+const DEFAULT_MAX_HEADERS_SIZE: usize = 64 * 1024;
+
+/// Maximum allowed body size (16 MiB).
+const DEFAULT_MAX_BODY_SIZE: usize = 16 * 1024 * 1024;
+
+/// Maximum number of headers.
+const MAX_HEADERS: usize = 128;
+
 /// HTTP/1.1 client codec that encodes *requests* and decodes *responses*.
 ///
 /// This is the mirror of [`Http1Codec`](super::Http1Codec) which decodes
 /// requests and encodes responses. The client codec is used with
 /// [`Framed`] for client-side connections.
+///
+/// # Limits
+///
+/// - Maximum header block size: 64 KiB (configurable via [`max_headers_size`](Self::max_headers_size))
+/// - Maximum body size: 16 MiB (configurable via [`max_body_size`](Self::max_body_size))
+/// - Maximum number of headers: 128
 pub struct Http1ClientCodec {
     state: ClientDecodeState,
+    max_headers_size: usize,
+    max_body_size: usize,
 }
 
 enum ClientDecodeState {
@@ -38,12 +55,28 @@ enum ClientDecodeState {
 }
 
 impl Http1ClientCodec {
-    /// Create a new client codec.
+    /// Create a new client codec with default limits.
     #[must_use]
     pub fn new() -> Self {
         Self {
             state: ClientDecodeState::Head,
+            max_headers_size: DEFAULT_MAX_HEADERS_SIZE,
+            max_body_size: DEFAULT_MAX_BODY_SIZE,
         }
+    }
+
+    /// Set the maximum header block size.
+    #[must_use]
+    pub fn max_headers_size(mut self, size: usize) -> Self {
+        self.max_headers_size = size;
+        self
+    }
+
+    /// Set the maximum body size.
+    #[must_use]
+    pub fn max_body_size(mut self, size: usize) -> Self {
+        self.max_body_size = size;
+        self
     }
 }
 
@@ -98,7 +131,10 @@ fn is_chunked(headers: &[(String, String)]) -> bool {
 
 /// Decode a chunked body from `buf`. Returns `Some((body, consumed))` when
 /// complete, or `None` if more data is needed.
-fn decode_chunked(buf: &[u8]) -> Result<Option<(Vec<u8>, usize)>, HttpError> {
+///
+/// Returns `Err(HttpError::BodyTooLarge)` if the accumulated body exceeds
+/// `max_body_size`.
+fn decode_chunked(buf: &[u8], max_body_size: usize) -> Result<Option<(Vec<u8>, usize)>, HttpError> {
     let mut body = Vec::new();
     let mut pos = 0;
 
@@ -119,14 +155,27 @@ fn decode_chunked(buf: &[u8]) -> Result<Option<(Vec<u8>, usize)>, HttpError> {
             if buf.len() < pos + 2 {
                 return Ok(None);
             }
+            // Validate trailing CRLF after terminal chunk
+            if buf[pos] != b'\r' || buf[pos + 1] != b'\n' {
+                return Err(HttpError::BadChunkedEncoding);
+            }
             pos += 2;
             return Ok(Some((body, pos)));
+        }
+
+        // Check body size limit before accumulating
+        if body.len().saturating_add(chunk_size) > max_body_size {
+            return Err(HttpError::BodyTooLarge);
         }
 
         if buf.len() < pos + chunk_size + 2 {
             return Ok(None);
         }
         body.extend_from_slice(&buf[pos..pos + chunk_size]);
+        // Validate trailing CRLF after chunk data
+        if buf[pos + chunk_size] != b'\r' || buf[pos + chunk_size + 1] != b'\n' {
+            return Err(HttpError::BadChunkedEncoding);
+        }
         pos += chunk_size + 2;
     }
 }
@@ -141,8 +190,16 @@ impl crate::codec::Decoder for Http1ClientCodec {
             match &self.state {
                 ClientDecodeState::Head => {
                     let Some(end) = find_headers_end(src.as_ref()) else {
+                        // Check for header overflow while waiting for more data
+                        if src.len() > self.max_headers_size {
+                            return Err(HttpError::HeadersTooLarge);
+                        }
                         return Ok(None);
                     };
+
+                    if end > self.max_headers_size {
+                        return Err(HttpError::HeadersTooLarge);
+                    }
 
                     let head_bytes = src.split_to(end);
                     let head_str = std::str::from_utf8(head_bytes.as_ref())
@@ -158,6 +215,17 @@ impl crate::codec::Decoder for Http1ClientCodec {
                             break;
                         }
                         headers.push(parse_header_line(line)?);
+                        if headers.len() > MAX_HEADERS {
+                            return Err(HttpError::TooManyHeaders);
+                        }
+                    }
+
+                    // RFC 7230 3.3.3: Reject responses with both Transfer-Encoding
+                    // and Content-Length to prevent response smuggling.
+                    let has_te = header_value(&headers, "Transfer-Encoding").is_some();
+                    let has_cl = header_value(&headers, "Content-Length").is_some();
+                    if has_te && has_cl {
+                        return Err(HttpError::AmbiguousBodyLength);
                     }
 
                     if is_chunked(&headers) {
@@ -185,6 +253,11 @@ impl crate::codec::Decoder for Http1ClientCodec {
                             headers,
                             body: Vec::new(),
                         }));
+                    }
+
+                    // Check body size limit upfront for Content-Length
+                    if content_length > self.max_body_size {
+                        return Err(HttpError::BodyTooLarge);
                     }
 
                     self.state = ClientDecodeState::Body {
@@ -225,7 +298,7 @@ impl crate::codec::Decoder for Http1ClientCodec {
                 }
 
                 ClientDecodeState::Chunked { .. } => {
-                    let Some((body, consumed)) = decode_chunked(src.as_ref())? else {
+                    let Some((body, consumed)) = decode_chunked(src.as_ref(), self.max_body_size)? else {
                         return Ok(None);
                     };
                     let _ = src.split_to(consumed);
