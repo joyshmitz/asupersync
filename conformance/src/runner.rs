@@ -679,8 +679,8 @@ mod tests {
     use super::*;
     use crate::logging::TestEventKind;
     use crate::{
-        BroadcastRecvError, BroadcastReceiver, BroadcastSender, MpscReceiver, MpscSender,
-        OneshotRecvError, OneshotSender, WatchRecvError, WatchReceiver, WatchSender,
+        BroadcastReceiver, BroadcastRecvError, BroadcastSender, MpscReceiver, MpscSender,
+        OneshotRecvError, OneshotSender, WatchReceiver, WatchRecvError, WatchSender,
     };
     use std::future::Future;
     use std::marker::PhantomData;
@@ -865,7 +865,9 @@ mod tests {
             expected: "both runtimes pass".to_string(),
         };
 
-        let tests_a = vec![ConformanceTest::new(meta.clone(), |_rt| TestResult::passed())];
+        let tests_a = vec![ConformanceTest::new(meta.clone(), |_rt| {
+            TestResult::passed()
+        })];
         let tests_b = vec![ConformanceTest::new(meta, |_rt| TestResult::passed())];
 
         let summary = run_comparison(
@@ -1016,11 +1018,8 @@ mod tests {
 
         fn accept(
             &self,
-        ) -> Pin<
-            Box<
-                dyn Future<Output = std::io::Result<(Self::Stream, SocketAddr)>> + Send + '_,
-            >,
-        > {
+        ) -> Pin<Box<dyn Future<Output = std::io::Result<(Self::Stream, SocketAddr)>> + Send + '_>>
+        {
             Box::pin(async { panic!("dummy tcp accept") })
         }
     }
@@ -1065,7 +1064,8 @@ mod tests {
         fn recv_from<'a>(
             &'a self,
             _buf: &'a mut [u8],
-        ) -> Pin<Box<dyn Future<Output = std::io::Result<(usize, SocketAddr)>> + Send + 'a>> {
+        ) -> Pin<Box<dyn Future<Output = std::io::Result<(usize, SocketAddr)>> + Send + 'a>>
+        {
             Box::pin(async { panic!("dummy udp recv_from") })
         }
     }
@@ -1142,7 +1142,10 @@ mod tests {
             &self,
             _initial: T,
         ) -> (Self::WatchSender<T>, Self::WatchReceiver<T>) {
-            (DummyWatchSender(PhantomData), DummyWatchReceiver(PhantomData))
+            (
+                DummyWatchSender(PhantomData),
+                DummyWatchReceiver(PhantomData),
+            )
         }
 
         fn file_create<'a>(

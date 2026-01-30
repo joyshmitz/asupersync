@@ -740,17 +740,15 @@ fn parse_conformance_args(input: &str) -> Result<ConformanceArgs, String> {
         match key {
             "spec" => spec = Some(value),
             "requirement" => requirement = Some(value),
-            other => {
-                return Err(format!(
-                    "conformance attribute has unknown key '{other}', expected 'spec' or 'requirement'"
-                ))
-            }
+            other => return Err(format!(
+                "conformance attribute has unknown key '{other}', expected 'spec' or 'requirement'"
+            )),
         }
     }
 
     let spec = spec.ok_or_else(|| "conformance attribute missing 'spec'".to_string())?;
-    let requirement = requirement
-        .ok_or_else(|| "conformance attribute missing 'requirement'".to_string())?;
+    let requirement =
+        requirement.ok_or_else(|| "conformance attribute missing 'requirement'".to_string())?;
 
     Ok(ConformanceArgs { spec, requirement })
 }
@@ -1074,7 +1072,13 @@ mod tests {
         let scan = scan_conformance_attributes(&[file.clone()]).unwrap();
         assert!(scan.warnings.is_empty());
         assert_eq!(scan.entries.len(), 2);
-        assert!(scan.entries.iter().any(|entry| entry.spec_section == "3.2.1"));
-        assert!(scan.entries.iter().any(|entry| entry.spec_section == "3.2.2"));
+        assert!(scan
+            .entries
+            .iter()
+            .any(|entry| entry.spec_section == "3.2.1"));
+        assert!(scan
+            .entries
+            .iter()
+            .any(|entry| entry.spec_section == "3.2.2"));
     }
 }

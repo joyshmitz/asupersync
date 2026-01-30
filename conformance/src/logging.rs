@@ -292,11 +292,7 @@ impl ConformanceTestLogger {
             "location": location,
         });
         self.record(TestEventKind::Assertion, description, details);
-        assert!(
-            condition,
-            "Conformance assertion failed: {}",
-            description
-        );
+        assert!(condition, "Conformance assertion failed: {}", description);
     }
 
     /// Record a runtime event with structured details.
@@ -342,10 +338,7 @@ impl ConformanceTestLogger {
     }
 
     fn record(&self, kind: TestEventKind, name: &str, details: serde_json::Value) {
-        let mut guard = self
-            .inner
-            .lock()
-            .expect("conformance log lock poisoned");
+        let mut guard = self.inner.lock().expect("conformance log lock poisoned");
         let timestamp_ms = guard.start_time.elapsed().as_millis() as u64;
         guard
             .events

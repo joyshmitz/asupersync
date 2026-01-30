@@ -49,19 +49,18 @@ pub use bench::{
     ComparisonConfidence, RegressionCheck, RegressionConfig, RegressionMetric, Stats, StatsError,
 };
 pub use logging::{
-    ConformanceTestLogger, LogCollector, LogConfig, LogEntry, LogLevel, TestEvent,
-    TestEventKind,
+    ConformanceTestLogger, LogCollector, LogConfig, LogEntry, LogLevel, TestEvent, TestEventKind,
 };
 pub use report::{render_console_summary, write_json_report};
 pub use runner::{
-    compare_results, run_comparison, ComparisonResult, ComparisonStatus, ComparisonSummary,
-    RunConfig, RunSummary, SingleRunResult, SuiteResult, SuiteTestResult, TestRunner,
-    run_conformance_suite,
+    compare_results, run_comparison, run_conformance_suite, ComparisonResult, ComparisonStatus,
+    ComparisonSummary, RunConfig, RunSummary, SingleRunResult, SuiteResult, SuiteTestResult,
+    TestRunner,
 };
 pub use traceability::{
-    scan_conformance_attributes, requirements_from_entries, CiReport, CoverageStats,
-    ScanWarning, SpecRequirement, TraceabilityEntry, TraceabilityMatrix,
-    TraceabilityMatrixBuilder, TraceabilityScan, TraceabilityScanError,
+    requirements_from_entries, scan_conformance_attributes, CiReport, CoverageStats, ScanWarning,
+    SpecRequirement, TraceabilityEntry, TraceabilityMatrix, TraceabilityMatrixBuilder,
+    TraceabilityScan, TraceabilityScanError,
 };
 
 // ============================================================================

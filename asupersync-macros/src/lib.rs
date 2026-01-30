@@ -256,17 +256,15 @@ fn parse_conformance_args(attr: TokenStream) -> Result<ConformanceArgs, String> 
         match key {
             "spec" => spec = Some(value),
             "requirement" => requirement = Some(value),
-            other => {
-                return Err(format!(
-                    "conformance attribute has unknown key '{other}', expected 'spec' or 'requirement'"
-                ))
-            }
+            other => return Err(format!(
+                "conformance attribute has unknown key '{other}', expected 'spec' or 'requirement'"
+            )),
         }
     }
 
     let spec = spec.ok_or_else(|| "conformance attribute missing 'spec'".to_string())?;
-    let requirement = requirement
-        .ok_or_else(|| "conformance attribute missing 'requirement'".to_string())?;
+    let requirement =
+        requirement.ok_or_else(|| "conformance attribute missing 'requirement'".to_string())?;
 
     Ok(ConformanceArgs { spec, requirement })
 }
@@ -369,10 +367,9 @@ mod tests {
 
     #[test]
     fn parse_conformance_args_ok() {
-        let tokens = TokenStream2::from_str(
-            r#"spec = "3.2.1", requirement = "Region close waits""#,
-        )
-        .unwrap();
+        let tokens =
+            TokenStream2::from_str(r#"spec = "3.2.1", requirement = "Region close waits""#)
+                .unwrap();
         let args = parse_conformance_args(tokens.into()).unwrap();
         assert_eq!(args.spec, "3.2.1");
         assert_eq!(args.requirement, "Region close waits");
@@ -380,8 +377,7 @@ mod tests {
 
     #[test]
     fn parse_conformance_args_missing_spec() {
-        let tokens =
-            TokenStream2::from_str(r#"requirement = "Region close waits""#).unwrap();
+        let tokens = TokenStream2::from_str(r#"requirement = "Region close waits""#).unwrap();
         let err = parse_conformance_args(tokens.into()).unwrap_err();
         assert!(err.contains("missing 'spec'"));
     }
