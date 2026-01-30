@@ -94,7 +94,13 @@ struct MutexState {
     /// Whether the mutex is currently locked.
     locked: bool,
     /// Queue of waiters.
-    waiters: VecDeque<Waker>,
+    waiters: VecDeque<Waiter>,
+}
+
+#[derive(Debug)]
+struct Waiter {
+    waker: Waker,
+    queued: Arc<AtomicBool>,
 }
 
 impl<T> Mutex<T> {
@@ -138,7 +144,7 @@ impl<T> Mutex<T> {
         LockFuture {
             mutex: self,
             cx,
-            registered: false,
+            waiter: None,
         }
     }
 
@@ -178,8 +184,11 @@ impl<T> Mutex<T> {
     fn unlock(&self) {
         let mut state = self.state.lock().expect("mutex state lock poisoned");
         state.locked = false;
-        if let Some(waker) = state.waiters.pop_front() {
-            waker.wake();
+        while let Some(waiter) = state.waiters.pop_front() {
+            if waiter.queued.swap(false, Ordering::AcqRel) {
+                waiter.waker.wake();
+                break;
+            }
         }
     }
 }
@@ -194,7 +203,7 @@ impl<T: Default> Default for Mutex<T> {
 pub struct LockFuture<'a, 'b, T> {
     mutex: &'a Mutex<T>,
     cx: &'b Cx,
-    registered: bool,
+    waiter: Option<Arc<AtomicBool>>,
 }
 
 impl<'a, T> Future for LockFuture<'a, '_, T> {
@@ -215,6 +224,9 @@ impl<'a, T> Future for LockFuture<'a, '_, T> {
         if !state.locked {
             // Acquire lock
             state.locked = true;
+            if let Some(waiter) = self.waiter.as_ref() {
+                waiter.store(false, Ordering::Release);
+            }
             return Poll::Ready(Ok(MutexGuard { mutex: self.mutex }));
         }
 
@@ -223,11 +235,29 @@ impl<'a, T> Future for LockFuture<'a, '_, T> {
         // another waiter will be woken instead, which is harmless.
         // A more sophisticated implementation would use intrusive linked lists
         // with proper deregistration on drop.
-        if !self.registered {
-            state.waiters.push_back(context.waker().clone());
-            self.registered = true;
+        let mut new_waiter = None;
+        match self.waiter.as_ref() {
+            Some(waiter) if !waiter.load(Ordering::Acquire) => {
+                waiter.store(true, Ordering::Release);
+                state.waiters.push_back(Waiter {
+                    waker: context.waker().clone(),
+                    queued: Arc::clone(waiter),
+                });
+            }
+            Some(_) => {}
+            None => {
+                let waiter = Arc::new(AtomicBool::new(true));
+                state.waiters.push_back(Waiter {
+                    waker: context.waker().clone(),
+                    queued: Arc::clone(&waiter),
+                });
+                new_waiter = Some(waiter);
+            }
         }
         drop(state);
+        if let Some(waiter) = new_waiter {
+            self.waiter = Some(waiter);
+        }
 
         Poll::Pending
     }
@@ -291,7 +321,7 @@ impl<T> OwnedMutexGuard<T> {
         struct OwnedLockFuture<T> {
             mutex: Arc<Mutex<T>>,
             cx: Cx, // clone of cx
-            registered: bool,
+            waiter: Option<Arc<AtomicBool>>,
         }
 
         impl<T> Future for OwnedLockFuture<T> {
@@ -306,18 +336,35 @@ impl<T> OwnedMutexGuard<T> {
                 let mut state = self.mutex.state.lock().expect("mutex state poisoned");
                 if !state.locked {
                     state.locked = true;
+                    if let Some(waiter) = self.waiter.as_ref() {
+                        waiter.store(false, Ordering::Release);
+                    }
                     return Poll::Ready(Ok(OwnedMutexGuard {
                         mutex: self.mutex.clone(),
                     }));
                 }
-                // Only register once to prevent unbounded queue growth
-                let should_register = !self.registered;
-                if should_register {
-                    state.waiters.push_back(context.waker().clone());
+                let mut new_waiter = None;
+                match self.waiter.as_ref() {
+                    Some(waiter) if !waiter.load(Ordering::Acquire) => {
+                        waiter.store(true, Ordering::Release);
+                        state.waiters.push_back(Waiter {
+                            waker: context.waker().clone(),
+                            queued: Arc::clone(waiter),
+                        });
+                    }
+                    Some(_) => {}
+                    None => {
+                        let waiter = Arc::new(AtomicBool::new(true));
+                        state.waiters.push_back(Waiter {
+                            waker: context.waker().clone(),
+                            queued: Arc::clone(&waiter),
+                        });
+                        new_waiter = Some(waiter);
+                    }
                 }
                 drop(state);
-                if should_register {
-                    self.registered = true;
+                if let Some(waiter) = new_waiter {
+                    self.waiter = Some(waiter);
                 }
                 Poll::Pending
             }
@@ -326,7 +373,7 @@ impl<T> OwnedMutexGuard<T> {
         OwnedLockFuture {
             mutex,
             cx: cx.clone(),
-            registered: false,
+            waiter: None,
         }
         .await
     }
