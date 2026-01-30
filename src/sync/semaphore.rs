@@ -181,9 +181,11 @@ impl Semaphore {
     }
 
     /// Adds permits back to the semaphore.
+    ///
+    /// Saturates at `usize::MAX` if adding would overflow.
     pub fn add_permits(&self, count: usize) {
         let mut state = self.state.lock().expect("semaphore lock poisoned");
-        state.permits += count;
+        state.permits = state.permits.saturating_add(count);
         for waiter in &state.waiters {
             waiter.waker.wake_by_ref();
         }

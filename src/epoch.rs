@@ -507,9 +507,11 @@ impl SymbolValidityWindow {
     }
 
     /// Returns the span of this window in epochs.
+    ///
+    /// Returns `u64::MAX` if the span would overflow (e.g., for infinite windows).
     #[must_use]
     pub fn span(&self) -> u64 {
-        self.end.0 - self.start.0 + 1
+        (self.end.0 - self.start.0).saturating_add(1)
     }
 
     /// Extends the window to include the given epoch.
