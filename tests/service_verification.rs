@@ -1208,4 +1208,109 @@ mod tower_adapter_tests {
         assert!(matches!(result, Poll::Ready(Ok(22))));
         test_complete!("tower_adapter_e2e_middleware_stack");
     }
+
+    /// Tower → Asupersync: BestEffort cancellation mode completes normally
+    /// even when cancel is requested mid-flight (the service ignores it).
+    #[test]
+    fn tower_adapter_best_effort_completes_despite_cancel() {
+        init_test("tower_adapter_best_effort_completes_despite_cancel");
+
+        run_test_with_cx(|cx| async move {
+            let hits = Arc::new(AtomicUsize::new(0));
+            let service = CancelDuringCall {
+                cx: cx.clone(),
+                hits: Arc::clone(&hits),
+            };
+            // Default config uses BestEffort mode
+            let adapter = AsupersyncAdapter::new(service);
+
+            // BestEffort should return Ok even though cancel was requested mid-call
+            let result = adapter.call(&cx, ()).await;
+            assert!(result.is_ok(), "BestEffort should succeed: {result:?}");
+            assert_eq!(hits.load(Ordering::SeqCst), 1);
+        });
+
+        test_complete!("tower_adapter_best_effort_completes_despite_cancel");
+    }
+
+    /// Tower → Asupersync: inner service error propagates as TowerAdapterError::Service
+    #[test]
+    fn tower_adapter_inner_service_error_propagation() {
+        init_test("tower_adapter_inner_service_error_propagation");
+
+        #[derive(Clone)]
+        struct FailingTowerService;
+
+        impl Service<i32> for FailingTowerService {
+            type Response = i32;
+            type Error = &'static str;
+            type Future = future::Ready<Result<i32, &'static str>>;
+
+            fn poll_ready(&mut self, _cx: &mut Context<'_>) -> Poll<Result<(), Self::Error>> {
+                Poll::Ready(Ok(()))
+            }
+
+            fn call(&mut self, _req: i32) -> Self::Future {
+                future::ready(Err("inner failure"))
+            }
+        }
+
+        run_test_with_cx(|cx| async move {
+            let adapter = AsupersyncAdapter::new(FailingTowerService);
+            let err = adapter.call(&cx, 42).await.expect_err("expected error");
+            assert!(
+                matches!(err, TowerAdapterError::Service("inner failure")),
+                "expected Service error variant, got: {err:?}"
+            );
+        });
+
+        test_complete!("tower_adapter_inner_service_error_propagation");
+    }
+
+    /// Asupersync → Tower: FixedCxProvider full roundtrip through TowerAdapterWithProvider
+    #[test]
+    fn tower_adapter_fixed_provider_roundtrip() {
+        init_test("tower_adapter_fixed_provider_roundtrip");
+
+        use asupersync::service::{FixedCxProvider, TowerAdapterWithProvider};
+
+        let provider = FixedCxProvider::for_testing();
+        let mut adapter: TowerAdapterWithProvider<AddOneService, FixedCxProvider> =
+            TowerAdapterWithProvider::with_provider(AddOneService, provider);
+
+        let waker = noop_waker();
+        let mut cx = Context::from_waker(&waker);
+
+        // poll_ready should be Ready
+        let ready = <_ as Service<i32>>::poll_ready(&mut adapter, &mut cx);
+        assert!(matches!(ready, Poll::Ready(Ok(()))));
+
+        // call through FixedCxProvider should succeed without runtime
+        let future = <_ as Service<i32>>::call(&mut adapter, 99);
+        let mut pinned = Box::pin(future);
+        let result = Pin::new(&mut pinned).poll(&mut cx);
+        assert!(
+            matches!(result, Poll::Ready(Ok(100))),
+            "expected Ok(100), got: {result:?}"
+        );
+
+        test_complete!("tower_adapter_fixed_provider_roundtrip");
+    }
+
+    /// Tower → Asupersync: custom AdapterConfig with min_budget_for_wait
+    #[test]
+    fn tower_adapter_custom_config_min_budget() {
+        init_test("tower_adapter_custom_config_min_budget");
+
+        run_test_with_cx(|cx| async move {
+            let config = AdapterConfig::new().min_budget_for_wait(0);
+            let adapter = AsupersyncAdapter::with_config(TowerAddOne, config);
+            // With min_budget_for_wait=0, even zero-budget Cx should pass the check
+            // (cancellation check still applies, but budget floor is lowered)
+            let result = adapter.call(&cx, 41).await;
+            assert!(matches!(result, Ok(42)), "expected Ok(42), got: {result:?}");
+        });
+
+        test_complete!("tower_adapter_custom_config_min_budget");
+    }
 }

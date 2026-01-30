@@ -34,7 +34,7 @@ pub use service::{
     AdapterConfig, CancellationMode, DefaultErrorAdapter, ErrorAdapter, TowerAdapterError,
 };
 #[cfg(feature = "tower")]
-pub use service::{AsupersyncAdapter, TowerAdapter};
+pub use service::{AsupersyncAdapter, FixedCxProvider, TowerAdapter, TowerAdapterWithProvider};
 pub use service::{
     AsupersyncService, AsupersyncServiceExt, MapErr, MapResponse, Oneshot, Ready, Service,
     ServiceExt,
