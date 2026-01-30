@@ -3,8 +3,9 @@
 use asupersync::{Budget, Cx, LabConfig, LabRuntime, Outcome, Time};
 
 fn main() {
-    let _budget = Budget::INFINITE;
-    let _deadline = Time::from_secs(1);
+    let budget = Budget::INFINITE;
+    let deadline = Time::from_secs(1);
+    let _ = (budget, deadline);
 
     let cx = Cx::for_testing();
     let _ = cx.is_cancel_requested();
