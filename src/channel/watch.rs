@@ -64,12 +64,15 @@ impl<T: std::fmt::Debug> std::error::Error for SendError<T> {}
 pub enum RecvError {
     /// The sender was dropped.
     Closed,
+    /// The receive operation was cancelled.
+    Cancelled,
 }
 
 impl std::fmt::Display for RecvError {
     fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
         match self {
             Self::Closed => write!(f, "watch channel sender was dropped"),
+            Self::Cancelled => write!(f, "watch receive operation cancelled"),
         }
     }
 }
@@ -328,6 +331,7 @@ impl<T> Receiver<T> {
     /// # Errors
     ///
     /// Returns `RecvError::Closed` if the sender was dropped.
+    /// Returns `RecvError::Cancelled` if the operation was cancelled.
     pub fn changed(&mut self, cx: &Cx) -> Result<(), RecvError> {
         cx.trace("watch::changed starting wait");
 
@@ -361,7 +365,7 @@ impl<T> Receiver<T> {
             // Check cancellation before waiting
             if cx.checkpoint().is_err() {
                 cx.trace("watch::changed cancelled while waiting");
-                return Err(RecvError::Closed);
+                return Err(RecvError::Cancelled);
             }
 
             // Wait for notification
@@ -813,12 +817,19 @@ mod tests {
     #[test]
     fn recv_error_display() {
         init_test("recv_error_display");
-        let text = RecvError::Closed.to_string();
+        let closed_text = RecvError::Closed.to_string();
         crate::assert_with_log!(
-            text == "watch channel sender was dropped",
+            closed_text == "watch channel sender was dropped",
             "display",
             "watch channel sender was dropped",
-            text
+            closed_text
+        );
+        let cancelled_text = RecvError::Cancelled.to_string();
+        crate::assert_with_log!(
+            cancelled_text == "watch receive operation cancelled",
+            "display",
+            "watch receive operation cancelled",
+            cancelled_text
         );
         crate::test_complete!("recv_error_display");
     }

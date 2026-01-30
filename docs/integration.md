@@ -321,4 +321,16 @@ A region is waiting on children that never reach a checkpoint.
 - Add `cx.checkpoint()` in loops.
 - Avoid holding obligations across blocking waits.
 
-### Non-deterministi
+### Non-deterministic failures
+Intermittent failures usually indicate schedule sensitivity.
+
+- Prefer `LabRuntime` with a fixed seed for reproducibility.
+- Capture traces and replay to isolate schedule-dependent bugs.
+- Use `lab::assert_deterministic` to validate stable outcomes.
+
+### Slow shutdown or hanging tests
+If shutdown never completes or tests hang:
+
+- Ensure request/connection loops call `cx.checkpoint()`.
+- Propagate budgets to child regions and timeouts to I/O.
+- Confirm finalizers release obligations and permits.

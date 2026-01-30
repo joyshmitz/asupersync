@@ -298,7 +298,8 @@ impl crate::codec::Decoder for Http1ClientCodec {
                 }
 
                 ClientDecodeState::Chunked { .. } => {
-                    let Some((body, consumed)) = decode_chunked(src.as_ref(), self.max_body_size)? else {
+                    let Some((body, consumed)) = decode_chunked(src.as_ref(), self.max_body_size)?
+                    else {
                         return Ok(None);
                     };
                     let _ = src.split_to(consumed);
@@ -462,5 +463,61 @@ mod tests {
         let resp = codec.decode(&mut buf).unwrap().unwrap();
         assert_eq!(resp.status, 200);
         assert_eq!(resp.body, b"hello world");
+    }
+
+    #[test]
+    fn decode_headers_too_large() {
+        let mut codec = Http1ClientCodec::new().max_headers_size(32);
+        let mut buf = BytesMut::from(&b"HTTP/1.1 200 OK\r\nX-Large: aaaaaaaaaaaaaaa\r\n\r\n"[..]);
+        let result = codec.decode(&mut buf);
+        assert!(matches!(result, Err(HttpError::HeadersTooLarge)));
+    }
+
+    #[test]
+    fn decode_body_too_large_content_length() {
+        let mut codec = Http1ClientCodec::new().max_body_size(10);
+        let mut buf = BytesMut::from(&b"HTTP/1.1 200 OK\r\nContent-Length: 100\r\n\r\n"[..]);
+        let result = codec.decode(&mut buf);
+        assert!(matches!(result, Err(HttpError::BodyTooLarge)));
+    }
+
+    #[test]
+    fn decode_body_too_large_chunked() {
+        let mut codec = Http1ClientCodec::new().max_body_size(10);
+        // Chunked body with 20 bytes total (exceeds 10 byte limit)
+        let raw = b"HTTP/1.1 200 OK\r\nTransfer-Encoding: chunked\r\n\r\n\
+                    14\r\n01234567890123456789\r\n0\r\n\r\n";
+        let mut buf = BytesMut::from(&raw[..]);
+        let result = codec.decode(&mut buf);
+        assert!(matches!(result, Err(HttpError::BodyTooLarge)));
+    }
+
+    #[test]
+    fn decode_body_at_limit_succeeds() {
+        let mut codec = Http1ClientCodec::new().max_body_size(5);
+        let mut buf = BytesMut::from(&b"HTTP/1.1 200 OK\r\nContent-Length: 5\r\n\r\nhello"[..]);
+        let resp = codec.decode(&mut buf).unwrap().unwrap();
+        assert_eq!(resp.body, b"hello");
+    }
+
+    #[test]
+    fn reject_both_content_length_and_transfer_encoding() {
+        let mut codec = Http1ClientCodec::new();
+        let mut buf = BytesMut::from(
+            &b"HTTP/1.1 200 OK\r\nContent-Length: 5\r\nTransfer-Encoding: chunked\r\n\r\n"[..],
+        );
+        let result = codec.decode(&mut buf);
+        assert!(matches!(result, Err(HttpError::AmbiguousBodyLength)));
+    }
+
+    #[test]
+    fn reject_invalid_crlf_after_chunk() {
+        let mut codec = Http1ClientCodec::new();
+        // Invalid: missing proper CRLF after chunk data
+        let raw = b"HTTP/1.1 200 OK\r\nTransfer-Encoding: chunked\r\n\r\n\
+                    5\r\nhelloXX0\r\n\r\n";
+        let mut buf = BytesMut::from(&raw[..]);
+        let result = codec.decode(&mut buf);
+        assert!(matches!(result, Err(HttpError::BadChunkedEncoding)));
     }
 }

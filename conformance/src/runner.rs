@@ -680,7 +680,7 @@ mod tests {
     use crate::logging::TestEventKind;
     use crate::{
         BroadcastReceiver, BroadcastRecvError, BroadcastSender, MpscReceiver, MpscSender,
-        OneshotRecvError, OneshotSender, WatchReceiver, WatchRecvError, WatchSender,
+        OneshotRecvError, OneshotSender, TestMeta, WatchReceiver, WatchRecvError, WatchSender,
     };
     use std::future::Future;
     use std::marker::PhantomData;
@@ -873,9 +873,9 @@ mod tests {
         let summary = run_comparison(
             &runtime_a,
             "A",
-            &tests_a,
             &runtime_b,
             "B",
+            &tests_a,
             &tests_b,
             RunConfig::default(),
         );
@@ -890,24 +890,47 @@ mod tests {
 
     struct DummyRuntime;
 
-    #[derive(Clone)]
-    struct DummyMpscSender<T>(PhantomData<T>);
+    // Use PhantomData<fn() -> T> to ensure types are always Send + Sync
+    // regardless of T's bounds (since fn() -> T is always Send + Sync).
+    // Manual Clone impls avoid requiring T: Clone.
+    struct DummyMpscSender<T>(PhantomData<fn() -> T>);
+    impl<T> Clone for DummyMpscSender<T> {
+        fn clone(&self) -> Self {
+            Self(PhantomData)
+        }
+    }
 
-    struct DummyMpscReceiver<T>(PhantomData<T>);
+    struct DummyMpscReceiver<T>(PhantomData<fn() -> T>);
 
-    #[derive(Clone)]
-    struct DummyOneshotSender<T>(PhantomData<T>);
+    struct DummyOneshotSender<T>(PhantomData<fn() -> T>);
+    impl<T> Clone for DummyOneshotSender<T> {
+        fn clone(&self) -> Self {
+            Self(PhantomData)
+        }
+    }
 
-    #[derive(Clone)]
-    struct DummyBroadcastSender<T>(PhantomData<T>);
+    struct DummyBroadcastSender<T>(PhantomData<fn() -> T>);
+    impl<T> Clone for DummyBroadcastSender<T> {
+        fn clone(&self) -> Self {
+            Self(PhantomData)
+        }
+    }
 
-    struct DummyBroadcastReceiver<T>(PhantomData<T>);
+    struct DummyBroadcastReceiver<T>(PhantomData<fn() -> T>);
 
-    #[derive(Clone)]
-    struct DummyWatchSender<T>(PhantomData<T>);
+    struct DummyWatchSender<T>(PhantomData<fn() -> T>);
+    impl<T> Clone for DummyWatchSender<T> {
+        fn clone(&self) -> Self {
+            Self(PhantomData)
+        }
+    }
 
-    #[derive(Clone)]
-    struct DummyWatchReceiver<T>(PhantomData<T>);
+    struct DummyWatchReceiver<T>(PhantomData<fn() -> T>);
+    impl<T> Clone for DummyWatchReceiver<T> {
+        fn clone(&self) -> Self {
+            Self(PhantomData)
+        }
+    }
 
     struct DummyFile;
 
@@ -1025,8 +1048,11 @@ mod tests {
     }
 
     impl crate::TcpStream for DummyTcpStream {
-        fn peer_addr(&self) -> std::io::Result<SocketAddr> {
-            panic!("dummy tcp peer_addr")
+        fn read<'a>(
+            &'a mut self,
+            _buf: &'a mut [u8],
+        ) -> Pin<Box<dyn Future<Output = std::io::Result<usize>> + Send + 'a>> {
+            Box::pin(async { panic!("dummy tcp read") })
         }
 
         fn read_exact<'a>(
@@ -1184,19 +1210,18 @@ mod tests {
         }
     }
 
-    fn block_on_simple<F: Future>(mut future: F) -> F::Output {
-        fn clone(_: *const ()) -> RawWaker {
-            RawWaker::new(std::ptr::null(), &VTABLE)
-        }
-        fn wake(_: *const ()) {}
-        fn wake_by_ref(_: *const ()) {}
-        fn drop(_: *const ()) {}
+    /// A no-op waker that does nothing when woken.
+    struct NoopWaker;
 
-        static VTABLE: RawWakerVTable = RawWakerVTable::new(clone, wake, wake_by_ref, drop);
+    impl std::task::Wake for NoopWaker {
+        fn wake(self: std::sync::Arc<Self>) {}
+        fn wake_by_ref(self: &std::sync::Arc<Self>) {}
+    }
 
-        let waker = unsafe { Waker::from_raw(RawWaker::new(std::ptr::null(), &VTABLE)) };
+    fn block_on_simple<F: Future>(future: F) -> F::Output {
+        let waker = std::task::Waker::from(std::sync::Arc::new(NoopWaker));
         let mut context = Context::from_waker(&waker);
-        let mut future = unsafe { Pin::new_unchecked(&mut future) };
+        let mut future = std::pin::pin!(future);
 
         loop {
             match future.as_mut().poll(&mut context) {

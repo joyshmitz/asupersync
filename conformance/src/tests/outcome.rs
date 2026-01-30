@@ -821,10 +821,10 @@ pub fn ob_003_obligation_abort<RT: RuntimeInterface>() -> ConformanceTest<RT> {
         |rt| {
             rt.block_on(async {
                 // Use oneshot to test abort semantics
-                let (tx, _rx) = rt.oneshot_channel::<i32>();
+                let (tx, rx) = rt.oneshot_channel::<i32>();
 
                 // Drop receiver before send - this simulates abort
-                // The sender should be able to detect the closed channel
+                drop(rx);
                 let send_result = tx.send(42);
 
                 checkpoint(
@@ -968,7 +968,9 @@ pub fn ob_006_commit_after_abort_panics<RT: RuntimeInterface>() -> ConformanceTe
         |rt| {
             rt.block_on(async {
                 // Drop receiver to abort, then try to send
-                let (tx, _rx) = rt.oneshot_channel::<i32>();
+                let (tx, rx) = rt.oneshot_channel::<i32>();
+
+                drop(rx);
 
                 // Receiver dropped = channel aborted
                 // Send should return the value (fail)

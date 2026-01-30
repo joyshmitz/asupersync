@@ -20,8 +20,10 @@ use crate::{
     checkpoint, ConformanceTest, MpscReceiver, MpscSender, OneshotSender, RuntimeInterface,
     TestCategory, TestMeta, TestResult,
 };
+use std::future::poll_fn;
 use std::sync::atomic::{AtomicBool, AtomicU64, Ordering};
 use std::sync::Arc;
+use std::task::Poll;
 use std::time::{Duration, Instant};
 
 /// Get all runtime conformance tests.
@@ -601,12 +603,7 @@ pub fn rt_010_stress_test<RT: RuntimeInterface>() -> ConformanceTest<RT> {
                 const NUM_TASKS: u64 = 1000;
 
                 let counter = Arc::new(AtomicU64::new(0));
-                let (done_tx, mut done_rx) = rt.mpsc_channel::<()>(1);
-
-                // Track completed tasks
                 let completed = Arc::new(AtomicU64::new(0));
-                let completed_for_final = completed.clone();
-                let done_tx_final = done_tx;
 
                 // Spawn all tasks
                 let start = Instant::now();
@@ -630,22 +627,21 @@ pub fn rt_010_stress_test<RT: RuntimeInterface>() -> ConformanceTest<RT> {
                     }),
                 );
 
-                // Spawn monitor task that signals when all complete
-                let _monitor = rt.spawn(async move {
-                    // Poll until all tasks complete
-                    loop {
-                        let count = completed_for_final.load(Ordering::SeqCst);
-                        if count >= NUM_TASKS {
-                            let _ = done_tx_final.send(()).await;
-                            break;
-                        }
-                        std::thread::yield_now();
-                    }
-                });
-
-                // Wait for completion with timeout
+                let completed_for_wait = completed.clone();
                 let timeout_result = rt
-                    .timeout(Duration::from_secs(30), async { done_rx.recv().await })
+                    .timeout(Duration::from_secs(30), async move {
+                        loop {
+                            let count = completed_for_wait.load(Ordering::SeqCst);
+                            if count >= NUM_TASKS {
+                                break;
+                            }
+                            poll_fn(|cx| {
+                                cx.waker().wake_by_ref();
+                                Poll::<()>::Pending
+                            })
+                            .await;
+                        }
+                    })
                     .await;
 
                 let elapsed = start.elapsed();
@@ -662,7 +658,7 @@ pub fn rt_010_stress_test<RT: RuntimeInterface>() -> ConformanceTest<RT> {
                 );
 
                 match timeout_result {
-                    Ok(Some(())) => {
+                    Ok(()) => {
                         if final_count != NUM_TASKS {
                             TestResult::failed(format!(
                                 "Counter mismatch: expected {}, got {}",
@@ -672,14 +668,16 @@ pub fn rt_010_stress_test<RT: RuntimeInterface>() -> ConformanceTest<RT> {
                             TestResult::passed()
                         }
                     }
-                    Ok(None) => TestResult::failed(format!(
-                        "Monitor channel closed. Counter: {}/{}",
-                        final_count, NUM_TASKS
-                    )),
-                    Err(_) => TestResult::failed(format!(
-                        "Stress test timed out. Completed: {}/{}",
-                        final_completed, NUM_TASKS
-                    )),
+                    Err(_) => {
+                        if final_completed == NUM_TASKS {
+                            TestResult::passed()
+                        } else {
+                            TestResult::failed(format!(
+                                "Stress test timed out. Completed: {}/{}",
+                                final_completed, NUM_TASKS
+                            ))
+                        }
+                    }
                 }
             })
         },

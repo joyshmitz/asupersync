@@ -50,7 +50,7 @@ impl<T: Clone + Send + Sync> Stream for WatchStream<T> {
         let inner = &mut self.inner;
         match inner.changed(&cx) {
             Ok(()) => Poll::Ready(Some(inner.borrow_and_clone())),
-            Err(watch::RecvError::Closed) => Poll::Ready(None),
+            Err(watch::RecvError::Closed | watch::RecvError::Cancelled) => Poll::Ready(None),
         }
     }
 }
