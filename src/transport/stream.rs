@@ -4,11 +4,11 @@ use crate::cx::Cx;
 use crate::security::authenticated::AuthenticatedSymbol;
 use crate::time::{Sleep, TimeSource, WallClock};
 use crate::transport::error::StreamError;
-use crate::transport::{SharedChannel, SymbolSet};
+use crate::transport::{ChannelWaiter, SharedChannel, SymbolSet};
 use crate::types::Time;
 use std::future::Future;
 use std::pin::Pin;
-use std::sync::atomic::Ordering;
+use std::sync::atomic::{AtomicBool, Ordering};
 use std::sync::{Arc, OnceLock};
 use std::task::{Context, Poll};
 use std::time::Duration;
@@ -331,11 +331,16 @@ impl<S: SymbolStream + Unpin> SymbolStream for MergedStream<S> {
 /// In-memory channel stream.
 pub struct ChannelStream {
     pub(crate) shared: Arc<SharedChannel>,
+    /// Tracks if we already have a waiter registered to prevent unbounded queue growth.
+    waiter: Option<Arc<AtomicBool>>,
 }
 
 impl ChannelStream {
     pub(crate) fn new(shared: Arc<SharedChannel>) -> Self {
-        Self { shared }
+        Self {
+            shared,
+            waiter: None,
+        }
     }
 }
 
@@ -344,25 +349,31 @@ impl SymbolStream for ChannelStream {
         self: Pin<&mut Self>,
         cx: &mut Context<'_>,
     ) -> Poll<Option<Result<AuthenticatedSymbol, StreamError>>> {
+        let this = self.get_mut();
         let mut symbol = None;
         let mut closed = false;
         {
-            let mut queue = self.shared.queue.lock().unwrap();
+            let mut queue = this.shared.queue.lock().unwrap();
             if let Some(entry) = queue.pop_front() {
                 symbol = Some(entry);
-            } else if self.shared.closed.load(Ordering::SeqCst) {
+            } else if this.shared.closed.load(Ordering::SeqCst) {
                 closed = true;
             }
         }
 
         if let Some(symbol) = symbol {
+            // Mark as no longer queued if we had a waiter
+            if let Some(waiter) = this.waiter.as_ref() {
+                waiter.store(false, Ordering::Release);
+            }
             // Wake sender if we freed space.
-            let waker = {
-                let mut wakers = self.shared.send_wakers.lock().unwrap();
+            let waiter = {
+                let mut wakers = this.shared.send_wakers.lock().unwrap();
                 wakers.pop()
             };
-            if let Some(w) = waker {
-                w.wake();
+            if let Some(w) = waiter {
+                w.queued.store(false, Ordering::Release);
+                w.waker.wake();
             }
             return Poll::Ready(Some(Ok(symbol)));
         }
@@ -371,9 +382,35 @@ impl SymbolStream for ChannelStream {
             return Poll::Ready(None);
         }
 
-        // Register waker
-        let mut wakers = self.shared.recv_wakers.lock().unwrap();
-        wakers.push(cx.waker().clone());
+        // Only register waiter once to prevent unbounded queue growth.
+        // If the waker changes between polls, we accept the stale waker -
+        // another waiter will be woken instead, which is harmless.
+        let mut new_waiter = None;
+        match this.waiter.as_ref() {
+            Some(waiter) if !waiter.load(Ordering::Acquire) => {
+                // We were woken but no message yet - re-register
+                waiter.store(true, Ordering::Release);
+                let mut wakers = this.shared.recv_wakers.lock().unwrap();
+                wakers.push(ChannelWaiter {
+                    waker: cx.waker().clone(),
+                    queued: Arc::clone(waiter),
+                });
+            }
+            Some(_) => {} // Still queued, no need to re-register
+            None => {
+                // First time waiting - create new waiter
+                let waiter = Arc::new(AtomicBool::new(true));
+                let mut wakers = this.shared.recv_wakers.lock().unwrap();
+                wakers.push(ChannelWaiter {
+                    waker: cx.waker().clone(),
+                    queued: Arc::clone(&waiter),
+                });
+                new_waiter = Some(waiter);
+            }
+        }
+        if let Some(waiter) = new_waiter {
+            this.waiter = Some(waiter);
+        }
         Poll::Pending
     }
 }

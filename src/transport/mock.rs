@@ -10,6 +10,7 @@ use crate::types::Symbol;
 use crate::util::DetRng;
 use std::collections::{HashMap, HashSet, VecDeque};
 use std::pin::Pin;
+use std::sync::atomic::{AtomicBool, Ordering};
 use std::sync::{Arc, Mutex};
 use std::task::{Context, Poll, Waker};
 use std::time::{Duration, Instant};
@@ -279,12 +280,20 @@ impl Delay {
     }
 }
 
+/// A waiter entry with tracking flag to prevent unbounded queue growth.
+#[derive(Debug)]
+struct MockWaiter {
+    waker: Waker,
+    /// Flag indicating if this waiter is still queued. When woken, this is set to false.
+    queued: Arc<AtomicBool>,
+}
+
 #[derive(Debug)]
 struct MockQueueState {
     queue: VecDeque<AuthenticatedSymbol>,
     sent_symbols: Vec<AuthenticatedSymbol>,
-    send_wakers: Vec<Waker>,
-    recv_wakers: Vec<Waker>,
+    send_wakers: Vec<MockWaiter>,
+    recv_wakers: Vec<MockWaiter>,
     closed: bool,
     rng: DetRng,
 }
@@ -317,11 +326,13 @@ impl MockQueue {
         let send_wakers = std::mem::take(&mut state.send_wakers);
         let recv_wakers = std::mem::take(&mut state.recv_wakers);
         drop(state);
-        for waker in send_wakers {
-            waker.wake();
+        for waiter in send_wakers {
+            waiter.queued.store(false, Ordering::Release);
+            waiter.waker.wake();
         }
-        for waker in recv_wakers {
-            waker.wake();
+        for waiter in recv_wakers {
+            waiter.queued.store(false, Ordering::Release);
+            waiter.waker.wake();
         }
     }
 }
@@ -337,6 +348,8 @@ pub struct MockSymbolSink {
     inner: Arc<MockQueue>,
     delay: Option<Delay>,
     operation_count: usize,
+    /// Tracks if we already have a waiter registered to prevent unbounded queue growth.
+    waiter: Option<Arc<AtomicBool>>,
 }
 
 impl MockSymbolSink {
@@ -351,6 +364,7 @@ impl MockSymbolSink {
             inner,
             delay: None,
             operation_count: 0,
+            waiter: None,
         }
     }
 
@@ -385,6 +399,8 @@ pub struct MockSymbolStream {
     inner: Arc<MockQueue>,
     pending: Option<PendingSymbol>,
     operation_count: usize,
+    /// Tracks if we already have a waiter registered to prevent unbounded queue growth.
+    waiter: Option<Arc<AtomicBool>>,
 }
 
 impl MockSymbolStream {
@@ -410,6 +426,7 @@ impl MockSymbolStream {
             inner,
             pending: None,
             operation_count: 0,
+            waiter: None,
         }
     }
 
@@ -420,10 +437,11 @@ impl MockSymbolStream {
             return Err(StreamError::Closed);
         }
         state.queue.push_back(symbol);
-        let waker = state.recv_wakers.pop();
+        let waiter = state.recv_wakers.pop();
         drop(state);
-        if let Some(waker) = waker {
-            waker.wake();
+        if let Some(waiter) = waiter {
+            waiter.queued.store(false, Ordering::Release);
+            waiter.waker.wake();
         }
         Ok(())
     }
@@ -491,9 +509,38 @@ impl SymbolSink for MockSymbolSink {
             return Poll::Ready(Err(SinkError::Closed));
         }
         if state.queue.len() < this.inner.config.capacity {
+            // Mark as no longer queued if we had a waiter
+            if let Some(waiter) = this.waiter.as_ref() {
+                waiter.store(false, Ordering::Release);
+            }
             Poll::Ready(Ok(()))
         } else {
-            state.send_wakers.push(cx.waker().clone());
+            // Only register waiter once to prevent unbounded queue growth.
+            let mut new_waiter = None;
+            match this.waiter.as_ref() {
+                Some(waiter) if !waiter.load(Ordering::Acquire) => {
+                    // We were woken but capacity isn't available yet - re-register
+                    waiter.store(true, Ordering::Release);
+                    state.send_wakers.push(MockWaiter {
+                        waker: cx.waker().clone(),
+                        queued: Arc::clone(waiter),
+                    });
+                }
+                Some(_) => {} // Still queued, no need to re-register
+                None => {
+                    // First time waiting - create new waiter
+                    let waiter = Arc::new(AtomicBool::new(true));
+                    state.send_wakers.push(MockWaiter {
+                        waker: cx.waker().clone(),
+                        queued: Arc::clone(&waiter),
+                    });
+                    new_waiter = Some(waiter);
+                }
+            }
+            drop(state);
+            if let Some(waiter) = new_waiter {
+                this.waiter = Some(waiter);
+            }
             Poll::Pending
         }
     }
@@ -587,11 +634,12 @@ impl SymbolSink for MockSymbolSink {
             state.sent_symbols.push(delivered);
         }
 
-        let recv_waker = state.recv_wakers.pop();
+        let recv_waiter = state.recv_wakers.pop();
         drop(state);
         *op_count = op_count.saturating_add(1);
-        if let Some(waker) = recv_waker {
-            waker.wake();
+        if let Some(waiter) = recv_waiter {
+            waiter.queued.store(false, Ordering::Release);
+            waiter.waker.wake();
         }
 
         Poll::Ready(Ok(()))
@@ -628,14 +676,10 @@ impl SymbolStream for MockSymbolStream {
             }
         }
 
-        let inner = &this.inner;
-        let op_count = &mut this.operation_count;
-        let pending_field = &mut this.pending;
-
-        let mut state = inner.state.lock().expect("mock queue lock poisoned");
+        let mut state = this.inner.state.lock().expect("mock queue lock poisoned");
         let symbol = if state.queue.is_empty() {
             None
-        } else if inner.config.preserve_order {
+        } else if this.inner.config.preserve_order {
             state.queue.pop_front()
         } else {
             let len = state.queue.len();
@@ -644,20 +688,25 @@ impl SymbolStream for MockSymbolStream {
         };
 
         if let Some(symbol) = symbol {
-            *op_count = op_count.saturating_add(1);
-            let delay = sample_latency(&inner.config, &mut state.rng);
-            let send_waker = state.send_wakers.pop();
+            this.operation_count = this.operation_count.saturating_add(1);
+            // Mark as no longer queued if we had a waiter
+            if let Some(waiter) = this.waiter.as_ref() {
+                waiter.store(false, Ordering::Release);
+            }
+            let delay = sample_latency(&this.inner.config, &mut state.rng);
+            let send_waiter = state.send_wakers.pop();
             drop(state);
-            if let Some(waker) = send_waker {
-                waker.wake();
+            if let Some(waiter) = send_waiter {
+                waiter.queued.store(false, Ordering::Release);
+                waiter.waker.wake();
             }
             if delay > Duration::ZERO {
                 let pending = PendingSymbol {
                     symbol,
                     delay: Delay::new(delay),
                 };
-                *pending_field = Some(pending);
-                if pending_field
+                this.pending = Some(pending);
+                if this.pending
                     .as_ref()
                     .expect("pending symbol missing")
                     .delay
@@ -666,7 +715,7 @@ impl SymbolStream for MockSymbolStream {
                 {
                     return Poll::Pending;
                 }
-                let pending = pending_field.take().expect("pending symbol missing");
+                let pending = this.pending.take().expect("pending symbol missing");
                 return Poll::Ready(Some(Ok(pending.symbol)));
             }
             return Poll::Ready(Some(Ok(symbol)));
@@ -676,7 +725,32 @@ impl SymbolStream for MockSymbolStream {
             return Poll::Ready(None);
         }
 
-        state.recv_wakers.push(cx.waker().clone());
+        // Only register waiter once to prevent unbounded queue growth.
+        let mut new_waiter = None;
+        match this.waiter.as_ref() {
+            Some(waiter) if !waiter.load(Ordering::Acquire) => {
+                // We were woken but no message yet - re-register
+                waiter.store(true, Ordering::Release);
+                state.recv_wakers.push(MockWaiter {
+                    waker: cx.waker().clone(),
+                    queued: Arc::clone(waiter),
+                });
+            }
+            Some(_) => {} // Still queued, no need to re-register
+            None => {
+                // First time waiting - create new waiter
+                let waiter = Arc::new(AtomicBool::new(true));
+                state.recv_wakers.push(MockWaiter {
+                    waker: cx.waker().clone(),
+                    queued: Arc::clone(&waiter),
+                });
+                new_waiter = Some(waiter);
+            }
+        }
+        drop(state);
+        if let Some(waiter) = new_waiter {
+            this.waiter = Some(waiter);
+        }
         Poll::Pending
     }
 

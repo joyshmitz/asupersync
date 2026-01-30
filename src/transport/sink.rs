@@ -2,10 +2,10 @@
 
 use crate::security::authenticated::AuthenticatedSymbol;
 use crate::transport::error::SinkError;
-use crate::transport::SharedChannel;
+use crate::transport::{ChannelWaiter, SharedChannel};
 use std::future::Future;
 use std::pin::Pin;
-use std::sync::atomic::Ordering;
+use std::sync::atomic::{AtomicBool, Ordering};
 use std::sync::Arc;
 use std::task::{Context, Poll};
 
@@ -293,27 +293,66 @@ impl<S: SymbolSink + Unpin> SymbolSink for BufferedSink<S> {
 /// In-memory channel sink.
 pub struct ChannelSink {
     shared: Arc<SharedChannel>,
+    /// Tracks if we already have a waiter registered to prevent unbounded queue growth.
+    waiter: Option<Arc<AtomicBool>>,
 }
 
 impl ChannelSink {
     pub(crate) fn new(shared: Arc<SharedChannel>) -> Self {
-        Self { shared }
+        Self {
+            shared,
+            waiter: None,
+        }
     }
 }
 
 impl SymbolSink for ChannelSink {
     fn poll_ready(self: Pin<&mut Self>, cx: &mut Context<'_>) -> Poll<Result<(), SinkError>> {
-        let queue = self.shared.queue.lock().unwrap();
+        let this = self.get_mut();
+        let queue = this.shared.queue.lock().unwrap();
 
-        if self.shared.closed.load(Ordering::SeqCst) {
+        if this.shared.closed.load(Ordering::SeqCst) {
             return Poll::Ready(Err(SinkError::Closed));
         }
 
-        if queue.len() < self.shared.capacity {
+        if queue.len() < this.shared.capacity {
+            // Mark as no longer queued if we had a waiter
+            if let Some(waiter) = this.waiter.as_ref() {
+                waiter.store(false, Ordering::Release);
+            }
             Poll::Ready(Ok(()))
         } else {
-            let mut wakers = self.shared.send_wakers.lock().unwrap();
-            wakers.push(cx.waker().clone());
+            drop(queue); // Release queue lock before acquiring wakers lock
+
+            // Only register waiter once to prevent unbounded queue growth.
+            // If the waker changes between polls, we accept the stale waker -
+            // another waiter will be woken instead, which is harmless.
+            let mut new_waiter = None;
+            match this.waiter.as_ref() {
+                Some(waiter) if !waiter.load(Ordering::Acquire) => {
+                    // We were woken but capacity isn't available yet - re-register
+                    waiter.store(true, Ordering::Release);
+                    let mut wakers = this.shared.send_wakers.lock().unwrap();
+                    wakers.push(ChannelWaiter {
+                        waker: cx.waker().clone(),
+                        queued: Arc::clone(waiter),
+                    });
+                }
+                Some(_) => {} // Still queued, no need to re-register
+                None => {
+                    // First time waiting - create new waiter
+                    let waiter = Arc::new(AtomicBool::new(true));
+                    let mut wakers = this.shared.send_wakers.lock().unwrap();
+                    wakers.push(ChannelWaiter {
+                        waker: cx.waker().clone(),
+                        queued: Arc::clone(&waiter),
+                    });
+                    new_waiter = Some(waiter);
+                }
+            }
+            if let Some(waiter) = new_waiter {
+                this.waiter = Some(waiter);
+            }
             Poll::Pending
         }
     }
@@ -323,15 +362,16 @@ impl SymbolSink for ChannelSink {
         _cx: &mut Context<'_>,
         symbol: AuthenticatedSymbol,
     ) -> Poll<Result<(), SinkError>> {
+        let this = self.get_mut();
         {
-            let mut queue = self.shared.queue.lock().unwrap();
+            let mut queue = this.shared.queue.lock().unwrap();
 
-            if self.shared.closed.load(Ordering::SeqCst) {
+            if this.shared.closed.load(Ordering::SeqCst) {
                 return Poll::Ready(Err(SinkError::Closed));
             }
 
             // We assume poll_ready checked capacity, but we check again for safety
-            if queue.len() >= self.shared.capacity {
+            if queue.len() >= this.shared.capacity {
                 return Poll::Ready(Err(SinkError::BufferFull));
             }
 
@@ -339,12 +379,13 @@ impl SymbolSink for ChannelSink {
         }
 
         // Wake receiver.
-        let waker = {
-            let mut wakers = self.shared.recv_wakers.lock().unwrap();
+        let waiter = {
+            let mut wakers = this.shared.recv_wakers.lock().unwrap();
             wakers.pop()
         };
-        if let Some(w) = waker {
-            w.wake();
+        if let Some(w) = waiter {
+            w.queued.store(false, Ordering::Release);
+            w.waker.wake();
         }
 
         Poll::Ready(Ok(()))

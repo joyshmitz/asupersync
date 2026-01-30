@@ -33,20 +33,29 @@ pub use stream::{SymbolStream, SymbolStreamExt};
 use crate::security::authenticated::AuthenticatedSymbol;
 use crate::types::Symbol;
 use std::collections::{HashSet, VecDeque};
+use std::sync::atomic::{AtomicBool, Ordering};
 use std::sync::{Arc, Mutex};
 use std::task::Waker;
 
 /// A set of unique symbols.
 pub type SymbolSet = HashSet<Symbol>;
 
+/// A waiter entry with tracking flag to prevent unbounded queue growth.
+#[derive(Debug)]
+pub(crate) struct ChannelWaiter {
+    pub waker: Waker,
+    /// Flag indicating if this waiter is still queued. When woken, this is set to false.
+    pub queued: Arc<AtomicBool>,
+}
+
 /// Shared state for in-memory channel.
 #[derive(Debug)]
 pub(crate) struct SharedChannel {
     pub queue: Mutex<VecDeque<AuthenticatedSymbol>>,
     pub capacity: usize,
-    pub send_wakers: Mutex<Vec<Waker>>,
-    pub recv_wakers: Mutex<Vec<Waker>>,
-    pub closed: std::sync::atomic::AtomicBool,
+    pub send_wakers: Mutex<Vec<ChannelWaiter>>,
+    pub recv_wakers: Mutex<Vec<ChannelWaiter>>,
+    pub closed: AtomicBool,
 }
 
 impl SharedChannel {
@@ -56,23 +65,25 @@ impl SharedChannel {
             capacity,
             send_wakers: Mutex::new(Vec::new()),
             recv_wakers: Mutex::new(Vec::new()),
-            closed: std::sync::atomic::AtomicBool::new(false),
+            closed: AtomicBool::new(false),
         }
     }
 
     pub(crate) fn close(&self) {
-        self.closed.store(true, std::sync::atomic::Ordering::SeqCst);
+        self.closed.store(true, Ordering::SeqCst);
         // Wake everyone
         {
             let mut wakers = self.send_wakers.lock().unwrap();
             for w in wakers.drain(..) {
-                w.wake();
+                w.queued.store(false, Ordering::Release);
+                w.waker.wake();
             }
         }
         {
             let mut wakers = self.recv_wakers.lock().unwrap();
             for w in wakers.drain(..) {
-                w.wake();
+                w.queued.store(false, Ordering::Release);
+                w.waker.wake();
             }
         }
     }
