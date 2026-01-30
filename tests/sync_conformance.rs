@@ -183,30 +183,217 @@ fn sync_002b_mutex_cancellation() {
 
 /// SYNC-003: RwLock Reader/Writer Priority
 ///
-/// TODO: Implement when RwLock is available.
-/// This test will verify:
+/// Verifies that:
 /// - Multiple readers can hold the lock simultaneously
 /// - Writers have exclusive access
-/// - Writer starvation is prevented
+/// - Read/write guards provide correct access to data
 #[test]
-#[ignore = "RwLock not yet implemented"]
 fn sync_003_rwlock_reader_writer_priority() {
     init_test("sync_003_rwlock_reader_writer_priority");
-    // Placeholder for RwLock tests
+    let cx = Cx::for_testing();
+    let rwlock = RwLock::new(42);
+
+    // Multiple readers can hold the lock simultaneously (same thread)
+    {
+        let r1 = rwlock.read(&cx).expect("first read should succeed");
+        let r2 = rwlock
+            .read(&cx)
+            .expect("second concurrent read should succeed");
+        assert_with_log!(*r1 == 42, "reader 1 should see initial value", 42, *r1);
+        assert_with_log!(*r2 == 42, "reader 2 should see initial value", 42, *r2);
+
+        // try_write should fail while readers are held
+        let try_w = rwlock.try_write().is_err();
+        assert_with_log!(
+            try_w,
+            "try_write should fail while readers held",
+            true,
+            try_w
+        );
+    }
+
+    // Writer has exclusive access
+    {
+        let mut w = rwlock.write(&cx).expect("write should succeed");
+        *w = 100;
+
+        // try_read should fail while writer is held
+        let try_r = rwlock.try_read().is_err();
+        assert_with_log!(try_r, "try_read should fail while writer held", true, try_r);
+
+        // try_write should also fail
+        let try_w = rwlock.try_write().is_err();
+        assert_with_log!(
+            try_w,
+            "try_write should fail while writer held",
+            true,
+            try_w
+        );
+    }
+
+    // Verify write persisted after guard drop
+    {
+        let r = rwlock.read(&cx).expect("read after write should succeed");
+        assert_with_log!(*r == 100, "should see written value", 100, *r);
+    }
+
+    // Concurrent readers across threads
+    let rwlock = Arc::new(RwLock::new(0i64));
+    let num_readers: usize = 4;
+    let active_readers = Arc::new(AtomicUsize::new(0));
+
+    let handles: Vec<_> = (0..num_readers)
+        .map(|_| {
+            let rwlock = Arc::clone(&rwlock);
+            let active_readers = Arc::clone(&active_readers);
+            thread::spawn(move || {
+                let cx = Cx::for_testing();
+                let _guard = rwlock.read(&cx).expect("read should succeed");
+                active_readers.fetch_add(1, Ordering::SeqCst);
+                // Spin until all readers have acquired the lock
+                while active_readers.load(Ordering::SeqCst) < num_readers {
+                    thread::yield_now();
+                }
+            })
+        })
+        .collect();
+
+    for handle in handles {
+        handle.join().expect("reader thread should complete");
+    }
+
+    let final_count = active_readers.load(Ordering::SeqCst);
+    assert_with_log!(
+        final_count == num_readers,
+        "all readers should acquire concurrently",
+        num_readers,
+        final_count
+    );
+
+    // Writer contention correctness across threads
+    let rwlock = Arc::new(RwLock::new(0i64));
+    let iterations = 500;
+    let num_threads = 4;
+
+    let handles: Vec<_> = (0..num_threads)
+        .map(|_| {
+            let rwlock = Arc::clone(&rwlock);
+            thread::spawn(move || {
+                let cx = Cx::for_testing();
+                for _ in 0..iterations {
+                    let mut guard = rwlock.write(&cx).expect("write should succeed");
+                    *guard += 1;
+                }
+            })
+        })
+        .collect();
+
+    for handle in handles {
+        handle.join().expect("writer thread should complete");
+    }
+
+    let final_val = *rwlock.read(&cx).expect("final read should succeed");
+    let expected = i64::from(num_threads) * i64::from(iterations);
+    assert_with_log!(
+        final_val == expected,
+        "all writer increments should be counted",
+        expected,
+        final_val
+    );
+
     test_complete!("sync_003_rwlock_reader_writer_priority");
 }
 
 /// SYNC-004: Barrier Synchronization
 ///
-/// TODO: Implement when Barrier is available.
-/// This test will verify:
+/// Verifies that:
 /// - All threads wait until the barrier count is reached
 /// - Threads proceed together after barrier release
+/// - Exactly one leader is elected per barrier round
 #[test]
-#[ignore = "Barrier not yet implemented"]
 fn sync_004_barrier_synchronization() {
     init_test("sync_004_barrier_synchronization");
-    // Placeholder for Barrier tests
+
+    let num_threads: usize = 4;
+    let barrier = Arc::new(Barrier::new(num_threads));
+    let arrived = Arc::new(AtomicUsize::new(0));
+    let after_barrier = Arc::new(AtomicUsize::new(0));
+    let leader_count = Arc::new(AtomicUsize::new(0));
+
+    let handles: Vec<_> = (0..num_threads)
+        .map(|_| {
+            let barrier = Arc::clone(&barrier);
+            let arrived = Arc::clone(&arrived);
+            let after_barrier = Arc::clone(&after_barrier);
+            let leader_count = Arc::clone(&leader_count);
+            thread::spawn(move || {
+                let cx = Cx::for_testing();
+                arrived.fetch_add(1, Ordering::SeqCst);
+                let result = barrier.wait(&cx).expect("barrier wait should succeed");
+                if result.is_leader() {
+                    leader_count.fetch_add(1, Ordering::SeqCst);
+                }
+                after_barrier.fetch_add(1, Ordering::SeqCst);
+            })
+        })
+        .collect();
+
+    for handle in handles {
+        handle.join().expect("thread should complete");
+    }
+
+    let total_arrived = arrived.load(Ordering::SeqCst);
+    assert_with_log!(
+        total_arrived == num_threads,
+        "all threads should have arrived",
+        num_threads,
+        total_arrived
+    );
+
+    let total_after = after_barrier.load(Ordering::SeqCst);
+    assert_with_log!(
+        total_after == num_threads,
+        "all threads should proceed past barrier",
+        num_threads,
+        total_after
+    );
+
+    let leaders = leader_count.load(Ordering::SeqCst);
+    assert_with_log!(
+        leaders == 1,
+        "exactly one leader should be elected",
+        1,
+        leaders
+    );
+
+    // Verify barrier is reusable (second round)
+    let barrier = Arc::new(Barrier::new(num_threads));
+    let round2_count = Arc::new(AtomicUsize::new(0));
+
+    let handles: Vec<_> = (0..num_threads)
+        .map(|_| {
+            let barrier = Arc::clone(&barrier);
+            let round2_count = Arc::clone(&round2_count);
+            thread::spawn(move || {
+                let cx = Cx::for_testing();
+                barrier.wait(&cx).expect("round 2 wait should succeed");
+                round2_count.fetch_add(1, Ordering::SeqCst);
+            })
+        })
+        .collect();
+
+    for handle in handles {
+        handle.join().expect("round 2 thread should complete");
+    }
+
+    let round2 = round2_count.load(Ordering::SeqCst);
+    assert_with_log!(
+        round2 == num_threads,
+        "barrier should be reusable for round 2",
+        num_threads,
+        round2
+    );
+
     test_complete!("sync_004_barrier_synchronization");
 }
 
@@ -341,30 +528,242 @@ fn sync_005b_semaphore_concurrent_access() {
 
 /// SYNC-006: OnceCell Initialization
 ///
-/// TODO: Implement when OnceCell is available.
-/// This test will verify:
-/// - Value is initialized exactly once
-/// - Concurrent initialization attempts block and return same value
+/// Verifies that:
 /// - get() before initialization returns None
+/// - Value is initialized exactly once via set()
+/// - Duplicate set() returns Err with the rejected value
+/// - get_or_init_blocking initializes lazily and returns existing value
+/// - Concurrent initialization runs the init function exactly once
 #[test]
-#[ignore = "OnceCell not yet implemented"]
 fn sync_006_oncecell_initialization() {
     init_test("sync_006_oncecell_initialization");
-    // Placeholder for OnceCell tests
+
+    // get() before initialization returns None
+    let cell: OnceCell<i32> = OnceCell::new();
+    let before = cell.get().is_none();
+    assert_with_log!(before, "get should return None before init", true, before);
+    assert_with_log!(
+        !cell.is_initialized(),
+        "should not be initialized",
+        false,
+        cell.is_initialized()
+    );
+
+    // set() initializes the cell
+    let set_ok = cell.set(42).is_ok();
+    assert_with_log!(set_ok, "first set should succeed", true, set_ok);
+
+    // get() returns the value
+    let val = cell.get().copied();
+    assert_with_log!(
+        val == Some(42),
+        "get should return set value",
+        42,
+        val.unwrap_or(0)
+    );
+    assert_with_log!(
+        cell.is_initialized(),
+        "should be initialized after set",
+        true,
+        cell.is_initialized()
+    );
+
+    // Duplicate set fails and returns the rejected value
+    let dup = cell.set(99);
+    let dup_err = dup.is_err();
+    assert_with_log!(dup_err, "second set should fail", true, dup_err);
+
+    // Original value unchanged
+    let val = cell.get().copied();
+    assert_with_log!(
+        val == Some(42),
+        "value unchanged after failed set",
+        42,
+        val.unwrap_or(0)
+    );
+
+    // get_or_init_blocking: initializes on first call
+    let cell2: OnceCell<i32> = OnceCell::new();
+    let v = cell2.get_or_init_blocking(|| 77);
+    assert_with_log!(*v == 77, "get_or_init_blocking should init", 77, *v);
+
+    // get_or_init_blocking: returns existing on second call
+    let v2 = cell2.get_or_init_blocking(|| 999);
+    assert_with_log!(*v2 == 77, "get_or_init_blocking returns existing", 77, *v2);
+
+    // Concurrent initialization: init function runs exactly once
+    let cell3 = Arc::new(OnceCell::new());
+    let init_count = Arc::new(AtomicUsize::new(0));
+    let num_threads = 8;
+
+    let handles: Vec<_> = (0..num_threads)
+        .map(|i| {
+            let cell = Arc::clone(&cell3);
+            let init_count = Arc::clone(&init_count);
+            thread::spawn(move || {
+                let val = cell.get_or_init_blocking(|| {
+                    init_count.fetch_add(1, Ordering::SeqCst);
+                    i
+                });
+                *val
+            })
+        })
+        .collect();
+
+    let mut results = Vec::new();
+    for handle in handles {
+        results.push(handle.join().expect("thread should complete"));
+    }
+
+    // All threads see the same value
+    let first = results[0];
+    let all_same = results.iter().all(|&v| v == first);
+    assert_with_log!(
+        all_same,
+        "all threads should see same value",
+        true,
+        all_same
+    );
+
+    // Init function ran exactly once
+    let inits = init_count.load(Ordering::SeqCst);
+    assert_with_log!(inits == 1, "init should run exactly once", 1, inits);
+
     test_complete!("sync_006_oncecell_initialization");
 }
 
-/// SYNC-007: Condvar Notification
+/// SYNC-007: Notify (Condvar-style) Notification
 ///
-/// TODO: Implement when Condvar is available.
-/// This test will verify:
-/// - notify_one wakes one waiter
-/// - notify_all wakes all waiters
-/// - Spurious wakeups are handled correctly
+/// Verifies that:
+/// - notify_one wakes exactly one waiter
+/// - notify_waiters wakes all waiters
+/// - waiter_count tracks registered waiters
 #[test]
-#[ignore = "Condvar not yet implemented"]
-fn sync_007_condvar_notification() {
-    init_test("sync_007_condvar_notification");
-    // Placeholder for Condvar tests
-    test_complete!("sync_007_condvar_notification");
+fn sync_007_notify_notification() {
+    init_test("sync_007_notify_notification");
+
+    // Initial state: no waiters
+    let notify = Notify::new();
+    assert_with_log!(
+        notify.waiter_count() == 0,
+        "should start with no waiters",
+        0,
+        notify.waiter_count()
+    );
+
+    // notify_one: wakes exactly one waiter
+    {
+        let notify = Arc::new(Notify::new());
+        let woke = Arc::new(AtomicBool::new(false));
+        let woke_clone = Arc::clone(&woke);
+        let notify_clone = Arc::clone(&notify);
+
+        let handle = thread::spawn(move || {
+            block_on(notify_clone.notified());
+            woke_clone.store(true, Ordering::SeqCst);
+        });
+
+        // Wait for waiter to register
+        while notify.waiter_count() == 0 {
+            thread::yield_now();
+        }
+
+        notify.notify_one();
+        handle.join().expect("notify_one thread should complete");
+
+        let was_woken = woke.load(Ordering::SeqCst);
+        assert_with_log!(
+            was_woken,
+            "notify_one should wake the waiter",
+            true,
+            was_woken
+        );
+    }
+
+    // notify_waiters: wakes all waiters
+    {
+        let notify = Arc::new(Notify::new());
+        let num_waiters: usize = 4;
+        let woke_count = Arc::new(AtomicUsize::new(0));
+
+        let handles: Vec<_> = (0..num_waiters)
+            .map(|_| {
+                let notify = Arc::clone(&notify);
+                let woke_count = Arc::clone(&woke_count);
+                thread::spawn(move || {
+                    block_on(notify.notified());
+                    woke_count.fetch_add(1, Ordering::SeqCst);
+                })
+            })
+            .collect();
+
+        // Wait for all waiters to register
+        while notify.waiter_count() < num_waiters {
+            thread::yield_now();
+        }
+
+        notify.notify_waiters();
+
+        for handle in handles {
+            handle
+                .join()
+                .expect("notify_waiters thread should complete");
+        }
+
+        let total_woken = woke_count.load(Ordering::SeqCst);
+        assert_with_log!(
+            total_woken == num_waiters,
+            "notify_waiters should wake all",
+            num_waiters,
+            total_woken
+        );
+    }
+
+    // notify_one with multiple waiters: wakes exactly one
+    {
+        let notify = Arc::new(Notify::new());
+        let num_waiters: usize = 3;
+        let woke_count = Arc::new(AtomicUsize::new(0));
+
+        let handles: Vec<_> = (0..num_waiters)
+            .map(|_| {
+                let notify = Arc::clone(&notify);
+                let woke_count = Arc::clone(&woke_count);
+                thread::spawn(move || {
+                    block_on(notify.notified());
+                    woke_count.fetch_add(1, Ordering::SeqCst);
+                })
+            })
+            .collect();
+
+        // Wait for all waiters to register
+        while notify.waiter_count() < num_waiters {
+            thread::yield_now();
+        }
+
+        // Notify one at a time
+        for i in 0..num_waiters {
+            notify.notify_one();
+            // Wait for one waiter to wake
+            while woke_count.load(Ordering::SeqCst) < i + 1 {
+                thread::yield_now();
+            }
+        }
+
+        for handle in handles {
+            handle
+                .join()
+                .expect("sequential notify thread should complete");
+        }
+
+        let total_woken = woke_count.load(Ordering::SeqCst);
+        assert_with_log!(
+            total_woken == num_waiters,
+            "sequential notify_one should wake all",
+            num_waiters,
+            total_woken
+        );
+    }
+
+    test_complete!("sync_007_notify_notification");
 }
