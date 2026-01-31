@@ -8,11 +8,11 @@ use crate::bytes::Bytes;
 
 use super::error::{ErrorCode, H2Error};
 use super::frame::PrioritySpec;
-use super::settings::{DEFAULT_INITIAL_WINDOW_SIZE, DEFAULT_MAX_HEADER_LIST_SIZE};
+use super::settings::DEFAULT_INITIAL_WINDOW_SIZE;
 
-/// Maximum accumulated header fragment size (4x the default max header list size).
+/// Maximum accumulated header fragment size multiplier.
 /// Provides protection against DoS via unbounded CONTINUATION frames.
-const MAX_HEADER_FRAGMENT_SIZE: usize = DEFAULT_MAX_HEADER_LIST_SIZE as usize * 4;
+const HEADER_FRAGMENT_MULTIPLIER: usize = 4;
 
 /// Stream state as defined in RFC 7540 Section 5.1.
 ///
@@ -133,6 +133,8 @@ pub struct Stream {
     headers_complete: bool,
     /// Accumulated header block fragments.
     header_fragments: Vec<Bytes>,
+    /// Max header list size (used to bound fragment accumulation).
+    max_header_list_size: u32,
 }
 
 /// Pending data waiting for flow control window.
@@ -145,7 +147,7 @@ struct PendingData {
 impl Stream {
     /// Create a new stream in idle state.
     #[must_use]
-    pub fn new(id: u32, initial_window_size: u32) -> Self {
+    pub fn new(id: u32, initial_window_size: u32, max_header_list_size: u32) -> Self {
         let initial_send_window =
             i32::try_from(initial_window_size).expect("initial window size exceeds i32");
         let default_recv_window =
@@ -166,7 +168,18 @@ impl Stream {
             error_code: None,
             headers_complete: true,
             header_fragments: Vec::new(),
+            max_header_list_size,
         }
+    }
+
+    /// Compute maximum accumulated header fragment size for a given limit.
+    pub(crate) fn max_header_fragment_size_for(max_header_list_size: u32) -> usize {
+        let max_list_size = usize::try_from(max_header_list_size).unwrap_or(usize::MAX);
+        max_list_size.saturating_mul(HEADER_FRAGMENT_MULTIPLIER)
+    }
+
+    fn max_header_fragment_size(&self) -> usize {
+        Self::max_header_fragment_size_for(self.max_header_list_size)
     }
 
     /// Get the stream ID.
@@ -366,7 +379,7 @@ impl Stream {
 
         // Check accumulated size to prevent DoS via unbounded CONTINUATION frames
         let current_size: usize = self.header_fragments.iter().map(Bytes::len).sum();
-        if current_size.saturating_add(header_block.len()) > MAX_HEADER_FRAGMENT_SIZE {
+        if current_size.saturating_add(header_block.len()) > self.max_header_fragment_size() {
             return Err(H2Error::stream(
                 self.id,
                 ErrorCode::EnhanceYourCalm,
@@ -389,7 +402,7 @@ impl Stream {
     /// Returns an error if the accumulated size would exceed the limit.
     pub fn add_header_fragment(&mut self, fragment: Bytes) -> Result<(), H2Error> {
         let current_size: usize = self.header_fragments.iter().map(Bytes::len).sum();
-        if current_size.saturating_add(fragment.len()) > MAX_HEADER_FRAGMENT_SIZE {
+        if current_size.saturating_add(fragment.len()) > self.max_header_fragment_size() {
             return Err(H2Error::stream(
                 self.id,
                 ErrorCode::EnhanceYourCalm,
@@ -504,6 +517,8 @@ pub struct StreamStore {
     max_concurrent_streams: u32,
     /// Initial window size for new streams.
     initial_window_size: u32,
+    /// Maximum header list size for new streams.
+    max_header_list_size: u32,
     /// Whether this is a client (for stream ID assignment).
     is_client: bool,
 }
@@ -511,13 +526,14 @@ pub struct StreamStore {
 impl StreamStore {
     /// Create a new stream store.
     #[must_use]
-    pub fn new(is_client: bool, initial_window_size: u32) -> Self {
+    pub fn new(is_client: bool, initial_window_size: u32, max_header_list_size: u32) -> Self {
         Self {
             streams: std::collections::HashMap::new(),
             next_client_stream_id: 1,
             next_server_stream_id: 2,
             max_concurrent_streams: u32::MAX,
             initial_window_size,
+            max_header_list_size,
             is_client,
         }
     }
@@ -578,7 +594,7 @@ impl StreamStore {
                 self.next_client_stream_id = id + 2;
             }
 
-            let stream = Stream::new(id, self.initial_window_size);
+            let stream = Stream::new(id, self.initial_window_size, self.max_header_list_size);
             self.streams.insert(id, stream);
         }
         Ok(self.streams.get_mut(&id).unwrap())
@@ -605,7 +621,7 @@ impl StreamStore {
             id
         };
 
-        let stream = Stream::new(id, self.initial_window_size);
+        let stream = Stream::new(id, self.initial_window_size, self.max_header_list_size);
         self.streams.insert(id, stream);
         Ok(id)
     }
@@ -637,11 +653,12 @@ impl StreamStore {
 
 #[cfg(test)]
 mod tests {
+    use super::super::settings::DEFAULT_MAX_HEADER_LIST_SIZE;
     use super::*;
 
     #[test]
     fn test_stream_state_transitions() {
-        let mut stream = Stream::new(1, 65535);
+        let mut stream = Stream::new(1, 65535, DEFAULT_MAX_HEADER_LIST_SIZE);
         assert_eq!(stream.state(), StreamState::Idle);
 
         // Send headers (no end_stream)
@@ -659,7 +676,7 @@ mod tests {
 
     #[test]
     fn test_stream_flow_control() {
-        let mut stream = Stream::new(1, 65535);
+        let mut stream = Stream::new(1, 65535, DEFAULT_MAX_HEADER_LIST_SIZE);
         assert_eq!(stream.send_window(), 65535);
 
         stream.consume_send_window(1000);
@@ -670,8 +687,22 @@ mod tests {
     }
 
     #[test]
+    fn header_fragment_limit_respects_max_header_list_size() {
+        let max_list_size = 8;
+        let mut stream = Stream::new(1, 65535, max_list_size);
+
+        // 4x multiplier => 32 bytes total allowed.
+        stream
+            .add_header_fragment(Bytes::from(vec![0; 16]))
+            .unwrap();
+        assert!(stream
+            .add_header_fragment(Bytes::from(vec![0; 17]))
+            .is_err());
+    }
+
+    #[test]
     fn test_stream_store_allocation() {
-        let mut store = StreamStore::new(true, 65535);
+        let mut store = StreamStore::new(true, 65535, DEFAULT_MAX_HEADER_LIST_SIZE);
 
         let id1 = store.allocate_stream_id().unwrap();
         assert_eq!(id1, 1);
@@ -685,7 +716,7 @@ mod tests {
 
     #[test]
     fn test_stream_store_max_concurrent() {
-        let mut store = StreamStore::new(true, 65535);
+        let mut store = StreamStore::new(true, 65535, DEFAULT_MAX_HEADER_LIST_SIZE);
         store.set_max_concurrent_streams(2);
 
         store.allocate_stream_id().unwrap();
@@ -704,7 +735,7 @@ mod tests {
 
     #[test]
     fn auto_window_update_not_needed_when_window_above_half() {
-        let mut stream = Stream::new(1, 65535);
+        let mut stream = Stream::new(1, 65535, DEFAULT_MAX_HEADER_LIST_SIZE);
         stream.send_headers(false).unwrap();
 
         // Consume less than half: no update needed.
@@ -720,7 +751,7 @@ mod tests {
     fn auto_window_update_triggered_when_window_below_half() {
         let initial = DEFAULT_INITIAL_WINDOW_SIZE;
         let initial_i32 = i32::try_from(initial).unwrap();
-        let mut stream = Stream::new(1, initial);
+        let mut stream = Stream::new(1, initial, DEFAULT_MAX_HEADER_LIST_SIZE);
         stream.send_headers(false).unwrap();
 
         // Consume just over half to cross the watermark.
@@ -742,7 +773,7 @@ mod tests {
     fn auto_window_update_returns_none_after_replenish() {
         let initial = DEFAULT_INITIAL_WINDOW_SIZE;
         let initial_i32 = i32::try_from(initial).unwrap();
-        let mut stream = Stream::new(1, initial);
+        let mut stream = Stream::new(1, initial, DEFAULT_MAX_HEADER_LIST_SIZE);
         stream.send_headers(false).unwrap();
 
         // Drain below the watermark.

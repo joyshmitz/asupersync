@@ -4,13 +4,19 @@
 //! TLS connections from the client side.
 
 use super::error::TlsError;
+use super::stream::TlsStream;
 use super::types::{Certificate, CertificateChain, PrivateKey, RootCertStore};
+use crate::io::{AsyncRead, AsyncWrite};
 
 #[cfg(feature = "tls")]
 use rustls::pki_types::ServerName;
 #[cfg(feature = "tls")]
 use rustls::ClientConfig;
+#[cfg(feature = "tls")]
+use rustls::ClientConnection;
 
+#[cfg(feature = "tls")]
+use std::future::poll_fn;
 use std::sync::Arc;
 
 /// Client-side TLS connector.
@@ -32,6 +38,7 @@ use std::sync::Arc;
 pub struct TlsConnector {
     #[cfg(feature = "tls")]
     config: Arc<ClientConfig>,
+    handshake_timeout: Option<std::time::Duration>,
     #[cfg(not(feature = "tls"))]
     _marker: std::marker::PhantomData<()>,
 }
@@ -42,6 +49,7 @@ impl TlsConnector {
     pub fn new(config: ClientConfig) -> Self {
         Self {
             config: Arc::new(config),
+            handshake_timeout: None,
         }
     }
 
@@ -50,10 +58,56 @@ impl TlsConnector {
         TlsConnectorBuilder::new()
     }
 
+    /// Get the handshake timeout, if configured.
+    #[must_use]
+    pub fn handshake_timeout(&self) -> Option<std::time::Duration> {
+        self.handshake_timeout
+    }
+
     /// Get the inner configuration (for advanced use).
     #[cfg(feature = "tls")]
     pub fn config(&self) -> &Arc<ClientConfig> {
         &self.config
+    }
+
+    /// Establish a TLS connection over the provided I/O stream.
+    ///
+    /// # Cancel-Safety
+    /// Handshake is NOT cancel-safe. If cancelled mid-handshake, drop the stream.
+    #[cfg(feature = "tls")]
+    pub async fn connect<IO>(&self, domain: &str, io: IO) -> Result<TlsStream<IO>, TlsError>
+    where
+        IO: AsyncRead + AsyncWrite + Unpin,
+    {
+        let server_name = ServerName::try_from(domain.to_string())
+            .map_err(|_| TlsError::InvalidDnsName(domain.to_string()))?;
+        let conn = ClientConnection::new(Arc::clone(&self.config), server_name)
+            .map_err(|e| TlsError::Configuration(e.to_string()))?;
+        let mut stream = TlsStream::new_client(io, conn);
+        if let Some(timeout) = self.handshake_timeout {
+            match crate::time::timeout(
+                super::wall_clock_now(),
+                timeout,
+                poll_fn(|cx| stream.poll_handshake(cx)),
+            )
+            .await
+            {
+                Ok(result) => result?,
+                Err(_) => return Err(TlsError::Timeout(timeout)),
+            }
+        } else {
+            poll_fn(|cx| stream.poll_handshake(cx)).await?;
+        }
+        Ok(stream)
+    }
+
+    /// Establish a TLS connection (stub when TLS is disabled).
+    #[cfg(not(feature = "tls"))]
+    pub async fn connect<IO>(&self, _domain: &str, _io: IO) -> Result<TlsStream<IO>, TlsError>
+    where
+        IO: AsyncRead + AsyncWrite + Unpin,
+    {
+        Err(TlsError::Configuration("tls feature not enabled".into()))
     }
 
     /// Validate a domain name for use with TLS.
@@ -99,6 +153,7 @@ pub struct TlsConnectorBuilder {
     client_identity: Option<(CertificateChain, PrivateKey)>,
     alpn_protocols: Vec<Vec<u8>>,
     enable_sni: bool,
+    handshake_timeout: Option<std::time::Duration>,
     #[cfg(feature = "tls")]
     min_protocol: Option<rustls::ProtocolVersion>,
     #[cfg(feature = "tls")]
@@ -119,6 +174,7 @@ impl TlsConnectorBuilder {
             client_identity: None,
             alpn_protocols: Vec::new(),
             enable_sni: true,
+            handshake_timeout: None,
             #[cfg(feature = "tls")]
             min_protocol: None,
             #[cfg(feature = "tls")]
@@ -244,6 +300,12 @@ impl TlsConnectorBuilder {
         self
     }
 
+    /// Set a timeout for the TLS handshake.
+    pub fn handshake_timeout(mut self, timeout: std::time::Duration) -> Self {
+        self.handshake_timeout = Some(timeout);
+        self
+    }
+
     /// Set minimum TLS protocol version.
     #[cfg(feature = "tls")]
     pub fn min_protocol_version(mut self, version: rustls::ProtocolVersion) -> Self {
@@ -349,7 +411,10 @@ impl TlsConnectorBuilder {
             "TlsConnector built"
         );
 
-        Ok(TlsConnector::new(config))
+        Ok(TlsConnector {
+            config: Arc::new(config),
+            handshake_timeout: self.handshake_timeout,
+        })
     }
 
     /// Build the `TlsConnector` (stub when TLS is disabled).
@@ -426,6 +491,17 @@ mod tests {
 
     #[cfg(feature = "tls")]
     #[test]
+    fn test_handshake_timeout_builder() {
+        let timeout = std::time::Duration::from_secs(1);
+        let connector = TlsConnectorBuilder::new()
+            .handshake_timeout(timeout)
+            .build()
+            .unwrap();
+        assert_eq!(connector.handshake_timeout(), Some(timeout));
+    }
+
+    #[cfg(feature = "tls")]
+    #[test]
     fn test_connector_clone_is_cheap() {
         let connector = TlsConnectorBuilder::new().build().unwrap();
 
@@ -437,6 +513,26 @@ mod tests {
 
         // Should be very fast (Arc clone)
         assert!(elapsed.as_millis() < 100);
+    }
+
+    #[cfg(feature = "tls")]
+    #[test]
+    fn test_connect_invalid_dns() {
+        use crate::net::tcp::VirtualTcpStream;
+        use crate::test_utils::run_test;
+
+        run_test(|| async {
+            let connector = TlsConnectorBuilder::new().build().unwrap();
+            let (client_io, _server_io) = VirtualTcpStream::pair(
+                "127.0.0.1:5100".parse().unwrap(),
+                "127.0.0.1:5101".parse().unwrap(),
+            );
+            let err = connector
+                .connect("invalid domain with spaces", client_io)
+                .await
+                .unwrap_err();
+            assert!(matches!(err, TlsError::InvalidDnsName(_)));
+        });
     }
 
     #[cfg(not(feature = "tls"))]

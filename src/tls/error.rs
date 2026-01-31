@@ -2,6 +2,7 @@
 
 use std::fmt;
 use std::io;
+use std::time::Duration;
 
 /// Error type for TLS operations.
 #[derive(Debug)]
@@ -16,6 +17,8 @@ pub enum TlsError {
     Configuration(String),
     /// I/O error during TLS operations.
     Io(io::Error),
+    /// TLS operation timed out.
+    Timeout(Duration),
     /// Rustls-specific error.
     #[cfg(feature = "tls")]
     Rustls(rustls::Error),
@@ -29,6 +32,7 @@ impl fmt::Display for TlsError {
             Self::Certificate(msg) => write!(f, "certificate error: {msg}"),
             Self::Configuration(msg) => write!(f, "TLS configuration error: {msg}"),
             Self::Io(err) => write!(f, "I/O error: {err}"),
+            Self::Timeout(duration) => write!(f, "TLS operation timed out after {duration:?}"),
             #[cfg(feature = "tls")]
             Self::Rustls(err) => write!(f, "rustls error: {err}"),
         }

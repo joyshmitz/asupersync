@@ -118,8 +118,8 @@ impl OwnedReadHalf {
     pub fn reunite(self, other: OwnedWriteHalf) -> Result<super::UnixStream, ReuniteError> {
         if Arc::ptr_eq(&self.inner, &other.inner) {
             drop(other);
-            // Note: Original registration is lost when splitting; reunited stream has no registration
-            Ok(super::UnixStream::from_parts(self.inner, None))
+            // Note: Original registration is lost when splitting; reunited stream gets fresh lazy registration
+            Ok(super::UnixStream::from_parts(self.inner))
         } else {
             Err(ReuniteError(self, other))
         }

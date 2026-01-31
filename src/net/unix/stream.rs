@@ -23,13 +23,14 @@
 use crate::cx::Cx;
 use crate::io::{AsyncRead, AsyncReadVectored, AsyncWrite, ReadBuf};
 use crate::net::unix::split::{OwnedReadHalf, OwnedWriteHalf, ReadHalf, WriteHalf};
-use crate::runtime::reactor::{Interest, Registration};
+use crate::runtime::io_driver::IoRegistration;
+use crate::runtime::reactor::Interest;
 use std::io::{self, IoSlice, IoSliceMut, Read, Write};
 use std::net::Shutdown;
 use std::os::unix::net::{self, SocketAddr};
 use std::path::Path;
 use std::pin::Pin;
-use std::sync::Arc;
+use std::sync::{Arc, Mutex};
 use std::task::{Context, Poll};
 
 /// Credentials of the peer process.
@@ -76,8 +77,8 @@ pub struct UCred {
 pub struct UnixStream {
     /// The underlying standard library stream.
     pub(crate) inner: Arc<net::UnixStream>,
-    /// Reactor registration for I/O events.
-    registration: Option<Registration>,
+    /// Reactor registration for I/O events (lazily initialized).
+    registration: Mutex<Option<IoRegistration>>,
 }
 
 // Wrapper to implement Source for net::UnixStream
@@ -94,13 +95,10 @@ impl std::os::unix::io::AsRawFd for UnixStreamSource<'_> {
 impl UnixStream {
     /// Creates a UnixStream from raw parts (internal use).
     #[must_use]
-    pub(crate) fn from_parts(
-        inner: Arc<net::UnixStream>,
-        registration: Option<Registration>,
-    ) -> Self {
+    pub(crate) fn from_parts(inner: Arc<net::UnixStream>) -> Self {
         Self {
             inner,
-            registration,
+            registration: Mutex::new(None), // Lazy registration on first I/O
         }
     }
 
@@ -128,18 +126,9 @@ impl UnixStream {
         let inner = net::UnixStream::connect(path)?;
         inner.set_nonblocking(true)?;
 
-        // Register with reactor if available
-        let registration = Cx::current().and_then(|cx| {
-            cx.register_io(
-                &UnixStreamSource(&inner),
-                Interest::READABLE | Interest::WRITABLE,
-            )
-            .ok()
-        });
-
         Ok(Self {
             inner: Arc::new(inner),
-            registration,
+            registration: Mutex::new(None), // Lazy registration on first I/O
         })
     }
 
@@ -169,18 +158,9 @@ impl UnixStream {
         let inner = net::UnixStream::connect_addr(&addr)?;
         inner.set_nonblocking(true)?;
 
-        // Register with reactor if available
-        let registration = Cx::current().and_then(|cx| {
-            cx.register_io(
-                &UnixStreamSource(&inner),
-                Interest::READABLE | Interest::WRITABLE,
-            )
-            .ok()
-        });
-
         Ok(Self {
             inner: Arc::new(inner),
-            registration,
+            registration: Mutex::new(None), // Lazy registration on first I/O
         })
     }
 
@@ -203,19 +183,14 @@ impl UnixStream {
         s1.set_nonblocking(true)?;
         s2.set_nonblocking(true)?;
 
-        // We can't easily register here because we might not be in an async context (Cx::current() would fail).
-        // The user will have to register them manually or we rely on lazy registration (not implemented yet).
-        // For now, we return them unregistered. This mirrors UnixListener::accept behavior in current implementation phase.
-        // Ideally, we would have `pair_async().await` or similar.
-
         Ok((
             Self {
                 inner: Arc::new(s1),
-                registration: None,
+                registration: Mutex::new(None), // Lazy registration on first I/O
             },
             Self {
                 inner: Arc::new(s2),
-                registration: None,
+                registration: Mutex::new(None), // Lazy registration on first I/O
             },
         ))
     }
@@ -233,7 +208,7 @@ impl UnixStream {
         // Non-blocking is set by caller for streams from accept()
         Self {
             inner: Arc::new(stream),
-            registration: None,
+            registration: Mutex::new(None), // Lazy registration on first I/O
         }
     }
 
@@ -256,6 +231,64 @@ impl UnixStream {
     #[must_use]
     pub fn as_std(&self) -> &net::UnixStream {
         &self.inner
+    }
+
+    /// Registers interest with the I/O driver for read events.
+    fn register_interest_for_read(&self, cx: &Context<'_>) -> io::Result<()> {
+        self.register_interest(cx, Interest::READABLE)
+    }
+
+    /// Registers interest with the I/O driver for write events.
+    fn register_interest_for_write(&self, cx: &Context<'_>) -> io::Result<()> {
+        self.register_interest(cx, Interest::WRITABLE)
+    }
+
+    /// Registers interest with the I/O driver.
+    fn register_interest(&self, cx: &Context<'_>, interest: Interest) -> io::Result<()> {
+        let mut registration = self.registration.lock().expect("lock poisoned");
+
+        if let Some(existing) = registration.as_mut() {
+            if existing.update_waker(cx.waker().clone()) {
+                if existing.interest().contains(interest) {
+                    return Ok(());
+                }
+
+                let merged = existing.interest() | interest;
+                if existing.set_interest(merged).is_ok() {
+                    return Ok(());
+                }
+            }
+
+            *registration = None;
+        }
+
+        let Some(current) = Cx::current() else {
+            drop(registration);
+            cx.waker().wake_by_ref();
+            return Ok(());
+        };
+        let Some(driver) = current.io_driver_handle() else {
+            drop(registration);
+            cx.waker().wake_by_ref();
+            return Ok(());
+        };
+
+        match driver.register(&*self.inner, interest, cx.waker().clone()) {
+            Ok(new_reg) => {
+                *registration = Some(new_reg);
+                drop(registration);
+                Ok(())
+            }
+            Err(err) if err.kind() == io::ErrorKind::Unsupported => {
+                drop(registration);
+                cx.waker().wake_by_ref();
+                Ok(())
+            }
+            Err(err) => {
+                drop(registration);
+                Err(err)
+            }
+        }
     }
 
     /// Returns the credentials of the peer process.
@@ -334,47 +367,19 @@ impl UnixStream {
     ) -> io::Result<usize> {
         use std::os::unix::io::AsRawFd;
 
-        // Ensure registered
-        if self.registration.is_none() {
-            // In a real implementation we would lazily register here using Cx::current().
-            // But self is immutable.
-            // For now we assume registered or fail? Or busy loop?
-            // Falling back to busy loop if not registered is a safe compatibility path.
-        }
-
-        loop {
-            let result = send_with_ancillary_impl(self.inner.as_raw_fd(), buf, ancillary);
-            match result {
-                Ok(n) => return Ok(n),
+        std::future::poll_fn(|cx| {
+            match send_with_ancillary_impl(self.inner.as_raw_fd(), buf, ancillary) {
+                Ok(n) => Poll::Ready(Ok(n)),
                 Err(ref e) if e.kind() == io::ErrorKind::WouldBlock => {
-                    if let Some(reg) = &self.registration {
-                        // TODO: We need access to the current task's waker.
-                        // Since this is an async method, we don't have &mut Context directly.
-                        // We need to use poll_fn.
-                        // This method should be rewritten to use poll_fn like accept().
-                        // For now, retaining busy loop if not registered, but this is suboptimal.
-
-                        // BUT wait, we can't update waker without &mut Context.
-                        // We need to rewrite this method to use poll_fn.
-
-                        // Refactoring to use poll_fn below...
-                        return std::future::poll_fn(|cx| {
-                            match send_with_ancillary_impl(self.inner.as_raw_fd(), buf, ancillary) {
-                                Ok(n) => Poll::Ready(Ok(n)),
-                                Err(ref e) if e.kind() == io::ErrorKind::WouldBlock => {
-                                    reg.update_waker(cx.waker().clone());
-                                    Poll::Pending
-                                }
-                                Err(e) => Poll::Ready(Err(e)),
-                            }
-                        })
-                        .await;
+                    if let Err(e) = self.register_interest_for_write(cx) {
+                        return Poll::Ready(Err(e));
                     }
-                    crate::runtime::yield_now().await;
+                    Poll::Pending
                 }
-                Err(e) => return Err(e),
+                Err(e) => Poll::Ready(Err(e)),
             }
-        }
+        })
+        .await
     }
 
     /// Receives data along with ancillary data (control messages).
@@ -431,29 +436,19 @@ impl UnixStream {
     ) -> io::Result<usize> {
         use std::os::unix::io::AsRawFd;
 
-        loop {
-            let result = recv_with_ancillary_impl(self.inner.as_raw_fd(), buf, ancillary);
-            match result {
-                Ok(n) => return Ok(n),
+        std::future::poll_fn(|cx| {
+            match recv_with_ancillary_impl(self.inner.as_raw_fd(), buf, ancillary) {
+                Ok(n) => Poll::Ready(Ok(n)),
                 Err(ref e) if e.kind() == io::ErrorKind::WouldBlock => {
-                    if let Some(reg) = &self.registration {
-                        return std::future::poll_fn(|cx| {
-                            match recv_with_ancillary_impl(self.inner.as_raw_fd(), buf, ancillary) {
-                                Ok(n) => Poll::Ready(Ok(n)),
-                                Err(ref e) if e.kind() == io::ErrorKind::WouldBlock => {
-                                    reg.update_waker(cx.waker().clone());
-                                    Poll::Pending
-                                }
-                                Err(e) => Poll::Ready(Err(e)),
-                            }
-                        })
-                        .await;
+                    if let Err(e) = self.register_interest_for_read(cx) {
+                        return Poll::Ready(Err(e));
                     }
-                    crate::runtime::yield_now().await;
+                    Poll::Pending
                 }
-                Err(e) => return Err(e),
+                Err(e) => Poll::Ready(Err(e)),
             }
-        }
+        })
+        .await
     }
 
     /// Splits the stream into borrowed read and write halves.
@@ -511,11 +506,9 @@ impl AsyncRead for UnixStream {
                 Poll::Ready(Ok(()))
             }
             Err(ref e) if e.kind() == io::ErrorKind::WouldBlock => {
-                // Fallback for unregistered streams (e.g. from pair())
-                self.registration.as_ref().map_or_else(
-                    || cx.waker().wake_by_ref(),
-                    |reg| reg.update_waker(cx.waker().clone()),
-                );
+                if let Err(e) = self.register_interest_for_read(cx) {
+                    return Poll::Ready(Err(e));
+                }
                 Poll::Pending
             }
             Err(e) => Poll::Ready(Err(e)),
@@ -533,10 +526,9 @@ impl AsyncReadVectored for UnixStream {
         match (&*inner).read_vectored(bufs) {
             Ok(n) => Poll::Ready(Ok(n)),
             Err(ref e) if e.kind() == io::ErrorKind::WouldBlock => {
-                self.registration.as_ref().map_or_else(
-                    || cx.waker().wake_by_ref(),
-                    |reg| reg.update_waker(cx.waker().clone()),
-                );
+                if let Err(e) = self.register_interest_for_read(cx) {
+                    return Poll::Ready(Err(e));
+                }
                 Poll::Pending
             }
             Err(e) => Poll::Ready(Err(e)),
@@ -554,10 +546,9 @@ impl AsyncWrite for UnixStream {
         match (&*inner).write(buf) {
             Ok(n) => Poll::Ready(Ok(n)),
             Err(ref e) if e.kind() == io::ErrorKind::WouldBlock => {
-                self.registration.as_ref().map_or_else(
-                    || cx.waker().wake_by_ref(),
-                    |reg| reg.update_waker(cx.waker().clone()),
-                );
+                if let Err(e) = self.register_interest_for_write(cx) {
+                    return Poll::Ready(Err(e));
+                }
                 Poll::Pending
             }
             Err(e) => Poll::Ready(Err(e)),
@@ -573,10 +564,9 @@ impl AsyncWrite for UnixStream {
         match (&*inner).write_vectored(bufs) {
             Ok(n) => Poll::Ready(Ok(n)),
             Err(ref e) if e.kind() == io::ErrorKind::WouldBlock => {
-                self.registration.as_ref().map_or_else(
-                    || cx.waker().wake_by_ref(),
-                    |reg| reg.update_waker(cx.waker().clone()),
-                );
+                if let Err(e) = self.register_interest_for_write(cx) {
+                    return Poll::Ready(Err(e));
+                }
                 Poll::Pending
             }
             Err(e) => Poll::Ready(Err(e)),
@@ -592,10 +582,9 @@ impl AsyncWrite for UnixStream {
         match (&*inner).flush() {
             Ok(()) => Poll::Ready(Ok(())),
             Err(ref e) if e.kind() == io::ErrorKind::WouldBlock => {
-                self.registration.as_ref().map_or_else(
-                    || cx.waker().wake_by_ref(),
-                    |reg| reg.update_waker(cx.waker().clone()),
-                );
+                if let Err(e) = self.register_interest_for_write(cx) {
+                    return Poll::Ready(Err(e));
+                }
                 Poll::Pending
             }
             Err(e) => Poll::Ready(Err(e)),

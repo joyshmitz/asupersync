@@ -53,7 +53,10 @@ mod wheel;
 
 pub use budget_ext::{budget_sleep, budget_timeout, BudgetTimeExt};
 pub use deadline::{with_deadline, with_timeout};
-pub use driver::{TimeSource, TimerDriver, TimerHandle, VirtualClock, WallClock};
+pub use driver::{
+    TimeSource, TimerDriver, TimerDriverApi, TimerDriverHandle, TimerHandle, VirtualClock,
+    WallClock,
+};
 pub use elapsed::Elapsed;
 pub use interval::{interval, interval_at, Interval, MissedTickBehavior};
 pub use sleep::{sleep, sleep_until, Sleep};

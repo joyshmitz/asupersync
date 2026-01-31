@@ -29,13 +29,15 @@
 
 use crate::cx::Cx;
 use crate::net::unix::stream::UnixStream;
-use crate::runtime::reactor::{Interest, Registration};
+use crate::runtime::io_driver::IoRegistration;
+use crate::runtime::reactor::Interest;
 use crate::stream::Stream;
 use std::future::poll_fn;
 use std::io;
 use std::os::unix::net::{self, SocketAddr};
 use std::path::{Path, PathBuf};
 use std::pin::Pin;
+use std::sync::Mutex;
 use std::task::{Context, Poll};
 
 /// A Unix domain socket listener.
@@ -60,20 +62,9 @@ pub struct UnixListener {
     /// Path to the socket file (for cleanup on drop).
     /// None for abstract namespace sockets or from_std().
     path: Option<PathBuf>,
-    /// Reactor registration for I/O events.
-    registration: Option<Registration>,
+    /// Reactor registration for I/O events (lazily initialized).
+    registration: Mutex<Option<IoRegistration>>,
 }
-
-// Wrapper to implement Source for net::UnixListener
-struct UnixListenerSource<'a>(&'a net::UnixListener);
-
-impl std::os::unix::io::AsRawFd for UnixListenerSource<'_> {
-    fn as_raw_fd(&self) -> std::os::unix::io::RawFd {
-        self.0.as_raw_fd()
-    }
-}
-
-// Source is auto-implemented via blanket impl since we now implement AsRawFd
 
 impl UnixListener {
     /// Binds to a filesystem path.
@@ -106,16 +97,10 @@ impl UnixListener {
         let inner = net::UnixListener::bind(path)?;
         inner.set_nonblocking(true)?;
 
-        // Register with reactor if available
-        let registration = Cx::current().and_then(|cx| {
-            cx.register_io(&UnixListenerSource(&inner), Interest::READABLE)
-                .ok()
-        });
-
         Ok(Self {
             inner,
             path: Some(path.to_path_buf()),
-            registration,
+            registration: Mutex::new(None), // Lazy registration on first poll
         })
     }
 
@@ -145,16 +130,10 @@ impl UnixListener {
         let inner = net::UnixListener::bind_addr(&addr)?;
         inner.set_nonblocking(true)?;
 
-        // Register with reactor if available
-        let registration = Cx::current().and_then(|cx| {
-            cx.register_io(&UnixListenerSource(&inner), Interest::READABLE)
-                .ok()
-        });
-
         Ok(Self {
             inner,
-            path: None, // No filesystem path for abstract sockets
-            registration,
+            path: None,                     // No filesystem path for abstract sockets
+            registration: Mutex::new(None), // Lazy registration on first poll
         })
     }
 
@@ -180,73 +159,65 @@ impl UnixListener {
     ///     println!("New connection from {:?}", addr);
     /// }
     /// ```
-    #[allow(clippy::future_not_send)]
     pub async fn accept(&self) -> io::Result<(UnixStream, SocketAddr)> {
-        if self.registration.is_none() {
-            loop {
-                match self.inner.accept() {
-                    Ok((stream, addr)) => {
-                        stream.set_nonblocking(true)?;
-                        return Ok((UnixStream::from_std(stream), addr));
-                    }
-                    Err(ref e) if e.kind() == io::ErrorKind::WouldBlock => {
-                        crate::runtime::yield_now().await;
-                    }
-                    Err(e) => return Err(e),
-                }
+        poll_fn(|cx| self.poll_accept(cx)).await
+    }
+
+    /// Polls for an incoming connection using reactor wakeups.
+    pub fn poll_accept(&self, cx: &mut Context<'_>) -> Poll<io::Result<(UnixStream, SocketAddr)>> {
+        match self.inner.accept() {
+            Ok((stream, addr)) => {
+                stream.set_nonblocking(true)?;
+                Poll::Ready(Ok((UnixStream::from_std(stream), addr)))
             }
+            Err(ref e) if e.kind() == io::ErrorKind::WouldBlock => {
+                if let Err(err) = self.register_interest(cx) {
+                    return Poll::Ready(Err(err));
+                }
+                Poll::Pending
+            }
+            Err(e) => Poll::Ready(Err(e)),
+        }
+    }
+
+    /// Registers interest with the I/O driver for READABLE events.
+    fn register_interest(&self, cx: &Context<'_>) -> io::Result<()> {
+        let mut registration = self.registration.lock().expect("lock poisoned");
+
+        if let Some(existing) = registration.as_mut() {
+            if existing.update_waker(cx.waker().clone()) {
+                return Ok(());
+            }
+            *registration = None;
         }
 
-        poll_fn(|cx| {
-            match self.inner.accept() {
-                Ok((stream, addr)) => {
-                    stream.set_nonblocking(true)?;
-                    // Note: We don't register the stream here. It will be registered
-                    // when UnixStream::connect or from_std is used, or explicitly by user.
-                    // But wait, UnixStream::from_std doesn't register!
-                    // We should probably register it here or make UnixStream register itself lazily/eagerly.
-                    // For now, let's assume UnixStream handles its own registration or we do it here.
-                    // Since UnixStream doesn't have an async constructor for from_std, we return it unregistered
-                    // but it will be registered on first I/O? No, async methods on UnixStream expect registration.
+        let Some(current) = Cx::current() else {
+            drop(registration);
+            cx.waker().wake_by_ref();
+            return Ok(());
+        };
+        let Some(driver) = current.io_driver_handle() else {
+            drop(registration);
+            cx.waker().wake_by_ref();
+            return Ok(());
+        };
 
-                    // Actually, UnixStream::from_std returns a wrapper. That wrapper should probably facilitate registration.
-                    // But we can't register it here easily without moving it into an async block or similar.
-                    // However, UnixStream::from_std is synchronous.
-
-                    // Let's rely on UnixStream::from_std returning a valid stream,
-                    // and the user will likely use it in an async context where they might register it?
-                    // No, `UnixStream` wraps `inner`. It should handle registration.
-
-                    // Let's create an unregistered UnixStream and let the user (or read/write calls) handle it?
-                    // Ideally `accept` should return a registered stream.
-
-                    // Implementation note: we return unregistered stream here because we are inside poll_fn which is sync.
-                    // The caller of accept might want to register it.
-                    // Or we can register it using `Cx::current()` inside `poll_fn`? Yes we can!
-                    // Cx::current() is available in thread-local storage if we are in a task.
-
-                    // BUT `poll_fn` gives us `&mut Context`. It doesn't give us `Cx`.
-                    // We can try `Cx::current()` if we assume we are in a runtime task.
-
-                    // Actually, the `Cx` in `poll_fn` is `std::task::Context`.
-                    // We need `crate::cx::Cx`.
-
-                    // Let's just return unregistered stream for now and let `UnixStream` operations handle lazy registration or assume explicit registration?
-                    // `UnixStream` in Phase 2 should probably hold `Option<Registration>`.
-
-                    Poll::Ready(Ok((UnixStream::from_std(stream), addr)))
-                }
-                Err(ref e) if e.kind() == io::ErrorKind::WouldBlock => {
-                    // Safe: we only reach here when registration is present.
-                    if let Some(reg) = &self.registration {
-                        reg.update_waker(cx.waker().clone());
-                    }
-                    Poll::Pending
-                }
-                Err(e) => Poll::Ready(Err(e)),
+        match driver.register(&self.inner, Interest::READABLE, cx.waker().clone()) {
+            Ok(new_reg) => {
+                *registration = Some(new_reg);
+                drop(registration);
+                Ok(())
             }
-        })
-        .await
+            Err(err) if err.kind() == io::ErrorKind::Unsupported => {
+                drop(registration);
+                cx.waker().wake_by_ref();
+                Ok(())
+            }
+            Err(err) => {
+                drop(registration);
+                Err(err)
+            }
+        }
     }
 
     /// Returns the local socket address.
@@ -284,8 +255,8 @@ impl UnixListener {
 
         Ok(Self {
             inner: listener,
-            path: None,         // Don't clean up sockets we didn't create
-            registration: None, // No reactor registration for externally created listeners
+            path: None,                     // Don't clean up sockets we didn't create
+            registration: Mutex::new(None), // Lazy registration on first poll
         })
     }
 

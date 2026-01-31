@@ -4,12 +4,19 @@
 //! a token bucket algorithm. Requests are only allowed when tokens are available.
 
 use super::{Layer, Service};
+use crate::time::{TimeSource, WallClock};
 use crate::types::Time;
 use std::future::Future;
 use std::pin::Pin;
 use std::sync::Mutex;
+use std::sync::OnceLock;
 use std::task::{Context, Poll};
 use std::time::Duration;
+
+fn wall_clock_now() -> Time {
+    static CLOCK: OnceLock<WallClock> = OnceLock::new();
+    CLOCK.get_or_init(WallClock::new).now()
+}
 
 /// A layer that rate-limits requests using a token bucket.
 ///
@@ -34,6 +41,7 @@ pub struct RateLimitLayer {
     rate: u64,
     /// Duration of each period.
     period: Duration,
+    time_getter: fn() -> Time,
 }
 
 impl RateLimitLayer {
@@ -45,7 +53,21 @@ impl RateLimitLayer {
     /// * `period` - The time period for the rate limit
     #[must_use]
     pub const fn new(rate: u64, period: Duration) -> Self {
-        Self { rate, period }
+        Self {
+            rate,
+            period,
+            time_getter: wall_clock_now,
+        }
+    }
+
+    /// Creates a new rate limit layer with a custom time source.
+    #[must_use]
+    pub const fn with_time_getter(rate: u64, period: Duration, time_getter: fn() -> Time) -> Self {
+        Self {
+            rate,
+            period,
+            time_getter,
+        }
     }
 
     /// Returns the rate (tokens per period).
@@ -59,13 +81,19 @@ impl RateLimitLayer {
     pub const fn period(&self) -> Duration {
         self.period
     }
+
+    /// Returns the time source used by this layer.
+    #[must_use]
+    pub const fn time_getter(&self) -> fn() -> Time {
+        self.time_getter
+    }
 }
 
 impl<S> Layer<S> for RateLimitLayer {
     type Service = RateLimit<S>;
 
     fn layer(&self, inner: S) -> Self::Service {
-        RateLimit::new(inner, self.rate, self.period)
+        RateLimit::with_time_getter(inner, self.rate, self.period, self.time_getter)
     }
 }
 
@@ -82,6 +110,7 @@ pub struct RateLimit<S> {
     rate: u64,
     /// Period for refilling tokens.
     period: Duration,
+    time_getter: fn() -> Time,
 }
 
 #[derive(Debug)]
@@ -103,6 +132,7 @@ impl<S: Clone> Clone for RateLimit<S> {
             }),
             rate: self.rate,
             period: self.period,
+            time_getter: self.time_getter,
         }
     }
 }
@@ -125,6 +155,27 @@ impl<S> RateLimit<S> {
             }),
             rate,
             period,
+            time_getter: wall_clock_now,
+        }
+    }
+
+    /// Creates a new rate-limited service with a custom time source.
+    #[must_use]
+    pub fn with_time_getter(
+        inner: S,
+        rate: u64,
+        period: Duration,
+        time_getter: fn() -> Time,
+    ) -> Self {
+        Self {
+            inner,
+            state: Mutex::new(RateLimitState {
+                tokens: rate,
+                last_refill: None,
+            }),
+            rate,
+            period,
+            time_getter,
         }
     }
 
@@ -138,6 +189,12 @@ impl<S> RateLimit<S> {
     #[must_use]
     pub const fn period(&self) -> Duration {
         self.period
+    }
+
+    /// Returns the time source used by this rate limiter.
+    #[must_use]
+    pub const fn time_getter(&self) -> fn() -> Time {
+        self.time_getter
     }
 
     /// Returns the current number of available tokens.
@@ -256,14 +313,7 @@ where
     type Future = RateLimitFuture<S::Future>;
 
     fn poll_ready(&mut self, cx: &mut Context<'_>) -> Poll<Result<(), Self::Error>> {
-        // Use wall clock time for refill calculation
-        // Note: In production, this should integrate with the runtime's time source
-        let now = Time::from_nanos(
-            std::time::SystemTime::now()
-                .duration_since(std::time::UNIX_EPOCH)
-                .unwrap_or(Duration::ZERO)
-                .as_nanos() as u64,
-        );
+        let now = (self.time_getter)();
         self.refill(now);
 
         if self.try_acquire() {
@@ -322,6 +372,7 @@ impl<F: std::fmt::Debug> std::fmt::Debug for RateLimitFuture<F> {
 mod tests {
     use super::*;
     use std::future::ready;
+    use std::sync::atomic::{AtomicU64, Ordering};
     use std::sync::Arc;
     use std::task::{Wake, Waker};
 
@@ -355,6 +406,12 @@ mod tests {
         fn call(&mut self, req: i32) -> Self::Future {
             ready(Ok(req))
         }
+    }
+
+    static TEST_NOW: AtomicU64 = AtomicU64::new(0);
+
+    fn test_time() -> Time {
+        Time::from_nanos(TEST_NOW.load(Ordering::SeqCst))
     }
 
     #[test]
@@ -465,6 +522,29 @@ mod tests {
         let available = svc.available_tokens();
         crate::assert_with_log!(available == 5, "available", 5, available);
         crate::test_complete!("refill_caps_at_rate");
+    }
+
+    #[test]
+    fn poll_ready_uses_time_getter() {
+        init_test("poll_ready_uses_time_getter");
+        let mut svc =
+            RateLimit::with_time_getter(EchoService, 5, Duration::from_secs(1), test_time);
+        {
+            let mut state = svc.state.lock().unwrap();
+            state.tokens = 0;
+            state.last_refill = Some(Time::from_secs(0));
+        }
+        TEST_NOW.store(1_000_000_000, Ordering::SeqCst);
+        let waker = noop_waker();
+        let mut cx = Context::from_waker(&waker);
+
+        let result = svc.poll_ready(&mut cx);
+        let ok = matches!(result, Poll::Ready(Ok(())));
+        crate::assert_with_log!(ok, "ready ok", true, ok);
+
+        let available = svc.available_tokens();
+        crate::assert_with_log!(available == 4, "available", 4, available);
+        crate::test_complete!("poll_ready_uses_time_getter");
     }
 
     #[test]

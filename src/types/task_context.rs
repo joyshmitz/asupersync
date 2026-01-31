@@ -1,6 +1,7 @@
 //! Internal state shared between TaskRecord and Cx.
 
 use crate::types::{Budget, CancelReason, RegionId, TaskId};
+use std::task::Waker;
 use std::time::Instant;
 
 /// State for tracking checkpoint progress.
@@ -74,6 +75,8 @@ pub struct CxInner {
     pub cancel_requested: bool,
     /// The reason for cancellation, if requested.
     pub cancel_reason: Option<CancelReason>,
+    /// Waker used to schedule cancellation promptly.
+    pub cancel_waker: Option<Waker>,
     /// Current mask depth.
     pub mask_depth: u32,
     /// Progress checkpoint state.
@@ -92,6 +95,7 @@ impl CxInner {
             budget_baseline: budget,
             cancel_requested: false,
             cancel_reason: None,
+            cancel_waker: None,
             mask_depth: 0,
             checkpoint_state: CheckpointState::new(),
         }

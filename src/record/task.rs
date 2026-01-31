@@ -412,6 +412,15 @@ impl TaskRecord {
                 }
             }
         }
+        if let Some(inner) = &self.cx_inner {
+            if let Ok(guard) = inner.read() {
+                if guard.cancel_requested {
+                    if let Some(waker) = guard.cancel_waker.clone() {
+                        waker.wake_by_ref();
+                    }
+                }
+            }
+        }
         result
     }
 

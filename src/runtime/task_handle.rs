@@ -173,11 +173,18 @@ impl<T> TaskHandle<T> {
     /// more specific cancellation attribution.
     pub fn abort_with_reason(&self, reason: CancelReason) {
         if let Some(inner) = self.inner.upgrade() {
-            if let Ok(mut lock) = inner.write() {
-                lock.cancel_requested = true;
-                if lock.cancel_reason.is_none() {
-                    lock.cancel_reason = Some(reason);
-                }
+            let cancel_waker = inner.write().map_or_else(
+                |_| None,
+                |mut lock| {
+                    lock.cancel_requested = true;
+                    if lock.cancel_reason.is_none() {
+                        lock.cancel_reason = Some(reason);
+                    }
+                    lock.cancel_waker.clone()
+                },
+            );
+            if let Some(waker) = cancel_waker {
+                waker.wake_by_ref();
             }
         }
     }

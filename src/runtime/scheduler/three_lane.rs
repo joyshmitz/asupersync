@@ -7,12 +7,14 @@ use crate::runtime::scheduler::global_injector::GlobalInjector;
 use crate::runtime::scheduler::priority::Scheduler as PriorityScheduler;
 use crate::runtime::scheduler::worker::Parker;
 use crate::runtime::RuntimeState;
+use crate::time::TimerDriverHandle;
 use crate::tracing_compat::trace;
-use crate::types::{Outcome, TaskId, Time};
+use crate::types::{CxInner, Outcome, TaskId, Time};
 use crate::util::DetRng;
 use std::sync::atomic::{AtomicBool, Ordering};
-use std::sync::{Arc, Mutex};
+use std::sync::{Arc, Mutex, RwLock, Weak};
 use std::task::{Context, Poll, Wake, Waker};
+use std::time::Duration;
 
 /// Identifier for a scheduler worker.
 pub type WorkerId = usize;
@@ -32,6 +34,8 @@ pub struct ThreeLaneScheduler {
     shutdown: Arc<AtomicBool>,
     /// Parkers for waking idle workers.
     parkers: Vec<Parker>,
+    /// Timer driver for processing timer wakeups.
+    timer_driver: Option<TimerDriverHandle>,
 }
 
 impl ThreeLaneScheduler {
@@ -43,6 +47,12 @@ impl ThreeLaneScheduler {
         let mut parkers = Vec::with_capacity(worker_count);
         let mut local_schedulers: Vec<Arc<Mutex<PriorityScheduler>>> =
             Vec::with_capacity(worker_count);
+
+        // Get timer driver from runtime state
+        let timer_driver = state
+            .lock()
+            .expect("runtime state lock poisoned")
+            .timer_driver_handle();
 
         // Create local schedulers first so we can share references for stealing
         for _ in 0..worker_count {
@@ -71,6 +81,7 @@ impl ThreeLaneScheduler {
                 parker,
                 rng: DetRng::new(id as u64),
                 shutdown: Arc::clone(&shutdown),
+                timer_driver: timer_driver.clone(),
             });
         }
 
@@ -79,6 +90,7 @@ impl ThreeLaneScheduler {
             workers,
             shutdown,
             parkers,
+            timer_driver,
         }
     }
 
@@ -165,22 +177,30 @@ pub struct ThreeLaneWorker {
     pub rng: DetRng,
     /// Shutdown signal.
     pub shutdown: Arc<AtomicBool>,
+    /// Timer driver for processing timer wakeups (optional).
+    pub timer_driver: Option<TimerDriverHandle>,
 }
 
 impl ThreeLaneWorker {
     /// Runs the worker scheduling loop.
     ///
     /// The loop maintains strict priority ordering:
-    /// 1. Cancel work (global then local)
-    /// 2. Timed work (global then local)
-    /// 3. Ready work (global then local)
-    /// 4. Steal from other workers
-    /// 5. Park
+    /// 1. Process expired timers (wakes tasks via their wakers)
+    /// 2. Cancel work (global then local)
+    /// 3. Timed work (global then local)
+    /// 4. Ready work (global then local)
+    /// 5. Steal from other workers
+    /// 6. Park (with timeout based on next timer deadline)
     pub fn run_loop(&mut self) {
         const SPIN_LIMIT: u32 = 64;
         const YIELD_LIMIT: u32 = 16;
 
         while !self.shutdown.load(Ordering::Relaxed) {
+            // PHASE 0: Process expired timers (fires wakers, which may inject tasks)
+            if let Some(timer) = &self.timer_driver {
+                let _ = timer.process_timers();
+            }
+
             // PHASE 1: Cancel work (highest priority, never starve)
             if let Some(task) = self.try_cancel_work() {
                 self.execute(task);
@@ -213,11 +233,6 @@ impl ThreeLaneWorker {
                 if !self.global.is_empty() {
                     break;
                 }
-                // Note: Checking local lock is expensive, so we skip it in spin loop
-                // relying on global injector or wakeups to break the loop via 'break'
-                // if we were to check properly.
-                // But actually, we should check if we can make progress.
-                // For simplicity matching worker.rs:
 
                 if backoff < SPIN_LIMIT {
                     std::hint::spin_loop();
@@ -226,7 +241,23 @@ impl ThreeLaneWorker {
                     std::thread::yield_now();
                     backoff += 1;
                 } else {
-                    self.parker.park();
+                    // Park with timeout based on next timer deadline
+                    if let Some(timer) = &self.timer_driver {
+                        if let Some(next_deadline) = timer.next_deadline() {
+                            let now = timer.now();
+                            if next_deadline > now {
+                                let nanos = next_deadline.duration_since(now);
+                                self.parker.park_timeout(Duration::from_nanos(nanos));
+                            }
+                            // If deadline is due or passed, don't park - loop back to process timers
+                        } else {
+                            // No pending timers, park indefinitely
+                            self.parker.park();
+                        }
+                    } else {
+                        // No timer driver, park indefinitely
+                        self.parker.park();
+                    }
                     break;
                 }
             }
@@ -239,6 +270,11 @@ impl ThreeLaneWorker {
     pub(crate) fn run_once(&mut self) -> bool {
         if self.shutdown.load(Ordering::Relaxed) {
             return false;
+        }
+
+        // Process expired timers first
+        if let Some(timer) = &self.timer_driver {
+            let _ = timer.process_timers();
         }
 
         if let Some(task) = self.try_cancel_work() {
@@ -278,12 +314,24 @@ impl ThreeLaneWorker {
     }
 
     /// Tries to get timed work from global or local queues.
+    ///
+    /// Only returns tasks whose deadline has passed. Tasks with future
+    /// deadlines are re-injected to be checked later.
     pub(crate) fn try_timed_work(&mut self) -> Option<TaskId> {
-        // Global timed
+        // Get current time from timer driver or use Time::ZERO (always ready)
+        let now = self
+            .timer_driver
+            .as_ref()
+            .map_or(Time::ZERO, TimerDriverHandle::now);
+
+        // Global timed - check deadline before executing
         if let Some(tt) = self.global.pop_timed() {
-            // TODO: Check if deadline is due before executing
-            // For now, we assume all injected timed tasks are ready to run
-            return Some(tt.task);
+            if tt.deadline <= now {
+                return Some(tt.task);
+            }
+            // Deadline not yet due - re-inject the task
+            self.global.inject_timed(tt.task, tt.deadline);
+            return None;
         }
 
         // Local timed
@@ -364,7 +412,7 @@ impl ThreeLaneWorker {
     pub(crate) fn execute(&self, task_id: TaskId) {
         trace!(task_id = ?task_id, worker_id = self.id, "executing task");
 
-        let (mut stored, task_cx, wake_state, priority) = {
+        let (mut stored, task_cx, wake_state, priority, cx_inner) = {
             let mut state = self.state.lock().expect("runtime state lock poisoned");
             let Some(stored) = state.remove_stored_future(task_id) else {
                 return;
@@ -380,18 +428,32 @@ impl ThreeLaneWorker {
                 .and_then(|inner| inner.read().ok().map(|cx| cx.budget.priority))
                 .unwrap_or(0);
             let task_cx = record.cx.clone();
+            let cx_inner = record.cx_inner.clone();
             let wake_state = Arc::clone(&record.wake_state);
             drop(state);
-            (stored, task_cx, wake_state, priority)
+            (stored, task_cx, wake_state, priority, cx_inner)
         };
 
         let waker = Waker::from(Arc::new(ThreeLaneWaker {
             task_id,
             priority,
-            wake_state,
+            wake_state: Arc::clone(&wake_state),
             global: Arc::clone(&self.global),
             parker: self.parker.clone(),
         }));
+        if let Some(inner) = cx_inner.as_ref() {
+            let cancel_waker = Waker::from(Arc::new(CancelLaneWaker {
+                task_id,
+                default_priority: priority,
+                wake_state: Arc::clone(&wake_state),
+                global: Arc::clone(&self.global),
+                parker: self.parker.clone(),
+                cx_inner: Arc::downgrade(inner),
+            }));
+            if let Ok(mut guard) = inner.write() {
+                guard.cancel_waker = Some(cancel_waker);
+            }
+        }
         let mut cx = Context::from_waker(&waker);
         let _cx_guard = crate::cx::Cx::set_current(task_cx);
 
@@ -454,10 +516,58 @@ impl Wake for ThreeLaneWaker {
     }
 }
 
+struct CancelLaneWaker {
+    task_id: TaskId,
+    default_priority: u8,
+    wake_state: Arc<crate::record::task::TaskWakeState>,
+    global: Arc<GlobalInjector>,
+    parker: Parker,
+    cx_inner: Weak<RwLock<CxInner>>,
+}
+
+impl CancelLaneWaker {
+    fn schedule(&self) {
+        let Some(inner) = self.cx_inner.upgrade() else {
+            return;
+        };
+        let (cancel_requested, priority) = match inner.read() {
+            Ok(guard) => {
+                let priority = guard
+                    .cancel_reason
+                    .as_ref()
+                    .map_or(self.default_priority, |reason| {
+                        reason.cleanup_budget().priority
+                    });
+                (guard.cancel_requested, priority)
+            }
+            Err(_) => return,
+        };
+
+        if !cancel_requested {
+            return;
+        }
+
+        if self.wake_state.notify() {
+            self.global.inject_cancel(self.task_id, priority);
+            self.parker.unpark();
+        }
+    }
+}
+
+impl Wake for CancelLaneWaker {
+    fn wake(self: Arc<Self>) {
+        self.schedule();
+    }
+
+    fn wake_by_ref(self: &Arc<Self>) {
+        self.schedule();
+    }
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
-    use crate::types::Budget;
+    use crate::types::{Budget, CancelReason, RegionId};
     use std::time::Duration;
 
     #[test]
@@ -599,5 +709,204 @@ mod tests {
 
         let scheduled_task = worker.global.pop_ready().map(|pt| pt.task);
         assert_eq!(scheduled_task, Some(waiter_id));
+    }
+
+    #[test]
+    fn test_try_timed_work_checks_deadline() {
+        use crate::time::{TimerDriverHandle, VirtualClock};
+
+        // Create state with virtual clock timer driver
+        let clock = Arc::new(VirtualClock::new());
+        let mut state = RuntimeState::new();
+        state.set_timer_driver(TimerDriverHandle::with_virtual_clock(clock.clone()));
+        let state = Arc::new(Mutex::new(state));
+
+        let mut scheduler = ThreeLaneScheduler::new(1, &state);
+
+        // Inject a timed task with deadline at t=1000ns
+        let task_id = TaskId::new_for_test(1, 1);
+        let deadline = Time::from_nanos(1000);
+        scheduler.inject_timed(task_id, deadline);
+
+        let mut workers = scheduler.take_workers().into_iter();
+        let mut worker = workers.next().unwrap();
+
+        // At t=0, the task should NOT be ready (deadline not yet due)
+        // try_timed_work should re-inject the task
+        let result = worker.try_timed_work();
+        assert!(result.is_none(), "task should not be ready before deadline");
+
+        // Advance clock past deadline
+        clock.advance(2000); // t=2000ns, past deadline of 1000ns
+
+        // Now the task should be ready
+        let result = worker.try_timed_work();
+        assert_eq!(result, Some(task_id), "task should be ready after deadline");
+    }
+
+    #[test]
+    fn test_worker_has_timer_driver_from_state() {
+        use crate::time::{TimerDriverHandle, VirtualClock};
+
+        // Create state with timer driver
+        let clock = Arc::new(VirtualClock::new());
+        let mut state = RuntimeState::new();
+        state.set_timer_driver(TimerDriverHandle::with_virtual_clock(clock.clone()));
+        let state = Arc::new(Mutex::new(state));
+
+        let mut scheduler = ThreeLaneScheduler::new(1, &state);
+        let workers = scheduler.take_workers();
+        let worker = &workers[0];
+
+        // Worker should have timer driver
+        assert!(
+            worker.timer_driver.is_some(),
+            "worker should have timer driver from state"
+        );
+
+        // Timer driver should use the same clock
+        let timer = worker.timer_driver.as_ref().unwrap();
+        assert_eq!(timer.now(), Time::ZERO, "timer should start at zero");
+
+        clock.advance(1000);
+        assert_eq!(
+            timer.now(),
+            Time::from_nanos(1000),
+            "timer should reflect clock advance"
+        );
+    }
+
+    #[test]
+    fn test_scheduler_timer_driver_propagates_to_workers() {
+        // State without timer driver
+        let state = Arc::new(Mutex::new(RuntimeState::new()));
+        let mut scheduler = ThreeLaneScheduler::new(2, &state);
+
+        // Workers should not have timer driver
+        let workers = scheduler.take_workers();
+        assert!(workers[0].timer_driver.is_none());
+        assert!(workers[1].timer_driver.is_none());
+
+        // Scheduler should not have timer driver
+        assert!(scheduler.timer_driver.is_none());
+    }
+
+    #[test]
+    fn test_run_once_processes_timers() {
+        use crate::time::{TimerDriverHandle, VirtualClock};
+        use std::sync::atomic::AtomicBool;
+        use std::task::{Wake, Waker};
+
+        // Waker that sets a flag when woken
+        struct TestWaker(AtomicBool);
+        impl Wake for TestWaker {
+            fn wake(self: Arc<Self>) {
+                self.0.store(true, Ordering::SeqCst);
+            }
+        }
+
+        // Create state with virtual clock timer driver
+        let clock = Arc::new(VirtualClock::new());
+        let mut state = RuntimeState::new();
+        state.set_timer_driver(TimerDriverHandle::with_virtual_clock(clock.clone()));
+        let state = Arc::new(Mutex::new(state));
+
+        let mut scheduler = ThreeLaneScheduler::new(1, &state);
+
+        // Get timer driver to register a timer
+        let timer_driver = scheduler.timer_driver.as_ref().unwrap().clone();
+
+        // Register a timer that expires at t=500ns
+        let waker_flag = Arc::new(TestWaker(AtomicBool::new(false)));
+        let waker = Waker::from(waker_flag.clone());
+        let _handle = timer_driver.register(Time::from_nanos(500), waker);
+
+        let mut workers = scheduler.take_workers().into_iter();
+        let mut worker = workers.next().unwrap();
+
+        // Timer should not be fired at t=0
+        assert!(!waker_flag.0.load(Ordering::SeqCst));
+
+        // run_once should process timers but not fire (deadline not reached)
+        worker.run_once();
+        assert!(
+            !waker_flag.0.load(Ordering::SeqCst),
+            "timer should not fire before deadline"
+        );
+
+        // Advance clock past deadline
+        clock.advance(1000);
+
+        // run_once should now fire the timer
+        worker.run_once();
+        assert!(
+            waker_flag.0.load(Ordering::SeqCst),
+            "timer should fire after deadline"
+        );
+    }
+
+    #[test]
+    fn test_timed_work_reinjection() {
+        use crate::time::{TimerDriverHandle, VirtualClock};
+
+        // Create state with virtual clock timer driver
+        let clock = Arc::new(VirtualClock::new());
+        let mut state = RuntimeState::new();
+        state.set_timer_driver(TimerDriverHandle::with_virtual_clock(clock));
+        let state = Arc::new(Mutex::new(state));
+
+        let mut scheduler = ThreeLaneScheduler::new(1, &state);
+
+        // Inject a timed task with deadline at t=1000ns
+        let task_id = TaskId::new_for_test(1, 1);
+        let deadline = Time::from_nanos(1000);
+        scheduler.inject_timed(task_id, deadline);
+
+        let mut workers = scheduler.take_workers().into_iter();
+        let mut worker = workers.next().unwrap();
+
+        // At t=0, task is not ready - should be re-injected
+        let result = worker.try_timed_work();
+        assert!(result.is_none());
+
+        // The task should still be in the global queue (re-injected)
+        let peeked = worker.global.pop_timed();
+        assert!(
+            peeked.is_some(),
+            "task should be re-injected to global queue"
+        );
+        assert_eq!(peeked.unwrap().task, task_id);
+    }
+
+    #[test]
+    fn cancel_waker_injects_cancel_lane() {
+        let task_id = TaskId::new_for_test(1, 1);
+        let cx_inner = Arc::new(RwLock::new(CxInner::new(
+            RegionId::new_for_test(1, 0),
+            task_id,
+            Budget::INFINITE,
+        )));
+        {
+            let mut guard = cx_inner.write().expect("lock poisoned");
+            guard.cancel_requested = true;
+            guard.cancel_reason = Some(CancelReason::timeout());
+        }
+
+        let wake_state = Arc::new(crate::record::task::TaskWakeState::new());
+        let global = Arc::new(GlobalInjector::new());
+        let parker = Parker::new();
+        let waker = Waker::from(Arc::new(CancelLaneWaker {
+            task_id,
+            default_priority: Budget::INFINITE.priority,
+            wake_state,
+            global: Arc::clone(&global),
+            parker,
+            cx_inner: Arc::downgrade(&cx_inner),
+        }));
+
+        waker.wake_by_ref();
+
+        let task = global.pop_cancel().map(|pt| pt.task);
+        assert_eq!(task, Some(task_id));
     }
 }

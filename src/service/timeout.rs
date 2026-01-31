@@ -5,12 +5,18 @@
 //! an [`Elapsed`] error is returned.
 
 use super::{Layer, Service};
-use crate::time::{Elapsed, Sleep};
+use crate::time::{Elapsed, Sleep, TimeSource, WallClock};
 use crate::types::Time;
 use std::future::Future;
 use std::pin::Pin;
+use std::sync::OnceLock;
 use std::task::{Context, Poll};
 use std::time::Duration;
+
+fn wall_clock_now() -> Time {
+    static CLOCK: OnceLock<WallClock> = OnceLock::new();
+    CLOCK.get_or_init(WallClock::new).now()
+}
 
 /// A layer that applies a timeout to requests.
 ///
@@ -27,20 +33,39 @@ use std::time::Duration;
 /// ```
 #[derive(Debug, Clone, Copy)]
 pub struct TimeoutLayer {
-    timeout: Duration,
+    duration: Duration,
+    time_getter: fn() -> Time,
 }
 
 impl TimeoutLayer {
     /// Creates a new timeout layer with the given duration.
     #[must_use]
     pub const fn new(timeout: Duration) -> Self {
-        Self { timeout }
+        Self {
+            duration: timeout,
+            time_getter: wall_clock_now,
+        }
+    }
+
+    /// Creates a new timeout layer with a custom time source.
+    #[must_use]
+    pub const fn with_time_getter(timeout: Duration, time_getter: fn() -> Time) -> Self {
+        Self {
+            duration: timeout,
+            time_getter,
+        }
     }
 
     /// Returns the timeout duration.
     #[must_use]
     pub const fn timeout(&self) -> Duration {
-        self.timeout
+        self.duration
+    }
+
+    /// Returns the time source used by this layer.
+    #[must_use]
+    pub const fn time_getter(&self) -> fn() -> Time {
+        self.time_getter
     }
 }
 
@@ -48,7 +73,7 @@ impl<S> Layer<S> for TimeoutLayer {
     type Service = Timeout<S>;
 
     fn layer(&self, inner: S) -> Self::Service {
-        Timeout::new(inner, self.timeout)
+        Timeout::with_time_getter(inner, self.duration, self.time_getter)
     }
 }
 
@@ -59,20 +84,41 @@ impl<S> Layer<S> for TimeoutLayer {
 #[derive(Debug, Clone)]
 pub struct Timeout<S> {
     inner: S,
-    timeout: Duration,
+    duration: Duration,
+    time_getter: fn() -> Time,
 }
 
 impl<S> Timeout<S> {
     /// Creates a new timeout service.
     #[must_use]
     pub const fn new(inner: S, timeout: Duration) -> Self {
-        Self { inner, timeout }
+        Self {
+            inner,
+            duration: timeout,
+            time_getter: wall_clock_now,
+        }
+    }
+
+    /// Creates a new timeout service with a custom time source.
+    #[must_use]
+    pub const fn with_time_getter(inner: S, timeout: Duration, time_getter: fn() -> Time) -> Self {
+        Self {
+            inner,
+            duration: timeout,
+            time_getter,
+        }
     }
 
     /// Returns the timeout duration.
     #[must_use]
     pub const fn timeout(&self) -> Duration {
-        self.timeout
+        self.duration
+    }
+
+    /// Returns the time source used by this service.
+    #[must_use]
+    pub const fn time_getter(&self) -> fn() -> Time {
+        self.time_getter
     }
 
     /// Returns a reference to the inner service.
@@ -134,10 +180,9 @@ where
     }
 
     fn call(&mut self, req: Request) -> Self::Future {
-        // Use Time::ZERO as the base and add timeout duration
-        // The actual time tracking is handled by poll_with_time
-        let deadline = Time::from_nanos(self.timeout.as_nanos() as u64);
-        TimeoutFuture::new(self.inner.call(req), deadline)
+        let now = (self.time_getter)();
+        let deadline = now.saturating_add_nanos(self.duration.as_nanos() as u64);
+        TimeoutFuture::with_time_getter(self.inner.call(req), deadline, self.time_getter)
     }
 }
 
@@ -157,6 +202,16 @@ impl<F> TimeoutFuture<F> {
         Self {
             inner,
             sleep: Sleep::new(deadline),
+            started: false,
+        }
+    }
+
+    /// Creates a new timeout future with a custom time source.
+    #[must_use]
+    pub fn with_time_getter(inner: F, deadline: Time, time_getter: fn() -> Time) -> Self {
+        Self {
+            inner,
+            sleep: Sleep::with_time_getter(deadline, time_getter),
             started: false,
         }
     }
@@ -227,6 +282,7 @@ where
 mod tests {
     use super::*;
     use std::future::{pending, ready};
+    use std::sync::atomic::{AtomicU64, Ordering};
     use std::sync::Arc;
     use std::task::{Wake, Waker};
 
@@ -287,6 +343,20 @@ mod tests {
         let timeout = Timeout::new(EchoService, Duration::from_secs(10));
         assert_eq!(timeout.timeout(), Duration::from_secs(10));
         let _ = timeout.inner();
+    }
+
+    static TEST_NOW: AtomicU64 = AtomicU64::new(0);
+
+    fn test_time() -> Time {
+        Time::from_nanos(TEST_NOW.load(Ordering::SeqCst))
+    }
+
+    #[test]
+    fn timeout_uses_time_getter_for_deadline() {
+        TEST_NOW.store(1_000, Ordering::SeqCst);
+        let mut svc = Timeout::with_time_getter(EchoService, Duration::from_nanos(500), test_time);
+        let future = svc.call(1);
+        assert_eq!(future.deadline(), Time::from_nanos(1_500));
     }
 
     #[test]

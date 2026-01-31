@@ -2,7 +2,15 @@
 //!
 //! The [`Sleep`] future completes after a deadline has passed.
 //! It works with both wall clock time (production) and virtual time (lab).
+//!
+//! # Timer Driver Integration
+//!
+//! When a timer driver is available via `Cx::current()`, Sleep registers
+//! with the driver's timer wheel for efficient wakeups. Without a driver,
+//! Sleep falls back to spawning an OS thread for timing (less efficient).
 
+use crate::cx::Cx;
+use crate::time::{TimerDriverHandle, TimerHandle};
 use crate::types::Time;
 use std::cell::Cell;
 use std::future::Future;
@@ -16,7 +24,10 @@ static START_TIME: OnceLock<Instant> = OnceLock::new();
 #[derive(Debug)]
 struct SleepState {
     waker: Option<Waker>,
+    /// Whether a background thread has been spawned (fallback path).
     spawned: bool,
+    /// Handle to the registered timer in the timer driver.
+    timer_handle: Option<TimerHandle>,
 }
 
 /// A future that completes after a specified deadline.
@@ -91,6 +102,7 @@ impl Sleep {
             state: Arc::new(Mutex::new(SleepState {
                 waker: None,
                 spawned: false,
+                timer_handle: None,
             })),
         }
     }
@@ -136,6 +148,7 @@ impl Sleep {
             state: Arc::new(Mutex::new(SleepState {
                 waker: None,
                 spawned: false,
+                timer_handle: None,
             })),
         }
     }
@@ -176,19 +189,40 @@ impl Sleep {
     /// Resets this sleep to a new deadline.
     ///
     /// This can be used to reuse a `Sleep` instance without allocating a new one.
+    /// Any registered timer is cancelled and will be re-registered on next poll.
     pub fn reset(&mut self, deadline: Time) {
         self.deadline = deadline;
         self.polled.set(false);
         let mut state = self.state.lock().expect("sleep state lock poisoned");
         state.spawned = false;
+        let handle = state.timer_handle.take();
+        drop(state);
+
+        // Cancel any existing timer - will be re-registered on next poll
+        if let (Some(handle), Some(timer)) =
+            (handle, Cx::current().and_then(|cx| cx.timer_driver()))
+        {
+            let _ = timer.cancel(&handle);
+        }
     }
 
     /// Resets this sleep to complete after the given duration from `now`.
+    ///
+    /// Any registered timer is cancelled and will be re-registered on next poll.
     pub fn reset_after(&mut self, now: Time, duration: Duration) {
         self.deadline = now.saturating_add_nanos(duration.as_nanos() as u64);
         self.polled.set(false);
         let mut state = self.state.lock().expect("sleep state lock poisoned");
         state.spawned = false;
+        let handle = state.timer_handle.take();
+        drop(state);
+
+        // Cancel any existing timer - will be re-registered on next poll
+        if let (Some(handle), Some(timer)) =
+            (handle, Cx::current().and_then(|cx| cx.timer_driver()))
+        {
+            let _ = timer.cancel(&handle);
+        }
     }
 
     /// Returns true if this sleep has been polled at least once.
@@ -235,36 +269,66 @@ impl Future for Sleep {
     type Output = ();
 
     fn poll(self: Pin<&mut Self>, cx: &mut Context<'_>) -> Poll<Self::Output> {
-        let now = self.current_time();
+        // Try to get time from timer driver first (most efficient path)
+        let timer_driver = Cx::current().and_then(|current_cx| current_cx.timer_driver());
+        let now = timer_driver
+            .as_ref()
+            .map_or_else(|| self.current_time(), TimerDriverHandle::now);
+
         match self.poll_with_time(now) {
-            Poll::Ready(()) => Poll::Ready(()),
-            Poll::Pending => {
-                // If we are pending and have no time getter (using wall clock),
-                // spawn a background waiter to wake us up.
-                // This ensures we don't hang in a runtime without a timer driver.
-                if self.time_getter.is_none() {
+            Poll::Ready(()) => {
+                // Cancel any registered timer on completion
+                let handle = {
                     let mut state = self.state.lock().expect("sleep state lock poisoned");
-                    state.waker = Some(cx.waker().clone());
-
-                    if !state.spawned {
-                        state.spawned = true;
-                        let duration = self.remaining(now);
-                        let state_clone = Arc::clone(&self.state);
-                        drop(state);
-
-                        // ubs:ignore — intentional fire-and-forget: short-lived timer thread
-                        // self-terminates after sleeping; JoinHandle detach is correct here
-                        std::thread::spawn(move || {
-                            std::thread::sleep(duration);
-                            let mut state = state_clone.lock().expect("sleep state lock poisoned");
-                            if let Some(waker) = state.waker.take() {
-                                waker.wake();
-                            }
-                            // Reset spawned flag so if we are still pending (rare), we spawn again
-                            state.spawned = false;
-                        });
-                    }
+                    state.timer_handle.take()
+                };
+                if let (Some(handle), Some(timer)) = (handle, timer_driver.as_ref()) {
+                    let _ = timer.cancel(&handle);
                 }
+                Poll::Ready(())
+            }
+            Poll::Pending => {
+                // If we have a time getter (custom time source), just return pending.
+                // The caller is responsible for re-polling when time advances.
+                if self.time_getter.is_some() {
+                    return Poll::Pending;
+                }
+
+                let mut state = self.state.lock().expect("sleep state lock poisoned");
+                state.waker = Some(cx.waker().clone());
+
+                // Prefer timer driver over background thread
+                if let Some(timer) = timer_driver.as_ref() {
+                    // Register or update timer in the driver's wheel
+                    if let Some(handle) = state.timer_handle.as_ref() {
+                        // Update existing timer with new waker
+                        let new_handle = timer.update(handle, self.deadline, cx.waker().clone());
+                        state.timer_handle = Some(new_handle);
+                    } else {
+                        // Register new timer
+                        let handle = timer.register(self.deadline, cx.waker().clone());
+                        state.timer_handle = Some(handle);
+                    }
+                } else if !state.spawned {
+                    // Fallback: spawn background thread for timing
+                    state.spawned = true;
+                    let duration = self.remaining(now);
+                    let state_clone = Arc::clone(&self.state);
+                    drop(state);
+
+                    // ubs:ignore — intentional fire-and-forget: short-lived timer thread
+                    // self-terminates after sleeping; JoinHandle detach is correct here
+                    std::thread::spawn(move || {
+                        std::thread::sleep(duration);
+                        let mut state = state_clone.lock().expect("sleep state lock poisoned");
+                        if let Some(waker) = state.waker.take() {
+                            waker.wake();
+                        }
+                        // Reset spawned flag so if we are still pending (rare), we spawn again
+                        state.spawned = false;
+                    });
+                }
+
                 Poll::Pending
             }
         }
@@ -280,6 +344,7 @@ impl Clone for Sleep {
             state: Arc::new(Mutex::new(SleepState {
                 waker: None,
                 spawned: false,
+                timer_handle: None, // Fresh clone has no timer registration
             })),
         }
     }

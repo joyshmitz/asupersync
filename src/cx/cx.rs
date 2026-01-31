@@ -54,10 +54,10 @@
 use crate::combinator::select::SelectAll;
 use crate::observability::{DiagnosticContext, LogCollector, LogEntry, SpanId};
 use crate::remote::RemoteCap;
-use crate::runtime::io_driver::IoDriverHandle;
-use crate::runtime::reactor::{Interest, Registration, Source};
+use crate::runtime::io_driver::{IoDriverHandle, IoRegistration};
+use crate::runtime::reactor::{Interest, Source};
 use crate::runtime::task_handle::JoinError;
-use crate::time::{timeout, TimeSource, WallClock};
+use crate::time::{timeout, TimeSource, TimerDriverHandle, WallClock};
 use crate::tracing_compat::{debug, info, trace};
 use crate::types::{Budget, CancelKind, CancelReason, CxInner, RegionId, TaskId, Time};
 use crate::util::{EntropySource, OsEntropy};
@@ -65,6 +65,7 @@ use std::cell::RefCell;
 use std::future::Future;
 use std::pin::Pin;
 use std::sync::{Arc, OnceLock};
+use std::task::{Wake, Waker};
 use std::time::Duration;
 
 type NamedFuture<T> = (&'static str, Pin<Box<dyn Future<Output = T> + Send>>);
@@ -74,6 +75,17 @@ type NamedFutures<T> = Vec<NamedFuture<T>>;
 fn wall_clock_now() -> Time {
     static CLOCK: OnceLock<WallClock> = OnceLock::new();
     CLOCK.get_or_init(WallClock::new).now()
+}
+
+fn noop_waker() -> Waker {
+    struct NoopWaker;
+
+    impl Wake for NoopWaker {
+        fn wake(self: Arc<Self>) {}
+        fn wake_by_ref(self: &Arc<Self>) {}
+    }
+
+    Waker::from(Arc::new(NoopWaker))
 }
 
 /// The capability context for a task.
@@ -135,6 +147,7 @@ pub struct Cx {
     observability: Arc<std::sync::RwLock<ObservabilityState>>,
     io_driver: Option<IoDriverHandle>,
     io_cap: Option<Arc<dyn crate::io::IoCap>>,
+    timer_driver: Option<TimerDriverHandle>,
     entropy: Arc<dyn EntropySource>,
     remote_cap: Option<Arc<RemoteCap>>,
 }
@@ -220,6 +233,7 @@ impl Cx {
             ))),
             io_driver: None,
             io_cap: None,
+            timer_driver: None,
             entropy: Arc::new(OsEntropy),
             remote_cap: None,
         }
@@ -259,6 +273,32 @@ impl Cx {
         io_cap: Option<Arc<dyn crate::io::IoCap>>,
         entropy: Option<Arc<dyn EntropySource>>,
     ) -> Self {
+        Self::new_with_drivers(
+            region,
+            task,
+            budget,
+            observability,
+            io_driver,
+            io_cap,
+            None,
+            entropy,
+        )
+    }
+
+    /// Creates a new capability context with optional I/O and timer drivers (internal use).
+    #[must_use]
+    #[cfg_attr(feature = "test-internals", visibility::make(pub))]
+    #[allow(clippy::too_many_arguments)]
+    pub(crate) fn new_with_drivers(
+        region: RegionId,
+        task: TaskId,
+        budget: Budget,
+        observability: Option<ObservabilityState>,
+        io_driver: Option<IoDriverHandle>,
+        io_cap: Option<Arc<dyn crate::io::IoCap>>,
+        timer_driver: Option<TimerDriverHandle>,
+        entropy: Option<Arc<dyn EntropySource>>,
+    ) -> Self {
         let inner = Arc::new(std::sync::RwLock::new(CxInner::new(region, task, budget)));
         let observability_state =
             observability.unwrap_or_else(|| ObservabilityState::new(region, task));
@@ -281,6 +321,7 @@ impl Cx {
             observability,
             io_driver,
             io_cap,
+            timer_driver,
             entropy,
             remote_cap: None,
         }
@@ -432,6 +473,34 @@ impl Cx {
         self.io_driver.clone()
     }
 
+    /// Returns a cloned handle to the timer driver, if present.
+    ///
+    /// The timer driver provides access to timer registration for async time
+    /// operations like `sleep`, `timeout`, and `interval`. When present, these
+    /// operations use the runtime's timer wheel instead of spawning threads.
+    ///
+    /// # Example
+    ///
+    /// ```ignore
+    /// if let Some(timer) = Cx::current().and_then(|cx| cx.timer_driver()) {
+    ///     let deadline = timer.now() + Duration::from_secs(1);
+    ///     let handle = timer.register(deadline, waker);
+    /// }
+    /// ```
+    #[must_use]
+    pub fn timer_driver(&self) -> Option<TimerDriverHandle> {
+        self.timer_driver.clone()
+    }
+
+    /// Returns true if a timer driver is available.
+    ///
+    /// When true, time operations can use the runtime's timer wheel.
+    /// When false, time operations fall back to OS-level timing.
+    #[must_use]
+    pub fn has_timer(&self) -> bool {
+        self.timer_driver.is_some()
+    }
+
     /// Returns the I/O capability, if one is configured.
     ///
     /// The I/O capability provides access to async I/O operations. If no capability
@@ -506,7 +575,7 @@ impl Cx {
     ///
     /// # Returns
     ///
-    /// Returns a [`Registration`] handle that represents the active registration.
+    /// Returns a [`IoRegistration`] handle that represents the active registration.
     /// When dropped, the registration is automatically deregistered from the reactor.
     ///
     /// # Errors
@@ -515,22 +584,19 @@ impl Cx {
     /// - No reactor is available (reactor not initialized or not present)
     /// - The reactor fails to register the source
     ///
-    /// # Note
-    ///
-    /// This is a stub implementation - full reactor integration is pending.
-    /// Currently returns an error indicating reactor is not available.
     #[cfg(unix)]
     pub fn register_io<S: Source>(
         &self,
-        _source: &S,
-        _interest: Interest,
-    ) -> std::io::Result<Registration> {
-        // TODO: Implement proper reactor registration when I/O driver integration is complete.
-        // This stub allows compilation while the reactor infrastructure is being built.
-        Err(std::io::Error::new(
-            std::io::ErrorKind::NotConnected,
-            "reactor not available (I/O driver integration pending)",
-        ))
+        source: &S,
+        interest: Interest,
+    ) -> std::io::Result<IoRegistration> {
+        let Some(driver) = self.io_driver_handle() else {
+            return Err(std::io::Error::new(
+                std::io::ErrorKind::NotConnected,
+                "I/O driver not available",
+            ));
+        };
+        driver.register(source, interest, noop_waker())
     }
 
     /// Returns the current region ID.

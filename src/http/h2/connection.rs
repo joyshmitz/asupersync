@@ -201,16 +201,19 @@ impl Connection {
     /// Create a new client connection.
     #[must_use]
     pub fn client(settings: Settings) -> Self {
+        let max_header_list_size = settings.max_header_list_size;
         let initial_window = settings.initial_window_size;
+        let mut decoder = hpack::Decoder::new();
+        decoder.set_max_header_list_size(max_header_list_size as usize);
         Self {
             state: ConnectionState::Handshaking,
             is_client: true,
             local_settings: settings,
             remote_settings: Settings::default(),
             received_settings: false,
-            streams: StreamStore::new(true, initial_window),
+            streams: StreamStore::new(true, initial_window, max_header_list_size),
             hpack_encoder: hpack::Encoder::new(),
-            hpack_decoder: hpack::Decoder::new(),
+            hpack_decoder: decoder,
             send_window: DEFAULT_CONNECTION_WINDOW_SIZE,
             recv_window: DEFAULT_CONNECTION_WINDOW_SIZE,
             last_stream_id: 0,
@@ -224,16 +227,19 @@ impl Connection {
     /// Create a new server connection.
     #[must_use]
     pub fn server(settings: Settings) -> Self {
+        let max_header_list_size = settings.max_header_list_size;
         let initial_window = settings.initial_window_size;
+        let mut decoder = hpack::Decoder::new();
+        decoder.set_max_header_list_size(max_header_list_size as usize);
         Self {
             state: ConnectionState::Handshaking,
             is_client: false,
             local_settings: settings,
             remote_settings: Settings::default(),
             received_settings: false,
-            streams: StreamStore::new(false, initial_window),
+            streams: StreamStore::new(false, initial_window, max_header_list_size),
             hpack_encoder: hpack::Encoder::new(),
-            hpack_decoder: hpack::Decoder::new(),
+            hpack_decoder: decoder,
             send_window: DEFAULT_CONNECTION_WINDOW_SIZE,
             recv_window: DEFAULT_CONNECTION_WINDOW_SIZE,
             last_stream_id: 0,
@@ -521,6 +527,15 @@ impl Connection {
 
         // Concatenate all fragments
         let total_len: usize = fragments.iter().map(Bytes::len).sum();
+        let max_fragment_size =
+            Stream::max_header_fragment_size_for(self.local_settings.max_header_list_size);
+        if total_len > max_fragment_size {
+            return Err(H2Error::stream(
+                stream_id,
+                ErrorCode::EnhanceYourCalm,
+                "accumulated header fragments too large",
+            ));
+        }
         let mut combined = BytesMut::with_capacity(total_len);
         for fragment in fragments {
             combined.extend_from_slice(&fragment);
@@ -663,36 +678,43 @@ impl Connection {
     /// Get next pending frame to send.
     #[allow(clippy::too_many_lines)]
     pub fn next_frame(&mut self) -> Option<Frame> {
-        let op = self.pending_ops.pop_front()?;
+        let mut blocked_data = false;
+        let pending_len = self.pending_ops.len();
 
-        match op {
-            PendingOp::Settings(frame) => Some(Frame::Settings(frame)),
-            PendingOp::SettingsAck => Some(Frame::Settings(SettingsFrame::ack())),
-            PendingOp::PingAck(data) => Some(Frame::Ping(PingFrame::ack(data))),
-            PendingOp::WindowUpdate {
-                stream_id,
-                increment,
-            } => Some(Frame::WindowUpdate(WindowUpdateFrame::new(
-                stream_id, increment,
-            ))),
-            PendingOp::Headers {
-                stream_id,
-                headers,
-                end_stream,
-            } => {
-                // Encode headers
-                let mut encoded = BytesMut::new();
-                self.hpack_encoder.encode(&headers, &mut encoded);
-                let encoded = encoded.freeze();
+        for _ in 0..pending_len {
+            let op = self.pending_ops.pop_front()?;
 
-                let max_frame_size = self.remote_settings.max_frame_size as usize;
+            match op {
+                PendingOp::Settings(frame) => return Some(Frame::Settings(frame)),
+                PendingOp::SettingsAck => return Some(Frame::Settings(SettingsFrame::ack())),
+                PendingOp::PingAck(data) => return Some(Frame::Ping(PingFrame::ack(data))),
+                PendingOp::WindowUpdate {
+                    stream_id,
+                    increment,
+                } => {
+                    return Some(Frame::WindowUpdate(WindowUpdateFrame::new(
+                        stream_id, increment,
+                    )));
+                }
+                PendingOp::Headers {
+                    stream_id,
+                    headers,
+                    end_stream,
+                } => {
+                    // Encode headers
+                    let mut encoded = BytesMut::new();
+                    self.hpack_encoder.encode(&headers, &mut encoded);
+                    let encoded = encoded.freeze();
 
-                if encoded.len() <= max_frame_size {
-                    // Fits in a single HEADERS frame
-                    Some(Frame::Headers(HeadersFrame::new(
-                        stream_id, encoded, end_stream, true, // end_headers
-                    )))
-                } else {
+                    let max_frame_size = self.remote_settings.max_frame_size as usize;
+
+                    if encoded.len() <= max_frame_size {
+                        // Fits in a single HEADERS frame
+                        return Some(Frame::Headers(HeadersFrame::new(
+                            stream_id, encoded, end_stream, true, // end_headers
+                        )));
+                    }
+
                     // Need CONTINUATION frames - split the header block
                     let first_chunk = encoded.slice(..max_frame_size);
                     let remaining = encoded.slice(max_frame_size..);
@@ -711,92 +733,101 @@ impl Connection {
                         offset = chunk_end;
                     }
 
-                    Some(Frame::Headers(HeadersFrame::new(
+                    return Some(Frame::Headers(HeadersFrame::new(
                         stream_id,
                         first_chunk,
                         end_stream,
                         false, // end_headers = false, CONTINUATION follows
-                    )))
+                    )));
                 }
-            }
-            PendingOp::Continuation {
-                stream_id,
-                header_block,
-                end_headers,
-            } => Some(Frame::Continuation(ContinuationFrame {
-                stream_id,
-                header_block,
-                end_headers,
-            })),
-            PendingOp::Data {
-                stream_id,
-                data,
-                end_stream,
-            } => {
-                // Determine the maximum sendable bytes from flow control windows and max_frame_size.
-                let conn_avail = self.send_window.max(0).cast_unsigned();
-                let stream_avail = self
-                    .streams
-                    .get(stream_id)
-                    .map_or(0, |s| s.send_window().max(0).cast_unsigned());
-                let frame_size_limit = self.remote_settings.max_frame_size;
-                let max_send = conn_avail.min(stream_avail).min(frame_size_limit) as usize;
-
-                if max_send == 0 && !data.is_empty() {
-                    // No send window available; re-queue for later.
-                    self.pending_ops.push_back(PendingOp::Data {
-                        stream_id,
-                        data,
-                        end_stream,
-                    });
-                    return self.next_frame();
-                }
-
-                let send_len = data.len().min(max_send);
-                let (to_send, remainder) = if send_len < data.len() {
-                    (data.slice(..send_len), Some(data.slice(send_len..)))
-                } else {
-                    (data, None)
-                };
-
-                // Re-queue leftover data (end_stream only on the final piece).
-                let actually_end = end_stream && remainder.is_none();
-                if let Some(rest) = remainder {
-                    self.pending_ops.push_front(PendingOp::Data {
-                        stream_id,
-                        data: rest,
-                        end_stream,
-                    });
-                }
-
-                // Consume send windows.
-                let consumed =
-                    u32::try_from(to_send.len()).expect("send_len already clamped to u32 range");
-                self.send_window -= consumed.cast_signed();
-                if let Some(stream) = self.streams.get_mut(stream_id) {
-                    stream.consume_send_window(consumed);
-                }
-
-                Some(Frame::Data(DataFrame::new(
+                PendingOp::Continuation {
                     stream_id,
-                    to_send,
-                    actually_end,
-                )))
-            }
-            PendingOp::RstStream {
-                stream_id,
-                error_code,
-            } => Some(Frame::RstStream(RstStreamFrame::new(stream_id, error_code))),
-            PendingOp::GoAway {
-                last_stream_id,
-                error_code,
-                debug_data,
-            } => {
-                let mut frame = GoAwayFrame::new(last_stream_id, error_code);
-                frame.debug_data = debug_data;
-                Some(Frame::GoAway(frame))
+                    header_block,
+                    end_headers,
+                } => {
+                    return Some(Frame::Continuation(ContinuationFrame {
+                        stream_id,
+                        header_block,
+                        end_headers,
+                    }));
+                }
+                PendingOp::Data {
+                    stream_id,
+                    data,
+                    end_stream,
+                } => {
+                    // Determine the maximum sendable bytes from flow control windows and max_frame_size.
+                    let conn_avail = self.send_window.max(0).cast_unsigned();
+                    let stream_avail = self
+                        .streams
+                        .get(stream_id)
+                        .map_or(0, |s| s.send_window().max(0).cast_unsigned());
+                    let frame_size_limit = self.remote_settings.max_frame_size;
+                    let max_send = conn_avail.min(stream_avail).min(frame_size_limit) as usize;
+
+                    if max_send == 0 && !data.is_empty() {
+                        // No send window available; re-queue for later.
+                        self.pending_ops.push_back(PendingOp::Data {
+                            stream_id,
+                            data,
+                            end_stream,
+                        });
+                        blocked_data = true;
+                        continue;
+                    }
+
+                    let send_len = data.len().min(max_send);
+                    let (to_send, remainder) = if send_len < data.len() {
+                        (data.slice(..send_len), Some(data.slice(send_len..)))
+                    } else {
+                        (data, None)
+                    };
+
+                    // Re-queue leftover data (end_stream only on the final piece).
+                    let actually_end = end_stream && remainder.is_none();
+                    if let Some(rest) = remainder {
+                        self.pending_ops.push_front(PendingOp::Data {
+                            stream_id,
+                            data: rest,
+                            end_stream,
+                        });
+                    }
+
+                    // Consume send windows.
+                    let consumed = u32::try_from(to_send.len())
+                        .expect("send_len already clamped to u32 range");
+                    self.send_window -= consumed.cast_signed();
+                    if let Some(stream) = self.streams.get_mut(stream_id) {
+                        stream.consume_send_window(consumed);
+                    }
+
+                    return Some(Frame::Data(DataFrame::new(
+                        stream_id,
+                        to_send,
+                        actually_end,
+                    )));
+                }
+                PendingOp::RstStream {
+                    stream_id,
+                    error_code,
+                } => return Some(Frame::RstStream(RstStreamFrame::new(stream_id, error_code))),
+                PendingOp::GoAway {
+                    last_stream_id,
+                    error_code,
+                    debug_data,
+                } => {
+                    let mut frame = GoAwayFrame::new(last_stream_id, error_code);
+                    frame.debug_data = debug_data;
+                    return Some(Frame::GoAway(frame));
+                }
             }
         }
+
+        if blocked_data {
+            return None;
+        }
+
+        None
     }
 
     /// Check if there are pending frames to send.

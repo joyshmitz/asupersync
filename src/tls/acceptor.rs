@@ -4,11 +4,17 @@
 //! TLS connections on the server side.
 
 use super::error::TlsError;
+use super::stream::TlsStream;
 use super::types::{CertificateChain, PrivateKey, RootCertStore};
+use crate::io::{AsyncRead, AsyncWrite};
 
 #[cfg(feature = "tls")]
 use rustls::ServerConfig;
+#[cfg(feature = "tls")]
+use rustls::ServerConnection;
 
+#[cfg(feature = "tls")]
+use std::future::poll_fn;
 use std::path::Path;
 use std::sync::Arc;
 
@@ -30,6 +36,7 @@ use std::sync::Arc;
 pub struct TlsAcceptor {
     #[cfg(feature = "tls")]
     config: Arc<ServerConfig>,
+    handshake_timeout: Option<std::time::Duration>,
     #[cfg(not(feature = "tls"))]
     _marker: std::marker::PhantomData<()>,
 }
@@ -40,6 +47,7 @@ impl TlsAcceptor {
     pub fn new(config: ServerConfig) -> Self {
         Self {
             config: Arc::new(config),
+            handshake_timeout: None,
         }
     }
 
@@ -66,6 +74,50 @@ impl TlsAcceptor {
     #[cfg(feature = "tls")]
     pub fn config(&self) -> &Arc<ServerConfig> {
         &self.config
+    }
+
+    /// Get the handshake timeout, if configured.
+    #[must_use]
+    pub fn handshake_timeout(&self) -> Option<std::time::Duration> {
+        self.handshake_timeout
+    }
+
+    /// Accept an incoming TLS connection over the provided I/O stream.
+    ///
+    /// # Cancel-Safety
+    /// Handshake is NOT cancel-safe. If cancelled mid-handshake, drop the stream.
+    #[cfg(feature = "tls")]
+    pub async fn accept<IO>(&self, io: IO) -> Result<TlsStream<IO>, TlsError>
+    where
+        IO: AsyncRead + AsyncWrite + Unpin,
+    {
+        let conn = ServerConnection::new(Arc::clone(&self.config))
+            .map_err(|e| TlsError::Configuration(e.to_string()))?;
+        let mut stream = TlsStream::new_server(io, conn);
+        if let Some(timeout) = self.handshake_timeout {
+            match crate::time::timeout(
+                super::wall_clock_now(),
+                timeout,
+                poll_fn(|cx| stream.poll_handshake(cx)),
+            )
+            .await
+            {
+                Ok(result) => result?,
+                Err(_) => return Err(TlsError::Timeout(timeout)),
+            }
+        } else {
+            poll_fn(|cx| stream.poll_handshake(cx)).await?;
+        }
+        Ok(stream)
+    }
+
+    /// Accept a connection (stub when TLS is disabled).
+    #[cfg(not(feature = "tls"))]
+    pub async fn accept<IO>(&self, _io: IO) -> Result<TlsStream<IO>, TlsError>
+    where
+        IO: AsyncRead + AsyncWrite + Unpin,
+    {
+        Err(TlsError::Configuration("tls feature not enabled".into()))
     }
 }
 
@@ -103,6 +155,7 @@ pub struct TlsAcceptorBuilder {
     client_auth: ClientAuth,
     alpn_protocols: Vec<Vec<u8>>,
     max_fragment_size: Option<usize>,
+    handshake_timeout: Option<std::time::Duration>,
 }
 
 impl TlsAcceptorBuilder {
@@ -114,6 +167,7 @@ impl TlsAcceptorBuilder {
             client_auth: ClientAuth::None,
             alpn_protocols: Vec::new(),
             max_fragment_size: None,
+            handshake_timeout: None,
         }
     }
 
@@ -172,6 +226,12 @@ impl TlsAcceptorBuilder {
         self
     }
 
+    /// Set a timeout for the TLS handshake.
+    pub fn handshake_timeout(mut self, timeout: std::time::Duration) -> Self {
+        self.handshake_timeout = Some(timeout);
+        self
+    }
+
     /// Build the `TlsAcceptor`.
     ///
     /// # Errors
@@ -225,7 +285,10 @@ impl TlsAcceptorBuilder {
             "TlsAcceptor built"
         );
 
-        Ok(TlsAcceptor::new(config))
+        Ok(TlsAcceptor {
+            config: Arc::new(config),
+            handshake_timeout: self.handshake_timeout,
+        })
     }
 
     /// Build the `TlsAcceptor` (stub when TLS is disabled).
@@ -368,6 +431,73 @@ W7n9v0wIyo4e/O0DO2fczXZD
 
         // Should be very fast (Arc clone)
         assert!(elapsed.as_millis() < 100);
+    }
+
+    #[cfg(feature = "tls")]
+    #[test]
+    fn test_connect_accept_handshake() {
+        use crate::net::tcp::VirtualTcpStream;
+        use crate::test_utils::run_test;
+        use futures_lite::future::zip;
+
+        run_test(|| async {
+            let chain = CertificateChain::from_pem(TEST_CERT_PEM).unwrap();
+            let key = PrivateKey::from_pem(TEST_KEY_PEM).unwrap();
+            let acceptor = TlsAcceptorBuilder::new(chain, key)
+                .alpn_http()
+                .build()
+                .unwrap();
+
+            let certs = Certificate::from_pem(TEST_CERT_PEM).unwrap();
+            let connector = crate::tls::TlsConnectorBuilder::new()
+                .add_root_certificates(certs)
+                .alpn_http()
+                .build()
+                .unwrap();
+
+            let (client_io, server_io) = VirtualTcpStream::pair(
+                "127.0.0.1:5000".parse().unwrap(),
+                "127.0.0.1:5001".parse().unwrap(),
+            );
+
+            let (client_res, server_res) = zip(
+                connector.connect("localhost", client_io),
+                acceptor.accept(server_io),
+            )
+            .await;
+
+            let client = client_res.unwrap();
+            let server = server_res.unwrap();
+
+            assert!(client.is_ready());
+            assert!(server.is_ready());
+            assert!(client.protocol_version().is_some());
+            assert!(server.protocol_version().is_some());
+        });
+    }
+
+    #[cfg(feature = "tls")]
+    #[test]
+    fn test_connect_timeout() {
+        use crate::net::tcp::VirtualTcpStream;
+        use crate::test_utils::run_test;
+
+        run_test(|| async {
+            let certs = Certificate::from_pem(TEST_CERT_PEM).unwrap();
+            let connector = crate::tls::TlsConnectorBuilder::new()
+                .add_root_certificates(certs)
+                .handshake_timeout(std::time::Duration::from_millis(5))
+                .build()
+                .unwrap();
+
+            let (client_io, _server_io) = VirtualTcpStream::pair(
+                "127.0.0.1:5002".parse().unwrap(),
+                "127.0.0.1:5003".parse().unwrap(),
+            );
+
+            let err = connector.connect("localhost", client_io).await.unwrap_err();
+            assert!(matches!(err, TlsError::Timeout(_)));
+        });
     }
 
     #[cfg(not(feature = "tls"))]

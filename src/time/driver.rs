@@ -6,7 +6,7 @@
 
 use crate::types::Time;
 use std::sync::atomic::{AtomicU64, Ordering};
-use std::sync::Mutex;
+use std::sync::{Arc, Mutex};
 use std::task::Waker;
 
 use super::wheel::TimerWheel;
@@ -282,6 +282,180 @@ impl TimerDriver<VirtualClock> {
 impl Default for TimerDriver<VirtualClock> {
     fn default() -> Self {
         Self::new()
+    }
+}
+
+// =============================================================================
+// TimerDriverHandle - Shared handle for timer driver access
+// =============================================================================
+
+/// Trait abstracting timer driver operations for use with trait objects.
+///
+/// This allows the runtime to create either wall-clock or virtual-clock
+/// based drivers while consumers use a unified handle type.
+pub trait TimerDriverApi: Send + Sync + std::fmt::Debug {
+    /// Returns the current time.
+    fn now(&self) -> Time;
+
+    /// Registers a timer to fire at the given deadline.
+    fn register(&self, deadline: Time, waker: Waker) -> TimerHandle;
+
+    /// Updates an existing timer with a new deadline and waker.
+    fn update(&self, handle: &TimerHandle, deadline: Time, waker: Waker) -> TimerHandle;
+
+    /// Cancels an existing timer.
+    fn cancel(&self, handle: &TimerHandle) -> bool;
+
+    /// Returns the next deadline that will fire.
+    fn next_deadline(&self) -> Option<Time>;
+
+    /// Processes expired timers, calling their wakers.
+    fn process_timers(&self) -> usize;
+
+    /// Returns the number of pending timers.
+    fn pending_count(&self) -> usize;
+
+    /// Returns true if no timers are pending.
+    fn is_empty(&self) -> bool;
+}
+
+impl<T: TimeSource + std::fmt::Debug + 'static> TimerDriverApi for TimerDriver<T> {
+    fn now(&self) -> Time {
+        Self::now(self)
+    }
+
+    fn register(&self, deadline: Time, waker: Waker) -> TimerHandle {
+        Self::register(self, deadline, waker)
+    }
+
+    fn update(&self, handle: &TimerHandle, deadline: Time, waker: Waker) -> TimerHandle {
+        Self::update(self, handle, deadline, waker)
+    }
+
+    fn cancel(&self, handle: &TimerHandle) -> bool {
+        Self::cancel(self, handle)
+    }
+
+    fn next_deadline(&self) -> Option<Time> {
+        Self::next_deadline(self)
+    }
+
+    fn process_timers(&self) -> usize {
+        Self::process_timers(self)
+    }
+
+    fn pending_count(&self) -> usize {
+        Self::pending_count(self)
+    }
+
+    fn is_empty(&self) -> bool {
+        Self::is_empty(self)
+    }
+}
+
+/// Shared handle to a timer driver.
+///
+/// This wrapper provides cloneable access to the runtime's timer driver
+/// from async contexts. It abstracts over the concrete time source
+/// (wall clock vs virtual clock) using a trait object.
+///
+/// # Example
+///
+/// ```ignore
+/// use asupersync::time::TimerDriverHandle;
+///
+/// // Get handle from current context
+/// if let Some(timer) = Cx::current().and_then(|cx| cx.timer_driver()) {
+///     let deadline = timer.now() + Duration::from_secs(1);
+///     let handle = timer.register(deadline, waker);
+/// }
+/// ```
+#[derive(Clone)]
+pub struct TimerDriverHandle {
+    inner: Arc<dyn TimerDriverApi>,
+}
+
+impl std::fmt::Debug for TimerDriverHandle {
+    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        f.debug_struct("TimerDriverHandle")
+            .field("pending_count", &self.inner.pending_count())
+            .finish()
+    }
+}
+
+impl TimerDriverHandle {
+    /// Creates a new handle wrapping the given timer driver.
+    pub fn new<T: TimeSource + std::fmt::Debug + 'static>(driver: Arc<TimerDriver<T>>) -> Self {
+        Self { inner: driver }
+    }
+
+    /// Creates a handle with a wall clock timer driver for production use.
+    #[must_use]
+    pub fn with_wall_clock() -> Self {
+        let clock = Arc::new(WallClock::new());
+        let driver = Arc::new(TimerDriver::with_clock(clock));
+        Self::new(driver)
+    }
+
+    /// Creates a handle with a virtual clock timer driver for testing.
+    #[must_use]
+    pub fn with_virtual_clock(clock: Arc<VirtualClock>) -> Self {
+        let driver = Arc::new(TimerDriver::with_clock(clock));
+        Self::new(driver)
+    }
+
+    /// Returns the current time from the timer driver.
+    #[must_use]
+    pub fn now(&self) -> Time {
+        self.inner.now()
+    }
+
+    /// Registers a timer to fire at the given deadline.
+    ///
+    /// Returns a handle that can be used to cancel or update the timer.
+    #[must_use]
+    pub fn register(&self, deadline: Time, waker: Waker) -> TimerHandle {
+        self.inner.register(deadline, waker)
+    }
+
+    /// Updates an existing timer with a new deadline and waker.
+    #[must_use]
+    pub fn update(&self, handle: &TimerHandle, deadline: Time, waker: Waker) -> TimerHandle {
+        self.inner.update(handle, deadline, waker)
+    }
+
+    /// Cancels an existing timer.
+    ///
+    /// Returns true if the timer was active and is now cancelled.
+    #[must_use]
+    pub fn cancel(&self, handle: &TimerHandle) -> bool {
+        self.inner.cancel(handle)
+    }
+
+    /// Returns the next deadline that will fire, if any.
+    #[must_use]
+    pub fn next_deadline(&self) -> Option<Time> {
+        self.inner.next_deadline()
+    }
+
+    /// Processes all expired timers, calling their wakers.
+    ///
+    /// Returns the number of timers fired.
+    #[must_use]
+    pub fn process_timers(&self) -> usize {
+        self.inner.process_timers()
+    }
+
+    /// Returns the number of pending timers.
+    #[must_use]
+    pub fn pending_count(&self) -> usize {
+        self.inner.pending_count()
+    }
+
+    /// Returns true if no timers are pending.
+    #[must_use]
+    pub fn is_empty(&self) -> bool {
+        self.inner.is_empty()
     }
 }
 

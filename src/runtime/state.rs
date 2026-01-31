@@ -15,6 +15,7 @@ use crate::record::{
 use crate::runtime::io_driver::{IoDriver, IoDriverHandle};
 use crate::runtime::reactor::Reactor;
 use crate::runtime::stored_task::StoredTask;
+use crate::time::TimerDriverHandle;
 use crate::trace::event::{TraceData, TraceEventKind};
 use crate::trace::{TraceBuffer, TraceEvent};
 use crate::tracing_compat::{debug, debug_span, trace, trace_span};
@@ -102,6 +103,11 @@ pub struct RuntimeState {
     /// When present, the runtime can wait on I/O events via the reactor.
     /// When `None`, the runtime operates in pure Lab mode without real I/O.
     io_driver: Option<IoDriverHandle>,
+    /// Timer driver for sleep/timeout operations.
+    ///
+    /// When present, timers use the driver's timing wheel for efficient
+    /// multiplexed wakeups. When `None`, timers fall back to thread-based sleeps.
+    timer_driver: Option<TimerDriverHandle>,
     /// Entropy source for capability-based randomness.
     entropy_source: Arc<dyn EntropySource>,
 }
@@ -123,6 +129,7 @@ impl RuntimeState {
             trace_seq: 0,
             stored_futures: HashMap::new(),
             io_driver: None,
+            timer_driver: None,
             entropy_source: Arc::new(OsEntropy),
         }
     }
@@ -157,6 +164,7 @@ impl RuntimeState {
             trace_seq: 0,
             stored_futures: HashMap::new(),
             io_driver: Some(IoDriverHandle::new(reactor)),
+            timer_driver: Some(TimerDriverHandle::with_wall_clock()),
             entropy_source: Arc::new(OsEntropy),
         }
     }
@@ -191,6 +199,27 @@ impl RuntimeState {
     #[must_use]
     pub fn io_driver_handle(&self) -> Option<IoDriverHandle> {
         self.io_driver.clone()
+    }
+
+    /// Returns a reference to the timer driver handle, if present.
+    ///
+    /// Returns `None` if the runtime was created without a timer driver.
+    #[must_use]
+    pub fn timer_driver(&self) -> Option<&TimerDriverHandle> {
+        self.timer_driver.as_ref()
+    }
+
+    /// Returns a cloned handle to the timer driver, if present.
+    ///
+    /// Returns `None` if the runtime was created without a timer driver.
+    #[must_use]
+    pub fn timer_driver_handle(&self) -> Option<TimerDriverHandle> {
+        self.timer_driver.clone()
+    }
+
+    /// Sets the timer driver for this runtime.
+    pub fn set_timer_driver(&mut self, driver: TimerDriverHandle) {
+        self.timer_driver = Some(driver);
     }
 
     /// Returns the entropy source for this runtime.
@@ -868,14 +897,14 @@ impl RuntimeState {
         _source_task: Option<TaskId>,
     ) -> Vec<(TaskId, u8)> {
         let mut tasks_to_cancel = Vec::new();
-        let cleanup_budget = reason.cleanup_budget();
+        let _cleanup_budget = reason.cleanup_budget();
         let root_span = debug_span!(
             "cancel_request",
             target_region = ?region_id,
             cancel_kind = ?reason.kind,
             cancel_message = ?reason.message,
-            cleanup_poll_quota = cleanup_budget.poll_quota,
-            cleanup_priority = cleanup_budget.priority,
+            cleanup_poll_quota = _cleanup_budget.poll_quota,
+            cleanup_priority = _cleanup_budget.priority,
             source_task = ?_source_task
         );
         let _root_guard = root_span.enter();
@@ -884,8 +913,8 @@ impl RuntimeState {
             target_region = ?region_id,
             cancel_kind = ?reason.kind,
             cancel_message = ?reason.message,
-            cleanup_poll_quota = cleanup_budget.poll_quota,
-            cleanup_priority = cleanup_budget.priority,
+            cleanup_poll_quota = _cleanup_budget.poll_quota,
+            cleanup_priority = _cleanup_budget.priority,
             source_task = ?_source_task,
             "cancel request initiated"
         );
@@ -1018,10 +1047,10 @@ impl RuntimeState {
 
                     if newly_cancelled {
                         // Task was newly cancelled, add to list
-                        tasks_to_cancel.push((task_id, cleanup_budget.priority));
+                        tasks_to_cancel.push((task_id, task_budget.priority));
                     } else if already_cancelling {
                         // Task already cancelling, but still needs scheduling priority
-                        tasks_to_cancel.push((task_id, cleanup_budget.priority));
+                        tasks_to_cancel.push((task_id, task_budget.priority));
                     }
                 }
             }
@@ -1098,6 +1127,11 @@ impl RuntimeState {
             );
             return Vec::new();
         };
+        if let Some(inner) = task.cx_inner.as_ref() {
+            if let Ok(mut guard) = inner.write() {
+                guard.cancel_waker = None;
+            }
+        }
 
         // Get the owning region and the waiters before we mutate
         let owner = task.owner;

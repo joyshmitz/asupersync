@@ -35,11 +35,20 @@
 //! handshake completes, read/write operations follow the cancel-safety
 //! properties of the underlying I/O traits.
 
+use crate::time::WallClock;
+use crate::types::Time;
+use std::sync::OnceLock;
+
 mod acceptor;
 mod connector;
 mod error;
 mod stream;
 mod types;
+
+fn wall_clock_now() -> Time {
+    static CLOCK: OnceLock<WallClock> = OnceLock::new();
+    CLOCK.get_or_init(WallClock::new).now()
+}
 
 pub use acceptor::{ClientAuth, TlsAcceptor, TlsAcceptorBuilder};
 pub use connector::{TlsConnector, TlsConnectorBuilder};

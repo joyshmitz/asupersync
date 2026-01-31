@@ -38,8 +38,9 @@
 //! }
 //! ```
 
-use crate::runtime::reactor::{Event, Events, Interest, Reactor, Source, Token};
-use slab::Slab;
+use crate::runtime::reactor::{
+    Event, Events, Interest, Reactor, SlabToken, Source, Token, TokenSlab,
+};
 use std::collections::HashMap;
 use std::io;
 use std::sync::{Arc, Mutex, Weak};
@@ -81,7 +82,7 @@ pub struct IoDriver {
     /// The platform-specific reactor.
     reactor: Arc<dyn Reactor>,
     /// Slab mapping tokens to wakers.
-    wakers: Slab<Waker>,
+    wakers: TokenSlab,
     /// Interest sets for registered tokens.
     interests: HashMap<Token, Interest>,
     /// Pre-allocated events buffer to avoid allocation per turn.
@@ -100,7 +101,7 @@ impl IoDriver {
     pub fn new(reactor: Arc<dyn Reactor>) -> Self {
         Self {
             reactor,
-            wakers: Slab::new(),
+            wakers: TokenSlab::new(),
             interests: HashMap::new(),
             events: Events::with_capacity(DEFAULT_EVENTS_CAPACITY),
             stats: IoStats::default(),
@@ -114,7 +115,7 @@ impl IoDriver {
     pub fn with_capacity(reactor: Arc<dyn Reactor>, events_capacity: usize) -> Self {
         Self {
             reactor,
-            wakers: Slab::new(),
+            wakers: TokenSlab::new(),
             interests: HashMap::new(),
             events: Events::with_capacity(events_capacity),
             stats: IoStats::default(),
@@ -153,8 +154,8 @@ impl IoDriver {
         waker: Waker,
     ) -> io::Result<Token> {
         // Allocate a slot in the waker slab
-        let key = self.wakers.insert(waker);
-        let token = Token::new(key);
+        let slab_token = self.wakers.insert(waker);
+        let token = Token::new(slab_token.to_usize());
 
         // Register with the reactor
         match self.reactor.register(source, token, interest) {
@@ -165,21 +166,21 @@ impl IoDriver {
             }
             Err(e) => {
                 // Remove waker on registration failure
-                self.wakers.remove(key);
+                let _ = self.wakers.remove(slab_token);
                 Err(e)
             }
         }
     }
 
-    /// Registers a waker and returns a token key.
+    /// Registers a waker and returns a token.
     ///
     /// This is a lower-level method that only stores the waker without
     /// registering with the reactor. Use [`register()`](Self::register)
     /// for the full registration flow.
-    pub fn register_waker(&mut self, waker: Waker) -> usize {
-        let key = self.wakers.insert(waker);
+    pub fn register_waker(&mut self, waker: Waker) -> Token {
+        let slab_token = self.wakers.insert(waker);
         self.stats.registrations += 1;
-        key
+        Token::new(slab_token.to_usize())
     }
 
     /// Updates the waker for an existing registration.
@@ -190,7 +191,8 @@ impl IoDriver {
     ///
     /// `true` if the waker was updated, `false` if the token was not found.
     pub fn update_waker(&mut self, token: Token, waker: Waker) -> bool {
-        self.wakers.get_mut(token.0).is_some_and(|slot| {
+        let slab_token = SlabToken::from_usize(token.0);
+        self.wakers.get_mut(slab_token).is_some_and(|slot| {
             *slot = waker;
             true
         })
@@ -217,8 +219,8 @@ impl IoDriver {
         self.reactor.deregister(token)?;
 
         // Remove waker from slab
-        if self.wakers.contains(token.0) {
-            self.wakers.remove(token.0);
+        let slab_token = SlabToken::from_usize(token.0);
+        if self.wakers.remove(slab_token).is_some() {
             self.stats.deregistrations += 1;
         }
         self.interests.remove(&token);
@@ -230,9 +232,9 @@ impl IoDriver {
     ///
     /// This is a lower-level method that only removes the waker without
     /// deregistering from the reactor.
-    pub fn deregister_waker(&mut self, key: usize) {
-        if self.wakers.contains(key) {
-            self.wakers.remove(key);
+    pub fn deregister_waker(&mut self, token: Token) {
+        let slab_token = SlabToken::from_usize(token.0);
+        if self.wakers.remove(slab_token).is_some() {
             self.stats.deregistrations += 1;
         }
     }
@@ -280,7 +282,8 @@ impl IoDriver {
         for event in &self.events {
             let interest = self.interests.get(&event.token).copied();
             on_event(event, interest);
-            if let Some(waker) = self.wakers.get(event.token.0) {
+            let slab_token = SlabToken::from_usize(event.token.0);
+            if let Some(waker) = self.wakers.get(slab_token) {
                 waker.wake_by_ref();
                 self.stats.wakers_dispatched += 1;
             } else {
@@ -685,8 +688,7 @@ mod tests {
         let (waker1, _) = create_test_waker();
         let (waker2, _) = create_test_waker();
 
-        let key = driver.register_waker(waker1);
-        let token = Token::new(key);
+        let token = driver.register_waker(waker1);
 
         // Update should succeed for existing token
         let updated = driver.update_waker(token, waker2.clone());
@@ -709,11 +711,10 @@ mod tests {
         let reactor = Arc::new(LabReactor::new());
         let source = MockSource;
 
-        // Register waker first to get the slab index
+        // Register waker first to get the token
         let (waker, waker_state) = create_test_waker();
         let mut driver = IoDriver::new(reactor.clone());
-        let key = driver.register_waker(waker);
-        let token = Token::new(key);
+        let token = driver.register_waker(waker);
 
         // Now register the source with the reactor using the same token
         reactor
@@ -811,6 +812,43 @@ mod tests {
     }
 
     #[test]
+    fn io_driver_stale_token_does_not_wake_new_waker() {
+        init_test("io_driver_stale_token_does_not_wake_new_waker");
+        let reactor = Arc::new(LabReactor::new());
+        let source = MockSource;
+        let mut driver = IoDriver::new(reactor.clone());
+
+        let (waker1, _) = create_test_waker();
+        let token1 = driver.register_waker(waker1);
+        driver.deregister_waker(token1);
+
+        let (waker2, state2) = create_test_waker();
+        let token2 = driver.register_waker(waker2);
+
+        crate::assert_with_log!(token1 != token2, "token rotates", true, token1 != token2);
+
+        reactor
+            .register(&source, token1, Interest::READABLE)
+            .expect("register should succeed");
+        reactor.inject_event(token1, Event::readable(token1), Duration::ZERO);
+
+        let count = driver
+            .turn(Some(Duration::from_millis(10)))
+            .expect("turn should succeed");
+
+        crate::assert_with_log!(count == 1, "event count", 1usize, count);
+        let flag2 = state2.flag.load(Ordering::SeqCst);
+        crate::assert_with_log!(!flag2, "new waker not fired", false, flag2);
+        crate::assert_with_log!(
+            driver.stats().unknown_tokens == 1,
+            "unknown tokens",
+            1usize,
+            driver.stats().unknown_tokens
+        );
+        crate::test_complete!("io_driver_stale_token_does_not_wake_new_waker");
+    }
+
+    #[test]
     fn io_driver_wake() {
         init_test("io_driver_wake");
         let reactor = Arc::new(LabReactor::new());
@@ -837,9 +875,9 @@ mod tests {
         let (waker2, state2) = create_test_waker();
         let (waker3, state3) = create_test_waker();
 
-        let key1 = driver.register_waker(waker1);
-        let key2 = driver.register_waker(waker2);
-        let key3 = driver.register_waker(waker3);
+        let token1 = driver.register_waker(waker1);
+        let token2 = driver.register_waker(waker2);
+        let token3 = driver.register_waker(waker3);
 
         crate::assert_with_log!(
             driver.waker_count() == 3,
@@ -849,10 +887,6 @@ mod tests {
         );
 
         // Register sources with reactor
-        let token1 = Token::new(key1);
-        let token2 = Token::new(key2);
-        let token3 = Token::new(key3);
-
         reactor
             .register(&source, token1, Interest::READABLE)
             .unwrap();
