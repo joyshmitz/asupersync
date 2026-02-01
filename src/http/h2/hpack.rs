@@ -1169,9 +1169,9 @@ mod tests {
 
     #[test]
     fn test_rfc7541_integer_decode_roundtrip() {
-        // Test various integer values
+        // Test various integer values using encode/decode roundtrip
         for &(value, prefix_bits) in &[
-            (0u32, 5),
+            (0_usize, 5_u8),
             (1, 5),
             (30, 5),
             (31, 5),
@@ -1184,13 +1184,14 @@ mod tests {
             (65535, 8),
         ] {
             let mut buf = BytesMut::new();
-            encode_integer(&mut buf, value, prefix_bits);
+            encode_integer(&mut buf, value, prefix_bits, 0x00);
 
             let mut src = buf.freeze();
-            let first = src[0];
-            src.advance(1);
-            let decoded = decode_integer(&mut src, first, prefix_bits).unwrap();
-            assert_eq!(decoded, value, "roundtrip failed for {value} with {prefix_bits}-bit prefix");
+            let decoded = decode_integer(&mut src, prefix_bits).unwrap();
+            assert_eq!(
+                decoded, value,
+                "roundtrip failed for {value} with {prefix_bits}-bit prefix"
+            );
         }
     }
 
