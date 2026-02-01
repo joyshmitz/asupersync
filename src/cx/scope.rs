@@ -352,8 +352,43 @@ impl<P: Policy> Scope<'_, P> {
         // Capture child_cx for result sending
         let cx_for_send = child_cx.clone();
 
-        // Instantiate the future with the child context
-        let future = f(child_cx);
+        // Instantiate the future with the child context.
+        // We use a guard to rollback task creation if the factory panics.
+        // This prevents zombie tasks (recorded but never started) which would
+        // cause the region to never close (deadlock).
+        let future = {
+            struct TaskCreationGuard<'a> {
+                state: &'a mut RuntimeState,
+                task_id: TaskId,
+                region_id: RegionId,
+                committed: bool,
+            }
+
+            impl Drop for TaskCreationGuard<'_> {
+                fn drop(&mut self) {
+                    if !self.committed {
+                        // Rollback task creation
+                        if let Some(region) =
+                            self.state.regions.get_mut(self.region_id.arena_index())
+                        {
+                            region.remove_task(self.task_id);
+                        }
+                        self.state.tasks.remove(self.task_id.arena_index());
+                    }
+                }
+            }
+
+            let mut guard = TaskCreationGuard {
+                state,
+                task_id,
+                region_id: self.region,
+                committed: false,
+            };
+
+            let fut = f(child_cx);
+            guard.committed = true;
+            fut
+        };
 
         // Wrap the future to send its result through the channel
         // We use CatchUnwind to ensure panics are propagated as JoinError::Panicked
@@ -363,13 +398,16 @@ impl<P: Policy> Scope<'_, P> {
             match result_result {
                 Ok(result) => {
                     let _ = tx.send(&cx_for_send, Ok(result));
+                    crate::types::Outcome::Ok(())
                 }
                 Err(payload) => {
                     let msg = payload_to_string(&payload);
+                    let panic_payload = PanicPayload::new(msg);
                     let _ = tx.send(
                         &cx_for_send,
-                        Err(JoinError::Panicked(PanicPayload::new(msg))),
+                        Err(JoinError::Panicked(panic_payload.clone())),
                     );
+                    crate::types::Outcome::Panicked(panic_payload)
                 }
             }
         };
@@ -626,13 +664,16 @@ impl<P: Policy> Scope<'_, P> {
             match result {
                 Ok(res) => {
                     let _ = tx.send(&cx_for_send, Ok(res));
+                    crate::types::Outcome::Ok(())
                 }
                 Err(payload) => {
                     let msg = payload_to_string(&payload);
+                    let panic_payload = PanicPayload::new(msg);
                     let _ = tx.send(
                         &cx_for_send,
-                        Err(JoinError::Panicked(PanicPayload::new(msg))),
+                        Err(JoinError::Panicked(panic_payload.clone())),
                     );
+                    crate::types::Outcome::Panicked(panic_payload)
                 }
             }
         };
@@ -1142,8 +1183,8 @@ mod tests {
 
         // Task should run, see cancellation, and return "cancelled"
         match stored_task.poll(&mut ctx) {
-            Poll::Ready(()) => {}
-            Poll::Pending => panic!("Task should have completed"),
+            Poll::Ready(crate::types::Outcome::Ok(())) => {}
+            res => panic!("Task should have completed with Ok(()), got {res:?}"),
         }
 
         // Check result via handle
@@ -1180,10 +1221,10 @@ mod tests {
         let waker = Waker::from(Arc::new(NoopWaker));
         let mut ctx = Context::from_waker(&waker);
 
-        // Polling stored task should return Ready(()) even if it panics (caught inside)
+        // Polling stored task should return Ready(Panicked) even if it panics (caught inside)
         match stored_task.poll(&mut ctx) {
-            Poll::Ready(()) => {}
-            Poll::Pending => panic!("Task should have completed"),
+            Poll::Ready(crate::types::Outcome::Panicked(_)) => {}
+            res => panic!("Task should have completed with Panicked, got {res:?}"),
         }
 
         // Check result via handle

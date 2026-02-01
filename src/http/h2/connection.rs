@@ -3,6 +3,7 @@
 //! Manages HTTP/2 connection state, settings negotiation, and frame processing.
 
 use std::collections::VecDeque;
+use std::time::Instant;
 
 use crate::bytes::{Bytes, BytesMut};
 use crate::codec::{Decoder, Encoder};
@@ -202,6 +203,11 @@ pub struct Connection {
     pending_ops: VecDeque<PendingOp>,
     /// Stream ID being continued (for CONTINUATION frames).
     continuation_stream_id: Option<u32>,
+    /// When the current continuation sequence started.
+    ///
+    /// Set when a HEADERS or PUSH_PROMISE frame is received without END_HEADERS.
+    /// Used to enforce timeout on incomplete CONTINUATION sequences.
+    continuation_started_at: Option<Instant>,
     /// Pending PUSH_PROMISE header block, if any.
     pending_push_promise: Option<PushPromiseAccumulator>,
 }
@@ -230,6 +236,7 @@ impl Connection {
             goaway_sent: false,
             pending_ops: VecDeque::new(),
             continuation_stream_id: None,
+            continuation_started_at: None,
             pending_push_promise: None,
         }
     }
@@ -257,6 +264,7 @@ impl Connection {
             goaway_sent: false,
             pending_ops: VecDeque::new(),
             continuation_stream_id: None,
+            continuation_started_at: None,
             pending_push_promise: None,
         }
     }
@@ -313,6 +321,52 @@ impl Connection {
     #[must_use]
     pub fn goaway_received(&self) -> bool {
         self.goaway_received
+    }
+
+    /// Check if we're expecting CONTINUATION frames.
+    #[must_use]
+    pub fn is_awaiting_continuation(&self) -> bool {
+        self.continuation_stream_id.is_some()
+    }
+
+    /// Get the stream ID we're expecting CONTINUATION for, if any.
+    #[must_use]
+    pub fn continuation_stream_id(&self) -> Option<u32> {
+        self.continuation_stream_id
+    }
+
+    /// Check if the current CONTINUATION sequence has timed out.
+    ///
+    /// Returns `Ok(())` if no timeout has occurred, or an error if the
+    /// CONTINUATION sequence has been pending for longer than the configured
+    /// timeout.
+    ///
+    /// The caller should invoke this method periodically (e.g., each time
+    /// the connection is polled) to detect and handle timeout conditions.
+    ///
+    /// When a timeout is detected, this method:
+    /// 1. Clears the continuation state
+    /// 2. Returns a protocol error
+    ///
+    /// The caller should then send GOAWAY and close the connection.
+    pub fn check_continuation_timeout(&mut self) -> Result<(), H2Error> {
+        if let Some(started_at) = self.continuation_started_at {
+            let timeout_ms = self.local_settings.continuation_timeout_ms;
+            let elapsed = started_at.elapsed();
+
+            if elapsed.as_millis() >= u128::from(timeout_ms) {
+                // Clear continuation state
+                let stream_id = self.continuation_stream_id.take();
+                self.continuation_started_at = None;
+                self.pending_push_promise = None;
+
+                return Err(H2Error::protocol(format!(
+                    "CONTINUATION timeout: no END_HEADERS within {}ms for stream {:?}",
+                    timeout_ms, stream_id
+                )));
+            }
+        }
+        Ok(())
     }
 
     /// Queue initial settings frame.
@@ -410,6 +464,9 @@ impl Connection {
 
     /// Process an incoming frame.
     pub fn process_frame(&mut self, frame: Frame) -> Result<Option<ReceivedFrame>, H2Error> {
+        // Check continuation timeout before processing
+        self.check_continuation_timeout()?;
+
         // Check for CONTINUATION requirement
         if let Some(expected_stream) = self.continuation_stream_id {
             match &frame {
@@ -495,9 +552,11 @@ impl Connection {
 
         if frame.end_headers {
             self.continuation_stream_id = None;
+            self.continuation_started_at = None;
             self.decode_headers(frame.stream_id, frame.end_stream)
         } else {
             self.continuation_stream_id = Some(frame.stream_id);
+            self.continuation_started_at = Some(Instant::now());
             Ok(None)
         }
     }
@@ -522,6 +581,7 @@ impl Connection {
                 if frame.end_headers {
                     self.pending_push_promise = None;
                     self.continuation_stream_id = None;
+                    self.continuation_started_at = None;
                     return self.decode_push_promise(frame.stream_id, promised_stream_id);
                 }
 
@@ -538,6 +598,7 @@ impl Connection {
 
         if frame.end_headers {
             self.continuation_stream_id = None;
+            self.continuation_started_at = None;
             // Get end_stream from stream state
             let end_stream = matches!(
                 stream.state(),
@@ -726,6 +787,7 @@ impl Connection {
 
         if frame.end_headers {
             self.continuation_stream_id = None;
+            self.continuation_started_at = None;
             self.decode_push_promise(frame.stream_id, promised_stream_id)
         } else {
             self.pending_push_promise = Some(PushPromiseAccumulator {
@@ -733,6 +795,7 @@ impl Connection {
                 promised_stream_id,
             });
             self.continuation_stream_id = Some(frame.stream_id);
+            self.continuation_started_at = Some(Instant::now());
             Ok(None)
         }
     }

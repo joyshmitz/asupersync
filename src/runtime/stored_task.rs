@@ -4,7 +4,7 @@
 //! Each stored task is associated with a `TaskId` and can be polled to completion.
 
 use crate::tracing_compat::trace;
-use crate::types::TaskId;
+use crate::types::{Outcome, TaskId};
 use std::future::Future;
 use std::pin::Pin;
 use std::task::{Context, Poll};
@@ -16,7 +16,7 @@ use std::task::{Context, Poll};
 /// storing heterogeneous futures in a single collection.
 pub struct StoredTask {
     /// The pinned, boxed future to poll.
-    future: Pin<Box<dyn Future<Output = ()> + Send>>,
+    future: Pin<Box<dyn Future<Output = Outcome<(), ()>> + Send>>,
     /// The task ID (for tracing).
     task_id: Option<TaskId>,
     /// Poll counter (for tracing).
@@ -32,7 +32,7 @@ impl StoredTask {
     /// by sending through a oneshot channel).
     pub fn new<F>(future: F) -> Self
     where
-        F: Future<Output = ()> + Send + 'static,
+        F: Future<Output = Outcome<(), ()>> + Send + 'static,
     {
         Self {
             future: Box::pin(future),
@@ -47,7 +47,7 @@ impl StoredTask {
     /// The task ID is used for tracing poll events.
     pub fn new_with_id<F>(future: F, task_id: TaskId) -> Self
     where
-        F: Future<Output = ()> + Send + 'static,
+        F: Future<Output = Outcome<(), ()>> + Send + 'static,
     {
         Self {
             future: Box::pin(future),
@@ -72,10 +72,10 @@ impl StoredTask {
 
     /// Polls the stored task.
     ///
-    /// Returns `Poll::Ready(())` when the task is complete, or `Poll::Pending`
+    /// Returns `Poll::Ready(Outcome)` when the task is complete, or `Poll::Pending`
     /// if it needs to be polled again.
     #[allow(clippy::used_underscore_binding)]
-    pub fn poll(&mut self, cx: &mut Context<'_>) -> Poll<()> {
+    pub fn poll(&mut self, cx: &mut Context<'_>) -> Poll<Outcome<(), ()>> {
         self.poll_count += 1;
         let poll_number = self.poll_count;
 
@@ -94,7 +94,7 @@ impl StoredTask {
 
         if let Some(task_id) = self.task_id {
             let poll_result = match &result {
-                Poll::Ready(()) => "Ready",
+                Poll::Ready(_) => "Ready",
                 Poll::Pending => "Pending",
             };
             trace!(
@@ -153,6 +153,7 @@ mod tests {
 
         let task = StoredTask::new(async move {
             completed_clone.store(true, Ordering::SeqCst);
+            Outcome::Ok(())
         });
 
         let mut task = task;
@@ -162,7 +163,7 @@ mod tests {
         // Simple async block should complete immediately
         crate::test_section!("poll");
         let result = task.poll(&mut cx);
-        let ready = matches!(result, Poll::Ready(()));
+        let ready = matches!(result, Poll::Ready(Outcome::Ok(())));
         crate::assert_with_log!(ready, "poll should complete immediately", true, ready);
         let completed_value = completed.load(Ordering::SeqCst);
         crate::assert_with_log!(
@@ -177,7 +178,7 @@ mod tests {
     #[test]
     fn stored_task_debug() {
         init_test("stored_task_debug");
-        let task = StoredTask::new(async {});
+        let task = StoredTask::new(async { Outcome::Ok(()) });
         let debug = format!("{task:?}");
         let contains = debug.contains("StoredTask");
         crate::assert_with_log!(

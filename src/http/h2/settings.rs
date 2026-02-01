@@ -28,6 +28,13 @@ pub const DEFAULT_MAX_FRAME_SIZE: u32 = 16384;
 /// Most legitimate requests have headers well under this limit.
 pub const DEFAULT_MAX_HEADER_LIST_SIZE: u32 = 65536;
 
+/// Default continuation timeout (5 seconds).
+///
+/// Maximum time allowed for a CONTINUATION frame sequence to complete.
+/// Protects against DoS attacks where a peer sends HEADERS without END_HEADERS
+/// and never sends the CONTINUATION frames.
+pub const DEFAULT_CONTINUATION_TIMEOUT_MS: u64 = 5000;
+
 /// Maximum allowed initial window size.
 pub const MAX_INITIAL_WINDOW_SIZE: u32 = 0x7fff_ffff;
 
@@ -52,6 +59,15 @@ pub struct Settings {
     pub max_frame_size: u32,
     /// Maximum size of header list.
     pub max_header_list_size: u32,
+    /// Continuation sequence timeout in milliseconds.
+    ///
+    /// Maximum time allowed for a HEADERS/PUSH_PROMISE CONTINUATION sequence
+    /// to complete. If the peer doesn't send END_HEADERS within this time,
+    /// the connection returns a protocol error.
+    ///
+    /// This protects against DoS attacks where a malicious peer sends a
+    /// HEADERS frame without END_HEADERS and never sends CONTINUATION.
+    pub continuation_timeout_ms: u64,
 }
 
 impl Default for Settings {
@@ -63,6 +79,7 @@ impl Default for Settings {
             initial_window_size: DEFAULT_INITIAL_WINDOW_SIZE,
             max_frame_size: DEFAULT_MAX_FRAME_SIZE,
             max_header_list_size: DEFAULT_MAX_HEADER_LIST_SIZE,
+            continuation_timeout_ms: DEFAULT_CONTINUATION_TIMEOUT_MS,
         }
     }
 }
@@ -241,6 +258,16 @@ impl SettingsBuilder {
     #[must_use]
     pub fn max_header_list_size(mut self, size: u32) -> Self {
         self.settings.max_header_list_size = size;
+        self
+    }
+
+    /// Set the continuation sequence timeout in milliseconds.
+    ///
+    /// This controls how long a HEADERS/PUSH_PROMISE CONTINUATION sequence
+    /// can remain incomplete before the connection times out.
+    #[must_use]
+    pub fn continuation_timeout_ms(mut self, timeout_ms: u64) -> Self {
+        self.settings.continuation_timeout_ms = timeout_ms;
         self
     }
 

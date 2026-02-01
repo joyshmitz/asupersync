@@ -338,19 +338,31 @@ impl LabRuntime {
 
         // 5. Handle result
         match result {
-            Poll::Ready(()) => {
+            Poll::Ready(outcome) => {
                 // Task completed
                 self.state.remove_stored_future(task_id);
                 self.scheduler.lock().unwrap().forget_task(task_id);
 
                 // Record task completion
                 self.replay_recorder
-                    .record_task_completed(task_id, Severity::Ok);
+                    .record_task_completed(task_id, Severity::Ok); // Severity is approx here
 
                 // Update state to Completed if not already terminal
                 if let Some(record) = self.state.tasks.get_mut(task_id.arena_index()) {
                     if !record.state.is_terminal() {
-                        record.complete(crate::types::Outcome::Ok(()));
+                        let record_outcome = match outcome {
+                            crate::types::Outcome::Ok(()) => crate::types::Outcome::Ok(()),
+                            crate::types::Outcome::Err(()) => crate::types::Outcome::Err(
+                                crate::error::Error::new(crate::error::ErrorKind::Unknown),
+                            ),
+                            crate::types::Outcome::Cancelled(r) => {
+                                crate::types::Outcome::Cancelled(r)
+                            }
+                            crate::types::Outcome::Panicked(p) => {
+                                crate::types::Outcome::Panicked(p)
+                            }
+                        };
+                        record.complete(record_outcome);
                     }
                 }
 

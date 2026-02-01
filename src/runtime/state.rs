@@ -548,6 +548,7 @@ impl RuntimeState {
             let result = future.await;
             // Send the result - ignore error if TaskHandle was dropped
             let _ = result_tx.send(&cx, Ok::<_, JoinError>(result));
+            crate::types::Outcome::Ok(())
         };
 
         // Store the wrapped future with task_id for poll tracing
