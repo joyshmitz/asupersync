@@ -876,8 +876,7 @@ mod tests {
         let active_after = pool.active_threads();
         assert!(
             active_after <= 1,
-            "Expected excess threads to retire, active_after={}",
-            active_after
+            "Expected excess threads to retire, active_after={active_after}"
         );
     }
 
@@ -979,8 +978,8 @@ mod tests {
         let counter = Arc::new(AtomicU64::new(0));
         let mut spawners = Vec::new();
 
-        let spawner_count = 4;
-        let tasks_per_spawner = 50;
+        let spawner_count: u64 = 4;
+        let tasks_per_spawner: u64 = 50;
 
         for _ in 0..spawner_count {
             let pool_handle = pool.handle();
@@ -1002,7 +1001,7 @@ mod tests {
         assert!(pool.shutdown_and_wait(Duration::from_secs(5)));
         assert_eq!(
             counter.load(Ordering::Relaxed),
-            (spawner_count * tasks_per_spawner) as u64
+            spawner_count * tasks_per_spawner
         );
     }
 

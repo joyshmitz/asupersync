@@ -1,6 +1,6 @@
 //! Shared helpers for Console E2E tests.
 
-use asupersync::console::{Capabilities, ColorMode, ColorSupport, Console, Text};
+use asupersync::console::{Capabilities, ColorMode, ColorSupport, Console};
 use parking_lot::Mutex;
 use std::io::{self, Write};
 use std::sync::atomic::{AtomicUsize, Ordering};

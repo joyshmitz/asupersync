@@ -1,7 +1,7 @@
 //! Task explanation E2E tests.
 
+use crate::console_e2e::common::create_test_runtime_state;
 use crate::console_e2e::util::init_console_test;
-use asupersync::cx::Cx;
 use asupersync::observability::{BlockReason, Diagnostics};
 use asupersync::types::TaskId;
 
@@ -9,12 +9,11 @@ use asupersync::types::TaskId;
 fn e2e_diagnostics_explain_task_not_found() {
     init_console_test("e2e_diagnostics_explain_task_not_found");
 
-    let cx = Cx::for_testing();
-    let state = cx.runtime_state().clone();
+    let state = create_test_runtime_state();
     let diagnostics = Diagnostics::new(state);
 
     // Query a non-existent task
-    let fake_id = TaskId::from_raw(88888);
+    let fake_id = TaskId::new_for_test(88888, 0);
     let explanation = diagnostics.explain_task_blocked(fake_id);
 
     let is_not_found = matches!(explanation.block_reason, BlockReason::TaskNotFound);
@@ -32,26 +31,25 @@ fn e2e_diagnostics_explain_task_not_found() {
 fn e2e_diagnostics_explain_task_display() {
     init_console_test("e2e_diagnostics_explain_task_display");
 
-    let cx = Cx::for_testing();
-    let state = cx.runtime_state().clone();
+    let state = create_test_runtime_state();
     let diagnostics = Diagnostics::new(state);
 
     // Get an explanation and verify it can be displayed
-    let fake_id = TaskId::from_raw(77777);
+    let fake_id = TaskId::new_for_test(77777, 0);
     let explanation = diagnostics.explain_task_blocked(fake_id);
 
-    let display = format!("{explanation}");
+    let rendered = format!("{explanation}");
     crate::assert_with_log!(
-        display.contains("Task"),
+        rendered.contains("Task"),
         "display has task",
         true,
-        display.contains("Task")
+        rendered.contains("Task")
     );
     crate::assert_with_log!(
-        display.contains("blocked"),
+        rendered.contains("blocked"),
         "display has blocked",
         true,
-        display.contains("blocked")
+        rendered.contains("blocked")
     );
 
     crate::test_complete!("e2e_diagnostics_explain_task_display");
@@ -76,12 +74,12 @@ fn e2e_diagnostics_block_reason_display() {
     ];
 
     for (reason, expected_substring) in variants {
-        let display = format!("{reason}");
+        let rendered = format!("{reason}");
         crate::assert_with_log!(
-            display.to_lowercase().contains(expected_substring),
+            rendered.to_lowercase().contains(expected_substring),
             "block reason display",
             true,
-            display.to_lowercase().contains(expected_substring)
+            rendered.to_lowercase().contains(expected_substring)
         );
     }
 

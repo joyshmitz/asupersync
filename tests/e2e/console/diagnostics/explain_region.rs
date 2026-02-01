@@ -1,7 +1,7 @@
 //! Region explanation E2E tests.
 
+use crate::console_e2e::common::create_test_runtime_state;
 use crate::console_e2e::util::init_console_test;
-use asupersync::cx::Cx;
 use asupersync::observability::{Diagnostics, Reason};
 use asupersync::types::RegionId;
 
@@ -9,12 +9,11 @@ use asupersync::types::RegionId;
 fn e2e_diagnostics_explain_region_not_found() {
     init_console_test("e2e_diagnostics_explain_region_not_found");
 
-    let cx = Cx::for_testing();
-    let state = cx.runtime_state().clone();
+    let state = create_test_runtime_state();
     let diagnostics = Diagnostics::new(state);
 
     // Query a non-existent region
-    let fake_id = RegionId::from_raw(99999);
+    let fake_id = RegionId::new_for_test(99999, 0);
     let explanation = diagnostics.explain_region_open(fake_id);
 
     crate::assert_with_log!(
@@ -42,28 +41,27 @@ fn e2e_diagnostics_explain_region_not_found() {
 fn e2e_diagnostics_explain_region_display() {
     init_console_test("e2e_diagnostics_explain_region_display");
 
-    let cx = Cx::for_testing();
-    let state = cx.runtime_state().clone();
+    let state = create_test_runtime_state();
     let diagnostics = Diagnostics::new(state);
 
     // Get an explanation and verify it can be displayed
-    let fake_id = RegionId::from_raw(12345);
+    let fake_id = RegionId::new_for_test(12345, 0);
     let explanation = diagnostics.explain_region_open(fake_id);
 
     // The Display impl should produce readable output
-    let display = format!("{explanation}");
+    let rendered = format!("{explanation}");
 
     crate::assert_with_log!(
-        display.contains("Region"),
+        rendered.contains("Region"),
         "display has region",
         true,
-        display.contains("Region")
+        rendered.contains("Region")
     );
     crate::assert_with_log!(
-        display.contains("12345") || display.contains("RegionId"),
+        rendered.contains("12345") || rendered.contains("RegionId"),
         "display has id",
         true,
-        display.contains("12345") || display.contains("RegionId")
+        rendered.contains("12345") || rendered.contains("RegionId")
     );
 
     crate::test_complete!("e2e_diagnostics_explain_region_display");
@@ -75,12 +73,12 @@ fn e2e_diagnostics_reason_display() {
 
     // Test that each Reason variant has a meaningful Display
     let not_found = Reason::RegionNotFound;
-    let display = format!("{not_found}");
+    let rendered = format!("{not_found}");
     crate::assert_with_log!(
-        display.contains("not found"),
+        rendered.contains("not found"),
         "not found display",
         true,
-        display.contains("not found")
+        rendered.contains("not found")
     );
 
     crate::test_complete!("e2e_diagnostics_reason_display");

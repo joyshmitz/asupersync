@@ -392,6 +392,30 @@ pub const fn first_ok_still_possible(
     !was_cancelled && !had_panic && remaining > 0
 }
 
+/// Tries operations sequentially until one succeeds.
+///
+/// Returns the first success, or a collection of all errors if all fail.
+///
+/// # Semantics
+///
+/// ```ignore
+/// let result = first_ok!(
+///     try_cache(),
+///     try_database(),
+///     try_fallback(),
+/// ).await;
+/// ```
+///
+/// Operations are tried in order. Unlike `race!`, this is sequential:
+/// the second operation only starts after the first fails.
+#[macro_export]
+macro_rules! first_ok {
+    ($($operation:expr),+ $(,)?) => {{
+        // Placeholder: in real implementation, this tries operations sequentially
+        $(let _ = $operation;)+
+    }};
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;

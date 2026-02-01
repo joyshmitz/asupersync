@@ -43,6 +43,7 @@ fn e2e_unicode_width_emoji() {
     let sun = '\u{1F31E}'; // 🌞
 
     crate::assert_with_log!(char_width(smiley) == 2, "smiley width", 2usize, char_width(smiley));
+    crate::assert_with_log!(char_width(heart) == 1, "heart width", 1usize, char_width(heart));
     crate::assert_with_log!(char_width(sun) == 2, "sun width", 2usize, char_width(sun));
 
     crate::test_complete!("e2e_unicode_width_emoji");
