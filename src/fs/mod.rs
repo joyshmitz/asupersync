@@ -49,6 +49,9 @@ mod open_options;
 mod path_ops;
 mod read_dir;
 
+#[cfg(all(target_os = "linux", feature = "io-uring"))]
+pub mod uring;
+
 pub use buf_reader::BufReader;
 pub use buf_writer::BufWriter;
 pub use dir::{create_dir, create_dir_all, remove_dir, remove_dir_all};
@@ -61,6 +64,9 @@ pub use path_ops::{
     set_permissions, symlink_metadata, write,
 };
 pub use read_dir::{read_dir, DirEntry, ReadDir};
+
+#[cfg(all(target_os = "linux", feature = "io-uring"))]
+pub use uring::IoUringFile;
 
 #[cfg(unix)]
 pub use path_ops::symlink;
