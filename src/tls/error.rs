@@ -42,6 +42,17 @@ pub enum TlsError {
     Io(io::Error),
     /// TLS operation timed out.
     Timeout(Duration),
+    /// ALPN negotiation failed or did not meet requirements.
+    ///
+    /// This is returned when ALPN was configured as required (e.g. HTTP/2-only)
+    /// but the peer did not negotiate any protocol, or the negotiated protocol
+    /// was not one of the expected values.
+    AlpnNegotiationFailed {
+        /// The set of acceptable ALPN protocols (in preference order).
+        expected: Vec<Vec<u8>>,
+        /// The protocol negotiated by the peer, if any.
+        negotiated: Option<Vec<u8>>,
+    },
     /// Rustls-specific error.
     #[cfg(feature = "tls")]
     Rustls(rustls::Error),
@@ -69,6 +80,13 @@ impl fmt::Display for TlsError {
             Self::Configuration(msg) => write!(f, "TLS configuration error: {msg}"),
             Self::Io(err) => write!(f, "I/O error: {err}"),
             Self::Timeout(duration) => write!(f, "TLS operation timed out after {duration:?}"),
+            Self::AlpnNegotiationFailed {
+                expected,
+                negotiated,
+            } => write!(
+                f,
+                "ALPN negotiation failed: expected one of {expected:?}, negotiated {negotiated:?}"
+            ),
             #[cfg(feature = "tls")]
             Self::Rustls(err) => write!(f, "rustls error: {err}"),
         }

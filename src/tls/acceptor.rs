@@ -37,6 +37,7 @@ pub struct TlsAcceptor {
     #[cfg(feature = "tls")]
     config: Arc<ServerConfig>,
     handshake_timeout: Option<std::time::Duration>,
+    alpn_required: bool,
     #[cfg(not(feature = "tls"))]
     _marker: std::marker::PhantomData<()>,
 }
@@ -48,6 +49,7 @@ impl TlsAcceptor {
         Self {
             config: Arc::new(config),
             handshake_timeout: None,
+            alpn_required: false,
         }
     }
 
@@ -108,6 +110,21 @@ impl TlsAcceptor {
         } else {
             poll_fn(|cx| stream.poll_handshake(cx)).await?;
         }
+        if self.alpn_required {
+            let expected = self.config.alpn_protocols.clone();
+            let negotiated = stream.alpn_protocol().map(<[u8]>::to_vec);
+            let ok = match negotiated.as_deref() {
+                Some(p) => expected.iter().any(|e| e.as_slice() == p),
+                None => false,
+            };
+            if !ok {
+                return Err(TlsError::AlpnNegotiationFailed {
+                    expected,
+                    negotiated,
+                });
+            }
+        }
+
         Ok(stream)
     }
 
@@ -154,6 +171,7 @@ pub struct TlsAcceptorBuilder {
     key: PrivateKey,
     client_auth: ClientAuth,
     alpn_protocols: Vec<Vec<u8>>,
+    alpn_required: bool,
     max_fragment_size: Option<usize>,
     handshake_timeout: Option<std::time::Duration>,
 }
@@ -166,6 +184,7 @@ impl TlsAcceptorBuilder {
             key,
             client_auth: ClientAuth::None,
             alpn_protocols: Vec::new(),
+            alpn_required: false,
             max_fragment_size: None,
             handshake_timeout: None,
         }
@@ -205,9 +224,28 @@ impl TlsAcceptorBuilder {
         self
     }
 
+    /// Require that the peer negotiates an ALPN protocol.
+    ///
+    /// If the peer does not negotiate any protocol (or negotiates something
+    /// unexpected), `accept()` returns `TlsError::AlpnNegotiationFailed`.
+    pub fn require_alpn(mut self) -> Self {
+        self.alpn_required = true;
+        self
+    }
+
+    /// Set ALPN protocols and require successful negotiation.
+    pub fn alpn_protocols_required(self, protocols: Vec<Vec<u8>>) -> Self {
+        self.alpn_protocols(protocols).require_alpn()
+    }
+
     /// Convenience method for HTTP/2 ALPN only.
     pub fn alpn_h2(self) -> Self {
-        self.alpn_protocols(vec![b"h2".to_vec()])
+        self.alpn_protocols_required(vec![b"h2".to_vec()])
+    }
+
+    /// Convenience method for gRPC (HTTP/2-only) ALPN.
+    pub fn alpn_grpc(self) -> Self {
+        self.alpn_h2()
     }
 
     /// Convenience method for HTTP/1.1 and HTTP/2 ALPN.
@@ -241,6 +279,12 @@ impl TlsAcceptorBuilder {
     pub fn build(self) -> Result<TlsAcceptor, TlsError> {
         use rustls::crypto::ring::default_provider;
         use rustls::server::WebPkiClientVerifier;
+
+        if self.alpn_required && self.alpn_protocols.is_empty() {
+            return Err(TlsError::Configuration(
+                "require_alpn set but no ALPN protocols configured".into(),
+            ));
+        }
 
         // Create the config builder with the crypto provider
         let builder = ServerConfig::builder_with_provider(Arc::new(default_provider()))
@@ -288,6 +332,7 @@ impl TlsAcceptorBuilder {
         Ok(TlsAcceptor {
             config: Arc::new(config),
             handshake_timeout: self.handshake_timeout,
+            alpn_required: self.alpn_required,
         })
     }
 
@@ -379,6 +424,16 @@ W7n9v0wIyo4e/O0DO2fczXZD
         let key = PrivateKey::from_pem(TEST_KEY_PEM).unwrap();
         let builder = TlsAcceptorBuilder::new(chain, key).alpn_h2();
         assert_eq!(builder.alpn_protocols, vec![b"h2".to_vec()]);
+        assert!(builder.alpn_required);
+    }
+
+    #[test]
+    fn test_builder_alpn_grpc() {
+        let chain = CertificateChain::from_pem(TEST_CERT_PEM).unwrap();
+        let key = PrivateKey::from_pem(TEST_KEY_PEM).unwrap();
+        let builder = TlsAcceptorBuilder::new(chain, key).alpn_grpc();
+        assert_eq!(builder.alpn_protocols, vec![b"h2".to_vec()]);
+        assert!(builder.alpn_required);
     }
 
     #[test]
@@ -473,6 +528,220 @@ W7n9v0wIyo4e/O0DO2fczXZD
             assert!(server.is_ready());
             assert!(client.protocol_version().is_some());
             assert!(server.protocol_version().is_some());
+            assert_eq!(client.alpn_protocol(), Some(b"h2".as_slice()));
+            assert_eq!(server.alpn_protocol(), Some(b"h2".as_slice()));
+        });
+    }
+
+    #[cfg(feature = "tls")]
+    #[test]
+    fn test_alpn_server_preference_ordering() {
+        use crate::net::tcp::VirtualTcpStream;
+        use crate::test_utils::run_test;
+        use futures_lite::future::zip;
+
+        run_test(|| async {
+            // Server prefers http/1.1 over h2; client prefers h2 over http/1.1.
+            // Per TLS ALPN, the server selects from the intersection.
+            let chain = CertificateChain::from_pem(TEST_CERT_PEM).unwrap();
+            let key = PrivateKey::from_pem(TEST_KEY_PEM).unwrap();
+            let acceptor = TlsAcceptorBuilder::new(chain, key)
+                .alpn_protocols(vec![b"http/1.1".to_vec(), b"h2".to_vec()])
+                .build()
+                .unwrap();
+
+            let certs = Certificate::from_pem(TEST_CERT_PEM).unwrap();
+            let connector = crate::tls::TlsConnectorBuilder::new()
+                .add_root_certificates(certs)
+                .alpn_http()
+                .build()
+                .unwrap();
+
+            let (client_io, server_io) = VirtualTcpStream::pair(
+                "127.0.0.1:5100".parse().unwrap(),
+                "127.0.0.1:5101".parse().unwrap(),
+            );
+
+            let (client_res, server_res) = zip(
+                connector.connect("localhost", client_io),
+                acceptor.accept(server_io),
+            )
+            .await;
+
+            let client = client_res.unwrap();
+            let server = server_res.unwrap();
+
+            assert_eq!(client.alpn_protocol(), Some(b"http/1.1".as_slice()));
+            assert_eq!(server.alpn_protocol(), Some(b"http/1.1".as_slice()));
+        });
+    }
+
+    #[cfg(feature = "tls")]
+    #[test]
+    fn test_alpn_fallback_to_http11_when_server_h2_not_supported() {
+        use crate::net::tcp::VirtualTcpStream;
+        use crate::test_utils::run_test;
+        use futures_lite::future::zip;
+
+        run_test(|| async {
+            // Server supports only http/1.1; client offers h2 + http/1.1.
+            let chain = CertificateChain::from_pem(TEST_CERT_PEM).unwrap();
+            let key = PrivateKey::from_pem(TEST_KEY_PEM).unwrap();
+            let acceptor = TlsAcceptorBuilder::new(chain, key)
+                .alpn_protocols(vec![b"http/1.1".to_vec()])
+                .build()
+                .unwrap();
+
+            let certs = Certificate::from_pem(TEST_CERT_PEM).unwrap();
+            let connector = crate::tls::TlsConnectorBuilder::new()
+                .add_root_certificates(certs)
+                .alpn_http()
+                .build()
+                .unwrap();
+
+            let (client_io, server_io) = VirtualTcpStream::pair(
+                "127.0.0.1:5110".parse().unwrap(),
+                "127.0.0.1:5111".parse().unwrap(),
+            );
+
+            let (client_res, server_res) = zip(
+                connector.connect("localhost", client_io),
+                acceptor.accept(server_io),
+            )
+            .await;
+
+            let client = client_res.unwrap();
+            let server = server_res.unwrap();
+
+            assert_eq!(client.alpn_protocol(), Some(b"http/1.1".as_slice()));
+            assert_eq!(server.alpn_protocol(), Some(b"http/1.1".as_slice()));
+        });
+    }
+
+    #[cfg(feature = "tls")]
+    #[test]
+    fn test_alpn_none_when_server_has_no_alpn() {
+        use crate::net::tcp::VirtualTcpStream;
+        use crate::test_utils::run_test;
+        use futures_lite::future::zip;
+
+        run_test(|| async {
+            // Server does not advertise ALPN; client offers h2 + http/1.1.
+            // This should still succeed and return no negotiated ALPN.
+            let chain = CertificateChain::from_pem(TEST_CERT_PEM).unwrap();
+            let key = PrivateKey::from_pem(TEST_KEY_PEM).unwrap();
+            let acceptor = TlsAcceptorBuilder::new(chain, key).build().unwrap();
+
+            let certs = Certificate::from_pem(TEST_CERT_PEM).unwrap();
+            let connector = crate::tls::TlsConnectorBuilder::new()
+                .add_root_certificates(certs)
+                .alpn_http()
+                .build()
+                .unwrap();
+
+            let (client_io, server_io) = VirtualTcpStream::pair(
+                "127.0.0.1:5120".parse().unwrap(),
+                "127.0.0.1:5121".parse().unwrap(),
+            );
+
+            let (client_res, server_res) = zip(
+                connector.connect("localhost", client_io),
+                acceptor.accept(server_io),
+            )
+            .await;
+
+            let client = client_res.unwrap();
+            let server = server_res.unwrap();
+
+            assert!(client.alpn_protocol().is_none());
+            assert!(server.alpn_protocol().is_none());
+        });
+    }
+
+    #[cfg(feature = "tls")]
+    #[test]
+    fn test_alpn_required_client_errors_on_no_overlap() {
+        use crate::net::tcp::VirtualTcpStream;
+        use crate::test_utils::run_test;
+        use futures_lite::future::zip;
+
+        run_test(|| async {
+            // Client requires h2; server only offers http/1.1 -> no overlap.
+            let chain = CertificateChain::from_pem(TEST_CERT_PEM).unwrap();
+            let key = PrivateKey::from_pem(TEST_KEY_PEM).unwrap();
+            let acceptor = TlsAcceptorBuilder::new(chain, key)
+                .alpn_protocols(vec![b"http/1.1".to_vec()])
+                .build()
+                .unwrap();
+
+            let certs = Certificate::from_pem(TEST_CERT_PEM).unwrap();
+            let connector = crate::tls::TlsConnectorBuilder::new()
+                .add_root_certificates(certs)
+                .alpn_h2()
+                .build()
+                .unwrap();
+
+            let (client_io, server_io) = VirtualTcpStream::pair(
+                "127.0.0.1:5130".parse().unwrap(),
+                "127.0.0.1:5131".parse().unwrap(),
+            );
+
+            let (client_res, server_res) = zip(
+                connector.connect("localhost", client_io),
+                acceptor.accept(server_io),
+            )
+            .await;
+
+            let client_err = client_res.unwrap_err();
+            assert!(matches!(client_err, TlsError::AlpnNegotiationFailed { .. }));
+
+            // Server is not configured to require ALPN, so it accepts the connection but
+            // no ALPN is negotiated.
+            let server = server_res.unwrap();
+            assert!(server.alpn_protocol().is_none());
+        });
+    }
+
+    #[cfg(feature = "tls")]
+    #[test]
+    fn test_alpn_required_server_errors_when_client_offers_none() {
+        use crate::net::tcp::VirtualTcpStream;
+        use crate::test_utils::run_test;
+        use futures_lite::future::zip;
+
+        run_test(|| async {
+            // Server requires h2; client does not offer ALPN -> no negotiation.
+            let chain = CertificateChain::from_pem(TEST_CERT_PEM).unwrap();
+            let key = PrivateKey::from_pem(TEST_KEY_PEM).unwrap();
+            let acceptor = TlsAcceptorBuilder::new(chain, key)
+                .alpn_h2()
+                .build()
+                .unwrap();
+
+            let certs = Certificate::from_pem(TEST_CERT_PEM).unwrap();
+            let connector = crate::tls::TlsConnectorBuilder::new()
+                .add_root_certificates(certs)
+                .build()
+                .unwrap();
+
+            let (client_io, server_io) = VirtualTcpStream::pair(
+                "127.0.0.1:5140".parse().unwrap(),
+                "127.0.0.1:5141".parse().unwrap(),
+            );
+
+            let (client_res, server_res) = zip(
+                connector.connect("localhost", client_io),
+                acceptor.accept(server_io),
+            )
+            .await;
+
+            // Client doesn't require ALPN, so the handshake can succeed from its POV.
+            let client = client_res.unwrap();
+            assert!(client.alpn_protocol().is_none());
+
+            // Server enforces ALPN and rejects post-handshake if nothing was negotiated.
+            let server_err = server_res.unwrap_err();
+            assert!(matches!(server_err, TlsError::AlpnNegotiationFailed { .. }));
         });
     }
 

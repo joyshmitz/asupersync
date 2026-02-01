@@ -39,6 +39,7 @@ pub struct TlsConnector {
     #[cfg(feature = "tls")]
     config: Arc<ClientConfig>,
     handshake_timeout: Option<std::time::Duration>,
+    alpn_required: bool,
     #[cfg(not(feature = "tls"))]
     _marker: std::marker::PhantomData<()>,
 }
@@ -50,6 +51,7 @@ impl TlsConnector {
         Self {
             config: Arc::new(config),
             handshake_timeout: None,
+            alpn_required: false,
         }
     }
 
@@ -98,6 +100,21 @@ impl TlsConnector {
         } else {
             poll_fn(|cx| stream.poll_handshake(cx)).await?;
         }
+        if self.alpn_required {
+            let expected = self.config.alpn_protocols.clone();
+            let negotiated = stream.alpn_protocol().map(<[u8]>::to_vec);
+            let ok = match negotiated.as_deref() {
+                Some(p) => expected.iter().any(|e| e.as_slice() == p),
+                None => false,
+            };
+            if !ok {
+                return Err(TlsError::AlpnNegotiationFailed {
+                    expected,
+                    negotiated,
+                });
+            }
+        }
+
         Ok(stream)
     }
 
@@ -152,6 +169,7 @@ pub struct TlsConnectorBuilder {
     root_certs: RootCertStore,
     client_identity: Option<(CertificateChain, PrivateKey)>,
     alpn_protocols: Vec<Vec<u8>>,
+    alpn_required: bool,
     enable_sni: bool,
     handshake_timeout: Option<std::time::Duration>,
     #[cfg(feature = "tls")]
@@ -173,6 +191,7 @@ impl TlsConnectorBuilder {
             root_certs: RootCertStore::empty(),
             client_identity: None,
             alpn_protocols: Vec::new(),
+            alpn_required: false,
             enable_sni: true,
             handshake_timeout: None,
             #[cfg(feature = "tls")]
@@ -280,9 +299,28 @@ impl TlsConnectorBuilder {
         self
     }
 
+    /// Require that the peer negotiates an ALPN protocol.
+    ///
+    /// If the peer does not negotiate any protocol (or negotiates something
+    /// unexpected), `connect()` returns `TlsError::AlpnNegotiationFailed`.
+    pub fn require_alpn(mut self) -> Self {
+        self.alpn_required = true;
+        self
+    }
+
+    /// Set ALPN protocols and require successful negotiation.
+    pub fn alpn_protocols_required(self, protocols: Vec<Vec<u8>>) -> Self {
+        self.alpn_protocols(protocols).require_alpn()
+    }
+
     /// Convenience method for HTTP/2 ALPN only.
     pub fn alpn_h2(self) -> Self {
-        self.alpn_protocols(vec![b"h2".to_vec()])
+        self.alpn_protocols_required(vec![b"h2".to_vec()])
+    }
+
+    /// Convenience method for gRPC (HTTP/2-only) ALPN.
+    pub fn alpn_grpc(self) -> Self {
+        self.alpn_h2()
     }
 
     /// Convenience method for HTTP/1.1 and HTTP/2 ALPN.
@@ -328,6 +366,12 @@ impl TlsConnectorBuilder {
     #[cfg(feature = "tls")]
     pub fn build(self) -> Result<TlsConnector, TlsError> {
         use rustls::crypto::ring::default_provider;
+
+        if self.alpn_required && self.alpn_protocols.is_empty() {
+            return Err(TlsError::Configuration(
+                "require_alpn set but no ALPN protocols configured".into(),
+            ));
+        }
 
         if self.root_certs.is_empty() {
             #[cfg(feature = "tracing-integration")]
@@ -414,6 +458,7 @@ impl TlsConnectorBuilder {
         Ok(TlsConnector {
             config: Arc::new(config),
             handshake_timeout: self.handshake_timeout,
+            alpn_required: self.alpn_required,
         })
     }
 
@@ -449,6 +494,14 @@ mod tests {
     fn test_builder_alpn_h2() {
         let builder = TlsConnectorBuilder::new().alpn_h2();
         assert_eq!(builder.alpn_protocols, vec![b"h2".to_vec()]);
+        assert!(builder.alpn_required);
+    }
+
+    #[test]
+    fn test_builder_alpn_grpc() {
+        let builder = TlsConnectorBuilder::new().alpn_grpc();
+        assert_eq!(builder.alpn_protocols, vec![b"h2".to_vec()]);
+        assert!(builder.alpn_required);
     }
 
     #[test]
