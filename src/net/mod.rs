@@ -31,4 +31,7 @@ pub use unix::{
     OwnedWriteHalf as UnixOwnedWriteHalf, ReadHalf as UnixReadHalf,
     ReuniteError as UnixReuniteError, UnixListener, UnixStream, WriteHalf as UnixWriteHalf,
 };
-pub use websocket::{apply_mask, CloseCode, Frame, FrameCodec, Opcode, Role as WsRole, WsError};
+pub use websocket::{
+    apply_mask, ClientHandshake, CloseCode, Frame, FrameCodec, HandshakeError, Opcode,
+    Role as WsRole, ServerHandshake, WsError, WsUrl,
+};
