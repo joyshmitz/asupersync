@@ -484,5 +484,126 @@ mod tests {
         crate::test_complete!("lock_acquires_mutex");
     }
 
-    // ... Need to port other tests to async ...
+    #[test]
+    fn test_mutex_try_lock_success() {
+        init_test("test_mutex_try_lock_success");
+        let mutex = Mutex::new(42);
+
+        // Should succeed when unlocked
+        let guard = mutex.try_lock().expect("should succeed");
+        crate::assert_with_log!(*guard == 42, "guard value", 42, *guard);
+        drop(guard);
+        crate::test_complete!("test_mutex_try_lock_success");
+    }
+
+    #[test]
+    fn test_mutex_try_lock_fail() {
+        init_test("test_mutex_try_lock_fail");
+        let cx = test_cx();
+        let mutex = Mutex::new(42);
+
+        let mut fut = mutex.lock(&cx);
+        let _guard = poll_once(&mut fut).expect("immediate").expect("lock");
+
+        // Now try_lock should fail
+        let result = mutex.try_lock();
+        let is_locked = matches!(result, Err(TryLockError::Locked));
+        crate::assert_with_log!(is_locked, "should be locked", true, is_locked);
+        crate::test_complete!("test_mutex_try_lock_fail");
+    }
+
+    #[test]
+    fn test_mutex_cancel_waiting() {
+        init_test("test_mutex_cancel_waiting");
+        let cx = test_cx();
+        let mutex = Mutex::new(42);
+
+        // Acquire lock first
+        let mut fut1 = mutex.lock(&cx);
+        let _guard = poll_once(&mut fut1).expect("immediate").expect("lock");
+
+        // Create a cancellable context
+        let cancel_cx = Cx::new(
+            RegionId::from_arena(ArenaIndex::new(0, 1)),
+            TaskId::from_arena(ArenaIndex::new(0, 1)),
+            Budget::INFINITE,
+        );
+
+        // Start waiting
+        let mut fut2 = mutex.lock(&cancel_cx);
+        let pending = poll_once(&mut fut2).is_none();
+        crate::assert_with_log!(pending, "should be pending", true, pending);
+
+        // Cancel
+        cancel_cx.set_cancel_requested(true);
+
+        // Poll again - should return Cancelled
+        let result = poll_once(&mut fut2);
+        let cancelled = matches!(result, Some(Err(LockError::Cancelled)));
+        crate::assert_with_log!(cancelled, "should be cancelled", true, cancelled);
+        crate::test_complete!("test_mutex_cancel_waiting");
+    }
+
+    #[test]
+    fn test_mutex_no_queue_growth() {
+        init_test("test_mutex_no_queue_growth");
+        let cx = test_cx();
+        let mutex = Mutex::new(42);
+
+        // Hold the lock
+        let mut fut1 = mutex.lock(&cx);
+        let _guard = poll_once(&mut fut1).expect("immediate").expect("lock");
+
+        // Poll a waiter many times - queue should not grow
+        let mut fut2 = mutex.lock(&cx);
+        for _ in 0..100 {
+            let _ = poll_once(&mut fut2);
+        }
+
+        // Queue should have at most 1 waiter
+        let waiters = mutex.waiters();
+        crate::assert_with_log!(waiters <= 1, "waiters bounded", true, waiters <= 1);
+        crate::test_complete!("test_mutex_no_queue_growth");
+    }
+
+    #[test]
+    fn test_mutex_get_mut() {
+        init_test("test_mutex_get_mut");
+        let mut mutex = Mutex::new(42);
+
+        // get_mut provides direct access when we have &mut
+        *mutex.get_mut() = 100;
+
+        let value = *mutex.get_mut();
+        crate::assert_with_log!(value == 100, "get_mut works", 100, value);
+        crate::test_complete!("test_mutex_get_mut");
+    }
+
+    #[test]
+    fn test_mutex_into_inner() {
+        init_test("test_mutex_into_inner");
+        let mutex = Mutex::new(42);
+
+        let value = mutex.into_inner();
+        crate::assert_with_log!(value == 42, "into_inner works", 42, value);
+        crate::test_complete!("test_mutex_into_inner");
+    }
+
+    #[test]
+    fn test_mutex_drop_releases_lock() {
+        init_test("test_mutex_drop_releases_lock");
+        let cx = test_cx();
+        let mutex = Mutex::new(42);
+
+        // Acquire and drop
+        {
+            let mut fut = mutex.lock(&cx);
+            let _guard = poll_once(&mut fut).expect("immediate").expect("lock");
+        }
+
+        // Should be unlocked now
+        let can_lock = mutex.try_lock().is_ok();
+        crate::assert_with_log!(can_lock, "should be unlocked", true, can_lock);
+        crate::test_complete!("test_mutex_drop_releases_lock");
+    }
 }

@@ -657,4 +657,101 @@ mod tests {
         crate::assert_with_log!(cancelled, "read cancelled", true, cancelled);
         crate::test_complete!("cancel_during_read_wait");
     }
+
+    #[test]
+    fn test_rwlock_try_read_success() {
+        init_test("test_rwlock_try_read_success");
+        let lock = RwLock::new(42_u32);
+
+        // Should succeed when unlocked
+        let guard = lock.try_read().expect("try_read should succeed");
+        crate::assert_with_log!(*guard == 42, "read value", 42u32, *guard);
+        crate::test_complete!("test_rwlock_try_read_success");
+    }
+
+    #[test]
+    fn test_rwlock_try_write_success() {
+        init_test("test_rwlock_try_write_success");
+        let lock = RwLock::new(42_u32);
+
+        // Should succeed when unlocked
+        let mut guard = lock.try_write().expect("try_write should succeed");
+        *guard = 100;
+        crate::assert_with_log!(*guard == 100, "write value", 100u32, *guard);
+        crate::test_complete!("test_rwlock_try_write_success");
+    }
+
+    #[test]
+    fn test_rwlock_cancel_during_write_wait() {
+        init_test("test_rwlock_cancel_during_write_wait");
+        let cx = test_cx();
+        let lock = RwLock::new(0_u32);
+
+        // Hold a read lock
+        let _read = lock.read(&cx).expect("read");
+
+        // Request cancellation
+        cx.set_cancel_requested(true);
+
+        // Write should be cancelled
+        let cancelled = matches!(lock.write(&cx), Err(RwLockError::Cancelled));
+        crate::assert_with_log!(cancelled, "write cancelled", true, cancelled);
+        crate::test_complete!("test_rwlock_cancel_during_write_wait");
+    }
+
+    #[test]
+    fn test_rwlock_get_mut() {
+        init_test("test_rwlock_get_mut");
+        let mut lock = RwLock::new(42_u32);
+
+        // get_mut provides direct access when we have &mut
+        *lock.get_mut() = 100;
+        let value = *lock.get_mut();
+        crate::assert_with_log!(value == 100, "get_mut works", 100u32, value);
+        crate::test_complete!("test_rwlock_get_mut");
+    }
+
+    #[test]
+    fn test_rwlock_into_inner() {
+        init_test("test_rwlock_into_inner");
+        let lock = RwLock::new(42_u32);
+
+        let value = lock.into_inner();
+        crate::assert_with_log!(value == 42, "into_inner works", 42u32, value);
+        crate::test_complete!("test_rwlock_into_inner");
+    }
+
+    #[test]
+    fn test_rwlock_read_released_on_drop() {
+        init_test("test_rwlock_read_released_on_drop");
+        let cx = test_cx();
+        let lock = RwLock::new(42_u32);
+
+        // Acquire and drop read
+        {
+            let _guard = lock.read(&cx).expect("read");
+        }
+
+        // Write should succeed now
+        let can_write = lock.try_write().is_ok();
+        crate::assert_with_log!(can_write, "can write after read drop", true, can_write);
+        crate::test_complete!("test_rwlock_read_released_on_drop");
+    }
+
+    #[test]
+    fn test_rwlock_write_released_on_drop() {
+        init_test("test_rwlock_write_released_on_drop");
+        let cx = test_cx();
+        let lock = RwLock::new(42_u32);
+
+        // Acquire and drop write
+        {
+            let _guard = lock.write(&cx).expect("write");
+        }
+
+        // Read should succeed now
+        let can_read = lock.try_read().is_ok();
+        crate::assert_with_log!(can_read, "can read after write drop", true, can_read);
+        crate::test_complete!("test_rwlock_write_released_on_drop");
+    }
 }

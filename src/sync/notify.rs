@@ -420,4 +420,93 @@ mod tests {
         crate::assert_with_log!(count == 3, "completed count", 3usize, count);
         crate::test_complete!("notify_waiters_wakes_all");
     }
+
+    #[test]
+    fn test_notify_no_waiters() {
+        init_test("test_notify_no_waiters");
+        let notify = Notify::new();
+
+        // Notify with no waiters should not block or panic
+        notify.notify_one();
+        notify.notify_waiters();
+
+        // The stored notification should be consumed by next waiter
+        let mut fut = notify.notified();
+        let ready = poll_once(&mut fut).is_ready();
+        crate::assert_with_log!(ready, "stored notify consumed", true, ready);
+        crate::test_complete!("test_notify_no_waiters");
+    }
+
+    #[test]
+    fn test_notify_waiter_count() {
+        init_test("test_notify_waiter_count");
+        let notify = Notify::new();
+
+        // Initially no waiters
+        let count0 = notify.waiter_count();
+        crate::assert_with_log!(count0 == 0, "initial count", 0usize, count0);
+
+        // Register a waiter
+        let mut fut = notify.notified();
+        let pending = poll_once(&mut fut).is_pending();
+        crate::assert_with_log!(pending, "should be pending", true, pending);
+
+        let count1 = notify.waiter_count();
+        crate::assert_with_log!(count1 == 1, "one waiter", 1usize, count1);
+
+        // Notify wakes the waiter
+        notify.notify_one();
+        let ready = poll_once(&mut fut).is_ready();
+        crate::assert_with_log!(ready, "should be ready", true, ready);
+
+        // Waiter count should decrease after wakeup and cleanup
+        drop(fut);
+        let count2 = notify.waiter_count();
+        crate::assert_with_log!(count2 == 0, "no waiters after", 0usize, count2);
+        crate::test_complete!("test_notify_waiter_count");
+    }
+
+    #[test]
+    fn test_notify_drop_cleanup() {
+        init_test("test_notify_drop_cleanup");
+        let notify = Notify::new();
+
+        // Register and drop without notification
+        {
+            let mut fut = notify.notified();
+            let _ = poll_once(&mut fut);
+            // fut dropped here - should cleanup
+        }
+
+        // Waiter count should be 0 after cleanup
+        let count = notify.waiter_count();
+        crate::assert_with_log!(count == 0, "cleaned up", 0usize, count);
+        crate::test_complete!("test_notify_drop_cleanup");
+    }
+
+    #[test]
+    fn test_notify_multiple_stored() {
+        init_test("test_notify_multiple_stored");
+        let notify = Notify::new();
+
+        // Store multiple notifications
+        notify.notify_one();
+        notify.notify_one();
+
+        // First waiter consumes one
+        let mut fut1 = notify.notified();
+        let ready1 = poll_once(&mut fut1).is_ready();
+        crate::assert_with_log!(ready1, "first ready", true, ready1);
+
+        // Second waiter consumes another
+        let mut fut2 = notify.notified();
+        let ready2 = poll_once(&mut fut2).is_ready();
+        crate::assert_with_log!(ready2, "second ready", true, ready2);
+
+        // Third waiter should wait
+        let mut fut3 = notify.notified();
+        let pending = poll_once(&mut fut3).is_pending();
+        crate::assert_with_log!(pending, "third pending", true, pending);
+        crate::test_complete!("test_notify_multiple_stored");
+    }
 }

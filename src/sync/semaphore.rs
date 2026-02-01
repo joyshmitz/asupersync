@@ -589,14 +589,14 @@ mod tests {
 
         // First waiter should acquire (FIFO)
         let result1 = poll_once(&mut fut1);
-        let _permit1 = result1.expect("first should acquire").expect("no error");
+        let permit1 = result1.expect("first should acquire").expect("no error");
         crate::assert_with_log!(true, "first waiter acquires", true, true);
 
         // Second waiter should still be pending (permit1 still held)
         let still_pending = poll_once(&mut fut2).is_none();
         crate::assert_with_log!(still_pending, "second still pending", true, still_pending);
 
-        drop(_permit1); // explicitly drop to document lifetime
+        drop(permit1); // explicitly drop to document lifetime
         crate::test_complete!("test_semaphore_fifo_basic");
     }
 
@@ -669,14 +669,14 @@ mod tests {
 
         // First waiter should acquire (not third, even though second cancelled)
         let result1 = poll_once(&mut fut1);
-        let _permit1 = result1.expect("first should acquire").expect("no error");
+        let permit1 = result1.expect("first should acquire").expect("no error");
         crate::assert_with_log!(true, "first waiter acquires", true, true);
 
         // Third should still be pending (permit1 still held)
         let third_pending = poll_once(&mut fut3).is_none();
         crate::assert_with_log!(third_pending, "third still pending", true, third_pending);
 
-        drop(_permit1); // explicitly drop to document lifetime
+        drop(permit1); // explicitly drop to document lifetime
         crate::test_complete!("test_semaphore_cancel_preserves_order");
     }
 }
