@@ -24,3 +24,161 @@ pub fn steal_task(stealers: &[Stealer], rng: &mut DetRng) -> Option<TaskId> {
 
     None
 }
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+    use crate::runtime::scheduler::local_queue::LocalQueue;
+    use std::collections::HashSet;
+    use std::sync::atomic::{AtomicUsize, Ordering};
+    use std::sync::{Arc, Barrier};
+    use std::thread;
+
+    fn task(id: u32) -> TaskId {
+        TaskId::new_for_test(id, 0)
+    }
+
+    #[test]
+    fn test_steal_from_busy_worker_succeeds() {
+        let queue = LocalQueue::new();
+        for i in 0..10 {
+            queue.push(task(i));
+        }
+
+        let stealers = vec![queue.stealer()];
+        let mut rng = DetRng::new(42);
+
+        let stolen = steal_task(&stealers, &mut rng);
+        assert!(stolen.is_some(), "should steal from busy queue");
+    }
+
+    #[test]
+    fn test_steal_from_empty_returns_none() {
+        let queue = LocalQueue::new();
+        let stealers = vec![queue.stealer()];
+        let mut rng = DetRng::new(42);
+
+        let stolen = steal_task(&stealers, &mut rng);
+        assert!(stolen.is_none(), "empty queue should return None");
+    }
+
+    #[test]
+    fn test_steal_empty_stealers_list() {
+        let stealers: Vec<Stealer> = vec![];
+        let mut rng = DetRng::new(42);
+
+        let stolen = steal_task(&stealers, &mut rng);
+        assert!(stolen.is_none(), "empty stealers list should return None");
+    }
+
+    #[test]
+    fn test_steal_skips_empty_queues() {
+        // 3 queues: first two empty, third has work
+        let q1 = LocalQueue::new();
+        let q2 = LocalQueue::new();
+        let q3 = LocalQueue::new();
+        q3.push(task(99));
+
+        let stealers = vec![q1.stealer(), q2.stealer(), q3.stealer()];
+
+        // Different RNG seeds to ensure we eventually find the non-empty queue
+        for seed in 0..10 {
+            let mut rng = DetRng::new(seed);
+            let stolen = steal_task(&stealers, &mut rng);
+            if let Some(t) = stolen {
+                assert_eq!(t, task(99));
+                return;
+            }
+        }
+        // If we get here, something is wrong
+        panic!("should have found task in q3");
+    }
+
+    #[test]
+    fn test_steal_visits_all_queues() {
+        // Each queue has a unique task
+        let queues: Vec<_> = (0..5).map(|_| LocalQueue::new()).collect();
+        for (i, q) in queues.iter().enumerate() {
+            q.push(task(i as u32));
+        }
+
+        let stealers: Vec<_> = queues.iter().map(LocalQueue::stealer).collect();
+        let mut seen = HashSet::new();
+
+        // With 5 queues and sequential RNG, should eventually hit all
+        let mut rng = DetRng::new(0);
+        for _ in 0..10 {
+            if let Some(t) = steal_task(&stealers, &mut rng) {
+                seen.insert(t);
+            }
+        }
+
+        // Should have stolen all 5 unique tasks
+        assert_eq!(seen.len(), 5, "should visit all queues");
+    }
+
+    #[test]
+    fn test_steal_contention_no_deadlock() {
+        // Multiple stealers don't deadlock
+        let queue = Arc::new(LocalQueue::new());
+        for i in 0..100 {
+            queue.push(task(i));
+        }
+
+        let stealer = queue.stealer();
+        let stolen_count = Arc::new(AtomicUsize::new(0));
+        let barrier = Arc::new(Barrier::new(5));
+
+        let handles: Vec<_> = (0..5)
+            .map(|i| {
+                let s = stealer.clone();
+                let count = stolen_count.clone();
+                let b = barrier.clone();
+                thread::spawn(move || {
+                    let stealers = vec![s];
+                    let mut rng = DetRng::new(i as u64);
+                    b.wait();
+
+                    let mut local_count = 0;
+                    while steal_task(&stealers, &mut rng).is_some() {
+                        local_count += 1;
+                        thread::yield_now();
+                    }
+                    count.fetch_add(local_count, Ordering::SeqCst);
+                })
+            })
+            .collect();
+
+        for h in handles {
+            h.join().expect("thread should complete without deadlock");
+        }
+
+        assert_eq!(
+            stolen_count.load(Ordering::SeqCst),
+            100,
+            "all tasks should be stolen exactly once"
+        );
+    }
+
+    #[test]
+    fn test_steal_deterministic_with_same_seed() {
+        let q1 = LocalQueue::new();
+        let q2 = LocalQueue::new();
+        let q3 = LocalQueue::new();
+
+        q1.push(task(1));
+        q2.push(task(2));
+        q3.push(task(3));
+
+        let stealers = vec![q1.stealer(), q2.stealer(), q3.stealer()];
+
+        // Same seed should give same result
+        let mut rng1 = DetRng::new(12345);
+        let mut rng2 = DetRng::new(12345);
+
+        let result1 = steal_task(&stealers, &mut rng1);
+        let result2 = steal_task(&stealers, &mut rng2);
+
+        assert_eq!(result1, result2, "same seed should give same steal target");
+    }
+}

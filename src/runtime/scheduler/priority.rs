@@ -674,4 +674,214 @@ mod tests {
         );
         crate::test_complete!("cancel_lane_priority_over_timed");
     }
+
+    // ========== Additional Three-Lane Tests ==========
+
+    #[test]
+    fn test_three_lane_push_pop_basic() {
+        let mut sched = Scheduler::new();
+        sched.schedule(task(1), 50);
+        assert_eq!(sched.pop(), Some(task(1)));
+        assert_eq!(sched.pop(), None);
+    }
+
+    #[test]
+    fn test_three_lane_fifo_ordering() {
+        let mut sched = Scheduler::new();
+        // Same priority, should be FIFO
+        sched.schedule(task(1), 50);
+        sched.schedule(task(2), 50);
+        sched.schedule(task(3), 50);
+
+        assert_eq!(sched.pop(), Some(task(1)), "first in, first out");
+        assert_eq!(sched.pop(), Some(task(2)));
+        assert_eq!(sched.pop(), Some(task(3)));
+    }
+
+    #[test]
+    fn test_three_lane_priority_lanes_strict() {
+        let mut sched = Scheduler::new();
+        // Add in reverse order
+        sched.schedule(task(1), 100); // ready
+        sched.schedule_timed(task(2), Time::from_secs(1)); // timed
+        sched.schedule_cancel(task(3), 50); // cancel
+
+        // Strict ordering: cancel > timed > ready
+        assert_eq!(sched.pop(), Some(task(3)), "cancel first");
+        assert_eq!(sched.pop(), Some(task(2)), "timed second");
+        assert_eq!(sched.pop(), Some(task(1)), "ready last");
+    }
+
+    #[test]
+    fn test_three_lane_empty_detection() {
+        let mut sched = Scheduler::new();
+        assert!(sched.is_empty());
+
+        sched.schedule(task(1), 50);
+        assert!(!sched.is_empty());
+
+        sched.pop();
+        assert!(sched.is_empty());
+    }
+
+    #[test]
+    fn test_three_lane_length_tracking() {
+        let mut sched = Scheduler::new();
+        assert_eq!(sched.len(), 0);
+
+        sched.schedule(task(1), 50);
+        sched.schedule_cancel(task(2), 50);
+        sched.schedule_timed(task(3), Time::from_secs(1));
+
+        assert_eq!(sched.len(), 3);
+
+        sched.pop();
+        assert_eq!(sched.len(), 2);
+    }
+
+    #[test]
+    fn test_cancel_lane_priority_ordering() {
+        let mut sched = Scheduler::new();
+        sched.schedule_cancel(task(1), 50);
+        sched.schedule_cancel(task(2), 100); // higher priority
+        sched.schedule_cancel(task(3), 75);
+
+        assert_eq!(sched.pop(), Some(task(2)), "highest priority first");
+        assert_eq!(sched.pop(), Some(task(3)), "middle priority second");
+        assert_eq!(sched.pop(), Some(task(1)), "lowest priority last");
+    }
+
+    #[test]
+    fn test_ready_lane_priority_ordering() {
+        let mut sched = Scheduler::new();
+        sched.schedule(task(1), 50);
+        sched.schedule(task(2), 100);
+        sched.schedule(task(3), 75);
+
+        assert_eq!(sched.pop(), Some(task(2)), "highest priority first");
+        assert_eq!(sched.pop(), Some(task(3)), "middle priority second");
+        assert_eq!(sched.pop(), Some(task(1)), "lowest priority last");
+    }
+
+    #[test]
+    fn test_steal_ready_batch_basic() {
+        let mut sched = Scheduler::new();
+        for i in 0..8 {
+            sched.schedule(task(i), 50);
+        }
+
+        let stolen = sched.steal_ready_batch(4);
+        assert!(!stolen.is_empty());
+        assert!(stolen.len() <= 4);
+
+        // Verify stolen tasks have correct format
+        for (task_id, priority) in &stolen {
+            assert_eq!(*priority, 50);
+            assert!(task_id.0.index() < 8);
+        }
+    }
+
+    #[test]
+    fn test_steal_only_from_ready() {
+        let mut sched = Scheduler::new();
+        sched.schedule_cancel(task(1), 100);
+        sched.schedule_timed(task(2), Time::from_secs(1));
+        sched.schedule(task(3), 50);
+
+        let stolen = sched.steal_ready_batch(10);
+        // Only ready task should be stolen
+        assert_eq!(stolen.len(), 1);
+        assert_eq!(stolen[0].0, task(3));
+
+        // Cancel and timed should still be in scheduler
+        assert!(sched.has_cancel_work());
+        assert!(sched.has_timed_work());
+    }
+
+    #[test]
+    fn test_pop_only_methods() {
+        let mut sched = Scheduler::new();
+        sched.schedule(task(1), 50);
+        sched.schedule_cancel(task(2), 100);
+        sched.schedule_timed(task(3), Time::from_secs(1));
+
+        // pop_cancel_only should only get cancel task
+        assert_eq!(sched.pop_cancel_only(), Some(task(2)));
+        assert_eq!(sched.pop_cancel_only(), None);
+
+        // pop_timed_only should only get timed task
+        assert_eq!(sched.pop_timed_only(), Some(task(3)));
+        assert_eq!(sched.pop_timed_only(), None);
+
+        // pop_ready_only should only get ready task
+        assert_eq!(sched.pop_ready_only(), Some(task(1)));
+        assert_eq!(sched.pop_ready_only(), None);
+    }
+
+    #[test]
+    fn test_remove_from_scheduler() {
+        let mut sched = Scheduler::new();
+        sched.schedule(task(1), 50);
+        sched.schedule(task(2), 50);
+        sched.schedule(task(3), 50);
+
+        sched.remove(task(2));
+
+        assert_eq!(sched.len(), 2);
+        assert_eq!(sched.pop(), Some(task(1)));
+        assert_eq!(sched.pop(), Some(task(3)));
+    }
+
+    #[test]
+    fn test_clear_scheduler() {
+        let mut sched = Scheduler::new();
+        sched.schedule(task(1), 50);
+        sched.schedule_cancel(task(2), 100);
+        sched.schedule_timed(task(3), Time::from_secs(1));
+
+        sched.clear();
+
+        assert!(sched.is_empty());
+        assert_eq!(sched.len(), 0);
+        assert!(!sched.has_cancel_work());
+        assert!(!sched.has_timed_work());
+        assert!(!sched.has_ready_work());
+    }
+
+    #[test]
+    fn test_has_work_methods() {
+        let mut sched = Scheduler::new();
+        assert!(!sched.has_cancel_work());
+        assert!(!sched.has_timed_work());
+        assert!(!sched.has_ready_work());
+
+        sched.schedule(task(1), 50);
+        assert!(sched.has_ready_work());
+
+        sched.schedule_cancel(task(2), 100);
+        assert!(sched.has_cancel_work());
+
+        sched.schedule_timed(task(3), Time::from_secs(1));
+        assert!(sched.has_timed_work());
+    }
+
+    #[test]
+    fn test_high_volume_scheduling() {
+        let mut sched = Scheduler::new();
+        let count = 1000;
+
+        for i in 0..count {
+            sched.schedule(task(i), (i % 256) as u8);
+        }
+
+        assert_eq!(sched.len(), count as usize);
+
+        let mut popped = 0;
+        while sched.pop().is_some() {
+            popped += 1;
+        }
+
+        assert_eq!(popped, count);
+        assert!(sched.is_empty());
+    }
 }

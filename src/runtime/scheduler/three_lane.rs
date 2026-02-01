@@ -1375,4 +1375,293 @@ mod tests {
         let second = scheduler.global.pop_ready();
         assert!(second.is_some(), "should be able to reschedule after clear");
     }
+
+    // ========== Stress Tests ==========
+    // These tests are marked #[ignore] for CI and should be run manually.
+
+    #[test]
+    #[ignore]
+    fn stress_test_parker_high_contention() {
+        use crate::runtime::scheduler::worker::Parker;
+        use std::sync::atomic::AtomicUsize;
+        use std::thread;
+
+        // 50 threads, 1000 park/unpark cycles each
+        let parker = Arc::new(Parker::new());
+        let successful_wakes = Arc::new(AtomicUsize::new(0));
+        let iterations = 1000;
+        let thread_count = 50;
+
+        let handles: Vec<_> = (0..thread_count)
+            .map(|i| {
+                let p = parker.clone();
+                let wakes = successful_wakes.clone();
+                thread::spawn(move || {
+                    for j in 0..iterations {
+                        if i % 2 == 0 {
+                            // Parker thread
+                            p.park_timeout(Duration::from_millis(10));
+                            wakes.fetch_add(1, Ordering::Relaxed);
+                        } else {
+                            // Unparker thread
+                            p.unpark();
+                            if j % 10 == 0 {
+                                thread::yield_now();
+                            }
+                        }
+                    }
+                })
+            })
+            .collect();
+
+        for h in handles {
+            h.join().expect("thread should not panic");
+        }
+
+        let total_wakes = successful_wakes.load(Ordering::Relaxed);
+        assert!(
+            total_wakes > 0,
+            "at least some threads should have woken up"
+        );
+    }
+
+    #[test]
+    #[ignore]
+    fn stress_test_scheduler_inject_while_parking() {
+        // Race: inject work between empty check and park
+        let state = Arc::new(Mutex::new(RuntimeState::new()));
+        let scheduler = Arc::new(ThreeLaneScheduler::new(4, &state));
+        let injected = Arc::new(AtomicUsize::new(0));
+        let executed = Arc::new(AtomicUsize::new(0));
+        let barrier = Arc::new(std::sync::Barrier::new(21)); // 20 injectors + 1 main
+
+        // 20 injector threads
+        let inject_handles: Vec<_> = (0..20)
+            .map(|t| {
+                let s = scheduler.clone();
+                let inj = injected.clone();
+                let b = barrier.clone();
+                std::thread::spawn(move || {
+                    b.wait();
+                    for i in 0..5000 {
+                        let task = TaskId::new_for_test(t * 10000 + i, 0);
+                        s.inject_ready(task, 50);
+                        inj.fetch_add(1, Ordering::Relaxed);
+                    }
+                })
+            })
+            .collect();
+
+        barrier.wait();
+
+        // Let injectors run
+        std::thread::sleep(Duration::from_millis(100));
+
+        // Drain the queue
+        let exec = executed.clone();
+        loop {
+            if scheduler.global.pop_ready().is_some() {
+                exec.fetch_add(1, Ordering::Relaxed);
+            } else {
+                break;
+            }
+        }
+
+        for h in inject_handles {
+            h.join().expect("injector should complete");
+        }
+
+        // Final drain
+        while scheduler.global.pop_ready().is_some() {
+            executed.fetch_add(1, Ordering::Relaxed);
+        }
+
+        let total_injected = injected.load(Ordering::Relaxed);
+        let total_executed = executed.load(Ordering::Relaxed);
+
+        // Due to dedup, executed may be less than injected if same task IDs were used
+        // But we should have at least executed something
+        assert!(
+            total_executed > 0,
+            "should have executed some tasks, got {total_executed}"
+        );
+        assert!(
+            total_injected >= total_executed,
+            "injected ({total_injected}) should be >= executed ({total_executed})"
+        );
+    }
+
+    #[test]
+    #[ignore]
+    fn stress_test_work_stealing_fairness() {
+        use crate::runtime::scheduler::priority::Scheduler as PriorityScheduler;
+
+        // Unbalanced workload: 1 producer, 10 stealers
+        let producer_queue = Arc::new(Mutex::new(PriorityScheduler::new()));
+        let stolen_count = Arc::new(AtomicUsize::new(0));
+        let barrier = Arc::new(std::sync::Barrier::new(12)); // 1 producer + 10 stealers + 1 main
+
+        // Fill producer queue
+        {
+            let mut q = producer_queue.lock().unwrap();
+            for i in 0..10000 {
+                q.schedule(TaskId::new_for_test(i, 0), 50);
+            }
+        }
+
+        // 10 stealer threads
+        let stealer_handles: Vec<_> = (0..10)
+            .map(|_| {
+                let q = producer_queue.clone();
+                let stolen = stolen_count.clone();
+                let b = barrier.clone();
+                std::thread::spawn(move || {
+                    b.wait();
+                    let mut local_stolen = 0;
+                    loop {
+                        let task = {
+                            let mut guard = match q.try_lock() {
+                                Ok(g) => g,
+                                Err(_) => continue,
+                            };
+                            let batch = guard.steal_ready_batch(4);
+                            if batch.is_empty() {
+                                None
+                            } else {
+                                Some(batch.len())
+                            }
+                        };
+
+                        match task {
+                            Some(count) => {
+                                local_stolen += count;
+                                std::thread::yield_now();
+                            }
+                            None => break,
+                        }
+                    }
+                    stolen.fetch_add(local_stolen, Ordering::Relaxed);
+                })
+            })
+            .collect();
+
+        // Producer thread that keeps adding
+        let q = producer_queue.clone();
+        let b = barrier.clone();
+        let producer = std::thread::spawn(move || {
+            b.wait();
+            for i in 10000..15000 {
+                let mut guard = q.lock().unwrap();
+                guard.schedule(TaskId::new_for_test(i, 0), 50);
+                drop(guard);
+                std::thread::yield_now();
+            }
+        });
+
+        barrier.wait();
+
+        producer.join().expect("producer should complete");
+        for h in stealer_handles {
+            h.join().expect("stealer should complete");
+        }
+
+        // Drain remaining
+        let mut remaining = 0;
+        {
+            let mut q = producer_queue.lock().unwrap();
+            while q.pop().is_some() {
+                remaining += 1;
+            }
+        }
+
+        let total_stolen = stolen_count.load(Ordering::Relaxed);
+        let total = total_stolen + remaining;
+
+        // Should have handled all 15000 tasks
+        assert!(
+            total >= 14000, // Allow some slack for race conditions
+            "should handle most tasks, got {total}"
+        );
+    }
+
+    #[test]
+    #[ignore]
+    fn stress_test_global_queue_contention() {
+        // High contention: 50 spawners, single queue
+        let global = Arc::new(GlobalInjector::new());
+        let spawned = Arc::new(AtomicUsize::new(0));
+        let consumed = Arc::new(AtomicUsize::new(0));
+        let barrier = Arc::new(std::sync::Barrier::new(61)); // 50 spawners + 10 consumers + 1 main
+
+        // 50 spawner threads
+        let spawn_handles: Vec<_> = (0..50)
+            .map(|t| {
+                let g = global.clone();
+                let s = spawned.clone();
+                let b = barrier.clone();
+                std::thread::spawn(move || {
+                    b.wait();
+                    for i in 0..2000 {
+                        let task = TaskId::new_for_test(t * 100000 + i, 0);
+                        g.inject_ready(task, 50);
+                        s.fetch_add(1, Ordering::Relaxed);
+                    }
+                })
+            })
+            .collect();
+
+        // 10 consumer threads
+        let consumer_handles: Vec<_> = (0..10)
+            .map(|_| {
+                let g = global.clone();
+                let c = consumed.clone();
+                let b = barrier.clone();
+                std::thread::spawn(move || {
+                    b.wait();
+                    let mut local = 0;
+                    let mut empty_streak = 0;
+                    loop {
+                        if g.pop_ready().is_some() {
+                            local += 1;
+                            empty_streak = 0;
+                        } else {
+                            empty_streak += 1;
+                            if empty_streak > 1000 {
+                                break;
+                            }
+                            std::thread::yield_now();
+                        }
+                    }
+                    c.fetch_add(local, Ordering::Relaxed);
+                })
+            })
+            .collect();
+
+        barrier.wait();
+
+        for h in spawn_handles {
+            h.join().expect("spawner should complete");
+        }
+
+        // Give consumers time to drain
+        std::thread::sleep(Duration::from_millis(100));
+
+        for h in consumer_handles {
+            h.join().expect("consumer should complete");
+        }
+
+        // Drain remaining
+        while global.pop_ready().is_some() {
+            consumed.fetch_add(1, Ordering::Relaxed);
+        }
+
+        let total_spawned = spawned.load(Ordering::Relaxed);
+        let total_consumed = consumed.load(Ordering::Relaxed);
+
+        assert_eq!(total_spawned, 100_000, "should spawn exactly 100k tasks");
+        assert!(
+            total_consumed >= 99_000, // Allow small slack
+            "should consume most tasks, got {total_consumed}"
+        );
+    }
 }

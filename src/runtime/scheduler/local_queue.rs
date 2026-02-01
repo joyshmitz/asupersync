@@ -240,4 +240,171 @@ mod tests {
         }
         assert_eq!(total_seen, total);
     }
+
+    // ========== Additional Local Queue Tests ==========
+
+    #[test]
+    fn test_local_queue_push_pop() {
+        let queue = LocalQueue::new();
+
+        // Push and pop single item
+        queue.push(task(1));
+        assert_eq!(queue.pop(), Some(task(1)));
+        assert_eq!(queue.pop(), None);
+    }
+
+    #[test]
+    fn test_local_queue_is_empty() {
+        let queue = LocalQueue::new();
+        assert!(queue.is_empty());
+
+        queue.push(task(1));
+        assert!(!queue.is_empty());
+
+        queue.pop();
+        assert!(queue.is_empty());
+    }
+
+    #[test]
+    fn test_local_queue_lifo_optimization() {
+        // LIFO ordering benefits cache locality for producer
+        let queue = LocalQueue::new();
+
+        // Push tasks in order 1,2,3,4,5
+        for i in 1..=5 {
+            queue.push(task(i));
+        }
+
+        // Pop should return in reverse order (LIFO)
+        assert_eq!(queue.pop(), Some(task(5)));
+        assert_eq!(queue.pop(), Some(task(4)));
+        assert_eq!(queue.pop(), Some(task(3)));
+        assert_eq!(queue.pop(), Some(task(2)));
+        assert_eq!(queue.pop(), Some(task(1)));
+    }
+
+    #[test]
+    fn test_steal_batch_steals_half() {
+        let src = LocalQueue::new();
+        let dest = LocalQueue::new();
+
+        // Push 10 tasks
+        for i in 0..10 {
+            src.push(task(i));
+        }
+
+        src.stealer().steal_batch(&dest);
+
+        // Should steal ~half (5)
+        let mut src_count = 0;
+        while src.pop().is_some() {
+            src_count += 1;
+        }
+
+        let mut dest_count = 0;
+        while dest.pop().is_some() {
+            dest_count += 1;
+        }
+
+        assert_eq!(src_count + dest_count, 10, "no tasks should be lost");
+        assert!(
+            dest_count >= 4 && dest_count <= 6,
+            "should steal roughly half, got {dest_count}"
+        );
+    }
+
+    #[test]
+    fn test_steal_batch_steals_one() {
+        // When queue has 1 item, steal batch should take it
+        let src = LocalQueue::new();
+        let dest = LocalQueue::new();
+
+        src.push(task(42));
+        src.stealer().steal_batch(&dest);
+
+        // Source should be empty
+        assert!(src.is_empty());
+        // Dest should have the task
+        assert_eq!(dest.pop(), Some(task(42)));
+    }
+
+    #[test]
+    fn test_local_queue_stealer_clone() {
+        let queue = LocalQueue::new();
+        queue.push(task(1));
+        queue.push(task(2));
+
+        let stealer1 = queue.stealer();
+        let stealer2 = stealer1.clone();
+
+        // Both stealers should work
+        let t1 = stealer1.steal();
+        let t2 = stealer2.steal();
+
+        assert!(t1.is_some());
+        assert!(t2.is_some());
+        assert_ne!(t1, t2, "stealers should get different tasks");
+    }
+
+    #[test]
+    fn test_local_queue_high_volume() {
+        let queue = LocalQueue::new();
+        let count = 10_000;
+
+        // Push many tasks
+        for i in 0..count {
+            queue.push(task(i));
+        }
+
+        // Pop all tasks
+        let mut popped = 0;
+        while queue.pop().is_some() {
+            popped += 1;
+        }
+
+        assert_eq!(popped, count, "should pop exactly {count} tasks");
+    }
+
+    #[test]
+    fn test_local_queue_mixed_push_pop() {
+        let queue = LocalQueue::new();
+
+        // Interleaved push and pop
+        queue.push(task(1));
+        queue.push(task(2));
+        assert_eq!(queue.pop(), Some(task(2)));
+
+        queue.push(task(3));
+        assert_eq!(queue.pop(), Some(task(3)));
+        assert_eq!(queue.pop(), Some(task(1)));
+        assert_eq!(queue.pop(), None);
+    }
+
+    #[test]
+    fn test_steal_from_empty_is_idempotent() {
+        let queue = LocalQueue::new();
+        let stealer = queue.stealer();
+
+        // Multiple steals from empty should all return None
+        for _ in 0..10 {
+            assert!(stealer.steal().is_none());
+        }
+    }
+
+    #[test]
+    fn test_steal_batch_from_empty() {
+        let src = LocalQueue::new();
+        let dest = LocalQueue::new();
+
+        // steal_batch from empty should return false
+        let result = src.stealer().steal_batch(&dest);
+        assert!(!result, "steal_batch from empty should return false");
+        assert!(dest.is_empty());
+    }
+
+    #[test]
+    fn test_default_trait() {
+        let queue = LocalQueue::default();
+        assert!(queue.is_empty());
+    }
 }
