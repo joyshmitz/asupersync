@@ -1,4 +1,7 @@
 #![cfg(feature = "test-internals")]
+#![allow(missing_docs)]
+
+//! Repro for spawn factory panic handling.
 
 use asupersync::cx::{Cx, Scope};
 use asupersync::runtime::RuntimeState;
