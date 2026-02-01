@@ -2018,7 +2018,10 @@ mod tests {
         }
 
         // Should accept up to max_concurrent_streams - 1 (minus the original request stream)
-        assert_eq!(accepted, 9, "should accept max_concurrent_streams - 1 pushes");
+        assert_eq!(
+            accepted, 9,
+            "should accept max_concurrent_streams - 1 pushes"
+        );
         assert_eq!(rejected, 91, "should reject the rest");
     }
 

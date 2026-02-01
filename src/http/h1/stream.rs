@@ -12,6 +12,7 @@
 //! - [`ChunkedEncoder`]: Encoder for HTTP/1.1 chunked transfer encoding
 //! - [`BodyKind`]: Body length determination (fixed vs chunked)
 
+use std::future::Future;
 use std::pin::Pin;
 use std::task::{Context, Poll};
 
@@ -1010,7 +1011,7 @@ mod tests {
     fn block_on<F: std::future::Future>(mut f: F) -> F::Output {
         let waker = noop_waker();
         let mut cx = Context::from_waker(&waker);
-        let mut pinned = unsafe { Pin::new_unchecked(&mut f) };
+        let mut pinned = std::pin::pin!(f);
         loop {
             match pinned.as_mut().poll(&mut cx) {
                 Poll::Ready(v) => return v,

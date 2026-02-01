@@ -546,7 +546,7 @@ impl<P: Policy> Scope<'_, P> {
     where
         F: FnOnce(Cx) -> Fut + 'static,
         Fut: Future + 'static,
-        Fut::Output: 'static,
+        Fut::Output: Send + 'static,
     {
         use crate::runtime::stored_task::LocalStoredTask;
         use crate::runtime::task_handle::JoinError;
