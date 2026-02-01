@@ -31,6 +31,7 @@ fn test_first_ok_success_wins() {
 #[test]
 fn test_first_ok_fallback() {
     #[derive(Debug, PartialEq)]
+    #[allow(dead_code)]
     enum TestError {
         FirstFailed,
         SecondFailed,
@@ -76,6 +77,7 @@ fn test_first_ok_all_fail() {
 #[test]
 fn test_first_ok_immediate_success() {
     #[derive(Debug, PartialEq)]
+    #[allow(dead_code)]
     enum TestError {
         Unused,
     }
@@ -213,6 +215,7 @@ fn test_first_ok_cleanup_on_error() {
 #[test]
 fn test_first_ok_heterogeneous_errors() {
     #[derive(Debug)]
+    #[allow(dead_code)]
     enum CombinedError {
         Network(String),
         Timeout,

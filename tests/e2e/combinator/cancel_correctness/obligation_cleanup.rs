@@ -10,13 +10,13 @@ use std::sync::Arc;
 #[derive(Debug)]
 pub struct MockPermit {
     resolved: Arc<AtomicBool>,
-    id: u32,
+    _id: u32,
 }
 
 impl MockPermit {
     /// Create a new mock permit.
     pub fn new(id: u32, resolved: Arc<AtomicBool>) -> Self {
-        Self { resolved, id }
+        Self { resolved, _id: id }
     }
 
     /// Simulate using the permit (committing the obligation).

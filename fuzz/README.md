@@ -1,0 +1,108 @@
+# Fuzzing Infrastructure for asupersync
+
+This directory contains fuzz targets for testing protocol parsers and runtime
+invariants using cargo-fuzz (libFuzzer backend).
+
+## Prerequisites
+
+```bash
+# Install cargo-fuzz (requires nightly Rust)
+rustup install nightly
+cargo +nightly install cargo-fuzz
+```
+
+## Available Targets
+
+| Target | Description | Priority |
+|--------|-------------|----------|
+| `fuzz_http1_request` | HTTP/1.1 request parser | High |
+| `fuzz_http1_response` | HTTP/1.1 response parser | High |
+| `fuzz_hpack_decode` | HPACK header compression decoder | Critical |
+| `fuzz_http2_frame` | HTTP/2 frame parser | Critical |
+| `fuzz_interest_flags` | Reactor Interest bitflags | Low |
+
+## Running Fuzz Targets
+
+```bash
+# Change to fuzz directory
+cd fuzz
+
+# Run a specific target
+cargo +nightly fuzz run fuzz_http2_frame
+
+# Run with timeout (e.g., 60 seconds)
+cargo +nightly fuzz run fuzz_http2_frame -- -max_total_time=60
+
+# Run with specific number of jobs (parallel)
+cargo +nightly fuzz run fuzz_http2_frame -- -jobs=4 -workers=4
+```
+
+## Corpus Management
+
+Corpora are stored in `corpus/<target_name>/`. To merge and minimize:
+
+```bash
+# Merge new findings into corpus
+cargo +nightly fuzz cmin fuzz_http2_frame
+
+# Minimize a specific crash
+cargo +nightly fuzz tmin fuzz_http2_frame <crash_file>
+```
+
+## Seed Files
+
+Initial seed files are in `seeds/`. These provide starting points for fuzzing:
+
+- `seeds/http1/` - Valid HTTP/1.1 messages
+- `seeds/http2/` - Valid HTTP/2 frames
+- `seeds/hpack/` - Valid HPACK-encoded headers
+
+To run with seeds:
+
+```bash
+cargo +nightly fuzz run fuzz_http2_frame seeds/http2/
+```
+
+## Coverage
+
+Generate coverage report:
+
+```bash
+# Build with coverage instrumentation
+cargo +nightly fuzz coverage fuzz_http2_frame
+
+# View coverage report
+# (Output in fuzz/coverage/fuzz_http2_frame/)
+```
+
+## CI Integration
+
+Fuzzing runs in CI using:
+
+```yaml
+# Example GitHub Actions snippet
+- name: Run fuzz tests
+  run: |
+    cargo +nightly fuzz run fuzz_http2_frame -- -max_total_time=300
+```
+
+## Security Notes
+
+- Crashes are saved in `artifacts/<target_name>/`
+- Review all crashes for security implications before disclosure
+- HPACK decoder is critical - vulnerable to HPACK bomb attacks
+- HTTP/2 frame parser is critical - vulnerable to resource exhaustion
+
+## Adding New Targets
+
+1. Create `fuzz_targets/<name>.rs` with the fuzz harness
+2. Add `[[bin]]` entry in `Cargo.toml`
+3. Create initial seeds in `seeds/<category>/`
+4. Update this README
+
+## References
+
+- [cargo-fuzz documentation](https://rust-fuzz.github.io/book/cargo-fuzz.html)
+- [libFuzzer documentation](https://llvm.org/docs/LibFuzzer.html)
+- [RFC 7540 - HTTP/2](https://tools.ietf.org/html/rfc7540)
+- [RFC 7541 - HPACK](https://tools.ietf.org/html/rfc7541)

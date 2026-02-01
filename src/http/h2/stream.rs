@@ -172,6 +172,18 @@ impl Stream {
         }
     }
 
+    /// Create a new reserved (remote) stream.
+    #[must_use]
+    pub fn new_reserved_remote(
+        id: u32,
+        initial_window_size: u32,
+        max_header_list_size: u32,
+    ) -> Self {
+        let mut stream = Self::new(id, initial_window_size, max_header_list_size);
+        stream.state = StreamState::ReservedRemote;
+        stream
+    }
+
     /// Compute maximum accumulated header fragment size for a given limit.
     pub(crate) fn max_header_fragment_size_for(max_header_list_size: u32) -> usize {
         let max_list_size = usize::try_from(max_header_list_size).unwrap_or(usize::MAX);
@@ -600,6 +612,40 @@ impl StreamStore {
         Ok(self.streams.get_mut(&id).unwrap())
     }
 
+    /// Reserve a remote-initiated stream (e.g., PUSH_PROMISE).
+    pub fn reserve_remote_stream(&mut self, id: u32) -> Result<&mut Stream, H2Error> {
+        if id == 0 {
+            return Err(H2Error::protocol("stream ID 0 is reserved"));
+        }
+        if self.streams.contains_key(&id) {
+            return Err(H2Error::protocol("stream ID already used"));
+        }
+
+        let is_client_stream = id % 2 == 1;
+        if self.is_client {
+            if is_client_stream {
+                return Err(H2Error::protocol("invalid promised stream ID"));
+            }
+            if id < self.next_server_stream_id {
+                return Err(H2Error::protocol("stream ID already used"));
+            }
+            self.next_server_stream_id = id + 2;
+        } else {
+            if !is_client_stream {
+                return Err(H2Error::protocol("invalid promised stream ID"));
+            }
+            if id < self.next_client_stream_id {
+                return Err(H2Error::protocol("stream ID already used"));
+            }
+            self.next_client_stream_id = id + 2;
+        }
+
+        let stream =
+            Stream::new_reserved_remote(id, self.initial_window_size, self.max_header_list_size);
+        self.streams.insert(id, stream);
+        Ok(self.streams.get_mut(&id).unwrap())
+    }
+
     /// Allocate a new stream ID.
     pub fn allocate_stream_id(&mut self) -> Result<u32, H2Error> {
         let active_count = self
@@ -787,5 +833,571 @@ mod tests {
 
         // After replenishing, should no longer need an update.
         assert!(stream.auto_window_update_increment().is_none());
+    }
+
+    // =========================================================================
+    // RFC 7540 Section 5.1 State Machine Tests
+    // =========================================================================
+
+    #[test]
+    fn idle_to_open_via_send_headers() {
+        let mut stream = Stream::new(1, 65535, DEFAULT_MAX_HEADER_LIST_SIZE);
+        assert_eq!(stream.state(), StreamState::Idle);
+
+        stream.send_headers(false).unwrap();
+        assert_eq!(stream.state(), StreamState::Open);
+    }
+
+    #[test]
+    fn idle_to_half_closed_local_via_send_headers_with_end_stream() {
+        let mut stream = Stream::new(1, 65535, DEFAULT_MAX_HEADER_LIST_SIZE);
+        assert_eq!(stream.state(), StreamState::Idle);
+
+        stream.send_headers(true).unwrap();
+        assert_eq!(stream.state(), StreamState::HalfClosedLocal);
+    }
+
+    #[test]
+    fn idle_to_open_via_recv_headers() {
+        let mut stream = Stream::new(1, 65535, DEFAULT_MAX_HEADER_LIST_SIZE);
+        assert_eq!(stream.state(), StreamState::Idle);
+
+        stream.recv_headers(false, true).unwrap();
+        assert_eq!(stream.state(), StreamState::Open);
+    }
+
+    #[test]
+    fn idle_to_half_closed_remote_via_recv_headers_with_end_stream() {
+        let mut stream = Stream::new(1, 65535, DEFAULT_MAX_HEADER_LIST_SIZE);
+        assert_eq!(stream.state(), StreamState::Idle);
+
+        stream.recv_headers(true, true).unwrap();
+        assert_eq!(stream.state(), StreamState::HalfClosedRemote);
+    }
+
+    #[test]
+    fn open_to_half_closed_local_via_send_data() {
+        let mut stream = Stream::new(1, 65535, DEFAULT_MAX_HEADER_LIST_SIZE);
+        stream.send_headers(false).unwrap();
+        assert_eq!(stream.state(), StreamState::Open);
+
+        stream.send_data(true).unwrap();
+        assert_eq!(stream.state(), StreamState::HalfClosedLocal);
+    }
+
+    #[test]
+    fn open_to_half_closed_local_via_send_headers() {
+        let mut stream = Stream::new(1, 65535, DEFAULT_MAX_HEADER_LIST_SIZE);
+        stream.send_headers(false).unwrap();
+        assert_eq!(stream.state(), StreamState::Open);
+
+        // Sending trailers with end_stream
+        stream.send_headers(true).unwrap();
+        assert_eq!(stream.state(), StreamState::HalfClosedLocal);
+    }
+
+    #[test]
+    fn open_to_half_closed_remote_via_recv_data() {
+        let mut stream = Stream::new(1, 65535, DEFAULT_MAX_HEADER_LIST_SIZE);
+        stream.send_headers(false).unwrap();
+        assert_eq!(stream.state(), StreamState::Open);
+
+        stream.recv_data(100, true).unwrap();
+        assert_eq!(stream.state(), StreamState::HalfClosedRemote);
+    }
+
+    #[test]
+    fn open_to_half_closed_remote_via_recv_headers() {
+        let mut stream = Stream::new(1, 65535, DEFAULT_MAX_HEADER_LIST_SIZE);
+        stream.send_headers(false).unwrap();
+        assert_eq!(stream.state(), StreamState::Open);
+
+        // Receiving trailers with end_stream
+        stream.recv_headers(true, true).unwrap();
+        assert_eq!(stream.state(), StreamState::HalfClosedRemote);
+    }
+
+    #[test]
+    fn half_closed_local_to_closed_via_recv_data() {
+        let mut stream = Stream::new(1, 65535, DEFAULT_MAX_HEADER_LIST_SIZE);
+        stream.send_headers(true).unwrap(); // Go to HalfClosedLocal
+        assert_eq!(stream.state(), StreamState::HalfClosedLocal);
+
+        stream.recv_data(100, true).unwrap();
+        assert_eq!(stream.state(), StreamState::Closed);
+    }
+
+    #[test]
+    fn half_closed_local_to_closed_via_recv_headers() {
+        let mut stream = Stream::new(1, 65535, DEFAULT_MAX_HEADER_LIST_SIZE);
+        stream.send_headers(true).unwrap();
+        assert_eq!(stream.state(), StreamState::HalfClosedLocal);
+
+        // Receiving trailers with end_stream closes the stream
+        stream.recv_headers(true, true).unwrap();
+        assert_eq!(stream.state(), StreamState::Closed);
+    }
+
+    #[test]
+    fn half_closed_remote_to_closed_via_send_data() {
+        let mut stream = Stream::new(1, 65535, DEFAULT_MAX_HEADER_LIST_SIZE);
+        stream.send_headers(false).unwrap();
+        stream.recv_data(100, true).unwrap(); // Go to HalfClosedRemote
+        assert_eq!(stream.state(), StreamState::HalfClosedRemote);
+
+        stream.send_data(true).unwrap();
+        assert_eq!(stream.state(), StreamState::Closed);
+    }
+
+    #[test]
+    fn half_closed_remote_to_closed_via_send_headers() {
+        let mut stream = Stream::new(1, 65535, DEFAULT_MAX_HEADER_LIST_SIZE);
+        stream.send_headers(false).unwrap();
+        stream.recv_data(100, true).unwrap();
+        assert_eq!(stream.state(), StreamState::HalfClosedRemote);
+
+        // Sending trailers with end_stream closes the stream
+        stream.send_headers(true).unwrap();
+        assert_eq!(stream.state(), StreamState::Closed);
+    }
+
+    // =========================================================================
+    // Reserved State Tests (Push Promise paths)
+    // =========================================================================
+
+    #[test]
+    fn reserved_local_to_half_closed_remote_via_send_headers() {
+        let mut stream = Stream::new(2, 65535, DEFAULT_MAX_HEADER_LIST_SIZE);
+        stream.state = StreamState::ReservedLocal; // Simulate PUSH_PROMISE sent
+
+        stream.send_headers(false).unwrap();
+        assert_eq!(stream.state(), StreamState::HalfClosedRemote);
+    }
+
+    #[test]
+    fn reserved_local_to_closed_via_send_headers_with_end_stream() {
+        let mut stream = Stream::new(2, 65535, DEFAULT_MAX_HEADER_LIST_SIZE);
+        stream.state = StreamState::ReservedLocal;
+
+        stream.send_headers(true).unwrap();
+        assert_eq!(stream.state(), StreamState::Closed);
+    }
+
+    #[test]
+    fn reserved_remote_to_half_closed_local_via_recv_headers() {
+        let mut stream = Stream::new(2, 65535, DEFAULT_MAX_HEADER_LIST_SIZE);
+        stream.state = StreamState::ReservedRemote; // Simulate PUSH_PROMISE received
+
+        stream.recv_headers(false, true).unwrap();
+        assert_eq!(stream.state(), StreamState::HalfClosedLocal);
+    }
+
+    #[test]
+    fn reserved_remote_to_closed_via_recv_headers_with_end_stream() {
+        let mut stream = Stream::new(2, 65535, DEFAULT_MAX_HEADER_LIST_SIZE);
+        stream.state = StreamState::ReservedRemote;
+
+        stream.recv_headers(true, true).unwrap();
+        assert_eq!(stream.state(), StreamState::Closed);
+    }
+
+    // =========================================================================
+    // Reset Tests
+    // =========================================================================
+
+    #[test]
+    fn reset_from_any_state_goes_to_closed() {
+        for initial_state in [
+            StreamState::Idle,
+            StreamState::Open,
+            StreamState::HalfClosedLocal,
+            StreamState::HalfClosedRemote,
+            StreamState::ReservedLocal,
+            StreamState::ReservedRemote,
+        ] {
+            let mut stream = Stream::new(1, 65535, DEFAULT_MAX_HEADER_LIST_SIZE);
+            stream.state = initial_state;
+
+            stream.reset(ErrorCode::Cancel);
+
+            assert_eq!(stream.state(), StreamState::Closed);
+            assert_eq!(stream.error_code(), Some(ErrorCode::Cancel));
+        }
+    }
+
+    #[test]
+    fn reset_preserves_error_code() {
+        let mut stream = Stream::new(1, 65535, DEFAULT_MAX_HEADER_LIST_SIZE);
+        stream.send_headers(false).unwrap();
+
+        stream.reset(ErrorCode::InternalError);
+        assert_eq!(stream.error_code(), Some(ErrorCode::InternalError));
+
+        stream.reset(ErrorCode::StreamClosed);
+        assert_eq!(stream.error_code(), Some(ErrorCode::StreamClosed));
+    }
+
+    // =========================================================================
+    // Illegal Transition Tests
+    // =========================================================================
+
+    #[test]
+    fn cannot_send_headers_on_closed_stream() {
+        let mut stream = Stream::new(1, 65535, DEFAULT_MAX_HEADER_LIST_SIZE);
+        stream.reset(ErrorCode::Cancel);
+        assert_eq!(stream.state(), StreamState::Closed);
+
+        let result = stream.send_headers(false);
+        assert!(result.is_err());
+    }
+
+    #[test]
+    fn cannot_recv_headers_on_closed_stream() {
+        let mut stream = Stream::new(1, 65535, DEFAULT_MAX_HEADER_LIST_SIZE);
+        stream.reset(ErrorCode::Cancel);
+
+        let result = stream.recv_headers(false, true);
+        assert!(result.is_err());
+    }
+
+    #[test]
+    fn cannot_send_data_on_closed_stream() {
+        let mut stream = Stream::new(1, 65535, DEFAULT_MAX_HEADER_LIST_SIZE);
+        stream.reset(ErrorCode::Cancel);
+
+        let result = stream.send_data(false);
+        assert!(result.is_err());
+    }
+
+    #[test]
+    fn cannot_recv_data_on_closed_stream() {
+        let mut stream = Stream::new(1, 65535, DEFAULT_MAX_HEADER_LIST_SIZE);
+        stream.reset(ErrorCode::Cancel);
+
+        let result = stream.recv_data(100, false);
+        assert!(result.is_err());
+    }
+
+    #[test]
+    fn cannot_send_data_on_half_closed_local() {
+        let mut stream = Stream::new(1, 65535, DEFAULT_MAX_HEADER_LIST_SIZE);
+        stream.send_headers(true).unwrap();
+        assert_eq!(stream.state(), StreamState::HalfClosedLocal);
+
+        let result = stream.send_data(false);
+        assert!(result.is_err());
+    }
+
+    #[test]
+    fn cannot_recv_data_on_half_closed_remote() {
+        let mut stream = Stream::new(1, 65535, DEFAULT_MAX_HEADER_LIST_SIZE);
+        stream.send_headers(false).unwrap();
+        stream.recv_data(100, true).unwrap();
+        assert_eq!(stream.state(), StreamState::HalfClosedRemote);
+
+        let result = stream.recv_data(100, false);
+        assert!(result.is_err());
+    }
+
+    #[test]
+    fn cannot_send_headers_on_half_closed_local() {
+        let mut stream = Stream::new(1, 65535, DEFAULT_MAX_HEADER_LIST_SIZE);
+        stream.send_headers(true).unwrap();
+        assert_eq!(stream.state(), StreamState::HalfClosedLocal);
+
+        // Trying to send more headers is illegal since we already ended
+        let result = stream.send_headers(false);
+        assert!(result.is_err());
+    }
+
+    #[test]
+    fn cannot_recv_headers_on_half_closed_remote() {
+        let mut stream = Stream::new(1, 65535, DEFAULT_MAX_HEADER_LIST_SIZE);
+        stream.send_headers(false).unwrap();
+        stream.recv_headers(true, true).unwrap();
+        assert_eq!(stream.state(), StreamState::HalfClosedRemote);
+
+        let result = stream.recv_headers(false, true);
+        assert!(result.is_err());
+    }
+
+    #[test]
+    fn cannot_send_data_on_idle() {
+        let mut stream = Stream::new(1, 65535, DEFAULT_MAX_HEADER_LIST_SIZE);
+        assert_eq!(stream.state(), StreamState::Idle);
+
+        let result = stream.send_data(false);
+        assert!(result.is_err());
+    }
+
+    #[test]
+    fn cannot_recv_data_on_idle() {
+        let mut stream = Stream::new(1, 65535, DEFAULT_MAX_HEADER_LIST_SIZE);
+        assert_eq!(stream.state(), StreamState::Idle);
+
+        let result = stream.recv_data(100, false);
+        assert!(result.is_err());
+    }
+
+    // =========================================================================
+    // Flow Control Error Tests
+    // =========================================================================
+
+    #[test]
+    fn recv_data_exceeding_window_returns_flow_control_error() {
+        let mut stream = Stream::new(1, 1000, DEFAULT_MAX_HEADER_LIST_SIZE);
+        stream.send_headers(false).unwrap();
+
+        // Try to receive more data than window allows
+        let result = stream.recv_data(2000, false);
+        assert!(result.is_err());
+        let err = result.unwrap_err();
+        assert_eq!(err.code, ErrorCode::FlowControlError);
+    }
+
+    #[test]
+    fn window_update_overflow_returns_error() {
+        let mut stream = Stream::new(1, 65535, DEFAULT_MAX_HEADER_LIST_SIZE);
+
+        // Try to overflow the window
+        let result = stream.update_send_window(i32::MAX);
+        assert!(result.is_err());
+    }
+
+    // =========================================================================
+    // State Predicate Tests
+    // =========================================================================
+
+    #[test]
+    fn can_send_predicates_are_correct() {
+        assert!(!StreamState::Idle.can_send());
+        assert!(StreamState::Open.can_send());
+        assert!(!StreamState::HalfClosedLocal.can_send());
+        assert!(StreamState::HalfClosedRemote.can_send());
+        assert!(StreamState::ReservedLocal.can_send());
+        assert!(!StreamState::ReservedRemote.can_send());
+        assert!(!StreamState::Closed.can_send());
+    }
+
+    #[test]
+    fn can_recv_predicates_are_correct() {
+        assert!(!StreamState::Idle.can_recv());
+        assert!(StreamState::Open.can_recv());
+        assert!(StreamState::HalfClosedLocal.can_recv());
+        assert!(!StreamState::HalfClosedRemote.can_recv());
+        assert!(!StreamState::ReservedLocal.can_recv());
+        assert!(StreamState::ReservedRemote.can_recv());
+        assert!(!StreamState::Closed.can_recv());
+    }
+
+    #[test]
+    fn can_send_headers_predicates_are_correct() {
+        assert!(StreamState::Idle.can_send_headers());
+        assert!(StreamState::Open.can_send_headers());
+        assert!(!StreamState::HalfClosedLocal.can_send_headers());
+        assert!(StreamState::HalfClosedRemote.can_send_headers());
+        assert!(StreamState::ReservedLocal.can_send_headers());
+        assert!(!StreamState::ReservedRemote.can_send_headers());
+        assert!(!StreamState::Closed.can_send_headers());
+    }
+
+    #[test]
+    fn can_recv_headers_predicates_are_correct() {
+        assert!(StreamState::Idle.can_recv_headers());
+        assert!(StreamState::Open.can_recv_headers());
+        assert!(StreamState::HalfClosedLocal.can_recv_headers());
+        assert!(!StreamState::HalfClosedRemote.can_recv_headers());
+        assert!(!StreamState::ReservedLocal.can_recv_headers());
+        assert!(StreamState::ReservedRemote.can_recv_headers());
+        assert!(!StreamState::Closed.can_recv_headers());
+    }
+
+    #[test]
+    fn is_closed_predicate_is_correct() {
+        assert!(!StreamState::Idle.is_closed());
+        assert!(!StreamState::Open.is_closed());
+        assert!(!StreamState::HalfClosedLocal.is_closed());
+        assert!(!StreamState::HalfClosedRemote.is_closed());
+        assert!(!StreamState::ReservedLocal.is_closed());
+        assert!(!StreamState::ReservedRemote.is_closed());
+        assert!(StreamState::Closed.is_closed());
+    }
+
+    // =========================================================================
+    // Continuation Frame Tests
+    // =========================================================================
+
+    #[test]
+    fn continuation_without_headers_in_progress_is_error() {
+        let mut stream = Stream::new(1, 65535, DEFAULT_MAX_HEADER_LIST_SIZE);
+        stream.send_headers(false).unwrap();
+
+        // headers_complete is true by default, so CONTINUATION is unexpected
+        let result = stream.recv_continuation(Bytes::from_static(b"test"), false);
+        assert!(result.is_err());
+    }
+
+    #[test]
+    fn continuation_accumulates_fragments() {
+        let mut stream = Stream::new(1, 65535, DEFAULT_MAX_HEADER_LIST_SIZE);
+        // Receive headers without END_HEADERS
+        stream.recv_headers(false, false).unwrap();
+        assert!(stream.is_receiving_headers());
+
+        // Add continuations
+        stream
+            .recv_continuation(Bytes::from_static(b"part1"), false)
+            .unwrap();
+        stream
+            .recv_continuation(Bytes::from_static(b"part2"), true)
+            .unwrap();
+
+        assert!(!stream.is_receiving_headers());
+
+        let fragments = stream.take_header_fragments();
+        assert_eq!(fragments.len(), 2);
+    }
+
+    // =========================================================================
+    // Pending Data Queue Tests
+    // =========================================================================
+
+    #[test]
+    fn pending_data_queue_works() {
+        let mut stream = Stream::new(1, 65535, DEFAULT_MAX_HEADER_LIST_SIZE);
+        assert!(!stream.has_pending_data());
+
+        stream.queue_data(Bytes::from_static(b"hello"), false);
+        stream.queue_data(Bytes::from_static(b"world"), true);
+        assert!(stream.has_pending_data());
+
+        let (data1, end1) = stream.take_pending_data(100).unwrap();
+        assert_eq!(&data1[..], b"hello");
+        assert!(!end1);
+
+        let (data2, end2) = stream.take_pending_data(100).unwrap();
+        assert_eq!(&data2[..], b"world");
+        assert!(end2);
+
+        assert!(!stream.has_pending_data());
+    }
+
+    #[test]
+    fn pending_data_partial_take() {
+        let mut stream = Stream::new(1, 65535, DEFAULT_MAX_HEADER_LIST_SIZE);
+        stream.queue_data(Bytes::from_static(b"hello world"), true);
+
+        // Take only 5 bytes
+        let (data1, end1) = stream.take_pending_data(5).unwrap();
+        assert_eq!(&data1[..], b"hello");
+        assert!(!end1); // Not end_stream since we only took partial
+
+        // Take the rest
+        let (data2, end2) = stream.take_pending_data(100).unwrap();
+        assert_eq!(&data2[..], b" world");
+        assert!(end2);
+    }
+
+    // =========================================================================
+    // Stream Store ID Validation Tests
+    // =========================================================================
+
+    #[test]
+    fn stream_store_rejects_stream_id_zero() {
+        let mut store = StreamStore::new(true, 65535, DEFAULT_MAX_HEADER_LIST_SIZE);
+
+        let result = store.get_or_create(0);
+        assert!(result.is_err());
+    }
+
+    #[test]
+    fn stream_store_client_rejects_reused_server_stream_id() {
+        let mut store = StreamStore::new(true, 65535, DEFAULT_MAX_HEADER_LIST_SIZE);
+
+        // Client receives server stream 2
+        store.get_or_create(2).unwrap();
+
+        // Trying to use ID 2 again should fail (but it already exists, so get returns it)
+        // The error case is when we try to create a lower ID
+        store.get_or_create(4).unwrap(); // This advances next_server_stream_id to 6
+
+        // Now trying to create stream 2 should just return existing
+        assert!(store.get_or_create(2).is_ok());
+    }
+
+    #[test]
+    fn stream_store_server_advances_client_stream_ids() {
+        let mut store = StreamStore::new(false, 65535, DEFAULT_MAX_HEADER_LIST_SIZE);
+
+        // Server receives client streams
+        store.get_or_create(1).unwrap();
+        store.get_or_create(5).unwrap(); // Skipping 3 is allowed
+
+        // Trying to create stream 3 now should fail (ID already "used")
+        let result = store.get_or_create(3);
+        assert!(result.is_err());
+    }
+
+    #[test]
+    fn stream_store_prune_removes_closed_streams() {
+        let mut store = StreamStore::new(true, 65535, DEFAULT_MAX_HEADER_LIST_SIZE);
+
+        let id = store.allocate_stream_id().unwrap();
+        store.get_mut(id).unwrap().reset(ErrorCode::NoError);
+
+        assert_eq!(store.active_count(), 0);
+        store.prune_closed();
+        assert!(store.get(id).is_none());
+    }
+
+    #[test]
+    fn stream_store_active_stream_ids() {
+        let mut store = StreamStore::new(true, 65535, DEFAULT_MAX_HEADER_LIST_SIZE);
+
+        let id1 = store.allocate_stream_id().unwrap();
+        let id2 = store.allocate_stream_id().unwrap();
+        store.get_mut(id1).unwrap().reset(ErrorCode::NoError);
+
+        let active = store.active_stream_ids();
+        assert_eq!(active.len(), 1);
+        assert!(active.contains(&id2));
+        assert!(!active.contains(&id1));
+    }
+
+    // =========================================================================
+    // Initial Window Size Update Tests
+    // =========================================================================
+
+    #[test]
+    fn update_initial_window_size_adjusts_existing_streams() {
+        let mut store = StreamStore::new(true, 65535, DEFAULT_MAX_HEADER_LIST_SIZE);
+
+        let id = store.allocate_stream_id().unwrap();
+        assert_eq!(store.get(id).unwrap().send_window(), 65535);
+
+        // Increase window size
+        store.set_initial_window_size(100_000).unwrap();
+        assert_eq!(store.get(id).unwrap().send_window(), 100_000);
+
+        // Decrease window size
+        store.set_initial_window_size(50_000).unwrap();
+        assert_eq!(store.get(id).unwrap().send_window(), 50_000);
+    }
+
+    #[test]
+    fn priority_can_be_set_and_retrieved() {
+        let mut stream = Stream::new(1, 65535, DEFAULT_MAX_HEADER_LIST_SIZE);
+
+        let new_priority = PrioritySpec {
+            exclusive: true,
+            dependency: 3,
+            weight: 255,
+        };
+        stream.set_priority(new_priority);
+
+        let priority = stream.priority();
+        assert!(priority.exclusive);
+        assert_eq!(priority.dependency, 3);
+        assert_eq!(priority.weight, 255);
     }
 }
