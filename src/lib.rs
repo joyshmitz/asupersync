@@ -84,6 +84,7 @@ pub mod grpc;
 pub mod http;
 pub mod io;
 pub mod lab;
+pub mod messaging;
 pub mod migration;
 pub mod net;
 pub mod obligation;
