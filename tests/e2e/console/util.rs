@@ -1,5 +1,7 @@
 //! Shared helpers for Console E2E tests.
 
+#![allow(dead_code)]
+
 use asupersync::console::{Capabilities, ColorMode, ColorSupport, Console};
 use parking_lot::Mutex;
 use std::io::{self, Write};
@@ -150,7 +152,7 @@ pub fn strip_ansi(output: &str) -> String {
             // Skip the escape sequence
             if chars.peek() == Some(&'[') {
                 chars.next(); // consume '['
-                // Skip until we hit a letter (the terminal code)
+                              // Skip until we hit a letter (the terminal code)
                 while let Some(&c) = chars.peek() {
                     chars.next();
                     if c.is_ascii_alphabetic() {
