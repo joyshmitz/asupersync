@@ -127,6 +127,8 @@ pub mod io_op;
 pub mod reactor;
 pub mod region_heap;
 pub mod scheduler;
+/// Async wrapper for blocking pool operations.
+pub mod spawn_blocking;
 pub mod state;
 pub mod stored_task;
 pub mod task_handle;
@@ -149,6 +151,7 @@ pub use io_op::IoOp;
 pub use reactor::{Event, Events, Interest, LabReactor, Reactor, Registration, Source, Token};
 pub use region_heap::{global_alloc_count, HeapIndex, HeapRef, HeapStats, RegionHeap};
 pub use scheduler::Scheduler;
+pub use spawn_blocking::{spawn_blocking, spawn_blocking_io};
 pub use state::{RuntimeSnapshot, RuntimeState, SpawnError};
 pub use stored_task::StoredTask;
 pub use task_handle::{JoinError, TaskHandle};
