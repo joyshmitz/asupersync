@@ -4,7 +4,10 @@
 
 use crate::bytes::BytesMut;
 use crate::codec::Framed;
-use crate::http::h1::codec::HttpError;
+use crate::http::h1::codec::{
+    parse_header_line, require_transfer_encoding_chunked, unique_header_value,
+    validate_header_field, ChunkedBodyDecoder, HttpError,
+};
 use crate::http::h1::types::{Request, Response, Version};
 use crate::io::{AsyncRead, AsyncWrite};
 use crate::stream::Stream;
@@ -47,6 +50,14 @@ enum ClientDecodeState {
         remaining: usize,
     },
     Chunked {
+        version: Version,
+        status: u16,
+        reason: String,
+        headers: Vec<(String, String)>,
+        chunked: ChunkedBodyDecoder,
+    },
+    /// Response body is delimited by EOF (no Content-Length/Transfer-Encoding).
+    Eof {
         version: Version,
         status: u16,
         reason: String,
@@ -104,82 +115,6 @@ fn parse_status_line(line: &str) -> Result<(Version, u16, String), HttpError> {
     Ok((version, status, reason))
 }
 
-fn parse_header_line(line: &str) -> Result<(String, String), HttpError> {
-    let colon = line.find(':').ok_or(HttpError::BadHeader)?;
-    let name = line[..colon].trim().to_owned();
-    let value = line[colon + 1..].trim().to_owned();
-    if name.is_empty() {
-        return Err(HttpError::BadHeader);
-    }
-    Ok((name, value))
-}
-
-fn header_value<'a>(headers: &'a [(String, String)], name: &str) -> Option<&'a str> {
-    headers
-        .iter()
-        .find(|(n, _)| n.eq_ignore_ascii_case(name))
-        .map(|(_, v)| v.as_str())
-}
-
-fn is_chunked(headers: &[(String, String)]) -> bool {
-    let Some(te) = header_value(headers, "Transfer-Encoding") else {
-        return false;
-    };
-    te.split(',')
-        .any(|token| token.trim().eq_ignore_ascii_case("chunked"))
-}
-
-/// Decode a chunked body from `buf`. Returns `Some((body, consumed))` when
-/// complete, or `None` if more data is needed.
-///
-/// Returns `Err(HttpError::BodyTooLarge)` if the accumulated body exceeds
-/// `max_body_size`.
-fn decode_chunked(buf: &[u8], max_body_size: usize) -> Result<Option<(Vec<u8>, usize)>, HttpError> {
-    let mut body = Vec::new();
-    let mut pos = 0;
-
-    loop {
-        let remaining = &buf[pos..];
-        let Some(line_end) = remaining.windows(2).position(|w| w == b"\r\n") else {
-            return Ok(None);
-        };
-
-        let size_str = std::str::from_utf8(&remaining[..line_end])
-            .map_err(|_| HttpError::BadChunkedEncoding)?;
-        let chunk_size = usize::from_str_radix(size_str.trim(), 16)
-            .map_err(|_| HttpError::BadChunkedEncoding)?;
-
-        pos += line_end + 2; // skip size line + CRLF
-
-        if chunk_size == 0 {
-            if buf.len() < pos + 2 {
-                return Ok(None);
-            }
-            // Validate trailing CRLF after terminal chunk
-            if buf[pos] != b'\r' || buf[pos + 1] != b'\n' {
-                return Err(HttpError::BadChunkedEncoding);
-            }
-            pos += 2;
-            return Ok(Some((body, pos)));
-        }
-
-        // Check body size limit before accumulating
-        if body.len().saturating_add(chunk_size) > max_body_size {
-            return Err(HttpError::BodyTooLarge);
-        }
-
-        if buf.len() < pos + chunk_size + 2 {
-            return Ok(None);
-        }
-        body.extend_from_slice(&buf[pos..pos + chunk_size]);
-        // Validate trailing CRLF after chunk data
-        if buf[pos + chunk_size] != b'\r' || buf[pos + chunk_size + 1] != b'\n' {
-            return Err(HttpError::BadChunkedEncoding);
-        }
-        pos += chunk_size + 2;
-    }
-}
-
 impl crate::codec::Decoder for Http1ClientCodec {
     type Item = Response;
     type Error = HttpError;
@@ -187,8 +122,8 @@ impl crate::codec::Decoder for Http1ClientCodec {
     #[allow(clippy::too_many_lines)]
     fn decode(&mut self, src: &mut BytesMut) -> Result<Option<Response>, HttpError> {
         loop {
-            match &self.state {
-                ClientDecodeState::Head => {
+            match &mut self.state {
+                state @ ClientDecodeState::Head => {
                     let Some(end) = find_headers_end(src.as_ref()) else {
                         // Check for header overflow while waiting for more data
                         if src.len() > self.max_headers_size {
@@ -220,53 +155,85 @@ impl crate::codec::Decoder for Http1ClientCodec {
                         }
                     }
 
-                    // RFC 7230 3.3.3: Reject responses with both Transfer-Encoding
-                    // and Content-Length to prevent response smuggling.
-                    let has_te = header_value(&headers, "Transfer-Encoding").is_some();
-                    let has_cl = header_value(&headers, "Content-Length").is_some();
-                    if has_te && has_cl {
-                        return Err(HttpError::AmbiguousBodyLength);
-                    }
-
-                    if is_chunked(&headers) {
-                        self.state = ClientDecodeState::Chunked {
-                            version,
-                            status,
-                            reason,
-                            headers,
-                        };
-                        continue;
-                    }
-
-                    let content_length = header_value(&headers, "Content-Length")
-                        .map(str::parse::<usize>)
-                        .transpose()
-                        .map_err(|_| HttpError::BadContentLength)?
-                        .unwrap_or(0);
-
-                    if content_length == 0 {
-                        self.state = ClientDecodeState::Head;
+                    // RFC 7230/9110: responses with these status codes have no body.
+                    if matches!(status, 100..=199 | 204 | 304) {
+                        *state = ClientDecodeState::Head;
                         return Ok(Some(Response {
                             version,
                             status,
                             reason,
                             headers,
                             body: Vec::new(),
+                            trailers: Vec::new(),
                         }));
                     }
 
-                    // Check body size limit upfront for Content-Length
-                    if content_length > self.max_body_size {
+                    // RFC 7230 3.3.3: Reject responses with both Transfer-Encoding
+                    // and Content-Length to prevent response smuggling.
+                    let te = unique_header_value(&headers, "Transfer-Encoding")?;
+                    let cl = unique_header_value(&headers, "Content-Length")?;
+                    if te.is_some() && cl.is_some() {
+                        return Err(HttpError::AmbiguousBodyLength);
+                    }
+
+                    if let Some(te) = te {
+                        require_transfer_encoding_chunked(te)?;
+                        *state = ClientDecodeState::Chunked {
+                            version,
+                            status,
+                            reason,
+                            headers,
+                            chunked: ChunkedBodyDecoder::new(
+                                self.max_body_size,
+                                self.max_headers_size,
+                            ),
+                        };
+                        continue;
+                    }
+
+                    if let Some(cl) = cl {
+                        let content_length: usize =
+                            cl.trim().parse().map_err(|_| HttpError::BadContentLength)?;
+
+                        if content_length == 0 {
+                            *state = ClientDecodeState::Head;
+                            return Ok(Some(Response {
+                                version,
+                                status,
+                                reason,
+                                headers,
+                                body: Vec::new(),
+                                trailers: Vec::new(),
+                            }));
+                        }
+
+                        // Check body size limit upfront for Content-Length
+                        if content_length > self.max_body_size {
+                            return Err(HttpError::BodyTooLarge);
+                        }
+
+                        *state = ClientDecodeState::Body {
+                            version,
+                            status,
+                            reason,
+                            headers,
+                            remaining: content_length,
+                        };
+                        continue;
+                    }
+
+                    // No Content-Length/Transfer-Encoding: body is delimited by EOF.
+                    if src.len() > self.max_body_size {
                         return Err(HttpError::BodyTooLarge);
                     }
 
-                    self.state = ClientDecodeState::Body {
+                    *state = ClientDecodeState::Eof {
                         version,
                         status,
                         reason,
                         headers,
-                        remaining: content_length,
                     };
+                    return Ok(None);
                 }
 
                 ClientDecodeState::Body { remaining, .. } => {
@@ -294,15 +261,14 @@ impl crate::codec::Decoder for Http1ClientCodec {
                         reason,
                         headers,
                         body: body_bytes.to_vec(),
+                        trailers: Vec::new(),
                     }));
                 }
 
-                ClientDecodeState::Chunked { .. } => {
-                    let Some((body, consumed)) = decode_chunked(src.as_ref(), self.max_body_size)?
-                    else {
+                ClientDecodeState::Chunked { chunked, .. } => {
+                    let Some((body, trailers)) = chunked.decode(src)? else {
                         return Ok(None);
                     };
-                    let _ = src.split_to(consumed);
 
                     let old = std::mem::replace(&mut self.state, ClientDecodeState::Head);
                     let ClientDecodeState::Chunked {
@@ -310,6 +276,7 @@ impl crate::codec::Decoder for Http1ClientCodec {
                         status,
                         reason,
                         headers,
+                        ..
                     } = old
                     else {
                         unreachable!()
@@ -321,9 +288,56 @@ impl crate::codec::Decoder for Http1ClientCodec {
                         reason,
                         headers,
                         body,
+                        trailers,
                     }));
                 }
+
+                ClientDecodeState::Eof { .. } => {
+                    if src.len() > self.max_body_size {
+                        return Err(HttpError::BodyTooLarge);
+                    }
+                    return Ok(None);
+                }
             }
+        }
+    }
+
+    fn decode_eof(&mut self, src: &mut BytesMut) -> Result<Option<Response>, HttpError> {
+        if matches!(&self.state, ClientDecodeState::Eof { .. }) {
+            let old = std::mem::replace(&mut self.state, ClientDecodeState::Head);
+            let ClientDecodeState::Eof {
+                version,
+                status,
+                reason,
+                headers,
+            } = old
+            else {
+                unreachable!()
+            };
+
+            if src.len() > self.max_body_size {
+                return Err(HttpError::BodyTooLarge);
+            }
+
+            let body = src.split_to(src.len()).to_vec();
+            return Ok(Some(Response {
+                version,
+                status,
+                reason,
+                headers,
+                body,
+                trailers: Vec::new(),
+            }));
+        }
+
+        match self.decode(src)? {
+            Some(frame) => Ok(Some(frame)),
+            None if src.is_empty() => Ok(None),
+            None => Err(std::io::Error::new(
+                std::io::ErrorKind::UnexpectedEof,
+                "incomplete frame at EOF",
+            )
+            .into()),
         }
     }
 }
@@ -332,6 +346,47 @@ impl crate::codec::Encoder<Request> for Http1ClientCodec {
     type Error = HttpError;
 
     fn encode(&mut self, req: Request, dst: &mut BytesMut) -> Result<(), HttpError> {
+        if req.uri.contains('\r')
+            || req.uri.contains('\n')
+            || req.uri.contains(' ')
+            || req.uri.contains('\t')
+        {
+            return Err(HttpError::BadRequestLine);
+        }
+        if req.method.as_str().contains('\r')
+            || req.method.as_str().contains('\n')
+            || req.method.as_str().contains(' ')
+            || req.method.as_str().contains('\t')
+        {
+            return Err(HttpError::BadMethod);
+        }
+
+        let te = unique_header_value(&req.headers, "Transfer-Encoding")?;
+        let cl = unique_header_value(&req.headers, "Content-Length")?;
+
+        let chunked = match te {
+            Some(value) => {
+                require_transfer_encoding_chunked(value)?;
+                true
+            }
+            None => false,
+        };
+
+        if chunked && cl.is_some() {
+            return Err(HttpError::AmbiguousBodyLength);
+        }
+        if !chunked && !req.trailers.is_empty() {
+            return Err(HttpError::TrailersNotAllowed);
+        }
+        if !chunked {
+            if let Some(cl) = cl {
+                let declared: usize = cl.trim().parse().map_err(|_| HttpError::BadContentLength)?;
+                if declared != req.body.len() {
+                    return Err(HttpError::BadContentLength);
+                }
+            }
+        }
+
         // Request line
         let mut head = String::with_capacity(256);
         let _ = write!(head, "{} {} {}\r\n", req.method, req.uri, req.version);
@@ -339,10 +394,36 @@ impl crate::codec::Encoder<Request> for Http1ClientCodec {
         // Headers
         let mut has_content_length = false;
         for (name, value) in &req.headers {
+            validate_header_field(name, value)?;
             if name.eq_ignore_ascii_case("content-length") {
                 has_content_length = true;
             }
             let _ = write!(head, "{name}: {value}\r\n");
+        }
+
+        if chunked {
+            head.push_str("\r\n");
+            dst.extend_from_slice(head.as_bytes());
+
+            if !req.body.is_empty() {
+                let mut chunk_line = String::with_capacity(16);
+                let _ = write!(chunk_line, "{:X}\r\n", req.body.len());
+                dst.extend_from_slice(chunk_line.as_bytes());
+                dst.extend_from_slice(&req.body);
+                dst.extend_from_slice(b"\r\n");
+            }
+
+            dst.extend_from_slice(b"0\r\n");
+            if !req.trailers.is_empty() {
+                let mut trailer_block = String::with_capacity(256);
+                for (name, value) in &req.trailers {
+                    validate_header_field(name, value)?;
+                    let _ = write!(trailer_block, "{name}: {value}\r\n");
+                }
+                dst.extend_from_slice(trailer_block.as_bytes());
+            }
+            dst.extend_from_slice(b"\r\n");
+            return Ok(());
         }
 
         if !has_content_length && !req.body.is_empty() {
@@ -402,6 +483,7 @@ mod tests {
         assert_eq!(resp.reason, "OK");
         assert_eq!(resp.version, Version::Http11);
         assert_eq!(resp.body, b"hello");
+        assert!(resp.trailers.is_empty());
     }
 
     #[test]
@@ -411,6 +493,7 @@ mod tests {
         let resp = codec.decode(&mut buf).unwrap().unwrap();
         assert_eq!(resp.status, 204);
         assert!(resp.body.is_empty());
+        assert!(resp.trailers.is_empty());
     }
 
     #[test]
@@ -429,6 +512,7 @@ mod tests {
             version: Version::Http11,
             headers: vec![("Host".into(), "example.com".into())],
             body: Vec::new(),
+            trailers: Vec::new(),
         };
         let mut buf = BytesMut::with_capacity(256);
         crate::codec::Encoder::encode(&mut codec, req, &mut buf).unwrap();
@@ -446,6 +530,7 @@ mod tests {
             version: Version::Http11,
             headers: vec![("Host".into(), "api.example.com".into())],
             body: b"data".to_vec(),
+            trailers: Vec::new(),
         };
         let mut buf = BytesMut::with_capacity(256);
         crate::codec::Encoder::encode(&mut codec, req, &mut buf).unwrap();
@@ -463,6 +548,30 @@ mod tests {
         let resp = codec.decode(&mut buf).unwrap().unwrap();
         assert_eq!(resp.status, 200);
         assert_eq!(resp.body, b"hello world");
+        assert!(resp.trailers.is_empty());
+    }
+
+    #[test]
+    fn decode_chunked_response_with_trailers() {
+        let mut codec = Http1ClientCodec::new();
+        let raw = b"HTTP/1.1 200 OK\r\nTransfer-Encoding: chunked\r\n\r\n\
+                    5\r\nhello\r\n0\r\nX-Trailer: one\r\nY-Trailer: two\r\n\r\n";
+        let mut buf = BytesMut::from(&raw[..]);
+        let resp = codec.decode(&mut buf).unwrap().unwrap();
+        assert_eq!(resp.body, b"hello");
+        assert_eq!(resp.trailers.len(), 2);
+        assert_eq!(resp.trailers[0].0, "X-Trailer");
+        assert_eq!(resp.trailers[0].1, "one");
+    }
+
+    #[test]
+    fn decode_response_without_length_is_eof_delimited() {
+        let mut codec = Http1ClientCodec::new();
+        let raw = b"HTTP/1.1 200 OK\r\n\r\nhello";
+        let mut buf = BytesMut::from(&raw[..]);
+        assert!(codec.decode(&mut buf).unwrap().is_none());
+        let resp = codec.decode_eof(&mut buf).unwrap().unwrap();
+        assert_eq!(resp.body, b"hello");
     }
 
     #[test]

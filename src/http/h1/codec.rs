@@ -37,6 +37,16 @@ pub enum HttpError {
     BadMethod,
     /// Content-Length header is not a valid integer.
     BadContentLength,
+    /// Multiple Content-Length headers present.
+    DuplicateContentLength,
+    /// Multiple Transfer-Encoding headers present.
+    DuplicateTransferEncoding,
+    /// Transfer-Encoding is present but unsupported.
+    BadTransferEncoding,
+    /// Header name contains invalid characters.
+    InvalidHeaderName,
+    /// Header value contains invalid characters.
+    InvalidHeaderValue,
     /// Header block exceeds the configured limit.
     HeadersTooLarge,
     /// Too many headers.
@@ -50,6 +60,8 @@ pub enum HttpError {
     /// Both Content-Length and Transfer-Encoding present (RFC 7230 3.3.3 violation).
     /// This is a potential request smuggling vector.
     AmbiguousBodyLength,
+    /// Trailers were provided/encountered but are not permitted in this context.
+    TrailersNotAllowed,
 }
 
 impl fmt::Display for HttpError {
@@ -61,6 +73,11 @@ impl fmt::Display for HttpError {
             Self::UnsupportedVersion => write!(f, "unsupported HTTP version"),
             Self::BadMethod => write!(f, "unrecognised HTTP method"),
             Self::BadContentLength => write!(f, "invalid Content-Length"),
+            Self::DuplicateContentLength => write!(f, "duplicate Content-Length"),
+            Self::DuplicateTransferEncoding => write!(f, "duplicate Transfer-Encoding"),
+            Self::BadTransferEncoding => write!(f, "unsupported Transfer-Encoding"),
+            Self::InvalidHeaderName => write!(f, "invalid header name"),
+            Self::InvalidHeaderValue => write!(f, "invalid header value"),
             Self::HeadersTooLarge => write!(f, "header block too large"),
             Self::TooManyHeaders => write!(f, "too many headers"),
             Self::RequestLineTooLong => write!(f, "request line too long"),
@@ -69,6 +86,7 @@ impl fmt::Display for HttpError {
             Self::AmbiguousBodyLength => {
                 write!(f, "both Content-Length and Transfer-Encoding present")
             }
+            Self::TrailersNotAllowed => write!(f, "trailers not allowed"),
         }
     }
 }
@@ -107,6 +125,7 @@ enum DecodeState {
         uri: String,
         version: Version,
         headers: Vec<(String, String)>,
+        chunked: ChunkedBodyDecoder,
     },
 }
 
@@ -167,10 +186,13 @@ fn find_headers_end(buf: &[u8]) -> Option<usize> {
 
 /// Parse the request line: `METHOD SP URI SP VERSION CRLF`.
 fn parse_request_line(line: &str) -> Result<(Method, String, Version), HttpError> {
-    let mut parts = line.splitn(3, ' ');
+    let mut parts = line.split_ascii_whitespace();
     let method_str = parts.next().ok_or(HttpError::BadRequestLine)?;
     let uri = parts.next().ok_or(HttpError::BadRequestLine)?;
     let version_str = parts.next().ok_or(HttpError::BadRequestLine)?;
+    if parts.next().is_some() {
+        return Err(HttpError::BadRequestLine);
+    }
 
     let method = Method::from_bytes(method_str.as_bytes()).ok_or(HttpError::BadMethod)?;
     let version =
@@ -179,15 +201,49 @@ fn parse_request_line(line: &str) -> Result<(Method, String, Version), HttpError
     Ok((method, uri.to_owned(), version))
 }
 
-/// Parse a single `Name: Value` header line.
-fn parse_header_line(line: &str) -> Result<(String, String), HttpError> {
-    let colon = line.find(':').ok_or(HttpError::BadHeader)?;
-    let name = line[..colon].trim().to_owned();
-    let value = line[colon + 1..].trim().to_owned();
+/// Validates an HTTP field-name (RFC 7230 token / tchar set).
+fn is_valid_header_name(name: &str) -> bool {
     if name.is_empty() {
-        return Err(HttpError::BadHeader);
+        return false;
     }
-    Ok((name, value))
+    name.as_bytes().iter().all(|&b| {
+        matches!(
+            b,
+            b'!' | b'#' | b'$' | b'%' | b'&' | b'\'' | b'*' | b'+' | b'-' | b'.' | b'^'
+                | b'_' | b'`' | b'|' | b'~' | b'0'..=b'9' | b'a'..=b'z' | b'A'..=b'Z'
+        )
+    })
+}
+
+/// Parse a single `Name: Value` header line.
+pub(super) fn parse_header_line(line: &str) -> Result<(String, String), HttpError> {
+    let colon = line.find(':').ok_or(HttpError::BadHeader)?;
+    let raw_name = &line[..colon];
+    let name = raw_name.trim();
+    let value = line[colon + 1..].trim().to_owned();
+    if raw_name != name {
+        return Err(HttpError::InvalidHeaderName);
+    }
+    if !is_valid_header_name(name) {
+        return Err(HttpError::InvalidHeaderName);
+    }
+    if value.contains('\r') || value.contains('\n') {
+        return Err(HttpError::InvalidHeaderValue);
+    }
+    Ok((name.to_owned(), value))
+}
+
+pub(super) fn validate_header_field(name: &str, value: &str) -> Result<(), HttpError> {
+    if name.contains('\r') || name.contains('\n') {
+        return Err(HttpError::InvalidHeaderName);
+    }
+    if !is_valid_header_name(name) {
+        return Err(HttpError::InvalidHeaderName);
+    }
+    if value.contains('\r') || value.contains('\n') {
+        return Err(HttpError::InvalidHeaderValue);
+    }
+    Ok(())
 }
 
 /// Look up a header value (case-insensitive name match).
@@ -198,27 +254,66 @@ fn header_value<'a>(headers: &'a [(String, String)], name: &str) -> Option<&'a s
         .map(|(_, v)| v.as_str())
 }
 
+/// Look up a header value, rejecting duplicates for security-sensitive headers.
+pub(super) fn unique_header_value<'a>(
+    headers: &'a [(String, String)],
+    name: &str,
+) -> Result<Option<&'a str>, HttpError> {
+    let mut found = None;
+    for (n, v) in headers {
+        if n.eq_ignore_ascii_case(name) {
+            if found.is_some() {
+                if name.eq_ignore_ascii_case("content-length") {
+                    return Err(HttpError::DuplicateContentLength);
+                }
+                if name.eq_ignore_ascii_case("transfer-encoding") {
+                    return Err(HttpError::DuplicateTransferEncoding);
+                }
+                return Err(HttpError::BadHeader);
+            }
+            found = Some(v.as_str());
+        }
+    }
+    Ok(found)
+}
+
+pub(super) fn require_transfer_encoding_chunked(value: &str) -> Result<(), HttpError> {
+    let mut tokens = value.split(',').map(str::trim).filter(|t| !t.is_empty());
+    let first = tokens.next().ok_or(HttpError::BadTransferEncoding)?;
+    if tokens.next().is_some() {
+        // We only support the simplest/secure subset for now: `chunked` only.
+        return Err(HttpError::BadTransferEncoding);
+    }
+    if first.eq_ignore_ascii_case("chunked") {
+        return Ok(());
+    }
+    Err(HttpError::BadTransferEncoding)
+}
+
 /// Determine body length from headers.
 ///
 /// Per RFC 7230 Section 3.3.3, having both Transfer-Encoding and Content-Length
 /// is an error that could indicate a request smuggling attempt.
-fn body_length(headers: &[(String, String)]) -> Result<BodyKind, HttpError> {
-    let has_te = header_value(headers, "Transfer-Encoding");
-    let has_cl = header_value(headers, "Content-Length");
+fn body_kind(version: Version, headers: &[(String, String)]) -> Result<BodyKind, HttpError> {
+    let te = unique_header_value(headers, "Transfer-Encoding")?;
+    let cl = unique_header_value(headers, "Content-Length")?;
 
     // RFC 7230 3.3.3: Reject requests with both Transfer-Encoding and Content-Length
     // to prevent request smuggling attacks.
-    if has_te.is_some() && has_cl.is_some() {
+    if te.is_some() && cl.is_some() {
         return Err(HttpError::AmbiguousBodyLength);
     }
 
-    if let Some(te) = has_te {
-        if te.eq_ignore_ascii_case("chunked") {
-            return Ok(BodyKind::Chunked);
+    if let Some(te) = te {
+        // HTTP/1.0 does not support Transfer-Encoding.
+        if version == Version::Http10 {
+            return Err(HttpError::BadTransferEncoding);
         }
+        require_transfer_encoding_chunked(te)?;
+        return Ok(BodyKind::Chunked);
     }
-    if let Some(cl) = has_cl {
-        let len: usize = cl.parse().map_err(|_| HttpError::BadContentLength)?;
+    if let Some(cl) = cl {
+        let len: usize = cl.trim().parse().map_err(|_| HttpError::BadContentLength)?;
         return Ok(BodyKind::ContentLength(len));
     }
     Ok(BodyKind::ContentLength(0))
@@ -229,57 +324,143 @@ enum BodyKind {
     Chunked,
 }
 
-/// Decode a chunked body from `buf`. Returns `Some((body, consumed))` when
-/// complete, or `None` if more data is needed.
-///
-/// Returns `Err(HttpError::BodyTooLarge)` if the accumulated body exceeds
-/// `max_body_size`.
-fn decode_chunked(buf: &[u8], max_body_size: usize) -> Result<Option<(Vec<u8>, usize)>, HttpError> {
-    let mut body = Vec::new();
-    let mut pos = 0;
+const MAX_CHUNK_LINE_LEN: usize = 1024;
 
-    loop {
-        let remaining = &buf[pos..];
-        let Some(line_end) = remaining.windows(2).position(|w| w == b"\r\n") else {
-            return Ok(None);
-        };
+type ChunkedDecoded = (Vec<u8>, Vec<(String, String)>);
 
-        let size_str = std::str::from_utf8(&remaining[..line_end])
-            .map_err(|_| HttpError::BadChunkedEncoding)?;
-        let chunk_size = usize::from_str_radix(size_str.trim(), 16)
-            .map_err(|_| HttpError::BadChunkedEncoding)?;
+#[derive(Debug)]
+enum ChunkPhase {
+    SizeLine,
+    Data { remaining: usize },
+    DataCrlf,
+    Trailers,
+}
 
-        pos += line_end + 2; // skip size line + CRLF
+#[derive(Debug)]
+pub(super) struct ChunkedBodyDecoder {
+    phase: ChunkPhase,
+    body: Vec<u8>,
+    trailers: Vec<(String, String)>,
+    trailers_bytes: usize,
+    max_body_size: usize,
+    max_trailers_size: usize,
+}
 
-        if chunk_size == 0 {
-            // Terminal chunk. Expect trailing CRLF.
-            if buf.len() < pos + 2 {
-                return Ok(None);
+impl ChunkedBodyDecoder {
+    pub(super) fn new(max_body_size: usize, max_trailers_size: usize) -> Self {
+        Self {
+            phase: ChunkPhase::SizeLine,
+            body: Vec::new(),
+            trailers: Vec::new(),
+            trailers_bytes: 0,
+            max_body_size,
+            max_trailers_size,
+        }
+    }
+
+    pub(super) fn decode(
+        &mut self,
+        src: &mut BytesMut,
+    ) -> Result<Option<ChunkedDecoded>, HttpError> {
+        loop {
+            match self.phase {
+                ChunkPhase::SizeLine => {
+                    let Some(line) = split_line_crlf(src, MAX_CHUNK_LINE_LEN)? else {
+                        return Ok(None);
+                    };
+                    let size = parse_chunk_size_line(line.as_ref())?;
+                    if size == 0 {
+                        self.phase = ChunkPhase::Trailers;
+                        continue;
+                    }
+
+                    if self.body.len().saturating_add(size) > self.max_body_size {
+                        return Err(HttpError::BodyTooLarge);
+                    }
+
+                    self.phase = ChunkPhase::Data { remaining: size };
+                }
+
+                ChunkPhase::Data { remaining } => {
+                    if src.len() < remaining {
+                        return Ok(None);
+                    }
+                    let data = src.split_to(remaining);
+                    self.body.extend_from_slice(data.as_ref());
+                    self.phase = ChunkPhase::DataCrlf;
+                }
+
+                ChunkPhase::DataCrlf => {
+                    if src.len() < 2 {
+                        return Ok(None);
+                    }
+                    if src.as_ref()[0] != b'\r' || src.as_ref()[1] != b'\n' {
+                        return Err(HttpError::BadChunkedEncoding);
+                    }
+                    let _ = src.split_to(2);
+                    self.phase = ChunkPhase::SizeLine;
+                }
+
+                ChunkPhase::Trailers => {
+                    // Limit total trailer size (DoS hardening).
+                    if self.trailers_bytes + src.len() > self.max_trailers_size {
+                        return Err(HttpError::HeadersTooLarge);
+                    }
+
+                    let Some(line) = split_line_crlf(src, self.max_trailers_size)? else {
+                        return Ok(None);
+                    };
+
+                    if line.is_empty() {
+                        self.phase = ChunkPhase::SizeLine;
+                        self.trailers_bytes = 0;
+                        return Ok(Some((
+                            std::mem::take(&mut self.body),
+                            std::mem::take(&mut self.trailers),
+                        )));
+                    }
+
+                    self.trailers_bytes = self.trailers_bytes.saturating_add(line.len() + 2);
+                    if self.trailers_bytes > self.max_trailers_size {
+                        return Err(HttpError::HeadersTooLarge);
+                    }
+
+                    let line =
+                        std::str::from_utf8(line.as_ref()).map_err(|_| HttpError::BadHeader)?;
+                    self.trailers.push(parse_header_line(line)?);
+                    if self.trailers.len() > MAX_HEADERS {
+                        return Err(HttpError::TooManyHeaders);
+                    }
+                }
             }
-            // Validate trailing CRLF after terminal chunk
-            if buf[pos] != b'\r' || buf[pos + 1] != b'\n' {
-                return Err(HttpError::BadChunkedEncoding);
-            }
-            pos += 2;
-            return Ok(Some((body, pos)));
         }
+    }
+}
 
-        // Check body size limit before accumulating
-        if body.len().saturating_add(chunk_size) > max_body_size {
-            return Err(HttpError::BodyTooLarge);
-        }
-
-        // Need chunk_size bytes + CRLF
-        if buf.len() < pos + chunk_size + 2 {
-            return Ok(None);
-        }
-        body.extend_from_slice(&buf[pos..pos + chunk_size]);
-        // Validate trailing CRLF after chunk data
-        if buf[pos + chunk_size] != b'\r' || buf[pos + chunk_size + 1] != b'\n' {
+fn split_line_crlf(src: &mut BytesMut, max_len: usize) -> Result<Option<BytesMut>, HttpError> {
+    let Some(line_end) = src.as_ref().windows(2).position(|w| w == b"\r\n") else {
+        if src.len() > max_len {
             return Err(HttpError::BadChunkedEncoding);
         }
-        pos += chunk_size + 2;
+        return Ok(None);
+    };
+
+    if line_end > max_len {
+        return Err(HttpError::BadChunkedEncoding);
     }
+
+    let line = src.split_to(line_end);
+    let _ = src.split_to(2); // CRLF
+    Ok(Some(line))
+}
+
+fn parse_chunk_size_line(line: &[u8]) -> Result<usize, HttpError> {
+    let line = std::str::from_utf8(line).map_err(|_| HttpError::BadChunkedEncoding)?;
+    let size_part = line.split(';').next().unwrap_or("").trim();
+    if size_part.is_empty() {
+        return Err(HttpError::BadChunkedEncoding);
+    }
+    usize::from_str_radix(size_part, 16).map_err(|_| HttpError::BadChunkedEncoding)
 }
 
 /// Parse the head (request line + headers) from `src`, splitting off the
@@ -326,7 +507,7 @@ fn decode_head(
         }
     }
 
-    let kind = body_length(&headers)?;
+    let kind = body_kind(version, &headers)?;
     Ok(Some((method, uri, version, headers, kind)))
 }
 
@@ -345,6 +526,7 @@ fn take_head(state: DecodeState) -> (Method, String, Version, Vec<(String, Strin
             uri,
             version,
             headers,
+            ..
         } => (method, uri, version, headers),
         DecodeState::Head => unreachable!("take_head called in Head state"),
     }
@@ -356,8 +538,8 @@ impl Decoder for Http1Codec {
 
     fn decode(&mut self, src: &mut BytesMut) -> Result<Option<Request>, HttpError> {
         loop {
-            match &self.state {
-                DecodeState::Head => {
+            match &mut self.state {
+                state @ DecodeState::Head => {
                     let Some((method, uri, version, headers, kind)) =
                         decode_head(src, self.max_headers_size)?
                     else {
@@ -372,6 +554,7 @@ impl Decoder for Http1Codec {
                                 version,
                                 headers,
                                 body: Vec::new(),
+                                trailers: Vec::new(),
                             }));
                         }
                         BodyKind::ContentLength(len) => {
@@ -379,7 +562,7 @@ impl Decoder for Http1Codec {
                             if len > self.max_body_size {
                                 return Err(HttpError::BodyTooLarge);
                             }
-                            self.state = DecodeState::Body {
+                            *state = DecodeState::Body {
                                 method,
                                 uri,
                                 version,
@@ -388,11 +571,15 @@ impl Decoder for Http1Codec {
                             };
                         }
                         BodyKind::Chunked => {
-                            self.state = DecodeState::Chunked {
+                            *state = DecodeState::Chunked {
                                 method,
                                 uri,
                                 version,
                                 headers,
+                                chunked: ChunkedBodyDecoder::new(
+                                    self.max_body_size,
+                                    self.max_headers_size,
+                                ),
                             };
                         }
                     }
@@ -414,15 +601,14 @@ impl Decoder for Http1Codec {
                         version,
                         headers,
                         body: body_bytes.to_vec(),
+                        trailers: Vec::new(),
                     }));
                 }
 
-                DecodeState::Chunked { .. } => {
-                    let Some((body, consumed)) = decode_chunked(src.as_ref(), self.max_body_size)?
-                    else {
+                DecodeState::Chunked { chunked, .. } => {
+                    let Some((body, trailers)) = chunked.decode(src)? else {
                         return Ok(None);
                     };
-                    let _ = src.split_to(consumed);
 
                     let old = std::mem::replace(&mut self.state, DecodeState::Head);
                     let (method, uri, version, headers) = take_head(old);
@@ -433,6 +619,7 @@ impl Decoder for Http1Codec {
                         version,
                         headers,
                         body,
+                        trailers,
                     }));
                 }
             }
@@ -452,11 +639,37 @@ impl Encoder<Response> for Http1Codec {
             &resp.reason
         };
 
-        let chunked = header_value(&resp.headers, "Transfer-Encoding").is_some_and(|value| {
-            value
-                .split(',')
-                .any(|token| token.trim().eq_ignore_ascii_case("chunked"))
-        });
+        if reason.contains('\r') || reason.contains('\n') {
+            return Err(HttpError::BadHeader);
+        }
+
+        let te = unique_header_value(&resp.headers, "Transfer-Encoding")?;
+        let cl = unique_header_value(&resp.headers, "Content-Length")?;
+
+        let chunked = match te {
+            Some(value) => {
+                require_transfer_encoding_chunked(value)?;
+                true
+            }
+            None => false,
+        };
+
+        if chunked && cl.is_some() {
+            return Err(HttpError::AmbiguousBodyLength);
+        }
+
+        if !chunked && !resp.trailers.is_empty() {
+            return Err(HttpError::TrailersNotAllowed);
+        }
+
+        if !chunked {
+            if let Some(cl) = cl {
+                let declared: usize = cl.trim().parse().map_err(|_| HttpError::BadContentLength)?;
+                if declared != resp.body.len() {
+                    return Err(HttpError::BadContentLength);
+                }
+            }
+        }
 
         // Status line
         let mut head = String::with_capacity(256);
@@ -465,11 +678,9 @@ impl Encoder<Response> for Http1Codec {
         // Headers
         let mut has_content_length = false;
         for (name, value) in &resp.headers {
+            validate_header_field(name, value)?;
             if name.eq_ignore_ascii_case("content-length") {
                 has_content_length = true;
-                if chunked {
-                    continue;
-                }
             }
             let _ = write!(head, "{name}: {value}\r\n");
         }
@@ -478,15 +689,24 @@ impl Encoder<Response> for Http1Codec {
             head.push_str("\r\n");
             dst.extend_from_slice(head.as_bytes());
 
-            if resp.body.is_empty() {
-                dst.extend_from_slice(b"0\r\n\r\n");
-            } else {
+            if !resp.body.is_empty() {
                 let mut chunk_line = String::with_capacity(16);
                 let _ = write!(chunk_line, "{:X}\r\n", resp.body.len());
                 dst.extend_from_slice(chunk_line.as_bytes());
                 dst.extend_from_slice(&resp.body);
-                dst.extend_from_slice(b"\r\n0\r\n\r\n");
+                dst.extend_from_slice(b"\r\n");
             }
+
+            dst.extend_from_slice(b"0\r\n");
+            if !resp.trailers.is_empty() {
+                let mut trailer_block = String::with_capacity(256);
+                for (name, value) in &resp.trailers {
+                    validate_header_field(name, value)?;
+                    let _ = write!(trailer_block, "{name}: {value}\r\n");
+                }
+                dst.extend_from_slice(trailer_block.as_bytes());
+            }
+            dst.extend_from_slice(b"\r\n");
             return Ok(());
         }
 
@@ -553,6 +773,28 @@ mod tests {
                      5\r\nhello\r\n6\r\n world\r\n0\r\n\r\n";
         let req = decode_one(&mut codec, raw).unwrap().unwrap();
         assert_eq!(req.body, b"hello world");
+        assert!(req.trailers.is_empty());
+    }
+
+    #[test]
+    fn decode_chunked_with_extensions() {
+        let mut codec = Http1Codec::new();
+        let raw = b"POST /upload HTTP/1.1\r\nTransfer-Encoding: chunked\r\n\r\n\
+                     5;ext=1\r\nhello\r\n0\r\n\r\n";
+        let req = decode_one(&mut codec, raw).unwrap().unwrap();
+        assert_eq!(req.body, b"hello");
+    }
+
+    #[test]
+    fn decode_chunked_with_trailers() {
+        let mut codec = Http1Codec::new();
+        let raw = b"POST /upload HTTP/1.1\r\nTransfer-Encoding: chunked\r\n\r\n\
+                     5\r\nhello\r\n0\r\nX-Trailer: one\r\nY-Trailer: two\r\n\r\n";
+        let req = decode_one(&mut codec, raw).unwrap().unwrap();
+        assert_eq!(req.body, b"hello");
+        assert_eq!(req.trailers.len(), 2);
+        assert_eq!(req.trailers[0].0, "X-Trailer");
+        assert_eq!(req.trailers[0].1, "one");
     }
 
     #[test]
@@ -606,6 +848,47 @@ mod tests {
             b"POST / HTTP/1.1\r\nContent-Length: abc\r\n\r\n",
         );
         assert!(matches!(result, Err(HttpError::BadContentLength)));
+    }
+
+    #[test]
+    fn reject_duplicate_content_length() {
+        let mut codec = Http1Codec::new();
+        let result = decode_one(
+            &mut codec,
+            b"POST / HTTP/1.1\r\nContent-Length: 5\r\nContent-Length: 5\r\n\r\nhello",
+        );
+        assert!(matches!(result, Err(HttpError::DuplicateContentLength)));
+    }
+
+    #[test]
+    fn reject_duplicate_transfer_encoding() {
+        let mut codec = Http1Codec::new();
+        let result = decode_one(
+            &mut codec,
+            b"POST / HTTP/1.1\r\nTransfer-Encoding: chunked\r\nTransfer-Encoding: chunked\r\n\r\n\
+              0\r\n\r\n",
+        );
+        assert!(matches!(result, Err(HttpError::DuplicateTransferEncoding)));
+    }
+
+    #[test]
+    fn reject_unsupported_transfer_encoding() {
+        let mut codec = Http1Codec::new();
+        let result = decode_one(
+            &mut codec,
+            b"POST / HTTP/1.1\r\nTransfer-Encoding: gzip, chunked\r\n\r\n0\r\n\r\n",
+        );
+        assert!(matches!(result, Err(HttpError::BadTransferEncoding)));
+    }
+
+    #[test]
+    fn reject_chunked_http10() {
+        let mut codec = Http1Codec::new();
+        let result = decode_one(
+            &mut codec,
+            b"POST / HTTP/1.0\r\nTransfer-Encoding: chunked\r\n\r\n0\r\n\r\n",
+        );
+        assert!(matches!(result, Err(HttpError::BadTransferEncoding)));
     }
 
     #[test]
@@ -681,6 +964,26 @@ mod tests {
         assert!(s.contains("Transfer-Encoding: chunked\r\n"));
         assert!(!s.contains("Content-Length"));
         assert!(s.ends_with("5\r\nhello\r\n0\r\n\r\n"));
+    }
+
+    #[test]
+    fn encode_chunked_response_with_trailers() {
+        let mut codec = Http1Codec::new();
+        let resp = Response::new(200, "OK", b"hello".to_vec())
+            .with_header("Transfer-Encoding", "chunked")
+            .with_trailer("X-Trailer", "one");
+        let bytes = encode_one(&mut codec, resp);
+        let s = String::from_utf8(bytes).unwrap();
+        assert!(s.ends_with("0\r\nX-Trailer: one\r\n\r\n"));
+    }
+
+    #[test]
+    fn encode_trailers_without_chunked_is_error() {
+        let mut codec = Http1Codec::new();
+        let resp = Response::new(200, "OK", b"hello".to_vec()).with_trailer("X-Trailer", "one");
+        let mut buf = BytesMut::with_capacity(256);
+        let err = codec.encode(resp, &mut buf).unwrap_err();
+        assert!(matches!(err, HttpError::TrailersNotAllowed));
     }
 
     #[test]
@@ -769,12 +1072,12 @@ mod tests {
     }
 
     #[test]
-    fn reject_invalid_crlf_after_terminal_chunk() {
+    fn reject_invalid_trailer_header_line() {
         let mut codec = Http1Codec::new();
-        // Invalid: "XX" instead of "\r\n" after terminal chunk
+        // Invalid: trailer header line missing ':'.
         let raw = b"POST /upload HTTP/1.1\r\nTransfer-Encoding: chunked\r\n\r\n\
-                    5\r\nhello\r\n0\r\nXX";
+                    5\r\nhello\r\n0\r\nXX\r\n\r\n";
         let result = decode_one(&mut codec, raw);
-        assert!(matches!(result, Err(HttpError::BadChunkedEncoding)));
+        assert!(matches!(result, Err(HttpError::BadHeader)));
     }
 }

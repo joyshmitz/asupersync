@@ -148,6 +148,7 @@ mod tests {
             version: crate::http::h1::types::Version::Http11,
             headers: vec![("Connection".into(), "close".into())],
             body: Vec::new(),
+            trailers: Vec::new(),
         };
         assert!(should_close(&req_close, true));
 
@@ -157,6 +158,7 @@ mod tests {
             version: crate::http::h1::types::Version::Http11,
             headers: vec![("Connection".into(), "keep-alive".into())],
             body: Vec::new(),
+            trailers: Vec::new(),
         };
         assert!(!should_close(&req_keepalive, true));
     }
@@ -169,6 +171,7 @@ mod tests {
             version: crate::http::h1::types::Version::Http10,
             headers: Vec::new(),
             body: Vec::new(),
+            trailers: Vec::new(),
         };
         assert!(should_close(&req, true));
     }
@@ -181,6 +184,7 @@ mod tests {
             version: crate::http::h1::types::Version::Http11,
             headers: Vec::new(),
             body: Vec::new(),
+            trailers: Vec::new(),
         };
         assert!(!should_close(&req, true));
     }
@@ -193,6 +197,7 @@ mod tests {
             version: crate::http::h1::types::Version::Http11,
             headers: Vec::new(),
             body: Vec::new(),
+            trailers: Vec::new(),
         };
         assert!(should_close(&req, false));
     }

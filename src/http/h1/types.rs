@@ -123,6 +123,8 @@ pub struct Request {
     pub headers: Vec<(String, String)>,
     /// Request body bytes.
     pub body: Vec<u8>,
+    /// Trailing headers (only valid for chunked transfer-encoding).
+    pub trailers: Vec<(String, String)>,
 }
 
 /// Parsed HTTP/1.1 response (status line + headers + body).
@@ -138,6 +140,8 @@ pub struct Response {
     pub headers: Vec<(String, String)>,
     /// Response body bytes.
     pub body: Vec<u8>,
+    /// Trailing headers (only valid for chunked transfer-encoding).
+    pub trailers: Vec<(String, String)>,
 }
 
 impl Response {
@@ -150,6 +154,7 @@ impl Response {
             reason: reason.into(),
             headers: Vec::new(),
             body: body.into(),
+            trailers: Vec::new(),
         }
     }
 
@@ -157,6 +162,15 @@ impl Response {
     #[must_use]
     pub fn with_header(mut self, name: impl Into<String>, value: impl Into<String>) -> Self {
         self.headers.push((name.into(), value.into()));
+        self
+    }
+
+    /// Add a trailer header.
+    ///
+    /// Trailers are only valid with `Transfer-Encoding: chunked`.
+    #[must_use]
+    pub fn with_trailer(mut self, name: impl Into<String>, value: impl Into<String>) -> Self {
+        self.trailers.push((name.into(), value.into()));
         self
     }
 }
@@ -225,6 +239,7 @@ mod tests {
         assert_eq!(resp.status, 200);
         assert_eq!(resp.headers.len(), 1);
         assert_eq!(resp.body, b"hello");
+        assert!(resp.trailers.is_empty());
     }
 
     #[test]
