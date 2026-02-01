@@ -1,7 +1,7 @@
 //! Async wrapper for blocking pool operations.
 //!
 //! This module provides `spawn_blocking` helpers that run blocking closures on a
-//! dedicated thread (Phase 0) and yield to the async runtime while waiting.
+//! runtime blocking pool when available, or a dedicated thread as a fallback.
 //!
 //! # Cancellation Safety
 //!
@@ -22,14 +22,43 @@
 //! }
 //! ```
 
+use crate::cx::Cx;
+use crate::runtime::blocking_pool::{BlockingPoolHandle, BlockingTaskHandle};
 use crate::runtime::yield_now;
 use std::sync::mpsc;
 use std::thread;
 
+struct CancelOnDrop {
+    handle: BlockingTaskHandle,
+    done: bool,
+}
+
+impl CancelOnDrop {
+    fn new(handle: BlockingTaskHandle) -> Self {
+        Self {
+            handle,
+            done: false,
+        }
+    }
+
+    fn mark_done(&mut self) {
+        self.done = true;
+    }
+}
+
+impl Drop for CancelOnDrop {
+    fn drop(&mut self) {
+        if !self.done {
+            self.handle.cancel();
+        }
+    }
+}
+
 /// Spawns a blocking operation and returns a Future that yields until completion.
 ///
-/// This function runs the provided closure on a dedicated thread (Phase 0).
-/// In later phases this should be redirected through the runtime blocking pool.
+/// This function runs the provided closure on the runtime blocking pool when
+/// a current `Cx` is available, and falls back to a dedicated thread when
+/// no runtime context is set.
 ///
 /// # Type Bounds
 ///
@@ -50,29 +79,15 @@ where
     F: FnOnce() -> T + Send + 'static,
     T: Send + 'static,
 {
-    let (tx, rx) = mpsc::channel();
-
-    // TODO(phase1): Route through BlockingPool associated with the runtime context.
-    let thread_result = thread::Builder::new()
-        .name("asupersync-blocking".to_string())
-        .spawn(move || {
-            let result = std::panic::catch_unwind(std::panic::AssertUnwindSafe(f));
-            let _ = tx.send(result);
-        });
-
-    let _ = thread_result.expect("failed to spawn blocking thread");
-
-    // Poll the channel, yielding between attempts.
-    loop {
-        match rx.try_recv() {
-            Ok(Ok(result)) => return result,
-            Ok(Err(panic_payload)) => std::panic::resume_unwind(panic_payload),
-            Err(mpsc::TryRecvError::Empty) => yield_now().await,
-            Err(mpsc::TryRecvError::Disconnected) => {
-                panic!("blocking thread dropped without sending result");
-            }
+    if let Some(cx) = Cx::current() {
+        if let Some(pool) = cx.blocking_pool_handle() {
+            return spawn_blocking_on_pool(pool, f).await;
         }
+        // Deterministic fallback when running inside a runtime without a pool.
+        return f();
     }
+
+    spawn_blocking_on_thread(f).await
 }
 
 /// Spawns a blocking I/O operation and returns a Future.
@@ -86,9 +101,66 @@ where
     spawn_blocking(f).await
 }
 
+async fn spawn_blocking_on_pool<F, T>(pool: BlockingPoolHandle, f: F) -> T
+where
+    F: FnOnce() -> T + Send + 'static,
+    T: Send + 'static,
+{
+    let (tx, rx) = mpsc::channel();
+    let handle = pool.spawn(move || {
+        let result = std::panic::catch_unwind(std::panic::AssertUnwindSafe(f));
+        let _ = tx.send(result);
+    });
+
+    let mut guard = CancelOnDrop::new(handle);
+
+    loop {
+        match rx.try_recv() {
+            Ok(Ok(result)) => {
+                guard.mark_done();
+                return result;
+            }
+            Ok(Err(panic_payload)) => std::panic::resume_unwind(panic_payload),
+            Err(mpsc::TryRecvError::Empty) => yield_now().await,
+            Err(mpsc::TryRecvError::Disconnected) => {
+                panic!("blocking pool task dropped without sending result");
+            }
+        }
+    }
+}
+
+async fn spawn_blocking_on_thread<F, T>(f: F) -> T
+where
+    F: FnOnce() -> T + Send + 'static,
+    T: Send + 'static,
+{
+    let (tx, rx) = mpsc::channel();
+
+    let thread_result = thread::Builder::new()
+        .name("asupersync-blocking".to_string())
+        .spawn(move || {
+            let result = std::panic::catch_unwind(std::panic::AssertUnwindSafe(f));
+            let _ = tx.send(result);
+        });
+
+    let _ = thread_result.expect("failed to spawn blocking thread");
+
+    loop {
+        match rx.try_recv() {
+            Ok(Ok(result)) => return result,
+            Ok(Err(panic_payload)) => std::panic::resume_unwind(panic_payload),
+            Err(mpsc::TryRecvError::Empty) => yield_now().await,
+            Err(mpsc::TryRecvError::Disconnected) => {
+                panic!("blocking thread dropped without sending result");
+            }
+        }
+    }
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
+    use crate::types::{Budget, RegionId, TaskId};
     use futures_lite::future;
     use std::sync::atomic::{AtomicU32, Ordering};
     use std::sync::Arc;
@@ -153,6 +225,62 @@ mod tests {
             crate::assert_with_log!(count == 1, "counter incremented", 1u32, count);
         });
         crate::test_complete!("spawn_blocking_captures_closure");
+    }
+
+    #[test]
+    fn spawn_blocking_uses_pool_when_current() {
+        init_test("spawn_blocking_uses_pool_when_current");
+        let pool = crate::runtime::BlockingPool::new(1, 1);
+        let cx = Cx::new_with_drivers(
+            RegionId::new_for_test(0, 0),
+            TaskId::new_for_test(0, 0),
+            Budget::INFINITE,
+            None,
+            None,
+            None,
+            None,
+            None,
+        )
+        .with_blocking_pool_handle(Some(pool.handle()));
+
+        let _guard = Cx::set_current(Some(cx));
+
+        let thread_name = future::block_on(async {
+            spawn_blocking(|| {
+                std::thread::current()
+                    .name()
+                    .unwrap_or("unnamed")
+                    .to_string()
+            })
+            .await
+        });
+
+        crate::assert_with_log!(
+            thread_name.contains("-blocking-"),
+            "thread name uses pool",
+            true,
+            thread_name.contains("-blocking-")
+        );
+        crate::test_complete!("spawn_blocking_uses_pool_when_current");
+    }
+
+    #[test]
+    fn spawn_blocking_inline_when_no_pool() {
+        init_test("spawn_blocking_inline_when_no_pool");
+        let cx = Cx::for_testing();
+        let _guard = Cx::set_current(Some(cx));
+        let current_id = std::thread::current().id();
+
+        let thread_id =
+            future::block_on(async { spawn_blocking(|| std::thread::current().id()).await });
+
+        crate::assert_with_log!(
+            thread_id == current_id,
+            "same thread",
+            current_id,
+            thread_id
+        );
+        crate::test_complete!("spawn_blocking_inline_when_no_pool");
     }
 
     #[test]

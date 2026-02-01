@@ -353,7 +353,7 @@ impl LabRuntime {
                         let record_outcome = match outcome {
                             crate::types::Outcome::Ok(()) => crate::types::Outcome::Ok(()),
                             crate::types::Outcome::Err(()) => crate::types::Outcome::Err(
-                                crate::error::Error::new(crate::error::ErrorKind::Unknown),
+                                crate::error::Error::new(crate::error::ErrorKind::Internal),
                             ),
                             crate::types::Outcome::Cancelled(r) => {
                                 crate::types::Outcome::Cancelled(r)

@@ -900,6 +900,11 @@ impl RuntimeInner {
             None
         };
 
+        if let Some(pool) = blocking_pool.as_ref() {
+            let mut guard = state.lock().expect("runtime state lock poisoned");
+            guard.set_blocking_pool(pool.handle());
+        }
+
         Self {
             config,
             next_worker_id: AtomicUsize::new(0),

@@ -18,6 +18,7 @@ use crate::record::{
 use crate::runtime::io_driver::{IoDriver, IoDriverHandle};
 use crate::runtime::reactor::Reactor;
 use crate::runtime::stored_task::StoredTask;
+use crate::runtime::BlockingPoolHandle;
 use crate::time::TimerDriverHandle;
 use crate::trace::event::{TraceData, TraceEventKind};
 use crate::trace::{TraceBufferHandle, TraceEvent};
@@ -137,6 +138,8 @@ pub struct RuntimeState {
     entropy_source: Arc<dyn EntropySource>,
     /// Optional observability configuration for runtime contexts.
     observability: Option<RuntimeObservability>,
+    /// Blocking pool handle for offloading synchronous work.
+    blocking_pool: Option<BlockingPoolHandle>,
 }
 
 impl std::fmt::Debug for RuntimeState {
@@ -154,6 +157,7 @@ impl std::fmt::Debug for RuntimeState {
             .field("timer_driver", &self.timer_driver)
             .field("entropy_source", &"<dyn EntropySource>")
             .field("observability", &self.observability.is_some())
+            .field("blocking_pool", &self.blocking_pool.is_some())
             .finish()
     }
 }
@@ -184,6 +188,7 @@ impl RuntimeState {
             timer_driver: None,
             entropy_source: Arc::new(OsEntropy),
             observability: None,
+            blocking_pool: None,
         }
     }
 
@@ -274,6 +279,17 @@ impl RuntimeState {
     #[must_use]
     pub fn timer_driver_handle(&self) -> Option<TimerDriverHandle> {
         self.timer_driver.clone()
+    }
+
+    /// Returns a cloned handle to the blocking pool, if present.
+    #[must_use]
+    pub fn blocking_pool_handle(&self) -> Option<BlockingPoolHandle> {
+        self.blocking_pool.clone()
+    }
+
+    /// Sets the blocking pool handle for this runtime.
+    pub fn set_blocking_pool(&mut self, handle: BlockingPoolHandle) {
+        self.blocking_pool = Some(handle);
     }
 
     /// Sets the timer driver for this runtime.
@@ -533,7 +549,8 @@ impl RuntimeState {
             None,
             self.timer_driver_handle(),
             Some(entropy),
-        );
+        )
+        .with_blocking_pool_handle(self.blocking_pool_handle());
         cx.set_trace_buffer(self.trace_handle());
         let cx_weak = std::sync::Arc::downgrade(&cx.inner);
 

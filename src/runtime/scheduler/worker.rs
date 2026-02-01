@@ -8,7 +8,7 @@ use crate::runtime::RuntimeState;
 use crate::time::TimerDriverHandle;
 use crate::trace::{TraceBufferHandle, TraceEvent};
 use crate::tracing_compat::trace;
-use crate::types::{Outcome, TaskId, Time};
+use crate::types::{TaskId, Time};
 use crate::util::DetRng;
 use std::collections::HashSet;
 use std::sync::atomic::{AtomicBool, Ordering};
@@ -198,11 +198,15 @@ impl Worker {
         let _cx_guard = crate::cx::Cx::set_current(task_cx);
 
         match stored.poll(&mut cx) {
-            Poll::Ready(()) => {
+            Poll::Ready(outcome) => {
+                // Map Outcome<(), ()> to Outcome<(), Error> for record.complete()
+                let task_outcome = outcome.map_err(|()| {
+                    crate::error::Error::new(crate::error::ErrorKind::Internal)
+                });
                 let mut state = self.state.lock().expect("runtime state lock poisoned");
                 if let Some(record) = state.tasks.get_mut(task_id.arena_index()) {
                     if !record.state.is_terminal() {
-                        record.complete(Outcome::Ok(()));
+                        record.complete(task_outcome);
                     }
                 }
 

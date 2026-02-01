@@ -9,7 +9,7 @@ use crate::runtime::scheduler::worker::Parker;
 use crate::runtime::RuntimeState;
 use crate::time::TimerDriverHandle;
 use crate::tracing_compat::trace;
-use crate::types::{CxInner, Outcome, TaskId, Time};
+use crate::types::{CxInner, TaskId, Time};
 use crate::util::DetRng;
 use std::sync::atomic::{AtomicBool, AtomicUsize, Ordering};
 use std::sync::{Arc, Mutex, RwLock, Weak};
@@ -105,18 +105,51 @@ impl ThreeLaneScheduler {
 
     /// Injects a task into the cancel lane for cross-thread wakeup.
     ///
-    /// Uses `wake_state.notify()` for centralized deduplication.
-    /// If the task is already scheduled, this is a no-op.
-    /// If the task record doesn't exist (e.g., in tests), allows injection.
+    /// Uses `wake_state.notify()` for centralized deduplication, BUT always
+    /// injects into the cancel lane to ensure priority promotion.
+    ///
+    /// If a task is already scheduled in the Ready or Timed lane, `notify()`
+    /// will return false. However, since cancellation is higher priority,
+    /// we must ensure it gets into the Cancel lane.
+    ///
+    /// This may result in the task being in multiple lanes (e.g., Ready and Cancel),
+    /// or multiple times in the Cancel lane. This is safe because `execute()`
+    /// handles double-execution via `state.remove_stored_future()`.
     pub fn inject_cancel(&self, task: TaskId, priority: u8) {
-        let should_schedule = {
+        let exists = {
             let state = self.state.lock().expect("runtime state lock poisoned");
-            state
-                .tasks
-                .get(task.arena_index())
-                .is_none_or(|record| record.wake_state.notify())
+            if let Some(record) = state.tasks.get(task.arena_index()) {
+                // Try to notify. Even if already notified, we continue to inject
+                // to ensure priority promotion.
+                record.wake_state.notify();
+                true
+            } else {
+                false
+            }
         };
-        if should_schedule {
+        
+        // Always inject if the task exists (or if we want to support test behavior
+        // where tasks might not exist in state but are injected).
+        // The original code allowed injection if task didn't exist (is_none_or).
+        // We preserve that behavior implicitly if we just check exists or if we 
+        // follow the original logic's intent.
+        // Actually, looking at original: `is_none_or` meant "if None OR (Some and notify)".
+        // If None, it returned true.
+        // So we should inject if None OR Some.
+        // For Some, we don't care about notify result.
+        
+        let should_inject = {
+             let state = self.state.lock().expect("runtime state lock poisoned");
+             let record = state.tasks.get(task.arena_index());
+             if let Some(r) = record {
+                 r.wake_state.notify(); // Attempt notify, ignore result
+                 true
+             } else {
+                 true // Allow injection for missing tasks (tests)
+             }
+        };
+
+        if should_inject {
             self.global.inject_cancel(task, priority);
             self.wake_one();
         }
@@ -571,11 +604,15 @@ impl ThreeLaneWorker {
         let _cx_guard = crate::cx::Cx::set_current(task_cx);
 
         match stored.poll(&mut cx) {
-            Poll::Ready(()) => {
+            Poll::Ready(outcome) => {
+                // Map Outcome<(), ()> to Outcome<(), Error> for record.complete()
+                let task_outcome = outcome.map_err(|()| {
+                    crate::error::Error::new(crate::error::ErrorKind::Internal)
+                });
                 let mut state = self.state.lock().expect("runtime state lock poisoned");
                 if let Some(record) = state.tasks.get_mut(task_id.arena_index()) {
                     if !record.state.is_terminal() {
-                        record.complete(Outcome::Ok(()));
+                        record.complete(task_outcome);
                     }
                 }
 
@@ -683,10 +720,13 @@ impl CancelLaneWaker {
             return;
         }
 
-        if self.wake_state.notify() {
-            self.global.inject_cancel(self.task_id, priority);
-            self.parker.unpark();
-        }
+        // Always notify (attempt state transition)
+        self.wake_state.notify();
+        
+        // Always inject to ensure priority promotion, even if already scheduled.
+        // See `inject_cancel` for details.
+        self.global.inject_cancel(self.task_id, priority);
+        self.parker.unpark();
     }
 }
 
@@ -1193,7 +1233,7 @@ mod tests {
     }
 
     #[test]
-    fn test_inject_cancel_dedup_prevents_double_schedule() {
+    fn test_inject_cancel_allows_duplicates_for_priority() {
         let state = Arc::new(Mutex::new(RuntimeState::new()));
         let region = state
             .lock()
@@ -1214,14 +1254,52 @@ mod tests {
         scheduler.inject_cancel(task_id, 100);
         assert!(scheduler.global.has_cancel_work());
 
-        // Second inject should be deduplicated
+        // Second inject should NOT be deduplicated (to ensure priority promotion)
         scheduler.inject_cancel(task_id, 100);
 
-        // Only one task should be in queue
+        // Both should be in queue
         let first = scheduler.global.pop_cancel();
         assert!(first.is_some());
         let second = scheduler.global.pop_cancel();
-        assert!(second.is_none(), "duplicate should be prevented");
+        assert!(second.is_some(), "cancel inject always injects");
+        
+        // Third check should be empty
+        let third = scheduler.global.pop_cancel();
+        assert!(third.is_none());
+    }
+
+    #[test]
+    fn test_inject_cancel_promotes_ready_task() {
+        let state = Arc::new(Mutex::new(RuntimeState::new()));
+        let region = state
+            .lock()
+            .expect("runtime state lock poisoned")
+            .create_root_region(Budget::INFINITE);
+
+        let task_id = {
+            let mut guard = state.lock().expect("runtime state lock poisoned");
+            let (task_id, _handle) = guard
+                .create_task(region, Budget::INFINITE, async {})
+                .expect("create task");
+            task_id
+        };
+
+        let scheduler = ThreeLaneScheduler::new(1, &state);
+
+        // 1. Schedule task in Ready Lane
+        scheduler.inject_ready(task_id, 50);
+        assert!(scheduler.global.has_ready_work());
+        assert!(!scheduler.global.has_cancel_work());
+
+        // 2. Inject cancel for same task
+        // Expected: Should be promoted to Cancel Lane
+        scheduler.inject_cancel(task_id, 100);
+
+        // 3. Verify it is now in Cancel Lane (possibly in addition to Ready Lane)
+        assert!(
+            scheduler.global.has_cancel_work(),
+            "Task should be promoted to cancel lane"
+        );
     }
 
     #[test]
