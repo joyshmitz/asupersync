@@ -624,7 +624,7 @@ mod tests {
     }
 
     #[test]
-    #[ignore]
+    #[ignore = "stress test; run manually"]
     fn stress_test_mutex_high_contention() {
         init_test("stress_test_mutex_high_contention");
         let threads = 8usize;

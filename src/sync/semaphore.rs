@@ -701,7 +701,7 @@ mod tests {
     }
 
     #[test]
-    #[ignore]
+    #[ignore = "stress test; run manually"]
     fn stress_test_semaphore_fairness() {
         init_test("stress_test_semaphore_fairness");
         let threads = 8usize;
