@@ -1385,20 +1385,21 @@ mod tests {
         table.insert(Header::new("a", "1"));
         table.insert(Header::new("b", "2"));
         table.insert(Header::new("c", "3"));
-        assert_eq!(table.size(), 102); // Exceeds 100, oldest evicted
 
-        // After eviction, only 2 entries should remain
+        // With max_size=100, inserting 102 bytes triggers eviction of oldest
+        // After eviction, only 2 entries should remain (68 bytes)
+        assert_eq!(table.size(), 68);
         assert!(table.size() <= 100);
     }
 
     #[test]
     fn test_dynamic_table_set_max_size() {
         let mut table = DynamicTable::new();
-        table.insert(Header::new("header1", "value1")); // 39 + 32 = 46
-        table.insert(Header::new("header2", "value2")); // 46
+        table.insert(Header::new("header1", "value1")); // 7 + 6 + 32 = 45
+        table.insert(Header::new("header2", "value2")); // 7 + 6 + 32 = 45
 
         let initial_size = table.size();
-        assert_eq!(initial_size, 92);
+        assert_eq!(initial_size, 90); // 45 + 45 = 90
 
         // Reduce max size to force eviction
         table.set_max_size(50);

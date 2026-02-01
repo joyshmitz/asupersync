@@ -11,7 +11,7 @@ use crate::time::TimerDriverHandle;
 use crate::tracing_compat::trace;
 use crate::types::{CxInner, Outcome, TaskId, Time};
 use crate::util::DetRng;
-use std::sync::atomic::{AtomicBool, Ordering};
+use std::sync::atomic::{AtomicBool, AtomicUsize, Ordering};
 use std::sync::{Arc, Mutex, RwLock, Weak};
 use std::task::{Context, Poll, Wake, Waker};
 use std::time::Duration;
@@ -37,6 +37,8 @@ pub struct ThreeLaneScheduler {
     shutdown: Arc<AtomicBool>,
     /// Parkers for waking idle workers.
     parkers: Vec<Parker>,
+    /// Round-robin index for waking workers.
+    next_wake: AtomicUsize,
     /// Timer driver for processing timer wakeups.
     timer_driver: Option<TimerDriverHandle>,
     /// Shared runtime state for accessing task records and wake_state.
@@ -95,6 +97,7 @@ impl ThreeLaneScheduler {
             workers,
             shutdown,
             parkers,
+            next_wake: AtomicUsize::new(0),
             timer_driver,
             state: Arc::clone(state),
         }
@@ -171,11 +174,13 @@ impl ThreeLaneScheduler {
 
     /// Wakes one idle worker.
     fn wake_one(&self) {
-        // Simple strategy: wake the first parker
-        // TODO: Could be smarter (round-robin, least-loaded, etc.)
-        if let Some(parker) = self.parkers.first() {
-            parker.unpark();
+        let count = self.parkers.len();
+        if count == 0 {
+            return;
         }
+
+        let idx = self.next_wake.fetch_add(1, Ordering::Relaxed);
+        self.parkers[idx % count].unpark();
     }
 
     /// Wakes all idle workers.

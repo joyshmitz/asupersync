@@ -543,4 +543,3 @@ pub struct ObligationLeak {
     /// Age since creation.
     pub age: Duration,
 }
-||||||| Stash base

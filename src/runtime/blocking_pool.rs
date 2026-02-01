@@ -677,7 +677,8 @@ fn blocking_worker_loop(inner: &BlockingPoolInner) {
 #[cfg(test)]
 mod tests {
     use super::*;
-    use std::sync::atomic::AtomicI32;
+    use std::collections::HashSet;
+    use std::sync::atomic::{AtomicI32, AtomicU64};
 
     #[test]
     fn basic_spawn_and_wait() {
@@ -715,6 +716,28 @@ mod tests {
     }
 
     #[test]
+    fn test_spawn_from_handle() {
+        let pool = BlockingPool::new(1, 4);
+        let handle = pool.handle();
+        let counter = Arc::new(AtomicI32::new(0));
+
+        let c = Arc::clone(&counter);
+        let task = handle.spawn(move || {
+            c.fetch_add(1, Ordering::Relaxed);
+        });
+
+        task.wait();
+        assert_eq!(counter.load(Ordering::Relaxed), 1);
+    }
+
+    #[test]
+    fn test_active_threads_starts_at_min() {
+        let pool = BlockingPool::new(3, 8);
+        thread::sleep(Duration::from_millis(50));
+        assert_eq!(pool.active_threads(), 3);
+    }
+
+    #[test]
     fn cancellation_before_execution() {
         let pool = BlockingPool::new(0, 1); // Start with no threads
         let counter = Arc::new(AtomicI32::new(0));
@@ -741,6 +764,51 @@ mod tests {
     }
 
     #[test]
+    fn test_shutdown_and_wait_empty_pool() {
+        let pool = BlockingPool::new(2, 4);
+        thread::sleep(Duration::from_millis(20));
+
+        let start = std::time::Instant::now();
+        let result = pool.shutdown_and_wait(Duration::from_secs(2));
+        let elapsed = start.elapsed();
+
+        assert!(result, "Shutdown should succeed");
+        assert!(elapsed < Duration::from_secs(1));
+        assert_eq!(pool.active_threads(), 0);
+    }
+
+    #[test]
+    fn test_shutdown_and_wait_timeout_respected() {
+        let pool = BlockingPool::new(1, 1);
+        pool.spawn(|| {
+            thread::sleep(Duration::from_secs(5));
+        });
+
+        thread::sleep(Duration::from_millis(20));
+
+        let start = std::time::Instant::now();
+        let result = pool.shutdown_and_wait(Duration::from_millis(50));
+        let elapsed = start.elapsed();
+
+        assert!(!result, "Expected timeout to return false");
+        assert!(elapsed >= Duration::from_millis(50));
+        assert!(elapsed < Duration::from_secs(1));
+    }
+
+    #[test]
+    fn test_shutdown_idempotent() {
+        let pool = BlockingPool::new(1, 2);
+        pool.spawn(|| {});
+
+        pool.shutdown();
+        assert!(pool.is_shutdown());
+        pool.shutdown();
+        assert!(pool.is_shutdown());
+
+        assert!(pool.shutdown_and_wait(Duration::from_secs(2)));
+    }
+
+    #[test]
     fn wait_timeout() {
         let pool = BlockingPool::new(1, 1);
 
@@ -754,6 +822,63 @@ mod tests {
         // Long timeout should succeed
         assert!(handle.wait_timeout(Duration::from_secs(2)));
         assert!(handle.is_done());
+    }
+
+    #[test]
+    fn test_worker_parks_on_empty() {
+        let pool = BlockingPool::new(2, 4);
+        thread::sleep(Duration::from_millis(50));
+        assert_eq!(pool.busy_threads(), 0);
+    }
+
+    #[test]
+    fn test_worker_wakes_on_task() {
+        let pool = BlockingPool::new(1, 2);
+        thread::sleep(Duration::from_millis(50));
+
+        let counter = Arc::new(AtomicI32::new(0));
+        let c = Arc::clone(&counter);
+        let handle = pool.spawn(move || {
+            c.fetch_add(1, Ordering::Relaxed);
+        });
+
+        assert!(handle.wait_timeout(Duration::from_secs(2)));
+        assert_eq!(counter.load(Ordering::Relaxed), 1);
+    }
+
+    #[test]
+    fn test_worker_idle_timeout_excess_threads_exit() {
+        let options = BlockingPoolOptions {
+            idle_timeout: Duration::from_millis(50),
+            ..Default::default()
+        };
+        let pool = BlockingPool::with_config(0, 3, options);
+
+        let barrier = Arc::new(std::sync::Barrier::new(4));
+        let mut handles = Vec::new();
+        for _ in 0..3 {
+            let b = Arc::clone(&barrier);
+            handles.push(pool.spawn(move || {
+                b.wait();
+            }));
+        }
+
+        thread::sleep(Duration::from_millis(50));
+        let active_before = pool.active_threads();
+        assert!(active_before >= 1);
+
+        barrier.wait();
+        for h in handles {
+            h.wait();
+        }
+
+        thread::sleep(Duration::from_millis(300));
+        let active_after = pool.active_threads();
+        assert!(
+            active_after <= 1,
+            "Expected excess threads to retire, active_after={}",
+            active_after
+        );
     }
 
     #[test]
@@ -786,6 +911,22 @@ mod tests {
 
         // Pool should have scaled threads (at least min_threads)
         assert!(pool.active_threads() >= 1);
+    }
+
+    #[test]
+    fn test_task_panic_caught() {
+        let pool = BlockingPool::new(2, 4);
+        let _ = pool.spawn(|| panic!("intentional panic"));
+
+        thread::sleep(Duration::from_millis(50));
+
+        let counter = Arc::new(AtomicI32::new(0));
+        let c = Arc::clone(&counter);
+        let handle = pool.spawn(move || {
+            c.fetch_add(1, Ordering::Relaxed);
+        });
+        handle.wait();
+        assert_eq!(counter.load(Ordering::Relaxed), 1);
     }
 
     #[test]
@@ -830,6 +971,39 @@ mod tests {
         t2.wait();
 
         assert_eq!(counter.load(Ordering::Relaxed), 2);
+    }
+
+    #[test]
+    fn test_queue_concurrent_push() {
+        let pool = BlockingPool::new(2, 8);
+        let counter = Arc::new(AtomicU64::new(0));
+        let mut spawners = Vec::new();
+
+        let spawner_count = 4;
+        let tasks_per_spawner = 50;
+
+        for _ in 0..spawner_count {
+            let pool_handle = pool.handle();
+            let c = Arc::clone(&counter);
+            spawners.push(thread::spawn(move || {
+                for _ in 0..tasks_per_spawner {
+                    let c_inner = Arc::clone(&c);
+                    pool_handle.spawn(move || {
+                        c_inner.fetch_add(1, Ordering::Relaxed);
+                    });
+                }
+            }));
+        }
+
+        for spawner in spawners {
+            spawner.join().expect("spawner panicked");
+        }
+
+        assert!(pool.shutdown_and_wait(Duration::from_secs(5)));
+        assert_eq!(
+            counter.load(Ordering::Relaxed),
+            (spawner_count * tasks_per_spawner) as u64
+        );
     }
 
     #[test]
@@ -893,5 +1067,38 @@ mod tests {
         pool.shutdown_and_wait(Duration::from_secs(5));
 
         assert_eq!(stopped.load(Ordering::Relaxed), 2);
+    }
+
+    #[test]
+    fn test_thread_name_unique() {
+        let options = BlockingPoolOptions {
+            thread_name_prefix: "unique-pool".to_string(),
+            ..Default::default()
+        };
+        let pool = BlockingPool::with_config(2, 2, options);
+
+        let barrier = Arc::new(std::sync::Barrier::new(3));
+        let names = Arc::new(Mutex::new(Vec::new()));
+        let mut handles = Vec::new();
+
+        for _ in 0..2 {
+            let b = Arc::clone(&barrier);
+            let n = Arc::clone(&names);
+            handles.push(pool.spawn(move || {
+                if let Some(name) = thread::current().name() {
+                    n.lock().unwrap().push(name.to_string());
+                }
+                b.wait();
+            }));
+        }
+
+        barrier.wait();
+        for h in handles {
+            h.wait();
+        }
+
+        let recorded = names.lock().unwrap().clone();
+        let unique: HashSet<_> = recorded.into_iter().collect();
+        assert_eq!(unique.len(), 2, "Expected two unique thread names");
     }
 }
