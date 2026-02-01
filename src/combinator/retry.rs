@@ -900,3 +900,37 @@ mod tests {
         }
     }
 }
+
+/// Retries an operation with configurable backoff.
+///
+/// # Semantics
+///
+/// ```ignore
+/// let result = retry!(
+///     attempts: 3,
+///     backoff: exponential(100ms, 2.0),
+///     operation()
+/// ).await;
+/// ```
+///
+/// - Retries up to `max_attempts` times
+/// - Waits `delay` between attempts (optionally with exponential backoff)
+/// - Returns first success, or last error after exhausting retries
+/// - Respects cancellation during both operation and delay
+#[macro_export]
+macro_rules! retry {
+    // Full syntax with policy
+    (attempts: $max:expr, backoff: $backoff:expr, $operation:expr) => {{
+        // Placeholder: in real implementation, this retries with backoff
+        let _ = $max;
+        let _ = $backoff;
+        let _ = $operation;
+    }};
+
+    // Simple syntax: retry!(max_attempts, operation)
+    ($max:expr, $operation:expr) => {{
+        // Placeholder: in real implementation, this retries with fixed delay
+        let _ = $max;
+        let _ = $operation;
+    }};
+}

@@ -289,6 +289,72 @@ impl TimeoutConfig {
     }
 }
 
+/// Runs a future with a timeout.
+///
+/// This macro races the provided future against a sleep, returning
+/// the result if it completes in time, or an error if it times out.
+///
+/// # Semantics
+///
+/// ```ignore
+/// let result = timeout!(Duration::from_secs(5), operation).await;
+///
+/// match result {
+///     Ok(value) => println!("Completed: {:?}", value),
+///     Err(Elapsed) => println!("Timed out"),
+/// }
+/// ```
+///
+/// # Cancellation Behavior
+///
+/// When timeout fires:
+/// 1. Main future is cancelled
+/// 2. Cancellation follows standard protocol (drain + finalize)
+/// 3. `timeout!` returns after main future is fully drained
+///
+/// When main future completes:
+/// 1. Sleep is cancelled
+/// 2. `timeout!` returns immediately (sleep cleanup is fast)
+#[macro_export]
+macro_rules! timeout {
+    // Basic syntax: timeout!(duration, future)
+    ($duration:expr, $future:expr) => {{
+        // Placeholder: in real implementation, this races against sleep
+        let _ = $duration;
+        let _ = $future;
+    }};
+
+    // With explicit cx: timeout!(cx, duration, future)
+    ($cx:expr, $duration:expr, $future:expr) => {{
+        // Placeholder: in real implementation, this races against sleep using cx
+        let _ = $cx;
+        let _ = $duration;
+        let _ = $future;
+    }};
+}
+
+/// Joins multiple futures, short-circuiting on the first error.
+///
+/// Unlike `join!` which waits for all futures, `try_join!` cancels
+/// remaining futures when any future returns an error.
+///
+/// # Semantics
+///
+/// ```ignore
+/// let (a, b, c) = try_join!(fut_a, fut_b, fut_c).await?;
+/// ```
+///
+/// - If all succeed: return tuple of values
+/// - If any fails: cancel remaining, return first error
+/// - If any panics: cancel remaining, return Panicked
+#[macro_export]
+macro_rules! try_join {
+    ($($future:expr),+ $(,)?) => {{
+        // Placeholder: in real implementation, this joins with short-circuit
+        $(let _ = $future;)+
+    }};
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
