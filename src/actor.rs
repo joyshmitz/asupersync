@@ -41,13 +41,114 @@
 
 use std::future::Future;
 use std::pin::Pin;
+use std::sync::atomic::{AtomicU8, Ordering};
 use std::sync::Arc;
 
 use crate::channel::mpsc;
 use crate::channel::mpsc::SendError;
 use crate::cx::Cx;
 use crate::runtime::{JoinError, SpawnError};
-use crate::types::CxInner;
+use crate::types::{CxInner, RegionId, TaskId, Time};
+
+/// Unique identifier for an actor.
+///
+/// For now this is a thin wrapper around the actor task's `TaskId`, which already
+/// provides arena + generation semantics. Keeping a distinct type avoids mixing
+/// actor IDs with generic tasks at call sites.
+#[derive(Clone, Copy, PartialEq, Eq, Hash)]
+pub struct ActorId(TaskId);
+
+impl ActorId {
+    /// Create an actor ID from a task ID.
+    #[must_use]
+    pub const fn from_task(task_id: TaskId) -> Self {
+        Self(task_id)
+    }
+
+    /// Returns the underlying task ID.
+    #[must_use]
+    pub const fn task_id(self) -> TaskId {
+        self.0
+    }
+}
+
+impl std::fmt::Debug for ActorId {
+    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        f.debug_tuple("ActorId").field(&self.0).finish()
+    }
+}
+
+impl std::fmt::Display for ActorId {
+    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        // Preserve the compact, deterministic formatting of TaskId while keeping
+        // a distinct type at the API level.
+        write!(f, "{}", self.0)
+    }
+}
+
+/// Lifecycle state for an actor.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum ActorState {
+    /// Actor constructed but not yet started.
+    Created,
+    /// Actor is running and processing messages.
+    Running,
+    /// Actor is stopping (cancellation requested / mailbox closed).
+    Stopping,
+    /// Actor has stopped and will not process further messages.
+    Stopped,
+}
+
+#[derive(Debug)]
+struct ActorStateCell {
+    state: AtomicU8,
+}
+
+impl ActorStateCell {
+    fn new(state: ActorState) -> Self {
+        Self {
+            state: AtomicU8::new(Self::encode(state)),
+        }
+    }
+
+    fn load(&self) -> ActorState {
+        Self::decode(self.state.load(Ordering::Acquire))
+    }
+
+    fn store(&self, state: ActorState) {
+        self.state.store(Self::encode(state), Ordering::Release);
+    }
+
+    const fn encode(state: ActorState) -> u8 {
+        match state {
+            ActorState::Created => 0,
+            ActorState::Running => 1,
+            ActorState::Stopping => 2,
+            ActorState::Stopped => 3,
+        }
+    }
+
+    const fn decode(value: u8) -> ActorState {
+        match value {
+            0 => ActorState::Created,
+            1 => ActorState::Running,
+            2 => ActorState::Stopping,
+            _ => ActorState::Stopped,
+        }
+    }
+}
+
+/// Internal runtime state for an actor.
+///
+/// This is intentionally lightweight and non-opinionated; higher-level actor
+/// features (mailbox policies, supervision trees, etc.) can extend this.
+struct ActorCell<M> {
+    actor_id: ActorId,
+    owner: RegionId,
+    mailbox: mpsc::Receiver<M>,
+    state: Arc<ActorStateCell>,
+    created_at: Time,
+}
 
 /// A message-driven actor that processes messages from a bounded mailbox.
 ///
@@ -102,8 +203,10 @@ pub trait Actor: Send + 'static {
 /// the actor loop to exit after processing remaining messages.
 #[derive(Debug)]
 pub struct ActorHandle<A: Actor> {
+    actor_id: ActorId,
     sender: mpsc::Sender<A::Message>,
-    task_id: crate::types::TaskId,
+    state: Arc<ActorStateCell>,
+    task_id: TaskId,
     receiver: crate::channel::oneshot::Receiver<Result<A, JoinError>>,
     inner: std::sync::Weak<std::sync::RwLock<CxInner>>,
 }
@@ -126,10 +229,18 @@ impl<A: Actor> ActorHandle<A> {
 
     /// Returns a lightweight, clonable reference for sending messages.
     #[must_use]
-    pub fn sender(&self) -> ActorRef<A> {
+    pub fn sender(&self) -> ActorRef<A::Message> {
         ActorRef {
+            actor_id: self.actor_id,
             sender: self.sender.clone(),
+            state: Arc::clone(&self.state),
         }
+    }
+
+    /// Returns the actor's unique identifier.
+    #[must_use]
+    pub const fn actor_id(&self) -> ActorId {
+        self.actor_id
     }
 
     /// Returns the task ID of the actor's underlying task.
@@ -146,6 +257,7 @@ impl<A: Actor> ActorHandle<A> {
         // Closing is achieved by dropping our sender clone won't work since
         // we need to keep the handle alive. Instead, we abort the task which
         // triggers cancellation.
+        self.state.store(ActorState::Stopping);
         if let Some(inner) = self.inner.upgrade() {
             if let Ok(mut guard) = inner.write() {
                 guard.cancel_requested = true;
@@ -173,6 +285,7 @@ impl<A: Actor> ActorHandle<A> {
 
     /// Request the actor to stop by aborting its task.
     pub fn abort(&self) {
+        self.state.store(ActorState::Stopping);
         if let Some(inner) = self.inner.upgrade() {
             if let Ok(mut guard) = inner.write() {
                 guard.cancel_requested = true;
@@ -185,27 +298,27 @@ impl<A: Actor> ActorHandle<A> {
 ///
 /// Use this to send messages to an actor from multiple locations without
 /// needing to share the `ActorHandle`.
-#[derive(Debug)]
-pub struct ActorRef<A: Actor> {
-    sender: mpsc::Sender<A::Message>,
+#[derive(Debug, Clone)]
+pub struct ActorRef<M> {
+    actor_id: ActorId,
+    sender: mpsc::Sender<M>,
+    state: Arc<ActorStateCell>,
 }
 
-impl<A: Actor> Clone for ActorRef<A> {
-    fn clone(&self) -> Self {
-        Self {
-            sender: self.sender.clone(),
-        }
-    }
-}
-
-impl<A: Actor> ActorRef<A> {
+impl<M: Send + 'static> ActorRef<M> {
     /// Send a message to the actor.
-    pub async fn send(&self, cx: &Cx, msg: A::Message) -> Result<(), SendError<A::Message>> {
+    pub async fn send(&self, cx: &Cx, msg: M) -> Result<(), SendError<M>> {
         self.sender.send(cx, msg).await
     }
 
+    /// Reserve a slot in the mailbox (two-phase send: reserve -> commit).
+    #[must_use]
+    pub fn reserve<'a>(&'a self, cx: &'a Cx) -> mpsc::Reserve<'a, M> {
+        self.sender.reserve(cx)
+    }
+
     /// Try to send a message without blocking.
-    pub fn try_send(&self, msg: A::Message) -> Result<(), SendError<A::Message>> {
+    pub fn try_send(&self, msg: M) -> Result<(), SendError<M>> {
         self.sender.try_send(msg)
     }
 
@@ -213,6 +326,20 @@ impl<A: Actor> ActorRef<A> {
     #[must_use]
     pub fn is_closed(&self) -> bool {
         self.sender.is_closed()
+    }
+
+    /// Returns true if the actor is still alive (not fully stopped).
+    ///
+    /// Note: This is best-effort. The definitive shutdown signal is `ActorHandle::join()`.
+    #[must_use]
+    pub fn is_alive(&self) -> bool {
+        self.state.load() != ActorState::Stopped
+    }
+
+    /// Returns the actor's unique identifier.
+    #[must_use]
+    pub const fn actor_id(&self) -> ActorId {
+        self.actor_id
     }
 }
 
@@ -227,8 +354,10 @@ pub const DEFAULT_MAILBOX_CAPACITY: usize = 64;
 /// 3. Drains remaining buffered messages (no silent drops)
 /// 4. Calls `on_stop`
 /// 5. Returns the actor state
-async fn run_actor_loop<A: Actor>(mut actor: A, cx: Cx, mailbox: &mpsc::Receiver<A::Message>) -> A {
+async fn run_actor_loop<A: Actor>(mut actor: A, cx: Cx, cell: &ActorCell<A::Message>) -> A {
     use crate::tracing_compat::debug;
+
+    cell.state.store(ActorState::Running);
 
     // Phase 1: Initialization
     cx.trace("actor::on_start");
@@ -242,7 +371,7 @@ async fn run_actor_loop<A: Actor>(mut actor: A, cx: Cx, mailbox: &mpsc::Receiver
             break;
         }
 
-        match mailbox.recv(&cx).await {
+        match cell.mailbox.recv(&cx).await {
             Ok(msg) => {
                 actor.handle(&cx, msg).await;
             }
@@ -263,12 +392,14 @@ async fn run_actor_loop<A: Actor>(mut actor: A, cx: Cx, mailbox: &mpsc::Receiver
         }
     }
 
+    cell.state.store(ActorState::Stopping);
+
     // Phase 3: Drain remaining buffered messages.
     // Two-phase mailbox guarantee: no message silently dropped. Every message
     // that was successfully sent (committed) into the mailbox will be handled
     // before the actor's on_stop runs.
     let mut drained: u64 = 0;
-    while let Ok(msg) = mailbox.try_recv() {
+    while let Ok(msg) = cell.mailbox.try_recv() {
         actor.handle(&cx, msg).await;
         drained += 1;
     }
@@ -322,6 +453,8 @@ impl<P: crate::types::Policy> crate::cx::Scope<'_, P> {
 
         // Create task record
         let task_id = self.create_task_record(state)?;
+        let actor_id = ActorId::from_task(task_id);
+        let actor_state = Arc::new(ActorStateCell::new(ActorState::Created));
 
         let _span = debug_span!(
             "actor_spawn",
@@ -358,13 +491,22 @@ impl<P: crate::types::Policy> crate::cx::Scope<'_, P> {
 
         let cx_for_send = child_cx.clone();
         let inner_weak = Arc::downgrade(&child_cx.inner);
+        let state_for_task = Arc::clone(&actor_state);
+
+        let cell = ActorCell {
+            actor_id,
+            owner: self.region_id(),
+            mailbox: msg_rx,
+            state: Arc::clone(&actor_state),
+            created_at: Time::ZERO,
+        };
 
         // Create the actor loop future
         let wrapped = async move {
-            let result = CatchUnwind(Box::pin(run_actor_loop(actor, child_cx, &msg_rx))).await;
+            let result = CatchUnwind(Box::pin(run_actor_loop(actor, child_cx, &cell))).await;
             match result {
-                Ok(actor_state) => {
-                    let _ = result_tx.send(&cx_for_send, Ok(actor_state));
+                Ok(actor_final) => {
+                    let _ = result_tx.send(&cx_for_send, Ok(actor_final));
                 }
                 Err(payload) => {
                     let msg = crate::cx::scope::payload_to_string(&payload);
@@ -374,12 +516,15 @@ impl<P: crate::types::Policy> crate::cx::Scope<'_, P> {
                     );
                 }
             }
+            state_for_task.store(ActorState::Stopped);
         };
 
         let stored = StoredTask::new_with_id(wrapped, task_id);
 
         let handle = ActorHandle {
+            actor_id,
             sender: msg_tx,
+            state: actor_state,
             task_id,
             receiver: result_rx,
             inner: inner_weak,
@@ -423,6 +568,8 @@ impl<P: crate::types::Policy> crate::cx::Scope<'_, P> {
         let (msg_tx, msg_rx) = mpsc::channel::<A::Message>(mailbox_capacity);
         let (result_tx, result_rx) = oneshot::channel::<Result<A, JoinError>>();
         let task_id = self.create_task_record(state)?;
+        let actor_id = ActorId::from_task(task_id);
+        let actor_state = Arc::new(ActorStateCell::new(ActorState::Created));
 
         let _span = debug_span!(
             "supervised_actor_spawn",
@@ -457,25 +604,37 @@ impl<P: crate::types::Policy> crate::cx::Scope<'_, P> {
         let cx_for_send = child_cx.clone();
         let inner_weak = Arc::downgrade(&child_cx.inner);
         let region_id = self.region_id();
+        let state_for_task = Arc::clone(&actor_state);
+
+        let cell = ActorCell {
+            actor_id,
+            owner: self.region_id(),
+            mailbox: msg_rx,
+            state: Arc::clone(&actor_state),
+            created_at: Time::ZERO,
+        };
 
         let wrapped = async move {
             let result = run_supervised_loop(
                 actor,
                 &mut factory,
                 child_cx,
-                &msg_rx,
+                &cell,
                 Supervisor::new(strategy),
                 task_id,
                 region_id,
             )
             .await;
             let _ = result_tx.send(&cx_for_send, result);
+            state_for_task.store(ActorState::Stopped);
         };
 
         let stored = StoredTask::new_with_id(wrapped, task_id);
 
         let handle = ActorHandle {
+            actor_id,
             sender: msg_tx,
+            state: actor_state,
             task_id,
             receiver: result_rx,
             inner: inner_weak,
@@ -507,10 +666,10 @@ async fn run_supervised_loop<A, F>(
     initial_actor: A,
     factory: &mut F,
     cx: Cx,
-    mailbox: &mpsc::Receiver<A::Message>,
+    cell: &ActorCell<A::Message>,
     mut supervisor: crate::supervision::Supervisor,
-    task_id: crate::types::TaskId,
-    region_id: crate::types::RegionId,
+    task_id: TaskId,
+    region_id: RegionId,
 ) -> Result<A, JoinError>
 where
     A: Actor,
@@ -524,13 +683,12 @@ where
 
     loop {
         // Run the actor until it finishes (normally or via panic)
-        let result =
-            CatchUnwind(Box::pin(run_actor_loop(current_actor, cx.clone(), mailbox))).await;
+        let result = CatchUnwind(Box::pin(run_actor_loop(current_actor, cx.clone(), cell))).await;
 
         match result {
-            Ok(actor_state) => {
+            Ok(actor_final) => {
                 // Actor completed normally — no supervision needed
-                return Ok(actor_state);
+                return Ok(actor_final);
             }
             Err(payload) => {
                 // Actor panicked — consult supervisor.
@@ -648,6 +806,17 @@ mod tests {
     }
 
     #[test]
+    fn actor_id_generation_distinct() {
+        init_test("actor_id_generation_distinct");
+
+        let id1 = ActorId::from_task(TaskId::new_for_test(1, 1));
+        let id2 = ActorId::from_task(TaskId::new_for_test(1, 2));
+        assert!(id1 != id2, "generation must distinguish actor reuse");
+
+        crate::test_complete!("actor_id_generation_distinct");
+    }
+
+    #[test]
     fn actor_ref_is_cloneable() {
         init_test("actor_ref_is_cloneable");
 
@@ -664,6 +833,14 @@ mod tests {
         // Get multiple refs
         let ref1 = handle.sender();
         let ref2 = ref1.clone();
+
+        // Actor identity is preserved across clones
+        assert_eq!(ref1.actor_id(), handle.actor_id());
+        assert_eq!(ref2.actor_id(), handle.actor_id());
+
+        // Actor is alive at creation time (even before first poll)
+        assert!(ref1.is_alive());
+        assert!(ref2.is_alive());
 
         // Both should be open
         assert!(!ref1.is_closed());
@@ -814,6 +991,53 @@ mod tests {
         assert!(stopped.load(Ordering::SeqCst), "on_stop was called");
 
         crate::test_complete!("actor_drains_mailbox_on_cancel");
+    }
+
+    /// E2E: ActorRef liveness tracks actor lifecycle (Created -> Stopping -> Stopped).
+    #[test]
+    fn actor_ref_is_alive_transitions() {
+        init_test("actor_ref_is_alive_transitions");
+
+        let mut runtime = crate::lab::LabRuntime::new(crate::lab::LabConfig::default());
+        let region = runtime.state.create_root_region(Budget::INFINITE);
+        let cx = Cx::for_testing();
+        let scope = crate::cx::Scope::<FailFast>::new(region, Budget::INFINITE);
+
+        let (on_stop_count, started, stopped) = observable_state();
+        let actor = ObservableCounter::new(on_stop_count.clone(), started.clone(), stopped.clone());
+
+        let (handle, stored) = scope
+            .spawn_actor(&mut runtime.state, &cx, actor, 32)
+            .unwrap();
+        let task_id = handle.task_id();
+        runtime.state.store_spawned_task(task_id, stored);
+
+        let actor_ref = handle.sender();
+        assert!(actor_ref.is_alive(), "created actor should be alive");
+        assert_eq!(actor_ref.actor_id(), handle.actor_id());
+
+        handle.stop();
+        assert!(actor_ref.is_alive(), "stopping actor is still alive");
+
+        runtime.scheduler.lock().unwrap().schedule(task_id, 0);
+        runtime.run_until_quiescent();
+
+        assert!(
+            handle.is_finished(),
+            "actor should be finished after stop + run"
+        );
+        assert!(!actor_ref.is_alive(), "finished actor is not alive");
+
+        // Sanity: the actor ran its hooks.
+        assert!(started.load(Ordering::SeqCst), "on_start was called");
+        assert!(stopped.load(Ordering::SeqCst), "on_stop was called");
+        assert_ne!(
+            on_stop_count.load(Ordering::SeqCst),
+            u64::MAX,
+            "on_stop_count updated"
+        );
+
+        crate::test_complete!("actor_ref_is_alive_transitions");
     }
 
     /// E2E: Supervised actor restarts on panic within budget.
