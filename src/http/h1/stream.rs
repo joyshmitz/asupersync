@@ -994,9 +994,7 @@ mod tests {
         }
     }
 
-    fn poll_body<B: Body + Unpin>(
-        body: &mut B,
-    ) -> Option<Result<Frame<B::Data>, B::Error>> {
+    fn poll_body<B: Body + Unpin>(body: &mut B) -> Option<Result<Frame<B::Data>, B::Error>> {
         let waker = noop_waker();
         let mut cx = Context::from_waker(&waker);
         loop {

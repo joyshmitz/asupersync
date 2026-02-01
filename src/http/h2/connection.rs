@@ -2054,4 +2054,382 @@ mod tests {
         let err = conn.process_frame(frame).unwrap_err();
         assert_eq!(err.code, ErrorCode::ProtocolError);
     }
+
+    // =========================================================================
+    // SETTINGS ACK Flow Tests (bd-1oo7)
+    // =========================================================================
+
+    #[test]
+    fn test_settings_ack_is_no_op() {
+        // SETTINGS ACK should be silently accepted
+        let mut conn = Connection::client(Settings::client());
+        conn.state = ConnectionState::Open;
+
+        let ack_frame = Frame::Settings(SettingsFrame::ack());
+        let result = conn.process_frame(ack_frame);
+
+        assert!(result.is_ok());
+        assert!(result.unwrap().is_none());
+    }
+
+    #[test]
+    fn test_settings_updates_remote_settings() {
+        let mut conn = Connection::server(Settings::default());
+        conn.state = ConnectionState::Open;
+
+        // Initial values
+        assert_eq!(conn.remote_settings().max_concurrent_streams, u32::MAX);
+        assert_eq!(
+            conn.remote_settings().initial_window_size,
+            settings::DEFAULT_INITIAL_WINDOW_SIZE
+        );
+
+        // Apply new settings
+        let settings = SettingsFrame::new(vec![
+            Setting::MaxConcurrentStreams(50),
+            Setting::InitialWindowSize(32768),
+            Setting::MaxFrameSize(32768),
+        ]);
+        conn.process_frame(Frame::Settings(settings)).unwrap();
+
+        // Verify updates
+        assert_eq!(conn.remote_settings().max_concurrent_streams, 50);
+        assert_eq!(conn.remote_settings().initial_window_size, 32768);
+        assert_eq!(conn.remote_settings().max_frame_size, 32768);
+    }
+
+    #[test]
+    fn test_settings_invalid_initial_window_size() {
+        let mut conn = Connection::server(Settings::default());
+        conn.state = ConnectionState::Open;
+
+        // Initial window size > 2^31 - 1 is a flow control error
+        let settings = SettingsFrame::new(vec![Setting::InitialWindowSize(0x8000_0000)]);
+        let err = conn.process_frame(Frame::Settings(settings)).unwrap_err();
+
+        assert_eq!(err.code, ErrorCode::FlowControlError);
+    }
+
+    #[test]
+    fn test_settings_invalid_max_frame_size() {
+        let mut conn = Connection::server(Settings::default());
+        conn.state = ConnectionState::Open;
+
+        // Max frame size must be between 16384 and 16777215
+        let settings = SettingsFrame::new(vec![Setting::MaxFrameSize(100)]); // Too small
+        let err = conn.process_frame(Frame::Settings(settings)).unwrap_err();
+
+        assert_eq!(err.code, ErrorCode::ProtocolError);
+    }
+
+    #[test]
+    fn test_settings_transitions_to_open() {
+        let mut conn = Connection::server(Settings::default());
+        assert_eq!(conn.state, ConnectionState::Handshaking);
+
+        // First SETTINGS from peer transitions to Open
+        let settings = SettingsFrame::new(vec![]);
+        conn.process_frame(Frame::Settings(settings)).unwrap();
+
+        assert_eq!(conn.state, ConnectionState::Open);
+    }
+
+    // =========================================================================
+    // GOAWAY Edge Case Tests (bd-1oo7)
+    // =========================================================================
+
+    #[test]
+    fn test_goaway_rejects_new_streams() {
+        let mut conn = Connection::client(Settings::client());
+        conn.state = ConnectionState::Open;
+
+        // Open a stream
+        let headers = vec![
+            Header::new(":method", "GET"),
+            Header::new(":path", "/"),
+            Header::new(":scheme", "https"),
+            Header::new(":authority", "example.com"),
+        ];
+        conn.open_stream(headers.clone(), false).unwrap();
+
+        // Receive GOAWAY
+        let goaway = Frame::GoAway(GoAwayFrame::new(1, ErrorCode::NoError));
+        conn.process_frame(goaway).unwrap();
+
+        assert!(conn.goaway_received());
+        assert_eq!(conn.state, ConnectionState::Closing);
+
+        // Trying to open new streams should fail
+        let err = conn.open_stream(headers, false).unwrap_err();
+        assert_eq!(err.code, ErrorCode::ProtocolError);
+    }
+
+    #[test]
+    fn test_goaway_resets_streams_above_last_id() {
+        let mut conn = Connection::client(Settings::client());
+        conn.state = ConnectionState::Open;
+
+        // Open multiple streams
+        let headers = vec![
+            Header::new(":method", "GET"),
+            Header::new(":path", "/"),
+            Header::new(":scheme", "https"),
+            Header::new(":authority", "example.com"),
+        ];
+        let stream1 = conn.open_stream(headers.clone(), false).unwrap(); // Stream 1
+        let _ = conn.next_frame(); // Drain HEADERS
+        let stream3 = conn.open_stream(headers.clone(), false).unwrap(); // Stream 3
+        let _ = conn.next_frame(); // Drain HEADERS
+        let stream5 = conn.open_stream(headers, false).unwrap(); // Stream 5
+        let _ = conn.next_frame(); // Drain HEADERS
+
+        assert_eq!(stream1, 1);
+        assert_eq!(stream3, 3);
+        assert_eq!(stream5, 5);
+
+        // GOAWAY with last_stream_id = 1 means streams 3 and 5 were not processed
+        let goaway = Frame::GoAway(GoAwayFrame::new(1, ErrorCode::NoError));
+        let result = conn.process_frame(goaway).unwrap().unwrap();
+
+        match result {
+            ReceivedFrame::GoAway {
+                last_stream_id,
+                error_code,
+                ..
+            } => {
+                assert_eq!(last_stream_id, 1);
+                assert_eq!(error_code, ErrorCode::NoError);
+            }
+            _ => panic!("expected GoAway"),
+        }
+
+        // Stream 1 should still be in its original state
+        assert!(!conn.stream(1).unwrap().state().is_closed());
+
+        // Streams 3 and 5 should be reset
+        assert_eq!(conn.stream(3).unwrap().state(), StreamState::Closed);
+        assert_eq!(conn.stream(5).unwrap().state(), StreamState::Closed);
+    }
+
+    #[test]
+    fn test_goaway_sent_once() {
+        let mut conn = Connection::server(Settings::default());
+        conn.state = ConnectionState::Open;
+
+        // First GOAWAY
+        conn.goaway(ErrorCode::NoError, Bytes::new());
+        assert!(conn.has_pending_frames());
+
+        // Second GOAWAY should be ignored
+        conn.goaway(ErrorCode::InternalError, Bytes::new());
+
+        // Should only have one GOAWAY frame
+        let frame1 = conn.next_frame().unwrap();
+        assert!(matches!(frame1, Frame::GoAway(_)));
+
+        // No second GOAWAY
+        assert!(!conn.has_pending_frames());
+    }
+
+    #[test]
+    fn test_goaway_with_debug_data() {
+        let mut conn = Connection::server(Settings::default());
+        conn.state = ConnectionState::Open;
+
+        let debug_data = Bytes::from("server shutting down for maintenance");
+        conn.goaway(ErrorCode::NoError, debug_data.clone());
+
+        let frame = conn.next_frame().unwrap();
+        match frame {
+            Frame::GoAway(g) => {
+                assert_eq!(g.error_code, ErrorCode::NoError);
+                assert_eq!(g.debug_data, debug_data);
+            }
+            _ => panic!("expected GoAway"),
+        }
+    }
+
+    #[test]
+    fn test_goaway_received_with_error() {
+        let mut conn = Connection::client(Settings::client());
+        conn.state = ConnectionState::Open;
+
+        let goaway = Frame::GoAway(GoAwayFrame::new(0, ErrorCode::InternalError));
+        let result = conn.process_frame(goaway).unwrap().unwrap();
+
+        match result {
+            ReceivedFrame::GoAway {
+                error_code,
+                last_stream_id,
+                ..
+            } => {
+                assert_eq!(error_code, ErrorCode::InternalError);
+                assert_eq!(last_stream_id, 0);
+            }
+            _ => panic!("expected GoAway"),
+        }
+
+        assert!(conn.goaway_received());
+        assert_eq!(conn.state, ConnectionState::Closing);
+    }
+
+    // =========================================================================
+    // Shutdown Semantics Tests (bd-1oo7)
+    // =========================================================================
+
+    #[test]
+    fn test_graceful_shutdown_flow() {
+        let mut conn = Connection::server(Settings::default());
+        conn.state = ConnectionState::Open;
+
+        // Initiate graceful shutdown
+        conn.goaway(ErrorCode::NoError, Bytes::new());
+
+        // Connection should transition to Closing
+        assert_eq!(conn.state, ConnectionState::Closing);
+
+        // Should have GOAWAY frame pending
+        let frame = conn.next_frame().unwrap();
+        match frame {
+            Frame::GoAway(g) => {
+                assert_eq!(g.error_code, ErrorCode::NoError);
+            }
+            _ => panic!("expected GoAway"),
+        }
+    }
+
+    // =========================================================================
+    // PING Keepalive Tests (bd-1oo7)
+    // =========================================================================
+
+    #[test]
+    fn test_ping_ack_response() {
+        let mut conn = Connection::server(Settings::default());
+        conn.state = ConnectionState::Open;
+
+        let opaque_data = [0x01, 0x02, 0x03, 0x04, 0x05, 0x06, 0x07, 0x08];
+        let ping = PingFrame::new(opaque_data);
+        conn.process_frame(Frame::Ping(ping)).unwrap();
+
+        // Should have PING ACK pending
+        let frame = conn.next_frame().unwrap();
+        match frame {
+            Frame::Ping(p) => {
+                assert!(p.ack);
+                assert_eq!(p.opaque_data, opaque_data);
+            }
+            _ => panic!("expected Ping ACK"),
+        }
+    }
+
+    #[test]
+    fn test_ping_ack_not_echoed() {
+        let mut conn = Connection::server(Settings::default());
+        conn.state = ConnectionState::Open;
+
+        // Receive PING ACK (should not trigger another ACK)
+        let ping_ack = PingFrame::ack([1, 2, 3, 4, 5, 6, 7, 8]);
+        conn.process_frame(Frame::Ping(ping_ack)).unwrap();
+
+        // No response should be queued
+        assert!(!conn.has_pending_frames());
+    }
+
+    // =========================================================================
+    // Cancellation Race Tests (bd-1oo7)
+    // =========================================================================
+
+    #[test]
+    fn test_rst_stream_on_idle_stream() {
+        let mut conn = Connection::server(Settings::default());
+        conn.state = ConnectionState::Open;
+
+        // RST_STREAM on stream that doesn't exist should be handled gracefully
+        let rst = Frame::RstStream(RstStreamFrame::new(999, ErrorCode::Cancel));
+        let result = conn.process_frame(rst).unwrap().unwrap();
+
+        match result {
+            ReceivedFrame::Reset {
+                stream_id,
+                error_code,
+            } => {
+                assert_eq!(stream_id, 999);
+                assert_eq!(error_code, ErrorCode::Cancel);
+            }
+            _ => panic!("expected Reset"),
+        }
+    }
+
+    #[test]
+    fn test_data_after_rst_ignored() {
+        let mut conn = Connection::server(Settings::default());
+        conn.state = ConnectionState::Open;
+
+        // Open stream via HEADERS
+        let headers = Frame::Headers(HeadersFrame::new(1, Bytes::new(), false, true));
+        conn.process_frame(headers).unwrap();
+
+        // Reset the stream
+        let rst = Frame::RstStream(RstStreamFrame::new(1, ErrorCode::Cancel));
+        conn.process_frame(rst).unwrap();
+
+        // Stream should be closed
+        assert_eq!(conn.stream(1).unwrap().state(), StreamState::Closed);
+
+        // DATA on closed stream should return error
+        let data = Frame::Data(DataFrame::new(1, Bytes::from("test"), false));
+        let err = conn.process_frame(data).unwrap_err();
+        assert_eq!(err.code, ErrorCode::StreamClosed);
+    }
+
+    #[test]
+    fn test_window_update_after_goaway() {
+        let mut conn = Connection::client(Settings::client());
+        conn.state = ConnectionState::Open;
+
+        // Receive GOAWAY
+        let goaway = Frame::GoAway(GoAwayFrame::new(0, ErrorCode::NoError));
+        conn.process_frame(goaway).unwrap();
+
+        // Connection-level WINDOW_UPDATE should still work
+        let window_update = Frame::WindowUpdate(WindowUpdateFrame::new(0, 1024));
+        let result = conn.process_frame(window_update);
+        assert!(result.is_ok());
+    }
+
+    #[test]
+    fn test_settings_during_continuation() {
+        let mut conn = Connection::server(Settings::default());
+        conn.state = ConnectionState::Open;
+
+        // Start a HEADERS sequence without END_HEADERS
+        let headers = Frame::Headers(HeadersFrame::new(1, Bytes::new(), false, false));
+        conn.process_frame(headers).unwrap();
+
+        // Connection is now expecting CONTINUATION
+        assert!(conn.is_awaiting_continuation());
+
+        // SETTINGS frame should cause protocol error (must get CONTINUATION)
+        let settings = Frame::Settings(SettingsFrame::new(vec![]));
+        let err = conn.process_frame(settings).unwrap_err();
+        assert_eq!(err.code, ErrorCode::ProtocolError);
+    }
+
+    #[test]
+    fn test_ping_during_continuation() {
+        let mut conn = Connection::server(Settings::default());
+        conn.state = ConnectionState::Open;
+
+        // Start a HEADERS sequence without END_HEADERS
+        let headers = Frame::Headers(HeadersFrame::new(1, Bytes::new(), false, false));
+        conn.process_frame(headers).unwrap();
+
+        // Connection is now expecting CONTINUATION
+        assert!(conn.is_awaiting_continuation());
+
+        // PING frame should cause protocol error (must get CONTINUATION)
+        let ping = Frame::Ping(PingFrame::new([0; 8]));
+        let err = conn.process_frame(ping).unwrap_err();
+        assert_eq!(err.code, ErrorCode::ProtocolError);
+    }
 }
