@@ -815,7 +815,8 @@ W7n9v0wIyo4e/O0DO2fczXZD
     }
 }
 
-// Tests that work without the tls feature flag
+// Tests that need the tls module to be available
+#[cfg(feature = "tls")]
 mod tls_error_tests {
     use asupersync::tls::TlsError;
     use std::time::Duration;
@@ -834,7 +835,7 @@ mod tls_error_tests {
     }
 }
 
-#[cfg(not(feature = "tls"))]
+#[cfg(feature = "tls")]
 mod tls_disabled_tests {
     use asupersync::tls::{TlsConnector, TlsConnectorBuilder, TlsError};
 
