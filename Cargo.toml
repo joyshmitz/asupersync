@@ -9,6 +9,7 @@ keywords = ["async", "structured-concurrency", "cancellation", "runtime"]
 categories = ["asynchronous", "concurrency"]
 
 [features]
+default = ["test-internals"]
 # Enable internal test helpers for integration tests.
 # This exposes private APIs like Cx::new() and is NOT for production use.
 test-internals = ["dep:tracing", "dep:tracing-subscriber", "dep:visibility"]
@@ -45,6 +46,8 @@ postgres = ["dep:sha2"]
 mysql = ["dep:sha2"]
 # Enable QUIC protocol support via quinn.
 quic = ["dep:quinn", "tls"]
+# Enable HTTP/3 client support over QUIC.
+http3 = ["quic", "dep:h3", "dep:h3-quinn", "dep:http", "dep:bytes"]
 # Enable Kafka client integration via rdkafka.
 kafka = ["dep:rdkafka"]
 # Enable Loom concurrency tests for scheduler verification.
@@ -119,6 +122,13 @@ rusqlite = { version = "0.33", features = ["bundled"], optional = true }
 sha2 = { version = "0.10", optional = true }
 # QUIC protocol implementation via quinn
 quinn = { version = "0.11", default-features = false, features = ["rustls", "runtime-smol"], optional = true }
+# HTTP/3 client support via h3 + h3-quinn
+h3 = { version = "0.0.8", optional = true }
+h3-quinn = { version = "0.0.10", optional = true }
+# External HTTP types for HTTP/3 integration
+http = { version = "1.1", optional = true }
+# External bytes crate for HTTP/3 integration
+bytes = { version = "1.7", optional = true }
 # Kafka client integration via rdkafka (optional, requires librdkafka on the system).
 rdkafka = { version = "0.39", default-features = false, optional = true }
 # Systematic concurrency testing for scheduler (loom-tests feature)
@@ -132,6 +142,7 @@ io-uring = { version = "0.7.11", optional = true }
 ring = { version = "0.17", optional = true }
 
 [dev-dependencies]
+asupersync = { path = ".", features = ["test-internals"] }
 proptest = "1.6"
 criterion = { version = "0.5", features = ["html_reports"] }
 futures-lite = "2.6"

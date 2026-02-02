@@ -106,6 +106,7 @@ pub mod signal;
 pub mod stream;
 pub mod supervision;
 pub mod sync;
+#[cfg(any(test, feature = "test-internals"))]
 pub mod test_logging;
 #[cfg(any(test, feature = "test-internals"))]
 pub mod test_utils;
