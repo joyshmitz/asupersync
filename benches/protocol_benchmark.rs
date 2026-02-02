@@ -309,7 +309,7 @@ fn create_ws_frame(payload_len: usize, masked: bool) -> Vec<u8> {
     }
 
     // Payload
-    frame.extend(std::iter::repeat(0xAB).take(payload_len));
+    frame.extend(std::iter::repeat_n(0xAB, payload_len));
 
     frame
 }

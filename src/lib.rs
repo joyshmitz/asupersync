@@ -74,7 +74,7 @@ pub mod config;
 pub mod conformance;
 pub mod console;
 pub mod cx;
-#[cfg(any(feature = "sqlite", feature = "postgres"))]
+#[cfg(any(feature = "sqlite", feature = "postgres", feature = "mysql"))]
 pub mod database;
 pub mod decoding;
 pub mod distributed;
