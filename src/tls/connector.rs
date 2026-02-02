@@ -176,6 +176,8 @@ pub struct TlsConnectorBuilder {
     min_protocol: Option<rustls::ProtocolVersion>,
     #[cfg(feature = "tls")]
     max_protocol: Option<rustls::ProtocolVersion>,
+    #[cfg(feature = "tls")]
+    resumption: Option<rustls::client::Resumption>,
 }
 
 impl TlsConnectorBuilder {
@@ -198,6 +200,8 @@ impl TlsConnectorBuilder {
             min_protocol: None,
             #[cfg(feature = "tls")]
             max_protocol: None,
+            #[cfg(feature = "tls")]
+            resumption: None,
         }
     }
 
@@ -358,6 +362,36 @@ impl TlsConnectorBuilder {
         self
     }
 
+    /// Configure TLS session resumption.
+    ///
+    /// By default, rustls enables in-memory session storage (256 sessions).
+    /// Use this to customize the resumption strategy.
+    ///
+    /// # Example
+    ///
+    /// ```ignore
+    /// use rustls::client::Resumption;
+    ///
+    /// let connector = TlsConnectorBuilder::new()
+    ///     .session_resumption(Resumption::in_memory_sessions(512))
+    ///     .build()?;
+    /// ```
+    #[cfg(feature = "tls")]
+    pub fn session_resumption(mut self, resumption: rustls::client::Resumption) -> Self {
+        self.resumption = Some(resumption);
+        self
+    }
+
+    /// Disable TLS session resumption entirely.
+    ///
+    /// This forces a full handshake on every connection. Use for testing
+    /// or when session tickets are a security concern.
+    #[cfg(feature = "tls")]
+    pub fn disable_session_resumption(mut self) -> Self {
+        self.resumption = Some(rustls::client::Resumption::disabled());
+        self
+    }
+
     /// Build the `TlsConnector`.
     ///
     /// # Errors
@@ -447,6 +481,12 @@ impl TlsConnectorBuilder {
 
         // SNI is enabled by default in rustls
         config.enable_sni = self.enable_sni;
+
+        // Configure session resumption if explicitly set.
+        // Default: rustls uses in-memory storage for 256 sessions.
+        if let Some(resumption) = self.resumption {
+            config.resumption = resumption;
+        }
 
         #[cfg(feature = "tracing-integration")]
         tracing::debug!(
@@ -586,6 +626,27 @@ mod tests {
                 .unwrap_err();
             assert!(matches!(err, TlsError::InvalidDnsName(_)));
         });
+    }
+
+    #[cfg(feature = "tls")]
+    #[test]
+    fn test_session_resumption_custom() {
+        let connector = TlsConnectorBuilder::new()
+            .session_resumption(rustls::client::Resumption::in_memory_sessions(512))
+            .build()
+            .unwrap();
+        // Connector builds successfully with custom resumption config.
+        assert!(connector.handshake_timeout().is_none());
+    }
+
+    #[cfg(feature = "tls")]
+    #[test]
+    fn test_session_resumption_disabled() {
+        let connector = TlsConnectorBuilder::new()
+            .disable_session_resumption()
+            .build()
+            .unwrap();
+        assert!(connector.handshake_timeout().is_none());
     }
 
     #[cfg(not(feature = "tls"))]
