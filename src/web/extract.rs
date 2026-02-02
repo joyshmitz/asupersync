@@ -262,24 +262,39 @@ fn parse_urlencoded(input: &str) -> HashMap<String, String> {
 
 /// Simple percent-decoding (handles %XX and + as space).
 fn percent_decode(input: &str) -> String {
-    let mut bytes = Vec::with_capacity(input.len());
-    let mut iter = input.bytes();
-    while let Some(b) = iter.next() {
-        match b {
-            b'+' => bytes.push(b' '),
+    let input = input.as_bytes();
+    let mut output = Vec::with_capacity(input.len());
+    let mut i = 0;
+    while i < input.len() {
+        match input[i] {
+            b'+' => {
+                output.push(b' ');
+                i += 1;
+            }
             b'%' => {
-                let hi = iter.next().and_then(hex_val);
-                let lo = iter.next().and_then(hex_val);
-                if let (Some(h), Some(l)) = (hi, lo) {
-                    bytes.push(h << 4 | l);
+                if i + 2 < input.len() {
+                    let hi = hex_val(input[i + 1]);
+                    let lo = hex_val(input[i + 2]);
+                    if let (Some(h), Some(l)) = (hi, lo) {
+                        output.push(h << 4 | l);
+                    } else {
+                        output.push(b'%');
+                        output.push(input[i + 1]);
+                        output.push(input[i + 2]);
+                    }
+                    i += 3;
                 } else {
-                    bytes.push(b'%');
+                    output.push(b'%');
+                    i += 1;
                 }
             }
-            _ => bytes.push(b),
+            b => {
+                output.push(b);
+                i += 1;
+            }
         }
     }
-    String::from_utf8(bytes).unwrap_or_else(|e| String::from_utf8_lossy(e.as_bytes()).into_owned())
+    String::from_utf8(output).unwrap_or_else(|e| String::from_utf8_lossy(e.as_bytes()).into_owned())
 }
 
 fn hex_val(b: u8) -> Option<u8> {
@@ -306,8 +321,22 @@ fn hex_val(b: u8) -> Option<u8> {
 #[derive(Debug, Clone)]
 pub struct Json<T>(pub T);
 
+/// Maximum JSON body size (10 MiB).
+const MAX_JSON_BODY_SIZE: usize = 10 * 1024 * 1024;
+
 impl<T: serde::de::DeserializeOwned> FromRequest for Json<T> {
     fn from_request(req: Request) -> Result<Self, ExtractionError> {
+        if req.body.len() > MAX_JSON_BODY_SIZE {
+            return Err(ExtractionError::new(
+                super::response::StatusCode::PAYLOAD_TOO_LARGE,
+                format!(
+                    "JSON body too large: {} bytes (limit {})",
+                    req.body.len(),
+                    MAX_JSON_BODY_SIZE
+                ),
+            ));
+        }
+
         let content_type = req.headers.get("content-type").map(String::as_str);
         if let Some(ct) = content_type {
             if !ct.contains("application/json") {
@@ -343,6 +372,16 @@ pub struct Form<T>(pub T);
 #[allow(clippy::implicit_hasher)]
 impl FromRequest for Form<HashMap<String, String>> {
     fn from_request(req: Request) -> Result<Self, ExtractionError> {
+        let content_type = req.headers.get("content-type").map(String::as_str);
+        if let Some(ct) = content_type {
+            if !ct.contains("application/x-www-form-urlencoded") {
+                return Err(ExtractionError::new(
+                    super::response::StatusCode::UNSUPPORTED_MEDIA_TYPE,
+                    format!("expected application/x-www-form-urlencoded, got {ct}"),
+                ));
+            }
+        }
+
         let body_str = std::str::from_utf8(req.body.as_ref())
             .map_err(|e| ExtractionError::bad_request(format!("invalid UTF-8 body: {e}")))?;
 
@@ -496,5 +535,14 @@ mod tests {
         let req = Request::new("GET", "/");
         let result = Path::<String>::from_request_parts(&req);
         assert!(result.is_err());
+    }
+
+    #[test]
+    fn percent_decode_preserves_invalid_sequences() {
+        assert_eq!(percent_decode("a%2"), "a%2");
+        assert_eq!(percent_decode("x%G1"), "x%G1");
+        assert_eq!(percent_decode("x%1G"), "x%1G");
+        assert_eq!(percent_decode("%"), "%");
+        assert_eq!(percent_decode("%A"), "%A");
     }
 }

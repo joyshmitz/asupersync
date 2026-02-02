@@ -195,11 +195,17 @@ impl<T> Sender<T> {
     }
 
     /// Attempts to reserve a slot without blocking.
+    ///
+    /// Returns `Full` when waiting senders exist, to preserve FIFO ordering.
     pub fn try_reserve(&self) -> Result<SendPermit<'_, T>, SendError<()>> {
         let mut inner = self.shared.inner.lock().expect("channel lock poisoned");
 
         if inner.receiver_dropped {
             return Err(SendError::Disconnected(()));
+        }
+
+        if !inner.send_wakers.is_empty() {
+            return Err(SendError::Full(()));
         }
 
         if inner.has_capacity() {
@@ -625,6 +631,10 @@ impl<T> Drop for Receiver<T> {
     fn drop(&mut self) {
         let mut inner = self.shared.inner.lock().expect("channel lock poisoned");
         inner.receiver_dropped = true;
+        // Drain queued items to prevent memory leaks when senders are
+        // long-lived (they hold Arc refs that keep the queue alive).
+        inner.queue.clear();
+        inner.reserved = 0;
         for waiter in inner.send_wakers.drain(..) {
             waiter.queued.store(false, Ordering::Release);
             waiter.waker.wake();
