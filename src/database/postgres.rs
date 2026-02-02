@@ -625,7 +625,7 @@ impl ScramAuth {
     fn new(cx: &Cx, username: &str, password: &str) -> Self {
         // Generate client nonce (24 random bytes, base64 encoded)
         let mut nonce_bytes = [0u8; 24];
-        cx.fill_random(&mut nonce_bytes);
+        cx.random_bytes(&mut nonce_bytes);
         let client_nonce =
             base64::Engine::encode(&base64::engine::general_purpose::STANDARD, nonce_bytes);
 
@@ -1572,11 +1572,14 @@ impl PgConnection {
         // Read length (4 bytes, includes itself)
         let mut len_buf = [0u8; 4];
         self.read_exact(&mut len_buf).await?;
-        let len = i32::from_be_bytes(len_buf) as usize;
+        let len_i32 = i32::from_be_bytes(len_buf);
 
-        if len < 4 {
-            return Err(PgError::Protocol(format!("invalid message length: {len}")));
+        if len_i32 < 4 {
+            return Err(PgError::Protocol(format!(
+                "invalid message length: {len_i32}"
+            )));
         }
+        let len = len_i32 as usize;
 
         // Read message body
         let body_len = len - 4;
