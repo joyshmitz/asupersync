@@ -629,7 +629,9 @@ impl ScramAuth {
         let client_nonce =
             base64::Engine::encode(&base64::engine::general_purpose::STANDARD, nonce_bytes);
 
-        let client_first_bare = format!("n={},r={}", username, client_nonce);
+        // RFC 5802: escape '=' as '=3D' and ',' as '=2C' in username
+        let escaped_username = username.replace('=', "=3D").replace(',', "=2C");
+        let client_first_bare = format!("n={},r={}", escaped_username, client_nonce);
 
         Self {
             username: username.to_string(),
@@ -741,12 +743,18 @@ impl ScramAuth {
                 })?;
 
         // Compute expected server signature
-        let salt = self.salt.as_ref().unwrap();
-        let iterations = self.iterations.unwrap();
+        let salt = self.salt.as_ref().ok_or_else(|| {
+            PgError::AuthenticationFailed("SCRAM state error: missing salt".to_string())
+        })?;
+        let iterations = self.iterations.ok_or_else(|| {
+            PgError::AuthenticationFailed("SCRAM state error: missing iterations".to_string())
+        })?;
         let salted_password = self.pbkdf2_sha256(&self.password, salt, iterations);
         let server_key = self.hmac_sha256(&salted_password, b"Server Key");
-        let expected_sig =
-            self.hmac_sha256(&server_key, self.auth_message.as_ref().unwrap().as_bytes());
+        let auth_message = self.auth_message.as_ref().ok_or_else(|| {
+            PgError::AuthenticationFailed("SCRAM state error: missing auth_message".to_string())
+        })?;
+        let expected_sig = self.hmac_sha256(&server_key, auth_message.as_bytes());
 
         if server_sig != expected_sig {
             return Err(PgError::AuthenticationFailed(
@@ -892,10 +900,24 @@ impl PgConnectOptions {
             ("postgres".to_string(), None, auth_host)
         };
 
-        // Split host:port
-        let (host, port) = host_port
-            .rsplit_once(':')
-            .map_or((host_port, 5432), |(h, p)| (h, p.parse().unwrap_or(5432)));
+        // Split host:port (handle IPv6 addresses like [::1]:5432)
+        let (host, port) = if host_port.starts_with('[') {
+            // IPv6 literal: [::1]:5432
+            if let Some((bracket_host, rest)) = host_port.split_once(']') {
+                let h = bracket_host.trim_start_matches('[');
+                let p = rest
+                    .strip_prefix(':')
+                    .and_then(|s| s.parse().ok())
+                    .unwrap_or(5432u16);
+                (h, p)
+            } else {
+                (host_port, 5432)
+            }
+        } else {
+            host_port
+                .rsplit_once(':')
+                .map_or((host_port, 5432), |(h, p)| (h, p.parse().unwrap_or(5432)))
+        };
 
         Ok(Self {
             host: host.to_string(),
@@ -1574,7 +1596,9 @@ impl PgConnection {
         self.read_exact(&mut len_buf).await?;
         let len_i32 = i32::from_be_bytes(len_buf);
 
-        if len_i32 < 4 {
+        // PostgreSQL messages should not exceed 1 GiB in practice.
+        const MAX_MESSAGE_LEN: i32 = 1_073_741_824;
+        if len_i32 < 4 || len_i32 > MAX_MESSAGE_LEN {
             return Err(PgError::Protocol(format!(
                 "invalid message length: {len_i32}"
             )));
