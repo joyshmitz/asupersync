@@ -343,6 +343,308 @@ impl<M: Send + 'static> ActorRef<M> {
     }
 }
 
+// ============================================================================
+// ActorContext: Actor-Specific Capability Extension
+// ============================================================================
+
+/// Configuration for actor mailbox.
+#[derive(Debug, Clone, Copy)]
+pub struct MailboxConfig {
+    /// Maximum number of messages the mailbox can hold.
+    pub capacity: usize,
+    /// Whether to use backpressure (block senders) or drop oldest messages.
+    pub backpressure: bool,
+}
+
+impl Default for MailboxConfig {
+    fn default() -> Self {
+        Self {
+            capacity: DEFAULT_MAILBOX_CAPACITY,
+            backpressure: true,
+        }
+    }
+}
+
+impl MailboxConfig {
+    /// Create a mailbox config with the specified capacity.
+    #[must_use]
+    pub const fn with_capacity(capacity: usize) -> Self {
+        Self {
+            capacity,
+            backpressure: true,
+        }
+    }
+}
+
+/// Messages that can be sent to a supervisor about child lifecycle events.
+#[derive(Debug, Clone)]
+pub enum SupervisorMessage {
+    /// A supervised child actor has failed.
+    ChildFailed {
+        /// The ID of the failed child.
+        child_id: ActorId,
+        /// Description of the failure.
+        reason: String,
+    },
+    /// A supervised child actor has stopped normally.
+    ChildStopped {
+        /// The ID of the stopped child.
+        child_id: ActorId,
+    },
+}
+
+/// Actor-specific capability context extending [`Cx`].
+///
+/// Provides actors with access to:
+/// - Self-reference for tell() patterns
+/// - Child management for supervision
+/// - Self-termination controls
+/// - Parent reference for escalation
+///
+/// All [`Cx`] methods are available through [`Deref`].
+///
+/// # Example
+///
+/// ```ignore
+/// async fn handle(&mut self, ctx: &ActorContext<'_, MyMessage>, msg: MyMessage) {
+///     // Access Cx methods directly
+///     if ctx.is_cancel_requested() {
+///         return;
+///     }
+///
+///     // Use actor-specific capabilities
+///     let my_id = ctx.self_actor_id();
+///     ctx.trace("handling message");
+/// }
+/// ```
+pub struct ActorContext<'a, M: Send + 'static> {
+    /// Underlying capability context.
+    cx: &'a Cx,
+    /// Reference to this actor's mailbox sender.
+    self_ref: ActorRef<M>,
+    /// This actor's unique identifier.
+    actor_id: ActorId,
+    /// Parent supervisor reference (None for root actors).
+    parent: Option<ActorRef<SupervisorMessage>>,
+    /// IDs of children currently supervised by this actor.
+    children: Vec<ActorId>,
+    /// Whether this actor has been requested to stop.
+    stopping: bool,
+}
+
+impl<'a, M: Send + 'static> ActorContext<'a, M> {
+    /// Create a new actor context.
+    ///
+    /// This is typically called internally by the actor runtime.
+    #[must_use]
+    pub fn new(
+        cx: &'a Cx,
+        self_ref: ActorRef<M>,
+        actor_id: ActorId,
+        parent: Option<ActorRef<SupervisorMessage>>,
+    ) -> Self {
+        Self {
+            cx,
+            self_ref,
+            actor_id,
+            parent,
+            children: Vec::new(),
+            stopping: false,
+        }
+    }
+
+    // ========================================================================
+    // Self-Reference Methods
+    // ========================================================================
+
+    /// Returns a clonable reference to this actor's mailbox.
+    ///
+    /// Use this to give other actors a way to send messages to this actor.
+    ///
+    /// Note: Requires `M: Clone` because `ActorRef` needs to clone the sender.
+    #[must_use]
+    pub fn self_ref(&self) -> ActorRef<M>
+    where
+        M: Clone,
+    {
+        self.self_ref.clone()
+    }
+
+    /// Returns this actor's unique identifier.
+    ///
+    /// Unlike `self_ref()`, this doesn't require `M: Clone` and is useful
+    /// for logging, debugging, or identity comparisons.
+    #[must_use]
+    pub const fn self_actor_id(&self) -> ActorId {
+        self.actor_id
+    }
+
+    /// Returns the underlying actor ID (alias for `self_actor_id`).
+    #[must_use]
+    pub const fn actor_id(&self) -> ActorId {
+        self.actor_id
+    }
+
+    // ========================================================================
+    // Child Management Methods
+    // ========================================================================
+
+    /// Register a child actor as supervised by this actor.
+    ///
+    /// Called internally when spawning supervised children.
+    pub fn register_child(&mut self, child_id: ActorId) {
+        self.children.push(child_id);
+    }
+
+    /// Unregister a child actor (after it has stopped).
+    ///
+    /// Returns true if the child was found and removed.
+    pub fn unregister_child(&mut self, child_id: ActorId) -> bool {
+        if let Some(pos) = self.children.iter().position(|&id| id == child_id) {
+            self.children.swap_remove(pos);
+            true
+        } else {
+            false
+        }
+    }
+
+    /// Returns the list of currently supervised child actor IDs.
+    #[must_use]
+    pub fn children(&self) -> &[ActorId] {
+        &self.children
+    }
+
+    /// Returns true if this actor has any supervised children.
+    #[must_use]
+    pub fn has_children(&self) -> bool {
+        !self.children.is_empty()
+    }
+
+    /// Returns the number of supervised children.
+    #[must_use]
+    pub fn child_count(&self) -> usize {
+        self.children.len()
+    }
+
+    // ========================================================================
+    // Self-Termination Methods
+    // ========================================================================
+
+    /// Request this actor to stop gracefully.
+    ///
+    /// Sets the stopping flag. The actor loop will exit after the current
+    /// message is processed and the mailbox is drained.
+    pub fn stop_self(&mut self) {
+        self.stopping = true;
+    }
+
+    /// Returns true if this actor has been requested to stop.
+    #[must_use]
+    pub fn is_stopping(&self) -> bool {
+        self.stopping
+    }
+
+    // ========================================================================
+    // Parent Interaction Methods
+    // ========================================================================
+
+    /// Returns a reference to the parent supervisor, if any.
+    ///
+    /// Root actors spawned without supervision return `None`.
+    #[must_use]
+    pub fn parent(&self) -> Option<&ActorRef<SupervisorMessage>> {
+        self.parent.as_ref()
+    }
+
+    /// Returns true if this actor has a parent supervisor.
+    #[must_use]
+    pub fn has_parent(&self) -> bool {
+        self.parent.is_some()
+    }
+
+    /// Escalate an error to the parent supervisor.
+    ///
+    /// Sends a `SupervisorMessage::ChildFailed` to the parent if one exists.
+    /// Does nothing if this is a root actor.
+    pub async fn escalate(&self, reason: String) {
+        if let Some(parent) = &self.parent {
+            let msg = SupervisorMessage::ChildFailed {
+                child_id: self.actor_id,
+                reason,
+            };
+            // Best-effort: ignore send failures (parent may have stopped)
+            let _ = parent.send(self.cx, msg).await;
+        }
+    }
+
+    // ========================================================================
+    // Cx Delegation Methods
+    // ========================================================================
+
+    /// Check for cancellation and return early if requested.
+    ///
+    /// This is a convenience method that checks both actor stopping
+    /// and Cx cancellation.
+    pub fn checkpoint(&self) -> Result<(), crate::error::Error> {
+        if self.stopping {
+            return Err(crate::error::Error::cancelled(
+                &crate::types::CancelReason::user("actor stopping"),
+            ));
+        }
+        self.cx.checkpoint()
+    }
+
+    /// Returns true if cancellation has been requested.
+    ///
+    /// Checks both actor stopping flag and Cx cancellation.
+    #[must_use]
+    pub fn is_cancel_requested(&self) -> bool {
+        self.stopping || self.cx.is_cancel_requested()
+    }
+
+    /// Returns the current budget.
+    #[must_use]
+    pub fn budget(&self) -> crate::types::Budget {
+        self.cx.budget()
+    }
+
+    /// Returns the deadline from the budget, if set.
+    #[must_use]
+    pub fn deadline(&self) -> Option<Time> {
+        self.cx.budget().deadline
+    }
+
+    /// Emit a trace event.
+    pub fn trace(&self, event: &str) {
+        self.cx.trace(event);
+    }
+
+    /// Returns a reference to the underlying Cx.
+    #[must_use]
+    pub const fn cx(&self) -> &Cx {
+        self.cx
+    }
+}
+
+impl<M: Send + 'static> std::ops::Deref for ActorContext<'_, M> {
+    type Target = Cx;
+
+    fn deref(&self) -> &Self::Target {
+        self.cx
+    }
+}
+
+impl<M: Send + 'static> std::fmt::Debug for ActorContext<'_, M> {
+    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        f.debug_struct("ActorContext")
+            .field("actor_id", &self.actor_id)
+            .field("children", &self.children.len())
+            .field("stopping", &self.stopping)
+            .field("has_parent", &self.parent.is_some())
+            .finish()
+    }
+}
+
 /// The default mailbox capacity for actors.
 pub const DEFAULT_MAILBOX_CAPACITY: usize = 64;
 
@@ -1188,5 +1490,172 @@ mod tests {
         assert_eq!(result1, 55, "sum of 1..=10");
 
         crate::test_complete!("actor_deterministic_replay");
+    }
+
+    // ---- ActorContext Tests ----
+
+    #[test]
+    fn actor_context_self_reference() {
+        init_test("actor_context_self_reference");
+
+        let mut state = RuntimeState::new();
+        let root = state.create_root_region(Budget::INFINITE);
+        let cx = Cx::for_testing();
+        let scope = crate::cx::Scope::<FailFast>::new(root, Budget::INFINITE);
+
+        let (handle, stored) = scope
+            .spawn_actor(&mut state, &cx, Counter::new(), 32)
+            .unwrap();
+        state.store_spawned_task(handle.task_id(), stored);
+
+        // Create an ActorContext using the handle's sender
+        let actor_ref = handle.sender();
+        let actor_id = handle.actor_id();
+        let ctx: ActorContext<'_, u64> = ActorContext::new(&cx, actor_ref, actor_id, None);
+
+        // Test self_actor_id() - doesn't require Clone
+        assert_eq!(ctx.self_actor_id(), actor_id);
+        assert_eq!(ctx.actor_id(), actor_id);
+
+        crate::test_complete!("actor_context_self_reference");
+    }
+
+    #[test]
+    fn actor_context_child_management() {
+        init_test("actor_context_child_management");
+
+        let cx = Cx::for_testing();
+        let (sender, _receiver) = mpsc::channel::<u64>(32);
+        let actor_id = ActorId::from_task(TaskId::new_for_test(1, 1));
+        let actor_ref = ActorRef {
+            actor_id,
+            sender,
+            state: Arc::new(ActorStateCell::new(ActorState::Running)),
+        };
+
+        let mut ctx = ActorContext::new(&cx, actor_ref, actor_id, None);
+
+        // Initially no children
+        assert!(!ctx.has_children());
+        assert_eq!(ctx.child_count(), 0);
+        assert!(ctx.children().is_empty());
+
+        // Register children
+        let child1 = ActorId::from_task(TaskId::new_for_test(2, 1));
+        let child2 = ActorId::from_task(TaskId::new_for_test(3, 1));
+
+        ctx.register_child(child1);
+        assert!(ctx.has_children());
+        assert_eq!(ctx.child_count(), 1);
+
+        ctx.register_child(child2);
+        assert_eq!(ctx.child_count(), 2);
+
+        // Unregister child
+        assert!(ctx.unregister_child(child1));
+        assert_eq!(ctx.child_count(), 1);
+
+        // Unregistering non-existent child returns false
+        assert!(!ctx.unregister_child(child1));
+
+        crate::test_complete!("actor_context_child_management");
+    }
+
+    #[test]
+    fn actor_context_stopping() {
+        init_test("actor_context_stopping");
+
+        let cx = Cx::for_testing();
+        let (sender, _receiver) = mpsc::channel::<u64>(32);
+        let actor_id = ActorId::from_task(TaskId::new_for_test(1, 1));
+        let actor_ref = ActorRef {
+            actor_id,
+            sender,
+            state: Arc::new(ActorStateCell::new(ActorState::Running)),
+        };
+
+        let mut ctx = ActorContext::new(&cx, actor_ref, actor_id, None);
+
+        // Initially not stopping
+        assert!(!ctx.is_stopping());
+        assert!(ctx.checkpoint().is_ok());
+
+        // Request stop
+        ctx.stop_self();
+        assert!(ctx.is_stopping());
+        assert!(ctx.checkpoint().is_err());
+        assert!(ctx.is_cancel_requested());
+
+        crate::test_complete!("actor_context_stopping");
+    }
+
+    #[test]
+    fn actor_context_parent_none() {
+        init_test("actor_context_parent_none");
+
+        let cx = Cx::for_testing();
+        let (sender, _receiver) = mpsc::channel::<u64>(32);
+        let actor_id = ActorId::from_task(TaskId::new_for_test(1, 1));
+        let actor_ref = ActorRef {
+            actor_id,
+            sender,
+            state: Arc::new(ActorStateCell::new(ActorState::Running)),
+        };
+
+        let ctx = ActorContext::new(&cx, actor_ref, actor_id, None);
+
+        // Root actor has no parent
+        assert!(!ctx.has_parent());
+        assert!(ctx.parent().is_none());
+
+        crate::test_complete!("actor_context_parent_none");
+    }
+
+    #[test]
+    fn actor_context_cx_delegation() {
+        init_test("actor_context_cx_delegation");
+
+        let cx = Cx::for_testing();
+        let (sender, _receiver) = mpsc::channel::<u64>(32);
+        let actor_id = ActorId::from_task(TaskId::new_for_test(1, 1));
+        let actor_ref = ActorRef {
+            actor_id,
+            sender,
+            state: Arc::new(ActorStateCell::new(ActorState::Running)),
+        };
+
+        let ctx = ActorContext::new(&cx, actor_ref, actor_id, None);
+
+        // Test Cx delegation via Deref
+        let _budget = ctx.budget();
+        ctx.trace("test_event");
+
+        // Test cx() accessor
+        let _cx_ref = ctx.cx();
+
+        crate::test_complete!("actor_context_cx_delegation");
+    }
+
+    #[test]
+    fn actor_context_debug() {
+        init_test("actor_context_debug");
+
+        let cx = Cx::for_testing();
+        let (sender, _receiver) = mpsc::channel::<u64>(32);
+        let actor_id = ActorId::from_task(TaskId::new_for_test(1, 1));
+        let actor_ref = ActorRef {
+            actor_id,
+            sender,
+            state: Arc::new(ActorStateCell::new(ActorState::Running)),
+        };
+
+        let ctx = ActorContext::new(&cx, actor_ref, actor_id, None);
+
+        // Debug formatting should work
+        let debug_str = format!("{ctx:?}");
+        assert!(debug_str.contains("ActorContext"));
+        assert!(debug_str.contains("actor_id"));
+
+        crate::test_complete!("actor_context_debug");
     }
 }
