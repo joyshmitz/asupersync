@@ -120,6 +120,7 @@ impl From<rustls::Error> for TlsError {
 #[cfg(test)]
 mod tests {
     use super::*;
+    use std::error::Error;
 
     fn init_test(name: &str) {
         crate::test_utils::init_test_logging();

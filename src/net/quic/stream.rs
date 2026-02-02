@@ -223,3 +223,52 @@ impl Drop for RecvStream {
         }
     }
 }
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[test]
+    fn tracker_initially_not_closing() {
+        let tracker = StreamTracker::new();
+        assert!(!tracker.is_closing());
+    }
+
+    #[test]
+    fn tracker_mark_closing() {
+        let tracker = StreamTracker::new();
+        tracker.mark_closing();
+        assert!(tracker.is_closing());
+    }
+
+    #[test]
+    fn tracker_mark_closing_idempotent() {
+        let tracker = StreamTracker::new();
+        tracker.mark_closing();
+        tracker.mark_closing();
+        assert!(tracker.is_closing());
+    }
+
+    #[test]
+    fn tracker_shared_across_arcs() {
+        let tracker = StreamTracker::new();
+        let tracker2 = Arc::clone(&tracker);
+
+        assert!(!tracker2.is_closing());
+        tracker.mark_closing();
+        assert!(tracker2.is_closing());
+    }
+
+    #[test]
+    fn tracker_default() {
+        let tracker = StreamTracker::default();
+        assert!(!tracker.closing.load(Ordering::Acquire));
+    }
+
+    #[test]
+    fn tracker_debug() {
+        let tracker = StreamTracker::new();
+        let debug = format!("{tracker:?}");
+        assert!(debug.contains("StreamTracker"));
+    }
+}
