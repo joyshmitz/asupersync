@@ -30,8 +30,8 @@
 //! All QUIC operations respect Cx cancellation:
 //! - Endpoint operations check cancellation at entry
 //! - Stream operations check cancellation before I/O
-//! - On cancellation, streams are reset/stopped appropriately
-//! - Connection close ensures all streams are cleaned up
+//! - On connection shutdown, streams are reset/stopped appropriately
+//! - Connection close marks streams for cleanup
 //!
 //! # Feature Flag
 //!

@@ -2,7 +2,7 @@
 //!
 //! Provides cancel-correct endpoint management for QUIC connections.
 
-use super::config::QuicConfig;
+use super::config::{ClientAuth, QuicConfig};
 use super::connection::QuicConnection;
 use super::error::QuicError;
 use crate::cx::Cx;
@@ -23,10 +23,11 @@ impl QuicEndpoint {
     ///
     /// The client endpoint can connect to servers but cannot accept
     /// incoming connections.
-    pub fn client(cx: &Cx, config: QuicConfig) -> Result<Self, QuicError> {
-        cx.checkpoint().map_err(|_| QuicError::Cancelled)?;
+    #[allow(clippy::option_if_let_else)] // Complex due to early returns
+    pub fn client(cx: &Cx, config: &QuicConfig) -> Result<Self, QuicError> {
+        cx.checkpoint()?;
 
-        let mut root_certs = if let Some(store) = config.root_certs.clone() {
+        let root_certs = if let Some(store) = config.root_certs.clone() {
             store
         } else {
             let mut store = crate::tls::RootCertStore::empty();
@@ -57,10 +58,10 @@ impl QuicEndpoint {
         };
 
         if !config.alpn_protocols.is_empty() {
-            crypto.alpn_protocols = config.alpn_protocols.clone();
+            crypto.alpn_protocols.clone_from(&config.alpn_protocols);
         }
 
-        let mut transport = config.to_transport_config();
+        let transport = config.to_transport_config();
 
         let mut client_config = quinn::ClientConfig::new(Arc::new(
             quinn::crypto::rustls::QuicClientConfig::try_from(crypto)
@@ -68,7 +69,8 @@ impl QuicEndpoint {
         ));
         client_config.transport_config(Arc::new(transport));
 
-        let mut endpoint = quinn::Endpoint::client("0.0.0.0:0".parse().unwrap())?;
+        let bind_addr = SocketAddr::from(([0, 0, 0, 0], 0));
+        let mut endpoint = quinn::Endpoint::client(bind_addr)?;
         endpoint.set_default_client_config(client_config);
 
         Ok(Self { inner: endpoint })
@@ -77,12 +79,12 @@ impl QuicEndpoint {
     /// Create a server endpoint bound to the specified address.
     ///
     /// The server endpoint can accept incoming connections.
-    pub fn server(cx: &Cx, addr: SocketAddr, config: QuicConfig) -> Result<Self, QuicError> {
+    pub fn server(cx: &Cx, addr: SocketAddr, config: &QuicConfig) -> Result<Self, QuicError> {
         cx.checkpoint()?;
 
         if !config.is_valid_for_server() {
             return Err(QuicError::Config(
-                "server requires cert_chain and private_key".into(),
+                "server requires cert_chain/private_key and client_auth_roots when client_auth is enabled".into(),
             ));
         }
 
@@ -99,13 +101,44 @@ impl QuicEndpoint {
         )
         .map_err(|e| QuicError::TlsConfig(format!("invalid private key: {e}")))?;
 
-        let mut crypto = rustls::ServerConfig::builder()
-            .with_no_client_auth()
+        let builder = rustls::ServerConfig::builder();
+        let builder = match config.client_auth {
+            ClientAuth::None => builder.with_no_client_auth(),
+            ClientAuth::Optional | ClientAuth::Required => {
+                let roots = config.client_auth_roots.clone().ok_or_else(|| {
+                    QuicError::Config(
+                        "client_auth_roots required when client_auth is Optional/Required".into(),
+                    )
+                })?;
+                if roots.is_empty() {
+                    return Err(QuicError::Config(
+                        "client_auth_roots must be non-empty when client_auth is enabled".into(),
+                    ));
+                }
+                let verifier = match config.client_auth {
+                    ClientAuth::Optional => {
+                        rustls::server::WebPkiClientVerifier::builder(Arc::new(roots.into_inner()))
+                            .allow_unauthenticated()
+                            .build()
+                            .map_err(|e| QuicError::TlsConfig(e.to_string()))?
+                    }
+                    ClientAuth::Required => {
+                        rustls::server::WebPkiClientVerifier::builder(Arc::new(roots.into_inner()))
+                            .build()
+                            .map_err(|e| QuicError::TlsConfig(e.to_string()))?
+                    }
+                    ClientAuth::None => unreachable!("handled above"),
+                };
+                builder.with_client_cert_verifier(verifier)
+            }
+        };
+
+        let mut crypto = builder
             .with_single_cert(cert_chain, private_key)
             .map_err(|e| QuicError::TlsConfig(e.to_string()))?;
 
         if !config.alpn_protocols.is_empty() {
-            crypto.alpn_protocols = config.alpn_protocols.clone();
+            crypto.alpn_protocols.clone_from(&config.alpn_protocols);
         }
 
         let transport = config.to_transport_config();

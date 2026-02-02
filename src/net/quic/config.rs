@@ -45,6 +45,8 @@ pub struct QuicConfig {
     /// Root certificates for verifying servers (client mode).
     pub root_certs: Option<RootCertStore>,
     /// Root certificates for verifying client certificates (server mode).
+    ///
+    /// Required when `client_auth` is `Optional` or `Required`.
     pub client_auth_roots: Option<RootCertStore>,
     /// Disable server certificate verification (insecure; testing only).
     pub insecure_skip_verify: bool,
@@ -178,10 +180,9 @@ impl QuicConfig {
         let idle_timeout = quinn::IdleTimeout::try_from(self.idle_timeout).ok();
         transport.max_idle_timeout(idle_timeout);
 
-        transport.initial_max_udp_payload_size(1472);
         // VarInt only supports values up to 2^62-1, cap at u32::MAX for safety
-        let stream_window = self.initial_max_stream_data.min(u32::MAX as u64) as u32;
-        let conn_window = self.initial_max_data.min(u32::MAX as u64) as u32;
+        let stream_window = self.initial_max_stream_data.min(u64::from(u32::MAX)) as u32;
+        let conn_window = self.initial_max_data.min(u64::from(u32::MAX)) as u32;
         transport.stream_receive_window(stream_window.into());
         transport.receive_window(conn_window.into());
 
@@ -191,6 +192,17 @@ impl QuicConfig {
     /// Check if this configuration is valid for server mode.
     #[must_use]
     pub fn is_valid_for_server(&self) -> bool {
-        self.cert_chain.is_some() && self.private_key.is_some()
+        let has_identity = self.cert_chain.is_some() && self.private_key.is_some();
+        if !has_identity {
+            return false;
+        }
+
+        match self.client_auth {
+            ClientAuth::None => true,
+            ClientAuth::Optional | ClientAuth::Required => self
+                .client_auth_roots
+                .as_ref()
+                .is_some_and(|roots| !roots.is_empty()),
+        }
     }
 }

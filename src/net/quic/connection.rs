@@ -45,7 +45,7 @@ impl QuicConnection {
         self.inner.handshake_data().and_then(|data| {
             data.downcast::<quinn::crypto::rustls::HandshakeData>()
                 .ok()
-                .and_then(|hs| hs.protocol.map(|p| p.to_vec()))
+                .and_then(|hs| hs.protocol.clone())
         })
     }
 
@@ -118,7 +118,7 @@ impl QuicConnection {
     /// Check if the connection is still open.
     #[must_use]
     pub fn is_open(&self) -> bool {
-        !self.tracker.is_closing()
+        !self.tracker.is_closing() && self.inner.close_reason().is_none()
     }
 
     /// Wait for the connection to close (for any reason).

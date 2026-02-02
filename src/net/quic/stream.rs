@@ -16,6 +16,7 @@ pub struct StreamTracker {
 
 impl StreamTracker {
     /// Create a new stream tracker.
+    #[must_use]
     pub fn new() -> Arc<Self> {
         Arc::new(Self {
             closing: AtomicBool::new(false),
@@ -35,7 +36,7 @@ impl StreamTracker {
 
 /// A QUIC send stream with cancel-correct semantics.
 ///
-/// On drop or cancellation, the stream is reset with an error code.
+/// On connection shutdown, the stream is reset with an error code on drop.
 #[derive(Debug)]
 pub struct SendStream {
     inner: quinn::SendStream,
@@ -93,7 +94,7 @@ impl SendStream {
     ///
     /// This signals to the peer that no more data will be sent.
     pub async fn finish(&mut self) -> Result<(), QuicError> {
-        self.inner.finish().map_err(|_| QuicError::StreamClosed)
+        self.inner.finish().map_err(QuicError::from)
     }
 
     /// Reset the stream with an error code.
@@ -126,7 +127,7 @@ impl Drop for SendStream {
 
 /// A QUIC receive stream with cancel-correct semantics.
 ///
-/// On drop or cancellation, the stream is stopped with an error code.
+/// On connection shutdown, the stream is stopped with an error code on drop.
 #[derive(Debug)]
 pub struct RecvStream {
     inner: quinn::RecvStream,

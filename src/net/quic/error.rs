@@ -19,9 +19,13 @@ pub enum QuicError {
     #[error("write error: {0}")]
     Write(#[from] quinn::WriteError),
 
-    /// Error reading from a stream.
+    /// Error reading from a stream (exact read).
     #[error("read error: {0}")]
     Read(#[from] quinn::ReadExactError),
+
+    /// Error reading from a stream.
+    #[error("read error: {0}")]
+    ReadStream(#[from] quinn::ReadError),
 
     /// Stream read finished unexpectedly.
     #[error("read to end error: {0}")]
@@ -70,7 +74,14 @@ impl QuicError {
     /// Check if this error is recoverable (connection can continue).
     #[must_use]
     pub fn is_recoverable(&self) -> bool {
-        matches!(self, Self::StreamClosed | Self::Read(_) | Self::Write(_))
+        matches!(
+            self,
+            Self::StreamClosed
+                | Self::Read(_)
+                | Self::ReadStream(_)
+                | Self::ReadToEnd(_)
+                | Self::Write(_)
+        )
     }
 
     /// Check if this is a connection-level error.
