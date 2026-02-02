@@ -329,6 +329,13 @@ impl RespValue {
                     }
                     let n = usize::try_from(n)
                         .map_err(|_| RedisError::Protocol(format!("invalid array length: {n}")))?;
+                    // Guard against absurdly large declared arrays (limit to 1M elements)
+                    const MAX_ARRAY_LEN: usize = 1_000_000;
+                    if n > MAX_ARRAY_LEN {
+                        return Err(RedisError::Protocol(format!(
+                            "array length {n} exceeds maximum {MAX_ARRAY_LEN}"
+                        )));
+                    }
                     let mut items = Vec::with_capacity(n);
                     let mut pos = end + 2;
                     for _ in 0..n {
@@ -433,7 +440,7 @@ fn encode_command_into(buf: &mut Vec<u8>, args: &[&[u8]]) {
 }
 
 /// Configuration for Redis client.
-#[derive(Debug, Clone)]
+#[derive(Clone)]
 pub struct RedisConfig {
     /// Host address.
     pub host: String,
@@ -443,6 +450,17 @@ pub struct RedisConfig {
     pub database: u8,
     /// Password for AUTH.
     pub password: Option<String>,
+}
+
+impl std::fmt::Debug for RedisConfig {
+    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        f.debug_struct("RedisConfig")
+            .field("host", &self.host)
+            .field("port", &self.port)
+            .field("database", &self.database)
+            .field("password", &self.password.as_ref().map(|_| "[REDACTED]"))
+            .finish()
+    }
 }
 
 impl Default for RedisConfig {
@@ -465,7 +483,7 @@ impl RedisConfig {
 
         let mut config = Self::default();
 
-        let url = if let Some((password, rest)) = url.split_once('@') {
+        let url = if let Some((password, rest)) = url.rsplit_once('@') {
             config.password = Some(password.to_string());
             rest
         } else {
