@@ -1,37 +1,61 @@
 //! Async directory creation and removal.
 //!
-//! Phase 0 uses synchronous std::fs calls under async wrappers.
+//! On Linux with `io-uring`, `remove_dir` uses `IORING_OP_UNLINKAT` with
+//! `AT_REMOVEDIR` for true async directory removal. Other operations use
+//! `spawn_blocking_io` to offload to a background thread.
 
+use crate::runtime::spawn_blocking_io;
 use std::io;
 use std::path::Path;
 
 /// Creates a new empty directory at the specified path.
+///
+/// On Linux with `io-uring`, uses `IORING_OP_MKDIRAT`.
 ///
 /// # Cancel Safety
 ///
 /// This operation is cancel-safe: it either completes or does not create the
 /// directory at all.
 pub async fn create_dir<P: AsRef<Path>>(path: P) -> io::Result<()> {
-    std::fs::create_dir(path.as_ref())
+    let path = path.as_ref().to_owned();
+    #[cfg(all(target_os = "linux", feature = "io-uring"))]
+    {
+        return uring_mkdirat(&path, 0o755);
+    }
+    #[cfg(not(all(target_os = "linux", feature = "io-uring")))]
+    {
+        spawn_blocking_io(move || std::fs::create_dir(&path)).await
+    }
 }
 
 /// Recursively creates a directory and all of its parent components.
 ///
 /// # Cancel Safety
 ///
-/// This operation is cancel-safe: the filesystem operation is atomic with
-/// respect to cancellation in Phase 0.
+/// This operation is cancel-safe: partial directories may be created on
+/// cancellation but each individual mkdir is atomic.
 pub async fn create_dir_all<P: AsRef<Path>>(path: P) -> io::Result<()> {
-    std::fs::create_dir_all(path.as_ref())
+    let path = path.as_ref().to_owned();
+    spawn_blocking_io(move || std::fs::create_dir_all(&path)).await
 }
 
 /// Removes an empty directory.
+///
+/// On Linux with `io-uring`, uses `IORING_OP_UNLINKAT` with `AT_REMOVEDIR`.
 ///
 /// # Cancel Safety
 ///
 /// This operation is cancel-safe: it either removes the directory or fails.
 pub async fn remove_dir<P: AsRef<Path>>(path: P) -> io::Result<()> {
-    std::fs::remove_dir(path.as_ref())
+    let path = path.as_ref().to_owned();
+    #[cfg(all(target_os = "linux", feature = "io-uring"))]
+    {
+        return uring_unlinkat_dir(&path);
+    }
+    #[cfg(not(all(target_os = "linux", feature = "io-uring")))]
+    {
+        spawn_blocking_io(move || std::fs::remove_dir(&path)).await
+    }
 }
 
 /// Recursively removes a directory and all of its contents.
@@ -40,7 +64,65 @@ pub async fn remove_dir<P: AsRef<Path>>(path: P) -> io::Result<()> {
 ///
 /// This operation is **not** cancel-safe; cancellation may leave partial state.
 pub async fn remove_dir_all<P: AsRef<Path>>(path: P) -> io::Result<()> {
-    std::fs::remove_dir_all(path.as_ref())
+    let path = path.as_ref().to_owned();
+    spawn_blocking_io(move || std::fs::remove_dir_all(&path)).await
+}
+
+// ---- io_uring helpers ----
+
+#[cfg(all(target_os = "linux", feature = "io-uring"))]
+#[allow(unsafe_code)]
+fn uring_submit_one(entry: io_uring::squeue::Entry) -> io::Result<()> {
+    use io_uring::IoUring;
+
+    let mut ring = IoUring::new(2)?;
+    unsafe {
+        ring.submission()
+            .push(&entry)
+            .map_err(|_| io::Error::new(io::ErrorKind::WouldBlock, "submission queue full"))?;
+    }
+    ring.submit_and_wait(1)?;
+    let result = ring
+        .completion()
+        .next()
+        .map(|cqe| cqe.result())
+        .ok_or_else(|| io::Error::new(io::ErrorKind::Other, "no completion received"))?;
+    if result < 0 {
+        Err(io::Error::from_raw_os_error(-result))
+    } else {
+        Ok(())
+    }
+}
+
+#[cfg(all(target_os = "linux", feature = "io-uring"))]
+fn path_to_cstring(path: &std::path::Path) -> io::Result<std::ffi::CString> {
+    std::ffi::CString::new(
+        path.to_str()
+            .ok_or_else(|| io::Error::new(io::ErrorKind::InvalidInput, "invalid path"))?,
+    )
+    .map_err(|_| io::Error::new(io::ErrorKind::InvalidInput, "path contains null bytes"))
+}
+
+/// Uses io_uring's UNLINKAT opcode with AT_REMOVEDIR flag for directory removal.
+#[cfg(all(target_os = "linux", feature = "io-uring"))]
+fn uring_unlinkat_dir(path: &std::path::Path) -> io::Result<()> {
+    use io_uring::{opcode, types};
+    let c_path = path_to_cstring(path)?;
+    let entry = opcode::UnlinkAt::new(types::Fd(libc::AT_FDCWD), c_path.as_ptr())
+        .flags(libc::AT_REMOVEDIR)
+        .build();
+    uring_submit_one(entry)
+}
+
+/// Uses io_uring's MKDIRAT opcode for directory creation.
+#[cfg(all(target_os = "linux", feature = "io-uring"))]
+fn uring_mkdirat(path: &std::path::Path, mode: libc::mode_t) -> io::Result<()> {
+    use io_uring::{opcode, types};
+    let c_path = path_to_cstring(path)?;
+    let entry = opcode::MkDirAt::new(types::Fd(libc::AT_FDCWD), c_path.as_ptr())
+        .mode(mode)
+        .build();
+    uring_submit_one(entry)
 }
 
 #[cfg(test)]
