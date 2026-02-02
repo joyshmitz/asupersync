@@ -1492,9 +1492,7 @@ impl RuntimeState {
     /// An async finalizer that needs to be scheduled, or `None` if the stack is empty.
     pub fn run_sync_finalizers(&mut self, region_id: RegionId) -> Option<Finalizer> {
         loop {
-            let Some(finalizer) = self.pop_region_finalizer(region_id) else {
-                return None;
-            };
+            let finalizer = self.pop_region_finalizer(region_id)?;
 
             match finalizer {
                 Finalizer::Sync(f) => {
@@ -1576,15 +1574,19 @@ impl RuntimeState {
         match state {
             crate::record::region::RegionState::Closing
             | crate::record::region::RegionState::Draining => {
-                // Check if we can transition to Finalizing (no children)
+                // Transition to Finalizing only once child regions and tasks are gone.
                 let transition_to_finalizing = {
                     let Some(region) = self.regions.get(region_id.arena_index()) else {
                         return;
                     };
-                    if region.child_ids().is_empty() {
+                    let no_children = region.child_ids().is_empty();
+                    let no_tasks = region.task_ids().is_empty();
+                    if no_children && no_tasks {
                         region.begin_finalize()
                     } else {
-                        if region.state() == crate::record::region::RegionState::Closing {
+                        if !no_children
+                            && region.state() == crate::record::region::RegionState::Closing
+                        {
                             region.begin_drain();
                         }
                         false
@@ -1597,8 +1599,14 @@ impl RuntimeState {
                 }
             }
             crate::record::region::RegionState::Finalizing => {
-                // Run sync finalizers (requires mut self)
-                let _async_barrier = self.run_sync_finalizers(region_id);
+                // Run sync finalizers (requires mut self).
+                // If we hit an async finalizer, reinsert it and wait for a scheduler to run it.
+                if let Some(async_finalizer) = self.run_sync_finalizers(region_id) {
+                    if let Some(region) = self.regions.get(region_id.arena_index()) {
+                        region.add_finalizer(async_finalizer);
+                    }
+                    return;
+                }
 
                 // Check if we can complete close
                 if self.can_region_complete_close(region_id) {
