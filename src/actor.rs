@@ -277,9 +277,14 @@ impl<A: Actor> ActorHandle<A> {
     /// then returns the actor's final state or a join error.
     pub async fn join(&self, cx: &Cx) -> Result<A, JoinError> {
         self.receiver.recv(cx).await.unwrap_or_else(|_| {
-            Err(JoinError::Cancelled(
-                crate::types::CancelReason::race_loser(),
-            ))
+            // The oneshot was dropped without sending — the actor task was
+            // cancelled or the runtime shut down. Propagate the actual
+            // cancel reason from the Cx if available; fall back to
+            // parent-cancelled since this is typically a scope teardown.
+            let reason = cx
+                .cancel_reason()
+                .unwrap_or_else(crate::types::CancelReason::parent_cancelled);
+            Err(JoinError::Cancelled(reason))
         })
     }
 
@@ -707,11 +712,17 @@ async fn run_actor_loop<A: Actor>(mut actor: A, cx: Cx, cell: &ActorCell<A::Mess
     // Phase 3: Drain remaining buffered messages.
     // Two-phase mailbox guarantee: no message silently dropped. Every message
     // that was successfully sent (committed) into the mailbox will be handled
-    // before the actor's on_stop runs.
+    // before the actor's on_stop runs. We cap the drain to the mailbox
+    // capacity to avoid unbounded work if the mailbox is being filled
+    // concurrently during shutdown.
+    let drain_limit = cell.mailbox.capacity() as u64;
     let mut drained: u64 = 0;
     while let Ok(msg) = cell.mailbox.try_recv() {
         actor.handle(&cx, msg).await;
         drained += 1;
+        if drained >= drain_limit {
+            break;
+        }
     }
     if drained > 0 {
         debug!(drained = drained, "actor::mailbox_drained");
