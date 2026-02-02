@@ -238,15 +238,6 @@ impl<IO: AsyncRead + AsyncWrite + Unpin> TlsStream<IO> {
                 return Poll::Ready(Err(TlsError::Handshake(e.to_string())));
             }
 
-            // Check if handshake is complete
-            if !self.conn.is_handshaking() {
-                self.state = TlsState::Ready;
-                #[cfg(feature = "tracing-integration")]
-                tracing::debug!("TLS handshake complete");
-                return Poll::Ready(Ok(()));
-            }
-
-            // Write TLS data if we have any
             let mut write_would_block = false;
             while self.conn.wants_write() {
                 match self.poll_write_tls(cx) {
@@ -266,6 +257,14 @@ impl<IO: AsyncRead + AsyncWrite + Unpin> TlsStream<IO> {
                         break;
                     }
                 }
+            }
+
+            // Check if handshake is complete (after flushing writes)
+            if !self.conn.is_handshaking() {
+                self.state = TlsState::Ready;
+                #[cfg(feature = "tracing-integration")]
+                tracing::debug!("TLS handshake complete");
+                return Poll::Ready(Ok(()));
             }
 
             // Read TLS data if expected
