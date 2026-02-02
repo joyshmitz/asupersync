@@ -19,8 +19,9 @@ use criterion::{
     black_box, criterion_group, criterion_main, BatchSize, BenchmarkId, Criterion, Throughput,
 };
 
-use asupersync::runtime::scheduler::{GlobalQueue, LocalQueue, Scheduler};
+use asupersync::runtime::scheduler::{GlobalQueue, LocalQueue, Parker, Scheduler};
 use asupersync::types::{TaskId, Time};
+use std::time::Duration;
 
 // =============================================================================
 // HELPER FUNCTIONS
@@ -481,6 +482,72 @@ fn bench_scheduler_throughput(c: &mut Criterion) {
 }
 
 // =============================================================================
+// PARKER BENCHMARKS
+// =============================================================================
+
+fn bench_parker(c: &mut Criterion) {
+    let mut group = c.benchmark_group("scheduler/parker");
+
+    // Unpark-before-park (permit model, no blocking)
+    group.bench_function("unpark_then_park", |b| {
+        b.iter_batched(
+            Parker::new,
+            |parker| {
+                parker.unpark();
+                parker.park();
+            },
+            BatchSize::SmallInput,
+        )
+    });
+
+    // Park with timeout (no notification, immediate timeout)
+    group.bench_function("park_timeout_zero", |b| {
+        b.iter_batched(
+            Parker::new,
+            |parker| {
+                parker.park_timeout(Duration::from_nanos(0));
+            },
+            BatchSize::SmallInput,
+        )
+    });
+
+    // Unpark-before-park cycle repeated (reuse)
+    group.bench_function("park_unpark_cycle_100", |b| {
+        b.iter_batched(
+            Parker::new,
+            |parker| {
+                for _ in 0..100 {
+                    parker.unpark();
+                    parker.park();
+                }
+            },
+            BatchSize::SmallInput,
+        )
+    });
+
+    // Cross-thread unpark latency
+    group.bench_function("cross_thread_unpark", |b| {
+        b.iter_batched(
+            || {
+                let parker = Parker::new();
+                let unparker = parker.clone();
+                (parker, unparker)
+            },
+            |(parker, unparker)| {
+                let handle = std::thread::spawn(move || {
+                    unparker.unpark();
+                });
+                parker.park();
+                handle.join().unwrap();
+            },
+            BatchSize::SmallInput,
+        )
+    });
+
+    group.finish();
+}
+
+// =============================================================================
 // MAIN
 // =============================================================================
 
@@ -492,6 +559,7 @@ criterion_group!(
     bench_lane_priority,
     bench_work_stealing,
     bench_scheduler_throughput,
+    bench_parker,
 );
 
 criterion_main!(benches);
