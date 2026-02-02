@@ -18,7 +18,14 @@
 //! - [`FinalizerOracle`] verifies all registered finalizers ran.
 //! - [`RegionTreeOracle`] verifies INV-TREE: regions form a proper rooted tree.
 //! - [`DeadlineMonotoneOracle`] verifies INV-DEADLINE-MONOTONE: child deadlines ≤ parent deadlines.
+//!
+//! # Actor-Specific Oracles
+//!
+//! - [`ActorLeakOracle`]: Detects actors not properly stopped before region close.
+//! - [`SupervisionOracle`]: Verifies supervision tree behavior (restarts, escalation).
+//! - [`MailboxOracle`]: Verifies mailbox invariants (capacity, backpressure).
 
+pub mod actor;
 pub mod ambient_authority;
 pub mod cancellation_protocol;
 pub mod deadline_monotone;
@@ -30,6 +37,10 @@ pub mod quiescence;
 pub mod region_tree;
 pub mod task_leak;
 
+pub use actor::{
+    ActorLeakOracle, ActorLeakViolation, MailboxOracle, MailboxViolation, MailboxViolationKind,
+    SupervisionOracle, SupervisionViolation, SupervisionViolationKind,
+};
 pub use ambient_authority::{
     AmbientAuthorityOracle, AmbientAuthorityViolation, CapabilityKind, CapabilitySet,
 };
@@ -71,6 +82,12 @@ pub enum OracleViolation {
     DeadlineMonotone(DeadlineMonotoneViolation),
     /// Cancellation protocol violated.
     CancellationProtocol(CancellationProtocolViolation),
+    /// An actor leak was detected.
+    ActorLeak(ActorLeakViolation),
+    /// Supervision tree behavior violated.
+    Supervision(SupervisionViolation),
+    /// Mailbox invariant violated.
+    Mailbox(MailboxViolation),
 }
 
 impl std::fmt::Display for OracleViolation {
@@ -85,6 +102,9 @@ impl std::fmt::Display for OracleViolation {
             Self::AmbientAuthority(v) => write!(f, "Ambient authority violation: {v}"),
             Self::DeadlineMonotone(v) => write!(f, "Deadline monotonicity violation: {v}"),
             Self::CancellationProtocol(v) => write!(f, "Cancellation protocol violation: {v}"),
+            Self::ActorLeak(v) => write!(f, "Actor leak: {v}"),
+            Self::Supervision(v) => write!(f, "Supervision violation: {v}"),
+            Self::Mailbox(v) => write!(f, "Mailbox violation: {v}"),
         }
     }
 }
@@ -112,6 +132,12 @@ pub struct OracleSuite {
     pub deadline_monotone: DeadlineMonotoneOracle,
     /// Cancellation protocol oracle.
     pub cancellation_protocol: CancellationProtocolOracle,
+    /// Actor leak oracle.
+    pub actor_leak: ActorLeakOracle,
+    /// Supervision oracle.
+    pub supervision: SupervisionOracle,
+    /// Mailbox oracle.
+    pub mailbox: MailboxOracle,
 }
 
 impl OracleSuite {
@@ -162,6 +188,18 @@ impl OracleSuite {
             violations.push(OracleViolation::CancellationProtocol(v));
         }
 
+        if let Err(v) = self.actor_leak.check(now) {
+            violations.push(OracleViolation::ActorLeak(v));
+        }
+
+        if let Err(v) = self.supervision.check(now) {
+            violations.push(OracleViolation::Supervision(v));
+        }
+
+        if let Err(v) = self.mailbox.check(now) {
+            violations.push(OracleViolation::Mailbox(v));
+        }
+
         violations
     }
 
@@ -176,6 +214,9 @@ impl OracleSuite {
         self.ambient_authority.reset();
         self.deadline_monotone.reset();
         self.cancellation_protocol.reset();
+        self.actor_leak.reset();
+        self.supervision.reset();
+        self.mailbox.reset();
     }
 }
 

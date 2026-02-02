@@ -88,10 +88,12 @@ pub use network::{
     NetworkMetrics, NetworkTraceEvent, NetworkTraceKind, Packet, SimulatedNetwork,
 };
 pub use oracle::{
-    assert_deterministic, assert_deterministic_multi, DeterminismOracle, DeterminismViolation,
-    FinalizerId, FinalizerOracle, FinalizerViolation, LoserDrainOracle, LoserDrainViolation,
+    assert_deterministic, assert_deterministic_multi, ActorLeakOracle, ActorLeakViolation,
+    DeterminismOracle, DeterminismViolation, FinalizerId, FinalizerOracle, FinalizerViolation,
+    LoserDrainOracle, LoserDrainViolation, MailboxOracle, MailboxViolation, MailboxViolationKind,
     ObligationLeakOracle, ObligationLeakViolation, OracleSuite, OracleViolation, QuiescenceOracle,
-    QuiescenceViolation, TaskLeakOracle, TaskLeakViolation, TraceEventSummary,
+    QuiescenceViolation, SupervisionOracle, SupervisionViolation, SupervisionViolationKind,
+    TaskLeakOracle, TaskLeakViolation, TraceEventSummary,
 };
 pub use runtime::LabRuntime;
 pub use virtual_time_wheel::{ExpiredTimer, VirtualTimerHandle, VirtualTimerWheel};

@@ -8,6 +8,7 @@
 
 use super::chaos::{ChaosRng, ChaosStats};
 use super::config::LabConfig;
+use super::oracle::OracleSuite;
 use crate::record::ObligationKind;
 use crate::runtime::deadline_monitor::{
     default_warning_handler, DeadlineMonitor, DeadlineWarning, MonitorConfig,
@@ -63,6 +64,8 @@ pub struct LabRuntime {
     replay_recorder: TraceRecorder,
     /// Optional deadline monitor for warning callbacks.
     deadline_monitor: Option<DeadlineMonitor>,
+    /// Oracle suite for invariant verification.
+    pub oracles: OracleSuite,
 }
 
 impl LabRuntime {
@@ -107,6 +110,7 @@ impl LabRuntime {
             chaos_stats: ChaosStats::new(),
             replay_recorder,
             deadline_monitor: None,
+            oracles: OracleSuite::new(),
         }
     }
 
@@ -967,6 +971,11 @@ pub enum InvariantViolation {
         /// Number of leaked tasks.
         count: usize,
     },
+    /// Actors were not stopped before region close.
+    ActorLeak {
+        /// Number of leaked actors.
+        count: usize,
+    },
     /// A region closed with live children.
     QuiescenceViolation,
     /// A task held obligations but stopped being polled (futurelock).
@@ -1012,6 +1021,7 @@ impl std::fmt::Display for InvariantViolation {
                 write!(f, "{} obligations leaked", leaks.len())
             }
             Self::TaskLeak { count } => write!(f, "{count} tasks leaked"),
+            Self::ActorLeak { count } => write!(f, "{count} actors leaked"),
             Self::QuiescenceViolation => write!(f, "region closed without quiescence"),
             Self::Futurelock {
                 task,

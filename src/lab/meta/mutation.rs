@@ -24,6 +24,12 @@ pub const INVARIANT_AMBIENT_AUTHORITY: &str = "ambient_authority";
 pub const INVARIANT_DEADLINE_MONOTONE: &str = "deadline_monotone";
 /// Invariant name for the cancellation protocol oracle.
 pub const INVARIANT_CANCELLATION_PROTOCOL: &str = "cancellation_protocol";
+/// Invariant name for the actor leak oracle.
+pub const INVARIANT_ACTOR_LEAK: &str = "actor_leak";
+/// Invariant name for the supervision oracle.
+pub const INVARIANT_SUPERVISION: &str = "supervision";
+/// Invariant name for the mailbox oracle.
+pub const INVARIANT_MAILBOX: &str = "mailbox";
 
 /// Ordered list of all oracle invariants covered by the meta runner.
 pub const ALL_ORACLE_INVARIANTS: &[&str] = &[
@@ -36,6 +42,9 @@ pub const ALL_ORACLE_INVARIANTS: &[&str] = &[
     INVARIANT_FINALIZER,
     INVARIANT_REGION_TREE,
     INVARIANT_DEADLINE_MONOTONE,
+    INVARIANT_ACTOR_LEAK,
+    INVARIANT_SUPERVISION,
+    INVARIANT_MAILBOX,
 ];
 
 /// Built-in mutations used to validate oracle detection.
@@ -424,5 +433,8 @@ pub fn invariant_from_violation(violation: &OracleViolation) -> &'static str {
         OracleViolation::AmbientAuthority(_) => INVARIANT_AMBIENT_AUTHORITY,
         OracleViolation::DeadlineMonotone(_) => INVARIANT_DEADLINE_MONOTONE,
         OracleViolation::CancellationProtocol(_) => INVARIANT_CANCELLATION_PROTOCOL,
+        OracleViolation::ActorLeak(_) => INVARIANT_ACTOR_LEAK,
+        OracleViolation::Supervision(_) => INVARIANT_SUPERVISION,
+        OracleViolation::Mailbox(_) => INVARIANT_MAILBOX,
     }
 }
