@@ -205,6 +205,7 @@
 use std::future::Future;
 use std::pin::Pin;
 use std::sync::mpsc;
+use std::task::{Context, Poll};
 use std::time::{Duration, Instant};
 
 use crate::cx::Cx;
@@ -716,6 +717,98 @@ struct GenericPoolState<R> {
     next_waiter_id: u64,
 }
 
+/// Future that waits for a resource notification.
+struct WaitForNotification<'a, R, F>
+where
+    R: Send + 'static,
+    F: Fn() -> std::pin::Pin<
+            Box<dyn Future<Output = Result<R, Box<dyn std::error::Error + Send + Sync>>> + Send>,
+        > + Send
+        + Sync
+        + 'static,
+{
+    pool: &'a GenericPool<R, F>,
+    waiter_id: Option<u64>,
+}
+
+impl<'a, R, F> Future for WaitForNotification<'a, R, F>
+where
+    R: Send + 'static,
+    F: Fn() -> std::pin::Pin<
+            Box<dyn Future<Output = Result<R, Box<dyn std::error::Error + Send + Sync>>> + Send>,
+        > + Send
+        + Sync
+        + 'static,
+{
+    type Output = ();
+
+    fn poll(mut self: Pin<&mut Self>, cx: &mut Context<'_>) -> Poll<Self::Output> {
+        let mut state = self.pool.state.lock().expect("pool state lock poisoned");
+
+        if state.closed {
+            return Poll::Ready(());
+        }
+
+        // If resources are available, we are ready.
+        if !state.idle.is_empty() || state.active < self.pool.config.max_size {
+            // If we were waiting, remove ourselves
+            if let Some(id) = self.waiter_id {
+                state.waiters.retain(|w| w.id != id);
+            }
+            return Poll::Ready(());
+        }
+
+        // Check if we are currently in the queue
+        let in_queue = if let Some(id) = self.waiter_id {
+            state.waiters.iter().any(|w| w.id == id)
+        } else {
+            false
+        };
+
+        if !in_queue {
+            // We are not in the queue. Register.
+            let id = state.next_waiter_id;
+            state.next_waiter_id += 1;
+            state.waiters.push_back(PoolWaiter {
+                id,
+                waker: cx.waker().clone(),
+            });
+            self.waiter_id = Some(id);
+        } else {
+            // Update waker if necessary
+            if let Some(w) = state
+                .waiters
+                .iter_mut()
+                .find(|w| w.id == self.waiter_id.unwrap())
+            {
+                if !w.waker.will_wake(cx.waker()) {
+                    w.waker = cx.waker().clone();
+                }
+            }
+        }
+
+        Poll::Pending
+    }
+}
+
+impl<'a, R, F> Drop for WaitForNotification<'a, R, F>
+where
+    R: Send + 'static,
+    F: Fn() -> std::pin::Pin<
+            Box<dyn Future<Output = Result<R, Box<dyn std::error::Error + Send + Sync>>> + Send>,
+        > + Send
+        + Sync
+        + 'static,
+{
+    fn drop(&mut self) {
+        if let Some(id) = self.waiter_id {
+            if let Ok(mut state) = self.pool.state.lock() {
+                state.waiters.retain(|w| w.id != id);
+            }
+        }
+    }
+}
+
 /// A generic resource pool with configurable behavior.
 ///
 /// This pool manages resources created by a factory function and provides
@@ -1082,76 +1175,85 @@ where
     #[cfg_attr(not(feature = "metrics"), allow(unused_variables))]
     fn acquire<'a>(
         &'a self,
-        _cx: &'a Cx,
+        cx: &'a Cx,
     ) -> PoolFuture<'a, Result<PooledResource<Self::Resource>, Self::Error>> {
         Box::pin(async move {
             let acquire_start = Instant::now();
 
-            // Process any pending returns
-            self.process_returns();
+            loop {
+                // Process any pending returns
+                self.process_returns();
 
-            // Check if closed
-            {
-                let state = self.state.lock().expect("pool state lock poisoned");
-                if state.closed {
-                    return Err(PoolError::Closed);
-                }
-            }
-
-            // Try to get a healthy idle resource.
-            // When health_check_on_acquire is enabled, unhealthy resources
-            // are silently discarded and the next idle resource is tried.
-            while let Some(resource) = self.try_get_idle() {
-                if self.config.health_check_on_acquire && !self.is_healthy(&resource) {
-                    // Unhealthy: undo the active count bump from try_get_idle
-                    let mut state = self.state.lock().expect("pool state lock poisoned");
-                    state.active = state.active.saturating_sub(1);
-                    state.total_acquisitions = state.total_acquisitions.saturating_sub(1);
-                    drop(state);
-                    continue;
+                // Check if closed
+                {
+                    let state = self.state.lock().expect("pool state lock poisoned");
+                    if state.closed {
+                        return Err(PoolError::Closed);
+                    }
                 }
 
-                let acquire_duration = acquire_start.elapsed();
+                // Try to get a healthy idle resource.
+                while let Some(resource) = self.try_get_idle() {
+                    if self.config.health_check_on_acquire && !self.is_healthy(&resource) {
+                        // Unhealthy: undo the active count bump from try_get_idle
+                        let mut state = self.state.lock().expect("pool state lock poisoned");
+                        state.active = state.active.saturating_sub(1);
+                        state.total_acquisitions = state.total_acquisitions.saturating_sub(1);
+                        drop(state);
+                        continue;
+                    }
 
-                // Record metrics
-                #[cfg(feature = "metrics")]
-                if let Some(ref metrics) = self.metrics {
-                    metrics.record_acquired(acquire_duration);
-                    self.update_metrics_gauges();
+                    let acquire_duration = acquire_start.elapsed();
+
+                    // Record metrics
+                    #[cfg(feature = "metrics")]
+                    if let Some(ref metrics) = self.metrics {
+                        metrics.record_acquired(acquire_duration);
+                        self.update_metrics_gauges();
+                    }
+
+                    return Ok(PooledResource::new(resource, self.return_tx.clone()));
                 }
 
-                return Ok(PooledResource::new(resource, self.return_tx.clone()));
-            }
+                // Try to create a new resource if under capacity
+                if self.can_create() {
+                    let resource = self.create_resource().await?;
+                    self.record_acquisition();
+                    let acquire_duration = acquire_start.elapsed();
 
-            // Try to create a new resource if under capacity
-            if self.can_create() {
-                let resource = self.create_resource().await?;
-                self.record_acquisition();
-                let acquire_duration = acquire_start.elapsed();
+                    // Record metrics for create and acquire
+                    #[cfg(feature = "metrics")]
+                    if let Some(ref metrics) = self.metrics {
+                        metrics.record_created();
+                        metrics.record_acquired(acquire_duration);
+                        self.update_metrics_gauges();
+                    }
 
-                // Record metrics for create and acquire
-                #[cfg(feature = "metrics")]
-                if let Some(ref metrics) = self.metrics {
-                    metrics.record_created();
-                    metrics.record_acquired(acquire_duration);
-                    self.update_metrics_gauges();
+                    return Ok(PooledResource::new(resource, self.return_tx.clone()));
                 }
 
-                return Ok(PooledResource::new(resource, self.return_tx.clone()));
+                // Check for timeout
+                let elapsed = acquire_start.elapsed();
+                if elapsed >= self.config.acquire_timeout {
+                    #[cfg(feature = "metrics")]
+                    if let Some(ref metrics) = self.metrics {
+                        metrics.record_timeout(elapsed);
+                    }
+                    return Err(PoolError::Timeout);
+                }
+
+                // Check for cancellation
+                if let Err(_e) = cx.checkpoint() {
+                    return Err(PoolError::Cancelled);
+                }
+
+                // Wait for a resource to become available
+                WaitForNotification {
+                    pool: self,
+                    waiter_id: None,
+                }
+                .await;
             }
-
-            // Need to wait for a resource
-            // For now, return timeout since we can't actually wait without a runtime
-            // In a real implementation, this would use the Cx deadline and wait
-            let wait_duration = acquire_start.elapsed();
-
-            // Record timeout metric
-            #[cfg(feature = "metrics")]
-            if let Some(ref metrics) = self.metrics {
-                metrics.record_timeout(wait_duration);
-            }
-
-            Err(PoolError::Timeout)
         })
     }
 
