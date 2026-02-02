@@ -368,6 +368,10 @@ mod tests {
         StatusCode::NOT_FOUND
     }
 
+    fn created_handler() -> StatusCode {
+        StatusCode::CREATED
+    }
+
     #[test]
     fn route_exact_match() {
         let router = Router::new().route("/", get(FnHandler::new(ok_handler)));
@@ -429,6 +433,96 @@ mod tests {
     }
 
     #[test]
+    fn route_priority_literal_before_param() {
+        use crate::web::extract::Path;
+        use crate::web::handler::FnHandler1;
+
+        fn param_handler(Path(_id): Path<String>) -> StatusCode {
+            StatusCode::CREATED
+        }
+
+        let router = Router::new()
+            .route("/users/me", get(FnHandler::new(ok_handler)))
+            .route(
+                "/users/:id",
+                get(FnHandler1::<_, Path<String>>::new(param_handler)),
+            );
+
+        let resp = router.handle(Request::new("GET", "/users/me"));
+        assert_eq!(resp.status, StatusCode::OK);
+    }
+
+    #[test]
+    fn route_priority_param_before_literal() {
+        use crate::web::extract::Path;
+        use crate::web::handler::FnHandler1;
+
+        fn param_handler(Path(_id): Path<String>) -> StatusCode {
+            StatusCode::CREATED
+        }
+
+        let router = Router::new()
+            .route(
+                "/users/:id",
+                get(FnHandler1::<_, Path<String>>::new(param_handler)),
+            )
+            .route("/users/me", get(FnHandler::new(ok_handler)));
+
+        let resp = router.handle(Request::new("GET", "/users/me"));
+        assert_eq!(resp.status, StatusCode::CREATED);
+    }
+
+    #[test]
+    fn route_priority_literal_before_wildcard() {
+        use crate::web::extract::Path;
+        use crate::web::handler::FnHandler1;
+
+        fn wildcard_handler(
+            Path(_params): Path<std::collections::HashMap<String, String>>,
+        ) -> StatusCode {
+            StatusCode::ACCEPTED
+        }
+
+        let router = Router::new()
+            .route("/files/static", get(FnHandler::new(ok_handler)))
+            .route(
+                "/files/*",
+                get(FnHandler1::<
+                    _,
+                    Path<std::collections::HashMap<String, String>>,
+                >::new(wildcard_handler)),
+            );
+
+        let resp = router.handle(Request::new("GET", "/files/static"));
+        assert_eq!(resp.status, StatusCode::OK);
+    }
+
+    #[test]
+    fn route_priority_wildcard_before_literal() {
+        use crate::web::extract::Path;
+        use crate::web::handler::FnHandler1;
+
+        fn wildcard_handler(
+            Path(_params): Path<std::collections::HashMap<String, String>>,
+        ) -> StatusCode {
+            StatusCode::ACCEPTED
+        }
+
+        let router = Router::new()
+            .route(
+                "/files/*",
+                get(FnHandler1::<
+                    _,
+                    Path<std::collections::HashMap<String, String>>,
+                >::new(wildcard_handler)),
+            )
+            .route("/files/static", get(FnHandler::new(ok_handler)));
+
+        let resp = router.handle(Request::new("GET", "/files/static"));
+        assert_eq!(resp.status, StatusCode::ACCEPTED);
+    }
+
+    #[test]
     fn nested_router() {
         let api = Router::new().route("/users", get(FnHandler::new(ok_handler)));
 
@@ -439,6 +533,28 @@ mod tests {
 
         let resp = app.handle(Request::new("GET", "/other"));
         assert_eq!(resp.status, StatusCode::NOT_FOUND);
+    }
+
+    #[test]
+    fn nested_router_top_level_priority() {
+        let api = Router::new().route("/users", get(FnHandler::new(created_handler)));
+
+        let app = Router::new()
+            .route("/api/v1/users", get(FnHandler::new(ok_handler)))
+            .nest("/api/v1", api);
+
+        let resp = app.handle(Request::new("POST", "/api/v1/users"));
+        assert_eq!(resp.status, StatusCode::METHOD_NOT_ALLOWED);
+    }
+
+    #[test]
+    fn nested_router_trailing_slash_prefix() {
+        let api = Router::new().route("/users", get(FnHandler::new(ok_handler)));
+
+        let app = Router::new().nest("/api/v1/", api);
+
+        let resp = app.handle(Request::new("GET", "/api/v1/users/"));
+        assert_eq!(resp.status, StatusCode::OK);
     }
 
     #[test]
@@ -477,10 +593,42 @@ mod tests {
     }
 
     #[test]
+    fn route_pattern_wildcard_empty_rest() {
+        use crate::web::extract::Path;
+        use crate::web::handler::FnHandler1;
+
+        fn wildcard_handler(
+            Path(params): Path<std::collections::HashMap<String, String>>,
+        ) -> String {
+            params.get("*").cloned().unwrap_or_default()
+        }
+
+        let router = Router::new().route(
+            "/files/*",
+            get(FnHandler1::<
+                _,
+                Path<std::collections::HashMap<String, String>>,
+            >::new(wildcard_handler)),
+        );
+
+        let resp = router.handle(Request::new("GET", "/files"));
+        assert_eq!(resp.status, StatusCode::OK);
+        assert_eq!(std::str::from_utf8(&resp.body).unwrap(), "");
+    }
+
+    #[test]
     fn route_pattern_literal_only() {
         let pattern = RoutePattern::parse("/health");
         assert!(pattern.matches("/health").is_some());
         assert!(pattern.matches("/other").is_none());
+    }
+
+    #[test]
+    fn route_trailing_slash_matches() {
+        let router = Router::new().route("/users", get(FnHandler::new(ok_handler)));
+
+        let resp = router.handle(Request::new("GET", "/users/"));
+        assert_eq!(resp.status, StatusCode::OK);
     }
 
     #[test]
@@ -499,5 +647,11 @@ mod tests {
         );
         assert_eq!(strip_prefix("/api/v1", "/api/v1"), Some("/".to_string()));
         assert!(strip_prefix("/other", "/api/v1").is_none());
+    }
+
+    #[test]
+    fn strip_prefix_boundary_mismatch() {
+        assert!(strip_prefix("/apix/users", "/api").is_none());
+        assert!(strip_prefix("/apiary", "/api").is_none());
     }
 }

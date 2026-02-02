@@ -911,4 +911,122 @@ mod tests {
         crate::assert_with_log!(ok, "both messages received", true, (v1, v2));
         crate::test_complete!("multiple_senders");
     }
+
+    fn cancelled_cx() -> Cx {
+        let cx = test_cx();
+        cx.set_cancel_requested(true);
+        cx
+    }
+
+    fn noop_waker() -> Waker {
+        struct NoopWaker;
+        impl std::task::Wake for NoopWaker {
+            fn wake(self: std::sync::Arc<Self>) {}
+        }
+        Waker::from(std::sync::Arc::new(NoopWaker))
+    }
+
+    #[test]
+    fn reserve_cancelled_returns_error() {
+        init_test("reserve_cancelled_returns_error");
+        let (tx, _rx) = channel::<i32>(1);
+        let cx = cancelled_cx();
+        let result = block_on(tx.reserve(&cx));
+        crate::assert_with_log!(
+            matches!(result, Err(SendError::Cancelled(()))),
+            "reserve cancelled",
+            "Err(Cancelled(()))",
+            format!("{:?}", result)
+        );
+        crate::test_complete!("reserve_cancelled_returns_error");
+    }
+
+    #[test]
+    fn recv_cancelled_returns_error() {
+        init_test("recv_cancelled_returns_error");
+        let (_tx, rx) = channel::<i32>(1);
+        let cx = cancelled_cx();
+        let result = block_on(rx.recv(&cx));
+        crate::assert_with_log!(
+            matches!(result, Err(RecvError::Cancelled)),
+            "recv cancelled",
+            "Err(Cancelled)",
+            format!("{:?}", result)
+        );
+        crate::test_complete!("recv_cancelled_returns_error");
+    }
+
+    #[test]
+    fn send_after_receiver_drop_returns_disconnected() {
+        init_test("send_after_receiver_drop_returns_disconnected");
+        let (tx, rx) = channel::<i32>(1);
+        let cx = test_cx();
+        drop(rx);
+        let result = block_on(tx.send(&cx, 7));
+        crate::assert_with_log!(
+            matches!(result, Err(SendError::Disconnected(7))),
+            "send after drop",
+            "Err(Disconnected(7))",
+            format!("{:?}", result)
+        );
+        crate::test_complete!("send_after_receiver_drop_returns_disconnected");
+    }
+
+    #[test]
+    fn try_reserve_full_when_waiter_queued() {
+        init_test("try_reserve_full_when_waiter_queued");
+        let (tx, _rx) = channel::<i32>(1);
+        let cx = test_cx();
+
+        let permit = block_on(tx.reserve(&cx)).expect("reserve");
+
+        let mut reserve_fut = Box::pin(tx.reserve(&cx));
+        let waker = noop_waker();
+        let mut cx_task = Context::from_waker(&waker);
+        let poll = reserve_fut.as_mut().poll(&mut cx_task);
+        crate::assert_with_log!(
+            matches!(poll, Poll::Pending),
+            "reserve pending",
+            "Pending",
+            format!("{:?}", poll)
+        );
+
+        let try_reserve = tx.try_reserve();
+        crate::assert_with_log!(
+            matches!(try_reserve, Err(SendError::Full(()))),
+            "try_reserve full due to waiter",
+            "Err(Full(()))",
+            format!("{:?}", try_reserve)
+        );
+
+        drop(reserve_fut);
+        permit.abort();
+        crate::test_complete!("try_reserve_full_when_waiter_queued");
+    }
+
+    #[test]
+    fn try_recv_disconnected_when_closed_and_empty() {
+        init_test("try_recv_disconnected_when_closed_and_empty");
+        let (tx, rx) = channel::<i32>(1);
+        drop(tx);
+        let result = rx.try_recv();
+        crate::assert_with_log!(
+            matches!(result, Err(RecvError::Disconnected)),
+            "try_recv disconnected",
+            "Err(Disconnected)",
+            format!("{:?}", result)
+        );
+        crate::test_complete!("try_recv_disconnected_when_closed_and_empty");
+    }
+
+    #[test]
+    fn weak_sender_upgrade_fails_after_drop() {
+        init_test("weak_sender_upgrade_fails_after_drop");
+        let (tx, _rx) = channel::<i32>(1);
+        let weak = tx.downgrade();
+        drop(tx);
+        let upgraded = weak.upgrade();
+        crate::assert_with_log!(upgraded.is_none(), "upgrade none", true, upgraded.is_none());
+        crate::test_complete!("weak_sender_upgrade_fails_after_drop");
+    }
 }

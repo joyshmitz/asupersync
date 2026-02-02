@@ -263,7 +263,11 @@ mod tests {
     #[test]
     fn merge_pending_streams_make_progress() {
         init_test("merge_pending_streams_make_progress");
-        let mut stream = merge([PendingEveryOther::new(vec![1, 3, 5]), iter(vec![2, 4, 6])]);
+        let streams: Vec<Box<dyn Stream<Item = i32> + Unpin>> = vec![
+            Box::new(PendingEveryOther::new(vec![1, 3, 5])),
+            Box::new(iter(vec![2, 4, 6])),
+        ];
+        let mut stream = merge(streams);
         let waker = noop_waker();
         let mut cx = Context::from_waker(&waker);
 
@@ -292,10 +296,14 @@ mod tests {
     #[test]
     fn merge_size_hint_unknown_upper() {
         init_test("merge_size_hint_unknown_upper");
-        let stream = merge([UnknownUpper::new(3), iter(vec![1, 2])]);
+        let streams: Vec<Box<dyn Stream<Item = i32> + Unpin>> = vec![
+            Box::new(UnknownUpper::new(3)),
+            Box::new(iter(vec![1, 2])),
+        ];
+        let stream = merge(streams);
         let hint = stream.size_hint();
         let ok = hint == (2, None);
-        crate::assert_with_log!(ok, "size hint", (2, None), hint);
+        crate::assert_with_log!(ok, "size hint", (2, None::<usize>), hint);
         crate::test_complete!("merge_size_hint_unknown_upper");
     }
 
