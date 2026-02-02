@@ -923,6 +923,32 @@ fn decode_huffman(src: &Bytes) -> Result<String, H2Error> {
         bits += 8;
 
         while bits >= 5 {
+            // Optimization: Fast path for 5-bit codes to prevent CPU exhaustion.
+            // The shortest Huffman codes are 5 bits (values 0x00..=0x09).
+            // Checking this first allows O(1) decoding for the most frequent symbols
+            // and improves the worst-case behavior (5 bits per symbol).
+            let high_5 = (accumulator >> (bits - 5)) as u32 & 0x1F;
+            if high_5 < 10 {
+                // Map 0..9 to corresponding symbols: 0,1,2,a,c,e,i,o,s,t
+                let sym = match high_5 {
+                    0 => b'0',
+                    1 => b'1',
+                    2 => b'2',
+                    3 => b'a',
+                    4 => b'c',
+                    5 => b'e',
+                    6 => b'i',
+                    7 => b'o',
+                    8 => b's',
+                    9 => b't',
+                    _ => unreachable!(),
+                };
+                result.push(sym);
+                accumulator &= (1u64 << (bits - 5)) - 1;
+                bits -= 5;
+                continue;
+            }
+
             // Try to decode a symbol
             let mut decoded = false;
 
@@ -971,7 +997,15 @@ fn decode_huffman(src: &Bytes) -> Result<String, H2Error> {
 
 #[cfg(test)]
 mod tests {
+    use super::super::error::ErrorCode;
     use super::*;
+
+    fn assert_compression_error<T>(result: Result<T, H2Error>) {
+        match result {
+            Ok(_) => panic!("expected compression error"),
+            Err(err) => assert_eq!(err.code, ErrorCode::CompressionError),
+        }
+    }
 
     #[test]
     fn test_integer_encoding_small() {
@@ -997,6 +1031,26 @@ mod tests {
     }
 
     #[test]
+    fn test_integer_decode_empty() {
+        let mut src = Bytes::new();
+        assert_compression_error(decode_integer(&mut src, 5));
+    }
+
+    #[test]
+    fn test_integer_decode_truncated() {
+        let mut src = Bytes::from_static(&[0x1f, 0x80]);
+        assert_compression_error(decode_integer(&mut src, 5));
+    }
+
+    #[test]
+    fn test_integer_decode_shift_overflow() {
+        let mut bytes = vec![0x1f];
+        bytes.extend_from_slice(&[0x80; 6]);
+        let mut src = Bytes::from(bytes);
+        assert_compression_error(decode_integer(&mut src, 5));
+    }
+
+    #[test]
     fn test_string_encoding_literal() {
         let mut buf = BytesMut::new();
         encode_string(&mut buf, "hello", false);
@@ -1004,6 +1058,80 @@ mod tests {
         let mut src = buf.freeze();
         let decoded = decode_string(&mut src).unwrap();
         assert_eq!(decoded, "hello");
+    }
+
+    #[test]
+    fn test_string_decode_length_exceeds_buffer() {
+        let mut src = Bytes::from_static(&[0x03, b'a', b'b']);
+        assert_compression_error(decode_string(&mut src));
+    }
+
+    #[test]
+    fn test_string_decode_invalid_utf8() {
+        let mut src = Bytes::from_static(&[0x01, 0xff]);
+        assert_compression_error(decode_string(&mut src));
+    }
+
+    #[test]
+    fn test_huffman_decode_invalid_padding() {
+        let mut src = Bytes::from_static(&[0x81, 0x00]);
+        assert_compression_error(decode_string(&mut src));
+    }
+
+    #[test]
+    fn test_indexed_header_zero_rejected() {
+        let mut decoder = Decoder::new();
+        let mut src = Bytes::from_static(&[0x80]); // indexed header with index 0
+        assert_compression_error(decoder.decode(&mut src));
+    }
+
+    #[test]
+    fn test_dynamic_table_size_update_exceeds_allowed() {
+        let mut decoder = Decoder::new();
+        decoder.set_allowed_table_size(1);
+
+        let mut buf = BytesMut::new();
+        encode_integer(&mut buf, 2, 5, 0x20);
+
+        let mut src = buf.freeze();
+        assert_compression_error(decoder.decode(&mut src));
+    }
+
+    #[test]
+    fn test_dynamic_table_size_update_without_header() {
+        let mut decoder = Decoder::new();
+        let mut buf = BytesMut::new();
+        encode_integer(&mut buf, 0, 5, 0x20);
+
+        let mut src = buf.freeze();
+        assert_compression_error(decoder.decode(&mut src));
+    }
+
+    #[test]
+    fn test_dynamic_table_size_update_too_many() {
+        let mut decoder = Decoder::new();
+        let mut buf = BytesMut::new();
+        for _ in 0..17 {
+            encode_integer(&mut buf, 0, 5, 0x20);
+        }
+
+        let mut src = buf.freeze();
+        assert_compression_error(decoder.decode(&mut src));
+    }
+
+    #[test]
+    fn test_header_list_size_exceeded() {
+        let mut decoder = Decoder::new();
+        decoder.set_max_header_list_size(1);
+
+        let mut buf = BytesMut::new();
+        // Literal without indexing, name "a", value "b".
+        encode_integer(&mut buf, 0, 4, 0x00);
+        encode_string(&mut buf, "a", false);
+        encode_string(&mut buf, "b", false);
+
+        let mut src = buf.freeze();
+        assert_compression_error(decoder.decode(&mut src));
     }
 
     #[test]
