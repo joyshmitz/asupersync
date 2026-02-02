@@ -59,7 +59,7 @@ pub use driver::{
 };
 pub use elapsed::Elapsed;
 pub use interval::{interval, interval_at, Interval, MissedTickBehavior};
-pub use sleep::{sleep, sleep_until, Sleep};
+pub use sleep::{sleep, sleep_until, wall_now, Sleep};
 pub use timeout_future::{timeout, timeout_at, TimeoutFuture};
 pub use wheel::{
     CoalescingConfig, TimerDurationExceeded, TimerHandle as WheelTimerHandle, TimerWheel,

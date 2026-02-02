@@ -22,6 +22,25 @@ use std::time::{Duration, Instant};
 
 static START_TIME: OnceLock<Instant> = OnceLock::new();
 
+/// Returns the current wall clock time.
+///
+/// This function returns the elapsed time since the first call to any
+/// time-related function in this module. It is suitable for production
+/// use where real wall clock time is needed.
+///
+/// For virtual time in tests/lab runtime, use a timer driver's `now()` method.
+#[must_use]
+pub fn wall_now() -> Time {
+    let start = START_TIME.get_or_init(Instant::now);
+    let now = Instant::now();
+    if now < *start {
+        Time::ZERO
+    } else {
+        let elapsed = now.duration_since(*start);
+        Time::from_nanos(elapsed.as_nanos() as u64)
+    }
+}
+
 #[derive(Debug)]
 struct SleepState {
     waker: Option<Waker>,
@@ -248,20 +267,7 @@ impl Sleep {
 
     /// Gets the current time using the configured time getter or default.
     fn current_time(&self) -> Time {
-        self.time_getter.map_or_else(
-            || {
-                // Production: Use wall clock
-                let start = START_TIME.get_or_init(Instant::now);
-                let now = Instant::now();
-                if now < *start {
-                    Time::ZERO
-                } else {
-                    let elapsed = now.duration_since(*start);
-                    Time::from_nanos(elapsed.as_nanos() as u64)
-                }
-            },
-            |getter| getter(),
-        )
+        self.time_getter.map_or_else(wall_now, |getter| getter())
     }
 
     /// Polls this sleep with an explicit time value.
