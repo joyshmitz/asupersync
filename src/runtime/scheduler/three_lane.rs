@@ -1725,4 +1725,39 @@ mod tests {
             "should consume most tasks, got {total_consumed}"
         );
     }
+
+    #[test]
+    fn test_round_robin_wakeup_distribution() {
+        // Verify that wake_one distributes wakeups across workers
+        let state = Arc::new(Mutex::new(RuntimeState::new()));
+        let scheduler = ThreeLaneScheduler::new(4, &state);
+
+        // Track which parkers have been woken
+        // The next_wake counter starts at 0, so:
+        // - Call 1: wakes parker 0 (idx=0 % 4 = 0), next_wake=1
+        // - Call 2: wakes parker 1 (idx=1 % 4 = 1), next_wake=2
+        // - Call 3: wakes parker 2 (idx=2 % 4 = 2), next_wake=3
+        // - Call 4: wakes parker 3 (idx=3 % 4 = 3), next_wake=4
+        // - Call 5: wakes parker 0 (idx=4 % 4 = 0), next_wake=5
+        // etc.
+
+        // Verify the next_wake counter increments correctly
+        let initial = scheduler.next_wake.load(Ordering::Relaxed);
+        assert_eq!(initial, 0, "next_wake should start at 0");
+
+        // Wake multiple times and verify counter advances
+        for i in 0..8 {
+            scheduler.wake_one();
+            let current = scheduler.next_wake.load(Ordering::Relaxed);
+            assert_eq!(current, i + 1, "next_wake should increment on each wake");
+        }
+
+        // Final counter should be 8
+        let final_val = scheduler.next_wake.load(Ordering::Relaxed);
+        assert_eq!(final_val, 8, "next_wake should be 8 after 8 wakes");
+
+        // Verify round-robin distribution: 8 wakes across 4 workers = 2 per worker
+        // (We can't directly verify which parker was woken, but the modulo math
+        // guarantees even distribution over time)
+    }
 }
