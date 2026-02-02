@@ -1023,6 +1023,663 @@ macro_rules! assert_eq_log {
 }
 
 // ============================================================================
+// TestHarness — Hierarchical E2E Test Framework
+// ============================================================================
+
+/// Result of a single assertion within a test.
+#[derive(Debug, Clone, serde::Serialize)]
+pub struct AssertionRecord {
+    /// Description of what was asserted.
+    pub description: String,
+    /// Whether the assertion passed.
+    pub passed: bool,
+    /// Expected value (stringified).
+    pub expected: String,
+    /// Actual value (stringified).
+    pub actual: String,
+    /// Phase path at time of assertion (e.g. "setup > connect").
+    pub phase_path: String,
+    /// Elapsed time since harness creation.
+    pub elapsed_ms: f64,
+}
+
+/// A hierarchical phase node in the test execution tree.
+#[derive(Debug, Clone, serde::Serialize)]
+pub struct PhaseNode {
+    /// Name of this phase/section/step.
+    pub name: String,
+    /// Depth level (0 = top-level phase, 1 = section, 2 = step, ...).
+    pub depth: usize,
+    /// Start time relative to harness creation.
+    pub start_ms: f64,
+    /// End time relative to harness creation (None if still open).
+    pub end_ms: Option<f64>,
+    /// Assertions recorded within this phase.
+    pub assertions: Vec<AssertionRecord>,
+    /// Child phases.
+    pub children: Vec<Self>,
+}
+
+/// Per-test JSON summary produced by [`TestHarness`].
+#[derive(Debug, Clone, serde::Serialize)]
+pub struct TestSummary {
+    /// Name of the test.
+    pub test_name: String,
+    /// Whether the test passed overall.
+    pub passed: bool,
+    /// Total assertions.
+    pub total_assertions: usize,
+    /// Passed assertions.
+    pub passed_assertions: usize,
+    /// Failed assertions.
+    pub failed_assertions: usize,
+    /// Total duration in milliseconds.
+    pub duration_ms: f64,
+    /// Hierarchical phase tree.
+    pub phases: Vec<PhaseNode>,
+    /// Artifacts collected on failure (file paths).
+    pub failure_artifacts: Vec<String>,
+    /// Event log statistics.
+    pub event_stats: EventStats,
+}
+
+/// Summary statistics from the event log.
+#[derive(Debug, Clone, serde::Serialize)]
+pub struct EventStats {
+    /// Total events captured.
+    pub total_events: usize,
+    /// Task spawns.
+    pub task_spawns: usize,
+    /// Task completions.
+    pub task_completions: usize,
+    /// Reactor polls.
+    pub reactor_polls: usize,
+    /// Errors logged.
+    pub errors: usize,
+    /// Warnings logged.
+    pub warnings: usize,
+}
+
+/// E2E test harness with hierarchical phase tracking, assertion capture,
+/// and automatic failure artifact collection.
+///
+/// # Example
+///
+/// ```ignore
+/// use asupersync::test_logging::TestHarness;
+///
+/// let mut harness = TestHarness::new("my_e2e_test");
+/// harness.enter_phase("setup");
+///   harness.enter_phase("create_listener");
+///   harness.assert_eq("port bound", 8080, listener.port());
+///   harness.exit_phase();
+/// harness.exit_phase();
+///
+/// harness.enter_phase("exercise");
+/// // ... test body ...
+/// harness.exit_phase();
+///
+/// let summary = harness.finish();
+/// println!("{}", serde_json::to_string_pretty(&summary).unwrap());
+/// ```
+#[derive(Debug)]
+pub struct TestHarness {
+    /// Test name.
+    test_name: String,
+    /// Underlying event logger.
+    logger: TestLogger,
+    /// Stack of open phase indices (indices into the flat phases vec).
+    phase_stack: Vec<usize>,
+    /// All phases (flat storage; tree structure via children indices).
+    phases: Vec<PhaseNode>,
+    /// All assertions recorded.
+    assertions: Vec<AssertionRecord>,
+    /// Artifact directory for failure dumps.
+    artifact_dir: Option<std::path::PathBuf>,
+    /// Collected artifact paths.
+    artifacts: Vec<String>,
+    /// Start instant.
+    start: Instant,
+}
+
+impl TestHarness {
+    /// Create a new test harness.
+    #[must_use]
+    pub fn new(test_name: &str) -> Self {
+        Self {
+            test_name: test_name.to_string(),
+            logger: TestLogger::new(TestLogLevel::from_env()),
+            phase_stack: Vec::new(),
+            phases: Vec::new(),
+            assertions: Vec::new(),
+            artifact_dir: artifact_dir_from_env(),
+            artifacts: Vec::new(),
+            start: Instant::now(),
+        }
+    }
+
+    /// Create a harness with a specific log level.
+    #[must_use]
+    pub fn with_level(test_name: &str, level: TestLogLevel) -> Self {
+        Self {
+            test_name: test_name.to_string(),
+            logger: TestLogger::new(level),
+            phase_stack: Vec::new(),
+            phases: Vec::new(),
+            assertions: Vec::new(),
+            artifact_dir: artifact_dir_from_env(),
+            artifacts: Vec::new(),
+            start: Instant::now(),
+        }
+    }
+
+    /// Access the underlying [`TestLogger`].
+    #[must_use]
+    pub fn logger(&self) -> &TestLogger {
+        &self.logger
+    }
+
+    /// Returns the current phase path as "phase > section > step".
+    #[must_use]
+    pub fn current_phase_path(&self) -> String {
+        self.phase_stack
+            .iter()
+            .map(|&idx| self.phases[idx].name.as_str())
+            .collect::<Vec<_>>()
+            .join(" > ")
+    }
+
+    /// Enter a new phase (push onto the hierarchy stack).
+    pub fn enter_phase(&mut self, name: &str) {
+        let elapsed = self.start.elapsed().as_secs_f64() * 1000.0;
+        let depth = self.phase_stack.len();
+        let node = PhaseNode {
+            name: name.to_string(),
+            depth,
+            start_ms: elapsed,
+            end_ms: None,
+            assertions: Vec::new(),
+            children: Vec::new(),
+        };
+        let idx = self.phases.len();
+        self.phases.push(node);
+
+        // Link as child of current parent.
+        if let Some(&parent_idx) = self.phase_stack.last() {
+            self.phases[parent_idx].children.push(PhaseNode {
+                name: String::new(),
+                depth: 0,
+                start_ms: 0.0,
+                end_ms: None,
+                assertions: Vec::new(),
+                children: Vec::new(),
+            });
+            // We'll rebuild the tree in finish(); for now track indices.
+        }
+
+        self.phase_stack.push(idx);
+
+        tracing::info!(
+            phase = %name,
+            depth = depth,
+            path = %self.current_phase_path(),
+            ">>> ENTER PHASE"
+        );
+    }
+
+    /// Exit the current phase.
+    pub fn exit_phase(&mut self) {
+        let elapsed = self.start.elapsed().as_secs_f64() * 1000.0;
+        if let Some(idx) = self.phase_stack.pop() {
+            self.phases[idx].end_ms = Some(elapsed);
+            tracing::info!(
+                phase = %self.phases[idx].name,
+                duration_ms = %(elapsed - self.phases[idx].start_ms),
+                "<<< EXIT PHASE"
+            );
+        }
+    }
+
+    /// Record an assertion with context.
+    pub fn record_assertion(
+        &mut self,
+        description: &str,
+        passed: bool,
+        expected: &str,
+        actual: &str,
+    ) {
+        let elapsed = self.start.elapsed().as_secs_f64() * 1000.0;
+        let phase_path = self.current_phase_path();
+
+        let record = AssertionRecord {
+            description: description.to_string(),
+            passed,
+            expected: expected.to_string(),
+            actual: actual.to_string(),
+            phase_path: phase_path.clone(),
+            elapsed_ms: elapsed,
+        };
+
+        // Attach to current phase if one is open.
+        if let Some(&idx) = self.phase_stack.last() {
+            self.phases[idx].assertions.push(record.clone());
+        }
+        self.assertions.push(record);
+
+        if passed {
+            tracing::debug!(
+                assertion = %description,
+                phase = %phase_path,
+                "PASS"
+            );
+        } else {
+            tracing::error!(
+                assertion = %description,
+                expected = %expected,
+                actual = %actual,
+                phase = %phase_path,
+                "FAIL"
+            );
+        }
+    }
+
+    /// Assert equality and record the result.
+    ///
+    /// Returns whether the assertion passed.
+    pub fn assert_eq<T: std::fmt::Debug + PartialEq>(
+        &mut self,
+        description: &str,
+        expected: &T,
+        actual: &T,
+    ) -> bool {
+        let passed = expected == actual;
+        self.record_assertion(
+            description,
+            passed,
+            &format!("{expected:?}"),
+            &format!("{actual:?}"),
+        );
+        passed
+    }
+
+    /// Assert a boolean condition and record the result.
+    ///
+    /// Returns whether the assertion passed.
+    pub fn assert_true(&mut self, description: &str, condition: bool) -> bool {
+        self.record_assertion(description, condition, "true", &format!("{condition}"));
+        condition
+    }
+
+    /// Collect a failure artifact (writes content to artifact dir if configured).
+    pub fn collect_artifact(&mut self, name: &str, content: &str) {
+        if let Some(ref dir) = self.artifact_dir {
+            let safe_test = self.test_name.replace(|c: char| !c.is_alphanumeric(), "_");
+            let artifact_dir = dir.join(&safe_test);
+            if std::fs::create_dir_all(&artifact_dir).is_ok() {
+                let path = artifact_dir.join(name);
+                if std::fs::write(&path, content).is_ok() {
+                    self.artifacts.push(path.display().to_string());
+                    tracing::info!(path = %path.display(), "collected failure artifact");
+                }
+            }
+        }
+    }
+
+    /// Build the hierarchical phase tree from flat storage.
+    ///
+    /// Uses an index-path stack to avoid unsafe pointer aliasing.
+    /// The stack tracks the index path from root to the current parent,
+    /// allowing safe traversal via repeated indexing.
+    fn build_phase_tree(&self) -> Vec<PhaseNode> {
+        let mut roots: Vec<PhaseNode> = Vec::new();
+        // Stack of (depth, child_index) pairs forming a path from roots
+        // to the current insertion point.
+        let mut path: Vec<(usize, usize)> = Vec::new();
+
+        for phase in &self.phases {
+            let node = PhaseNode {
+                name: phase.name.clone(),
+                depth: phase.depth,
+                start_ms: phase.start_ms,
+                end_ms: phase.end_ms,
+                assertions: phase.assertions.clone(),
+                children: Vec::new(),
+            };
+
+            if phase.depth == 0 {
+                roots.push(node);
+                let idx = roots.len() - 1;
+                path.clear();
+                path.push((0, idx));
+            } else {
+                // Pop stack until we find the parent depth.
+                while path.len() > phase.depth {
+                    path.pop();
+                }
+
+                // Navigate to the parent node via the index path and push.
+                if !path.is_empty() {
+                    // First index is into roots
+                    let (_, root_idx) = path[0];
+                    let mut current = &mut roots[root_idx];
+                    for &(_, child_idx) in &path[1..] {
+                        current = &mut current.children[child_idx];
+                    }
+                    current.children.push(node);
+                    let child_idx = current.children.len() - 1;
+                    path.push((phase.depth, child_idx));
+                }
+            }
+        }
+
+        roots
+    }
+
+    /// Compute event statistics from the logger.
+    fn compute_event_stats(&self) -> EventStats {
+        let events = self.logger.events();
+        EventStats {
+            total_events: events.len(),
+            task_spawns: events
+                .iter()
+                .filter(|r| matches!(r.event, TestEvent::TaskSpawn { .. }))
+                .count(),
+            task_completions: events
+                .iter()
+                .filter(|r| matches!(r.event, TestEvent::TaskComplete { .. }))
+                .count(),
+            reactor_polls: events
+                .iter()
+                .filter(|r| matches!(r.event, TestEvent::ReactorPoll { .. }))
+                .count(),
+            errors: events
+                .iter()
+                .filter(|r| matches!(r.event, TestEvent::Error { .. }))
+                .count(),
+            warnings: events
+                .iter()
+                .filter(|r| matches!(r.event, TestEvent::Warn { .. }))
+                .count(),
+        }
+    }
+
+    /// Finish the test and produce a JSON-serializable summary.
+    ///
+    /// If the test failed and an artifact directory is configured, automatically
+    /// collects the event log as an artifact.
+    #[must_use]
+    pub fn finish(mut self) -> TestSummary {
+        // Close any unclosed phases.
+        let elapsed = self.start.elapsed().as_secs_f64() * 1000.0;
+        for &idx in self.phase_stack.iter().rev() {
+            if self.phases[idx].end_ms.is_none() {
+                self.phases[idx].end_ms = Some(elapsed);
+            }
+        }
+
+        let total = self.assertions.len();
+        let passed_count = self.assertions.iter().filter(|a| a.passed).count();
+        let failed_count = total - passed_count;
+        let overall_passed = failed_count == 0;
+
+        // Auto-collect event log on failure.
+        if !overall_passed {
+            self.collect_artifact("event_log.txt", &self.logger.report());
+
+            let failed_json = serde_json::to_string_pretty(
+                &self
+                    .assertions
+                    .iter()
+                    .filter(|a| !a.passed)
+                    .collect::<Vec<_>>(),
+            )
+            .unwrap_or_default();
+            self.collect_artifact("failed_assertions.json", &failed_json);
+        }
+
+        let phases = self.build_phase_tree();
+        let event_stats = self.compute_event_stats();
+
+        let summary = TestSummary {
+            test_name: self.test_name.clone(),
+            passed: overall_passed,
+            total_assertions: total,
+            passed_assertions: passed_count,
+            failed_assertions: failed_count,
+            duration_ms: elapsed,
+            phases,
+            failure_artifacts: self.artifacts.clone(),
+            event_stats,
+        };
+
+        // Write JSON summary if artifact dir is configured.
+        if let Some(ref dir) = self.artifact_dir {
+            let safe_test = self.test_name.replace(|c: char| !c.is_alphanumeric(), "_");
+            let summary_path = dir.join(format!("{safe_test}_summary.json"));
+            if let Ok(json) = serde_json::to_string_pretty(&summary) {
+                let _ = std::fs::create_dir_all(dir);
+                let _ = std::fs::write(&summary_path, json);
+            }
+        }
+
+        tracing::info!(
+            test = %self.test_name,
+            passed = %overall_passed,
+            assertions = total,
+            passed_assertions = passed_count,
+            failed_assertions = failed_count,
+            duration_ms = %elapsed,
+            "TEST SUMMARY"
+        );
+
+        summary
+    }
+
+    /// Produce the JSON string for the test summary.
+    #[must_use]
+    pub fn finish_json(self) -> String {
+        let summary = self.finish();
+        serde_json::to_string_pretty(&summary).unwrap_or_else(|_| "{}".to_string())
+    }
+}
+
+/// Read the artifact directory from the environment.
+fn artifact_dir_from_env() -> Option<std::path::PathBuf> {
+    std::env::var("ASUPERSYNC_TEST_ARTIFACTS_DIR")
+        .ok()
+        .filter(|s| !s.trim().is_empty())
+        .map(std::path::PathBuf::from)
+}
+
+// ============================================================================
+// TestReportAggregator — Coverage Matrix
+// ============================================================================
+
+/// Aggregates multiple [`TestSummary`] results into a coverage matrix.
+#[derive(Debug, Default, serde::Serialize)]
+pub struct TestReportAggregator {
+    /// All collected summaries.
+    pub summaries: Vec<TestSummary>,
+}
+
+/// Aggregated report with coverage matrix.
+#[derive(Debug, serde::Serialize)]
+pub struct AggregatedReport {
+    /// Total tests run.
+    pub total_tests: usize,
+    /// Tests that passed.
+    pub passed_tests: usize,
+    /// Tests that failed.
+    pub failed_tests: usize,
+    /// Total assertions across all tests.
+    pub total_assertions: usize,
+    /// Passed assertions across all tests.
+    pub passed_assertions: usize,
+    /// Coverage matrix: test_name -> list of phase names exercised.
+    pub coverage_matrix: Vec<CoverageMatrixRow>,
+    /// Per-test summaries.
+    pub tests: Vec<TestSummaryBrief>,
+}
+
+/// One row in the coverage matrix.
+#[derive(Debug, serde::Serialize)]
+pub struct CoverageMatrixRow {
+    /// Test name.
+    pub test_name: String,
+    /// Whether it passed.
+    pub passed: bool,
+    /// Phase names exercised.
+    pub phases_exercised: Vec<String>,
+    /// Number of assertions.
+    pub assertion_count: usize,
+    /// Duration in ms.
+    pub duration_ms: f64,
+}
+
+/// Brief per-test entry in the aggregated report.
+#[derive(Debug, serde::Serialize)]
+pub struct TestSummaryBrief {
+    /// Test name.
+    pub test_name: String,
+    /// Pass/fail.
+    pub passed: bool,
+    /// Assertion counts.
+    pub assertions: usize,
+    /// Failed count.
+    pub failures: usize,
+    /// Duration.
+    pub duration_ms: f64,
+}
+
+impl TestReportAggregator {
+    /// Create a new empty aggregator.
+    #[must_use]
+    pub fn new() -> Self {
+        Self::default()
+    }
+
+    /// Add a test summary.
+    pub fn add(&mut self, summary: TestSummary) {
+        self.summaries.push(summary);
+    }
+
+    /// Collect phase names from a phase tree (recursive).
+    fn collect_phase_names(phases: &[PhaseNode], out: &mut Vec<String>) {
+        for phase in phases {
+            out.push(phase.name.clone());
+            Self::collect_phase_names(&phase.children, out);
+        }
+    }
+
+    /// Produce the aggregated report.
+    #[must_use]
+    pub fn report(&self) -> AggregatedReport {
+        let total = self.summaries.len();
+        let passed = self.summaries.iter().filter(|s| s.passed).count();
+
+        let total_assertions: usize = self.summaries.iter().map(|s| s.total_assertions).sum();
+        let passed_assertions: usize = self.summaries.iter().map(|s| s.passed_assertions).sum();
+
+        let coverage_matrix: Vec<CoverageMatrixRow> = self
+            .summaries
+            .iter()
+            .map(|s| {
+                let mut phases = Vec::new();
+                Self::collect_phase_names(&s.phases, &mut phases);
+                CoverageMatrixRow {
+                    test_name: s.test_name.clone(),
+                    passed: s.passed,
+                    phases_exercised: phases,
+                    assertion_count: s.total_assertions,
+                    duration_ms: s.duration_ms,
+                }
+            })
+            .collect();
+
+        let tests: Vec<TestSummaryBrief> = self
+            .summaries
+            .iter()
+            .map(|s| TestSummaryBrief {
+                test_name: s.test_name.clone(),
+                passed: s.passed,
+                assertions: s.total_assertions,
+                failures: s.failed_assertions,
+                duration_ms: s.duration_ms,
+            })
+            .collect();
+
+        AggregatedReport {
+            total_tests: total,
+            passed_tests: passed,
+            failed_tests: total - passed,
+            total_assertions,
+            passed_assertions,
+            coverage_matrix,
+            tests,
+        }
+    }
+
+    /// Produce the aggregated report as a JSON string.
+    #[must_use]
+    pub fn report_json(&self) -> String {
+        serde_json::to_string_pretty(&self.report()).unwrap_or_else(|_| "{}".to_string())
+    }
+}
+
+// ============================================================================
+// Harness Macros
+// ============================================================================
+
+/// Enter a hierarchical phase in a [`TestHarness`].
+///
+/// ```ignore
+/// harness_phase!(harness, "setup");
+/// // ... work ...
+/// harness_phase_exit!(harness);
+/// ```
+#[macro_export]
+macro_rules! harness_phase {
+    ($harness:expr, $name:expr) => {
+        $harness.enter_phase($name);
+    };
+}
+
+/// Exit the current phase in a [`TestHarness`].
+#[macro_export]
+macro_rules! harness_phase_exit {
+    ($harness:expr) => {
+        $harness.exit_phase();
+    };
+}
+
+/// Assert equality within a [`TestHarness`], recording the result.
+///
+/// Panics if the assertion fails.
+#[macro_export]
+macro_rules! harness_assert_eq {
+    ($harness:expr, $desc:expr, $expected:expr, $actual:expr) => {
+        if !$harness.assert_eq($desc, &$expected, &$actual) {
+            panic!(
+                "harness assertion failed: {}: expected {:?}, got {:?}",
+                $desc, $expected, $actual
+            );
+        }
+    };
+}
+
+/// Assert a condition within a [`TestHarness`], recording the result.
+///
+/// Panics if the assertion fails.
+#[macro_export]
+macro_rules! harness_assert {
+    ($harness:expr, $desc:expr, $cond:expr) => {
+        if !$harness.assert_true($desc, $cond) {
+            panic!("harness assertion failed: {}", $desc);
+        }
+    };
+}
+
+// ============================================================================
 // Tests
 // ============================================================================
 
@@ -1261,5 +1918,127 @@ mod tests {
         let has_worker = rendered.contains("worker");
         crate::assert_with_log!(has_worker, "rendered worker name", true, has_worker);
         crate::test_complete!("test_event_display");
+    }
+
+    // ====================================================================
+    // TestHarness tests
+    // ====================================================================
+
+    #[test]
+    fn test_harness_basic_flow() {
+        init_test("test_harness_basic_flow");
+        let mut harness = TestHarness::new("basic_flow");
+
+        harness.enter_phase("setup");
+        harness.assert_true("always true", true);
+        harness.exit_phase();
+
+        harness.enter_phase("exercise");
+        harness.assert_eq("equality", &42, &42);
+        harness.exit_phase();
+
+        let summary = harness.finish();
+        assert_eq!(summary.test_name, "basic_flow");
+        assert!(summary.passed);
+        assert_eq!(summary.total_assertions, 2);
+        assert_eq!(summary.passed_assertions, 2);
+        assert_eq!(summary.failed_assertions, 0);
+        crate::test_complete!("test_harness_basic_flow");
+    }
+
+    #[test]
+    fn test_harness_nested_phases() {
+        init_test("test_harness_nested_phases");
+        let mut harness = TestHarness::new("nested");
+
+        harness.enter_phase("outer");
+        harness.enter_phase("inner");
+        assert_eq!(harness.current_phase_path(), "outer > inner");
+        harness.exit_phase();
+        harness.exit_phase();
+
+        let summary = harness.finish();
+        assert!(summary.passed);
+        assert_eq!(summary.phases.len(), 1); // one root
+        crate::test_complete!("test_harness_nested_phases");
+    }
+
+    #[test]
+    fn test_harness_failed_assertion_recorded() {
+        init_test("test_harness_failed_assertion_recorded");
+        let mut harness = TestHarness::new("fail_test");
+
+        harness.enter_phase("check");
+        // Don't panic, just record
+        let passed = harness.assert_eq("mismatch", &1, &2);
+        assert!(!passed);
+        harness.exit_phase();
+
+        let summary = harness.finish();
+        assert!(!summary.passed);
+        assert_eq!(summary.failed_assertions, 1);
+        crate::test_complete!("test_harness_failed_assertion_recorded");
+    }
+
+    #[test]
+    fn test_harness_json_serialization() {
+        init_test("test_harness_json_serialization");
+        let mut harness = TestHarness::new("json_test");
+        harness.assert_true("ok", true);
+        let json = harness.finish_json();
+        let parsed: serde_json::Value = serde_json::from_str(&json).expect("valid json");
+        assert_eq!(parsed["test_name"], "json_test");
+        assert_eq!(parsed["passed"], true);
+        crate::test_complete!("test_harness_json_serialization");
+    }
+
+    #[test]
+    fn test_report_aggregator() {
+        init_test("test_report_aggregator");
+        let mut agg = TestReportAggregator::new();
+
+        // Test 1: passing
+        let mut h1 = TestHarness::new("test_a");
+        h1.enter_phase("setup");
+        h1.assert_true("ok", true);
+        h1.exit_phase();
+        agg.add(h1.finish());
+
+        // Test 2: failing
+        let mut h2 = TestHarness::new("test_b");
+        h2.enter_phase("check");
+        h2.assert_eq("bad", &1, &2);
+        h2.exit_phase();
+        agg.add(h2.finish());
+
+        let report = agg.report();
+        assert_eq!(report.total_tests, 2);
+        assert_eq!(report.passed_tests, 1);
+        assert_eq!(report.failed_tests, 1);
+        assert_eq!(report.total_assertions, 2);
+        assert_eq!(report.passed_assertions, 1);
+        assert_eq!(report.coverage_matrix.len(), 2);
+        assert_eq!(report.coverage_matrix[0].phases_exercised, vec!["setup"]);
+        assert_eq!(report.coverage_matrix[1].phases_exercised, vec!["check"]);
+
+        // Verify JSON round-trip
+        let json = agg.report_json();
+        let parsed: serde_json::Value = serde_json::from_str(&json).expect("valid json");
+        assert_eq!(parsed["total_tests"], 2);
+        crate::test_complete!("test_report_aggregator");
+    }
+
+    #[test]
+    fn test_harness_macros() {
+        init_test("test_harness_macros");
+        let mut harness = TestHarness::new("macro_test");
+        harness_phase!(harness, "setup");
+        harness_assert!(harness, "truthy", true);
+        harness_assert_eq!(harness, "equal", 5, 5);
+        harness_phase_exit!(harness);
+        let summary = harness.finish();
+        assert!(summary.passed);
+        assert_eq!(summary.total_assertions, 2);
+        crate::test_complete!("test_harness_macros");
     }
 }

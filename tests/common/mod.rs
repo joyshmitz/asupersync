@@ -15,6 +15,10 @@ pub use coverage::{
     InvariantTracker,
 };
 
+pub use asupersync::test_logging::{
+    AggregatedReport, TestHarness, TestReportAggregator, TestSummary,
+};
+
 use asupersync::cx::Cx;
 use asupersync::lab::{LabConfig, LabRuntime};
 use asupersync::runtime::RuntimeBuilder;
