@@ -354,6 +354,15 @@ impl HeadersFrame {
                 | ((u32::from(payload[1])) << 16)
                 | ((u32::from(payload[2])) << 8)
                 | u32::from(payload[3]);
+
+            if dependency == header.stream_id {
+                return Err(H2Error::stream(
+                    header.stream_id,
+                    ErrorCode::ProtocolError,
+                    "stream cannot depend on itself",
+                ));
+            }
+
             let weight = payload[4];
             payload = payload.slice(5..);
             Some(PrioritySpec {
@@ -456,6 +465,15 @@ impl PriorityFrame {
             | ((u32::from(payload[1])) << 16)
             | ((u32::from(payload[2])) << 8)
             | u32::from(payload[3]);
+
+        if dependency == header.stream_id {
+            return Err(H2Error::stream(
+                header.stream_id,
+                ErrorCode::ProtocolError,
+                "stream cannot depend on itself",
+            ));
+        }
+
         let weight = payload[4];
 
         Ok(Self {

@@ -14,6 +14,10 @@ use super::settings::DEFAULT_INITIAL_WINDOW_SIZE;
 /// Provides protection against DoS via unbounded CONTINUATION frames.
 const HEADER_FRAGMENT_MULTIPLIER: usize = 4;
 
+/// Absolute maximum header fragment size (256 KB).
+/// caps the size even if max_header_list_size is very large (e.g. u32::MAX).
+const MAX_HEADER_FRAGMENT_SIZE: usize = 256 * 1024;
+
 /// Stream state as defined in RFC 7540 Section 5.1.
 ///
 /// ```text
@@ -187,7 +191,8 @@ impl Stream {
     /// Compute maximum accumulated header fragment size for a given limit.
     pub(crate) fn max_header_fragment_size_for(max_header_list_size: u32) -> usize {
         let max_list_size = usize::try_from(max_header_list_size).unwrap_or(usize::MAX);
-        max_list_size.saturating_mul(HEADER_FRAGMENT_MULTIPLIER)
+        let calculated = max_list_size.saturating_mul(HEADER_FRAGMENT_MULTIPLIER);
+        calculated.min(MAX_HEADER_FRAGMENT_SIZE)
     }
 
     fn max_header_fragment_size(&self) -> usize {

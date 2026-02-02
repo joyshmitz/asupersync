@@ -276,6 +276,9 @@ impl IncomingBodyWriter {
         if matches!(self.kind, BodyKind::ContentLength(_)) && self.remaining != 0 {
             return Err(HttpError::BadContentLength);
         }
+        if matches!(self.kind, BodyKind::Chunked) {
+            return Err(HttpError::BadChunkedEncoding);
+        }
 
         self.done = true;
         self.close_sender();
@@ -1034,6 +1037,16 @@ mod tests {
         assert_eq!(trailers.len(), 1);
 
         assert!(body.is_end_stream());
+    }
+
+    #[test]
+    fn incoming_body_chunked_finish_incomplete_errors() {
+        let cx = Cx::for_testing();
+        let (mut writer, _body) = IncomingBody::channel(&cx, BodyKind::Chunked);
+
+        block_on(writer.push_bytes(&cx, b"5\r\nhello\r\n")).expect("push bytes");
+        let err = writer.finish(&cx).expect_err("finish should error");
+        assert!(matches!(err, HttpError::BadChunkedEncoding));
     }
 
     #[test]
