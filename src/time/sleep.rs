@@ -340,7 +340,9 @@ impl Future for Sleep {
                         .as_ref()
                         .is_some_and(|prev| !timer.ptr_eq(prev));
                     if needs_cancel {
-                        // Take both the old driver and handle to avoid borrow conflicts
+                        // Take both the old driver and handle to avoid borrow conflicts.
+                        // The old handle is consumed by cancel(); a new one will be
+                        // registered below.
                         let old_driver = state.timer_driver.take();
                         let old_handle = state.timer_handle.take();
                         if let (Some(prev_driver), Some(handle)) = (old_driver, old_handle) {
@@ -354,6 +356,8 @@ impl Future for Sleep {
                             }
                             let _ = prev_driver.cancel(&handle);
                         }
+                        // Note: timer_handle is now None; the code below will
+                        // register a fresh handle on the new driver.
                     }
 
                     state.timer_driver = Some(timer.clone());
