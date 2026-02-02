@@ -285,6 +285,33 @@ impl<'a, T> Future for LockFuture<'a, '_, T> {
     }
 }
 
+impl<'a, 'b, T> Drop for LockFuture<'a, 'b, T> {
+    fn drop(&mut self) {
+        if let Some(waiter) = self.waiter.as_ref() {
+            let mut state = self.mutex.state.lock().expect("mutex state lock poisoned");
+
+            // Try to remove from queue
+            let initial_len = state.waiters.len();
+            state.waiters.retain(|w| !Arc::ptr_eq(&w.queued, waiter));
+            let removed = initial_len != state.waiters.len();
+
+            if !removed {
+                // We weren't in the queue.
+                // Did unlock wake us?
+                let dequeued = !waiter.load(Ordering::Acquire);
+
+                // If we were dequeued AND the lock is free (because unlock set it to false and we didn't set it to true),
+                // then we must pass the baton to the next waiter.
+                if dequeued && !state.locked {
+                    if let Some(next) = state.waiters.front() {
+                        next.waker.wake_by_ref();
+                    }
+                }
+            }
+        }
+    }
+}
+
 /// A guard that releases the mutex when dropped.
 #[must_use = "guard will be immediately released if not held"]
 pub struct MutexGuard<'a, T> {
@@ -344,6 +371,33 @@ impl<T> OwnedMutexGuard<T> {
             mutex: Arc<Mutex<T>>,
             cx: Cx, // clone of cx
             waiter: Option<Arc<AtomicBool>>,
+        }
+
+        impl<T> Drop for OwnedLockFuture<T> {
+            fn drop(&mut self) {
+                if let Some(waiter) = self.waiter.as_ref() {
+                    let mut state = self.mutex.state.lock().expect("mutex state lock poisoned");
+
+                    // Try to remove from queue
+                    let initial_len = state.waiters.len();
+                    state.waiters.retain(|w| !Arc::ptr_eq(&w.queued, waiter));
+                    let removed = initial_len != state.waiters.len();
+
+                    if !removed {
+                        // We weren't in the queue.
+                        // Did unlock wake us?
+                        let dequeued = !waiter.load(Ordering::Acquire);
+
+                        // If we were dequeued AND the lock is free (because unlock set it to false and we didn't set it to true),
+                        // then we must pass the baton to the next waiter.
+                        if dequeued && !state.locked {
+                            if let Some(next) = state.waiters.front() {
+                                next.waker.wake_by_ref();
+                            }
+                        }
+                    }
+                }
+            }
         }
 
         impl<T> Future for OwnedLockFuture<T> {

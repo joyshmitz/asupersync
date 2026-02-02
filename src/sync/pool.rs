@@ -731,7 +731,7 @@ where
     waiter_id: Option<u64>,
 }
 
-impl<'a, R, F> Future for WaitForNotification<'a, R, F>
+impl<R, F> Future for WaitForNotification<'_, R, F>
 where
     R: Send + 'static,
     F: Fn() -> std::pin::Pin<
@@ -759,13 +759,20 @@ where
         }
 
         // Check if we are currently in the queue
-        let in_queue = if let Some(id) = self.waiter_id {
-            state.waiters.iter().any(|w| w.id == id)
-        } else {
-            false
-        };
+        let in_queue = self
+            .waiter_id
+            .map_or(false, |id| state.waiters.iter().any(|w| w.id == id));
 
-        if !in_queue {
+        if in_queue {
+            // Update waker if necessary.
+            if let Some(id) = self.waiter_id {
+                if let Some(w) = state.waiters.iter_mut().find(|w| w.id == id) {
+                    if !w.waker.will_wake(cx.waker()) {
+                        w.waker.clone_from(cx.waker());
+                    }
+                }
+            }
+        } else {
             // We are not in the queue. Register.
             let id = state.next_waiter_id;
             state.next_waiter_id += 1;
@@ -774,24 +781,13 @@ where
                 waker: cx.waker().clone(),
             });
             self.waiter_id = Some(id);
-        } else {
-            // Update waker if necessary
-            if let Some(w) = state
-                .waiters
-                .iter_mut()
-                .find(|w| w.id == self.waiter_id.unwrap())
-            {
-                if !w.waker.will_wake(cx.waker()) {
-                    w.waker = cx.waker().clone();
-                }
-            }
         }
 
         Poll::Pending
     }
 }
 
-impl<'a, R, F> Drop for WaitForNotification<'a, R, F>
+impl<R, F> Drop for WaitForNotification<'_, R, F>
 where
     R: Send + 'static,
     F: Fn() -> std::pin::Pin<

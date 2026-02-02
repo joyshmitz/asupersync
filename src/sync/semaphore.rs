@@ -211,7 +211,18 @@ impl Drop for AcquireFuture<'_, '_> {
                 .state
                 .lock()
                 .expect("semaphore lock poisoned");
+
+            // If we are at the front, we need to wake the next waiter when we leave,
+            // otherwise the signal (permits available) might be lost.
+            let was_front = state.waiters.front().is_some_and(|w| w.id == waiter_id);
+
             state.waiters.retain(|waiter| waiter.id != waiter_id);
+
+            if was_front {
+                if let Some(next) = state.waiters.front() {
+                    next.waker.wake_by_ref();
+                }
+            }
         }
     }
 }
@@ -381,7 +392,18 @@ impl Drop for OwnedAcquireFuture {
                 .state
                 .lock()
                 .expect("semaphore lock poisoned");
+
+            // If we are at the front, we need to wake the next waiter when we leave,
+            // otherwise the signal (permits available) might be lost.
+            let was_front = state.waiters.front().is_some_and(|w| w.id == waiter_id);
+
             state.waiters.retain(|waiter| waiter.id != waiter_id);
+
+            if was_front {
+                if let Some(next) = state.waiters.front() {
+                    next.waker.wake_by_ref();
+                }
+            }
         }
     }
 }
