@@ -35,6 +35,7 @@
 
 use super::nats::{Message, NatsClient, NatsError};
 use crate::cx::Cx;
+use crate::time::{timeout, wall_now};
 use crate::tracing_compat::warn;
 use std::fmt;
 use std::fmt::Write as _;
@@ -844,6 +845,9 @@ impl fmt::Debug for Consumer {
 }
 
 impl Consumer {
+    /// Default timeout for pull operations.
+    pub const DEFAULT_PULL_TIMEOUT: Duration = Duration::from_secs(30);
+
     /// Get the consumer name.
     #[must_use]
     pub fn name(&self) -> &str {
@@ -863,39 +867,65 @@ impl Consumer {
         cx: &Cx,
         batch: usize,
     ) -> Result<Vec<JsMessage>, JsError> {
+        self.pull_with_timeout(client, cx, batch, Self::DEFAULT_PULL_TIMEOUT)
+            .await
+    }
+
+    /// Pull a batch of messages with a timeout.
+    pub async fn pull_with_timeout(
+        &self,
+        client: &mut NatsClient,
+        cx: &Cx,
+        batch: usize,
+        pull_timeout: Duration,
+    ) -> Result<Vec<JsMessage>, JsError> {
         cx.checkpoint().map_err(|_| NatsError::Cancelled)?;
 
         let subject = format!(
             "{}.CONSUMER.MSG.NEXT.{}.{}",
             self.prefix, self.stream, self.name
         );
-        let request = format!("{{\"batch\":{batch}}}");
+        let expires = u64::try_from(pull_timeout.as_nanos()).unwrap_or(u64::MAX);
+        let request = format!("{{\"batch\":{batch},\"expires\":{expires}}}");
 
         // Subscribe to get batch responses
         let mut sub = client
-            .subscribe(cx, &format!("_INBOX.{}", random_id()))
+            .subscribe(cx, &format!("_INBOX.{}", random_id(cx)))
             .await?;
+        let sid = sub.sid();
         client
             .publish_request(cx, &subject, sub.subject(), request.as_bytes())
             .await?;
 
         let mut messages = Vec::with_capacity(batch);
+        let now = cx
+            .timer_driver()
+            .map_or_else(wall_now, |driver| driver.now());
+        let mut result: Result<(), JsError> = Ok(());
 
         // Collect messages until we get batch or timeout
         for _ in 0..batch {
-            match sub.next(cx).await? {
-                Some(msg) => {
+            let next_fut = Box::pin(sub.next(cx));
+            match timeout(now, pull_timeout, next_fut).await {
+                Ok(Ok(Some(msg))) => {
                     if let Some(js_msg) = Self::parse_js_message(msg) {
                         messages.push(js_msg);
                     } else {
                         break; // Status message or end
                     }
                 }
-                None => break,
+                Ok(Ok(None)) => break, // Subscription closed
+                Ok(Err(e)) => {
+                    result = Err(e.into());
+                    break;
+                }
+                Err(_) => break, // Timeout - return what we have
             }
         }
 
-        Ok(messages)
+        let _ = client.unsubscribe(cx, sid).await;
+
+        result.map(|_| messages)
     }
 
     fn parse_js_message(msg: Message) -> Option<JsMessage> {
@@ -1013,13 +1043,8 @@ fn base64_encode(data: &[u8]) -> String {
     result
 }
 
-fn random_id() -> String {
-    use std::time::{SystemTime, UNIX_EPOCH};
-    let nanos = SystemTime::now()
-        .duration_since(UNIX_EPOCH)
-        .map(|d| d.as_nanos())
-        .unwrap_or(0);
-    format!("{:016x}", nanos ^ u128::from(std::process::id()))
+fn random_id(cx: &Cx) -> String {
+    format!("{:016x}", cx.random_u64())
 }
 
 #[cfg(test)]
