@@ -89,12 +89,8 @@ mod tests {
         let waker = noop_waker();
         let mut cx = Context::from_waker(&waker);
         let mut items = Vec::new();
-        loop {
-            match Pin::new(&mut *stream).poll_next(&mut cx) {
-                Poll::Ready(Some(item)) => items.push(item),
-                Poll::Ready(None) => break,
-                Poll::Pending => break,
-            }
+        while let Poll::Ready(Some(item)) = Pin::new(&mut *stream).poll_next(&mut cx) {
+            items.push(item);
         }
         items
     }

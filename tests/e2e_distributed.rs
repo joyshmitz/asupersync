@@ -105,6 +105,7 @@ fn make_failure(id: &str) -> ReplicaFailure {
 // =========================================================================
 
 #[test]
+#[allow(clippy::too_many_lines)]
 fn e2e_full_encode_distribute_recover_pipeline() {
     common::init_test_logging();
     test_phase!("Setup");
@@ -148,9 +149,12 @@ fn e2e_full_encode_distribute_recover_pipeline() {
         AssignmentStrategy::MinimumK,
     ] {
         test_section!(&format!("Strategy: {strategy:?}"));
-        let assigner = SymbolAssigner::new(strategy.clone());
-        let assignments =
-            assigner.assign(&encoded_state.symbols, &replicas, encoded_state.source_count);
+        let assigner = SymbolAssigner::new(strategy);
+        let assignments = assigner.assign(
+            &encoded_state.symbols,
+            &replicas,
+            encoded_state.source_count,
+        );
         assert_eq!(assignments.len(), 3);
 
         for a in &assignments {
@@ -183,7 +187,7 @@ fn e2e_full_encode_distribute_recover_pipeline() {
                     );
                 }
             }
-            _ => {}
+            AssignmentStrategy::Weighted => {}
         }
     }
 
@@ -223,10 +227,10 @@ fn e2e_full_encode_distribute_recover_pipeline() {
         );
 
         match consistency {
-            ConsistencyLevel::Local => assert!(result.quorum_achieved),
-            ConsistencyLevel::One => assert!(result.quorum_achieved),
-            ConsistencyLevel::Quorum => assert!(result.quorum_achieved), // 2/3 >= quorum
-            ConsistencyLevel::All => assert!(!result.quorum_achieved),   // 2/3 < all
+            ConsistencyLevel::Local | ConsistencyLevel::One | ConsistencyLevel::Quorum => {
+                assert!(result.quorum_achieved);
+            } // 2/3 >= quorum
+            ConsistencyLevel::All => assert!(!result.quorum_achieved), // 2/3 < all
         }
     }
 
@@ -254,10 +258,7 @@ fn e2e_full_encode_distribute_recover_pipeline() {
     // Lose 1 — still has quorum
     let _ = record.replica_lost("node-2", Time::from_secs(10));
     assert!(record.has_quorum());
-    tracing::info!(
-        quorum = record.has_quorum(),
-        "after losing 1 replica"
-    );
+    tracing::info!(quorum = record.has_quorum(), "after losing 1 replica");
 
     // Phase 6: Recover
     test_phase!("Recover");
@@ -282,7 +283,12 @@ fn e2e_full_encode_distribute_recover_pipeline() {
     let mut orchestrator =
         RecoveryOrchestrator::new(RecoveryConfig::default(), RecoveryDecodingConfig::default());
     let result = orchestrator
-        .recover_from_symbols(&trigger, &symbols, encoded_state.params, Duration::from_millis(10))
+        .recover_from_symbols(
+            &trigger,
+            &symbols,
+            encoded_state.params,
+            Duration::from_millis(10),
+        )
         .unwrap();
 
     tracing::info!(
@@ -305,9 +311,18 @@ fn e2e_full_encode_distribute_recover_pipeline() {
     }
     assert_eq!(result.snapshot.children, snapshot.children);
     assert_eq!(result.snapshot.finalizer_count, snapshot.finalizer_count);
-    assert_eq!(result.snapshot.budget.deadline_nanos, snapshot.budget.deadline_nanos);
-    assert_eq!(result.snapshot.budget.polls_remaining, snapshot.budget.polls_remaining);
-    assert_eq!(result.snapshot.budget.cost_remaining, snapshot.budget.cost_remaining);
+    assert_eq!(
+        result.snapshot.budget.deadline_nanos,
+        snapshot.budget.deadline_nanos
+    );
+    assert_eq!(
+        result.snapshot.budget.polls_remaining,
+        snapshot.budget.polls_remaining
+    );
+    assert_eq!(
+        result.snapshot.budget.cost_remaining,
+        snapshot.budget.cost_remaining
+    );
     assert_eq!(result.snapshot.cancel_reason, snapshot.cancel_reason);
     assert_eq!(result.snapshot.parent, snapshot.parent);
     assert_eq!(result.snapshot.metadata, snapshot.metadata);
@@ -356,7 +371,9 @@ fn e2e_quorum_loss_and_recovery() {
     tracing::info!(state = ?record.state, "degraded after losing 2 replicas");
 
     test_section!("Trigger recovery");
-    record.trigger_recovery("admin", Time::from_secs(20)).unwrap();
+    record
+        .trigger_recovery("admin", Time::from_secs(20))
+        .unwrap();
 
     test_section!("Complete recovery");
     let _ = record.complete_recovery(8, Time::from_secs(30)).unwrap();
@@ -438,7 +455,9 @@ fn e2e_bridge_upgrade_snapshot_close() {
         ..Default::default()
     };
     let replicas = test_replicas(3);
-    let upgrade = bridge.upgrade_to_distributed(dist_config, &replicas).unwrap();
+    let upgrade = bridge
+        .upgrade_to_distributed(dist_config, &replicas)
+        .unwrap();
     assert_eq!(upgrade.previous_mode, RegionMode::Local);
     assert!(upgrade.new_mode.is_distributed());
     assert!(bridge.distributed().is_some());
@@ -531,10 +550,14 @@ fn e2e_collector_dedup_multi_replica() {
     // First replica's symbols accepted, rest are duplicates
     assert_eq!(accepted as usize, encoded.symbols.len());
     assert_eq!(rejected as usize, encoded.symbols.len() * 2);
-    assert_eq!(collector.metrics.symbols_duplicate as usize, encoded.symbols.len() * 2);
+    assert_eq!(
+        collector.metrics.symbols_duplicate as usize,
+        encoded.symbols.len() * 2
+    );
     assert!(collector.can_decode());
 
-    test_complete!("e2e_collector_dedup",
+    test_complete!(
+        "e2e_collector_dedup",
         total_symbols = encoded.symbols.len() * 3,
         unique_symbols = collector.symbols().len(),
     );
