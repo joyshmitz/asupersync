@@ -1302,6 +1302,21 @@ mod tests {
     }
 
     #[test]
+    fn test_data_frame_padding_exact_length_rejected() {
+        let header = FrameHeader {
+            length: 2,
+            frame_type: FrameType::Data as u8,
+            flags: data_flags::PADDED,
+            stream_id: 1,
+        };
+        // Pad length equals remaining data length (1), which is invalid.
+        let payload = Bytes::from_static(&[1, 0xff]);
+
+        let err = DataFrame::parse(&header, payload).unwrap_err();
+        assert_eq!(err.code, ErrorCode::ProtocolError);
+    }
+
+    #[test]
     fn test_headers_frame_stream_id_zero_rejected() {
         let header = FrameHeader {
             length: 5,
@@ -1325,6 +1340,35 @@ mod tests {
         };
         // Too short for priority (needs 5 bytes)
         let payload = Bytes::from_static(&[0, 0, 0]);
+
+        let err = HeadersFrame::parse(&header, payload).unwrap_err();
+        assert_eq!(err.code, ErrorCode::ProtocolError);
+    }
+
+    #[test]
+    fn test_headers_frame_padded_empty_payload_rejected() {
+        let header = FrameHeader {
+            length: 0,
+            frame_type: FrameType::Headers as u8,
+            flags: headers_flags::PADDED | headers_flags::END_HEADERS,
+            stream_id: 1,
+        };
+        let payload = Bytes::new();
+
+        let err = HeadersFrame::parse(&header, payload).unwrap_err();
+        assert_eq!(err.code, ErrorCode::ProtocolError);
+    }
+
+    #[test]
+    fn test_headers_frame_padding_exceeds_length() {
+        let header = FrameHeader {
+            length: 3,
+            frame_type: FrameType::Headers as u8,
+            flags: headers_flags::PADDED | headers_flags::END_HEADERS,
+            stream_id: 1,
+        };
+        // Pad length (2) >= remaining payload length (2).
+        let payload = Bytes::from_static(&[2, b'a', b'b']);
 
         let err = HeadersFrame::parse(&header, payload).unwrap_err();
         assert_eq!(err.code, ErrorCode::ProtocolError);
@@ -1451,6 +1495,35 @@ mod tests {
             stream_id: 1,
         };
         let payload = Bytes::from_static(&[0, 0, 2]);
+
+        let err = PushPromiseFrame::parse(&header, payload).unwrap_err();
+        assert_eq!(err.code, ErrorCode::ProtocolError);
+    }
+
+    #[test]
+    fn test_push_promise_padded_empty_payload_rejected() {
+        let header = FrameHeader {
+            length: 0,
+            frame_type: FrameType::PushPromise as u8,
+            flags: headers_flags::PADDED | headers_flags::END_HEADERS,
+            stream_id: 1,
+        };
+        let payload = Bytes::new();
+
+        let err = PushPromiseFrame::parse(&header, payload).unwrap_err();
+        assert_eq!(err.code, ErrorCode::ProtocolError);
+    }
+
+    #[test]
+    fn test_push_promise_padding_exceeds_length() {
+        let header = FrameHeader {
+            length: 5,
+            frame_type: FrameType::PushPromise as u8,
+            flags: headers_flags::PADDED | headers_flags::END_HEADERS,
+            stream_id: 1,
+        };
+        // Pad length (1) >= remaining header block length (0) after promised stream ID.
+        let payload = Bytes::from_static(&[1, 0, 0, 0, 1]);
 
         let err = PushPromiseFrame::parse(&header, payload).unwrap_err();
         assert_eq!(err.code, ErrorCode::ProtocolError);
