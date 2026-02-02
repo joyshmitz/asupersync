@@ -195,14 +195,23 @@ impl SymbolCancelToken {
                 .store(now.as_nanos(), Ordering::SeqCst);
             *self.state.reason.write().expect("lock poisoned") = Some(reason.clone());
 
-            // Notify listeners
-            for listener in self.state.listeners.read().expect("lock poisoned").iter() {
+            let listeners = {
+                let mut listeners = self.state.listeners.write().expect("lock poisoned");
+                std::mem::take(&mut *listeners)
+            };
+
+            // Notify listeners without holding the lock to avoid reentrancy deadlocks.
+            for listener in listeners {
                 listener.on_cancel(reason, now);
             }
 
-            // Cancel children
-            for child in self.state.children.read().expect("lock poisoned").iter() {
-                let parent_reason = CancelReason::parent_cancelled();
+            // Cancel children without holding the lock.
+            let children = {
+                let children = self.state.children.read().expect("lock poisoned");
+                children.clone()
+            };
+            let parent_reason = CancelReason::parent_cancelled();
+            for child in children {
                 child.cancel(&parent_reason, now);
             }
 
@@ -862,12 +871,14 @@ impl CleanupCoordinator {
     }
 
     /// Triggers cleanup for a cancelled object.
+    #[allow(unused_assignments)] // polls_used tracking for future multi-handler support
     pub fn cleanup(&self, object_id: ObjectId, budget: Option<Budget>) -> CleanupResult {
         let budget = budget.unwrap_or(self.default_budget);
         let mut symbols_cleaned = 0;
         let mut bytes_freed = 0;
         let mut handlers_run = Vec::new();
         let mut polls_used: u32 = 0;
+        let mut within_budget = true;
 
         // Get pending symbols
         let pending_set = self
@@ -882,11 +893,12 @@ impl CleanupCoordinator {
 
             // Run registered handler
             if let Some(handler) = self.handlers.read().expect("lock poisoned").get(&object_id) {
-                handlers_run.push(handler.name().to_string());
-                polls_used += 1;
-
                 if polls_used < budget.poll_quota {
+                    polls_used += 1;
+                    handlers_run.push(handler.name().to_string());
                     let _ = handler.cleanup(object_id, set.symbols);
+                } else {
+                    within_budget = false;
                 }
             }
         }
@@ -901,7 +913,7 @@ impl CleanupCoordinator {
             object_id,
             symbols_cleaned,
             bytes_freed,
-            within_budget: polls_used < budget.poll_quota,
+            within_budget,
             handlers_run,
         }
     }
