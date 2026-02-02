@@ -189,12 +189,21 @@ impl TcpStream {
     }
 
     /// Set keepalive.
-    pub fn set_keepalive(&self, _keepalive: Option<Duration>) -> io::Result<()> {
-        // Not supported in std
-        Err(io::Error::new(
-            io::ErrorKind::Unsupported,
-            "set_keepalive not supported",
-        ))
+    ///
+    /// Uses `socket2` to configure `SO_KEEPALIVE` and platform-specific
+    /// keepalive idle time. Pass `None` to disable keepalive.
+    pub fn set_keepalive(&self, keepalive: Option<Duration>) -> io::Result<()> {
+        let socket = socket2::SockRef::from(&*self.inner);
+        match keepalive {
+            Some(interval) => {
+                let params = socket2::TcpKeepalive::new().with_time(interval);
+                socket.set_tcp_keepalive(&params)?;
+            }
+            None => {
+                socket.set_keepalive(false)?;
+            }
+        }
+        Ok(())
     }
 
     /// Split into borrowed halves.

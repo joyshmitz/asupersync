@@ -99,18 +99,24 @@ impl UdpSocket {
         buf: &[u8],
         addrs: &[SocketAddr],
     ) -> Poll<io::Result<usize>> {
+        let mut last_err = None;
         for addr in addrs {
             match self.inner.send_to(buf, addr) {
                 Ok(n) => return Poll::Ready(Ok(n)),
-                Err(ref e) if e.kind() == io::ErrorKind::WouldBlock => {}
-                Err(e) => return Poll::Ready(Err(e)),
+                Err(ref e) if e.kind() == io::ErrorKind::WouldBlock => {
+                    // Socket not ready; register and wait.
+                    if let Err(err) = self.register_interest(cx, Interest::WRITABLE) {
+                        return Poll::Ready(Err(err));
+                    }
+                    return Poll::Pending;
+                }
+                Err(e) => last_err = Some(e),
             }
         }
-        // All attempts would block
-        if let Err(err) = self.register_interest(cx, Interest::WRITABLE) {
-            return Poll::Ready(Err(err));
-        }
-        Poll::Pending
+        // All addresses failed with non-WouldBlock errors; return last error.
+        Poll::Ready(Err(last_err.unwrap_or_else(|| {
+            io::Error::new(io::ErrorKind::InvalidInput, "no addresses to send to")
+        })))
     }
 
     /// Receive a datagram and its source address.
