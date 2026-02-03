@@ -129,6 +129,40 @@ cargo +nightly fuzz run fuzz_http2_frame -- -max_total_time=60
 
 Crashes and corpora are stored under `fuzz/artifacts/` and `fuzz/corpus/`.
 
+## Phase 6 End-to-End Suites
+
+Phase 6 E2E suites validate cross-module integration, determinism, and artifact
+stability for the five major subsystems. They are intentionally separate from
+unit tests: units validate local invariants, E2E validates the full pipeline.
+
+### Single command (local)
+
+```bash
+cargo test --test e2e_geodesic_normalization \
+           --test topology_benchmark \
+           --test e2e_governor_vs_baseline \
+           --test raptorq_conformance \
+           --test phase0_verification \
+           -- --nocapture
+```
+
+### Suite breakdown
+
+| Suite | Test file | Subsystem | Key checks |
+|-------|-----------|-----------|------------|
+| GEO | `e2e_geodesic_normalization.rs` | Trace normalization | Deterministic reports, switch cost reduction, golden checksum |
+| HOMO | `topology_benchmark.rs` | Topology-guided exploration | Coverage reports, detection rates, topology vs baseline |
+| LYAP | `e2e_governor_vs_baseline.rs` | Lyapunov governance | V(Σ) convergence, cancel/drain latency, deterministic fingerprints |
+| RAPTORQ | `raptorq_conformance.rs` | RaptorQ FEC codec | Roundtrip correctness, proof artifacts, erasure patterns |
+| PLAN | `phase0_verification.rs` | Certified rewrite engine | Certificate verification, lab equivalence, golden hashes |
+
+### What these tests catch
+
+- **Non-deterministic outputs**: Same seed must produce byte-identical reports.
+- **Golden checksum mismatches**: Behavioral changes are caught by pinned hashes.
+- **Invariant violations**: Oracle checks, linear extension validity, certificate verification.
+- **Regressions**: Cost metrics (switch count, latency, coverage) must not degrade.
+
 ## CI Expectations
 
 CI should run at minimum:
@@ -137,8 +171,9 @@ CI should run at minimum:
 - `cargo clippy --all-targets -- -D warnings`
 - `cargo test`
 
-CI also includes scheduled fuzzing via `.github/workflows/fuzz.yml` and
-property tests via `.github/workflows/property-tests.yml`.
+CI also includes scheduled fuzzing via `.github/workflows/fuzz.yml`,
+property tests via `.github/workflows/property-tests.yml`, and
+Phase 6 E2E suites via the `phase6-e2e` job in `.github/workflows/ci.yml`.
 
 ## Debugging Tips
 
