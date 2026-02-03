@@ -207,7 +207,17 @@ pub fn calculate_delay(policy: &RetryPolicy, attempt: u32, rng: Option<&mut DetR
         capped_nanos
     };
 
-    Duration::from_nanos(final_nanos as u64)
+    Duration::from_nanos(clamp_nanos_f64(final_nanos))
+}
+
+fn clamp_nanos_f64(nanos: f64) -> u64 {
+    if !nanos.is_finite() || nanos <= 0.0 {
+        return 0;
+    }
+    if nanos >= u64::MAX as f64 {
+        return u64::MAX;
+    }
+    nanos as u64
 }
 
 /// Calculates the delay and returns the deadline.
@@ -221,7 +231,13 @@ pub fn calculate_deadline(
     rng: Option<&mut DetRng>,
 ) -> Time {
     let delay = calculate_delay(policy, attempt, rng);
-    now.saturating_add_nanos(delay.as_nanos() as u64)
+    let nanos = delay.as_nanos();
+    let nanos = if nanos > u128::from(u64::MAX) {
+        u64::MAX
+    } else {
+        nanos as u64
+    };
+    now.saturating_add_nanos(nanos)
 }
 
 /// Calculates the total worst-case budget needed for all retries.
@@ -236,7 +252,7 @@ pub fn total_delay_budget(policy: &RetryPolicy) -> Duration {
         // Use None for RNG to get base delays (upper bound without jitter)
         let delay = calculate_delay(policy, attempt, None);
         // With jitter, actual delay could be up to (1 + jitter) * base
-        let max_delay_nanos = (delay.as_nanos() as f64 * (1.0 + policy.jitter)) as u64;
+        let max_delay_nanos = clamp_nanos_f64(delay.as_nanos() as f64 * (1.0 + policy.jitter));
         total += Duration::from_nanos(max_delay_nanos);
     }
     total

@@ -501,27 +501,48 @@ fn mutation_supervision_restart(harness: &mut MetaHarness) {
     harness.oracles.supervision.on_restart(actor(201), 3, now);
 }
 
-fn baseline_actor_leak(harness: &mut MetaHarness) {
+fn baseline_mailbox_capacity(harness: &mut MetaHarness) {
     let now = harness.now();
-    let region = harness.next_region();
-    let actor_id = actor(1);
-
-    harness.oracles.actor_leak.on_spawn(actor_id, region, now);
-    harness.oracles.actor_leak.on_stop(actor_id, now);
-    harness.oracles.actor_leak.on_region_close(region, now);
+    harness
+        .oracles
+        .mailbox
+        .configure_mailbox(actor(300), 2, false);
+    harness.oracles.mailbox.on_send(actor(300), now);
+    harness.oracles.mailbox.on_send(actor(300), now);
 }
 
-fn mutation_actor_leak(harness: &mut MetaHarness) {
+fn mutation_mailbox_capacity(harness: &mut MetaHarness) {
     let now = harness.now();
-    let region = harness.next_region();
-    let actor_id = actor(1);
-
-    harness.oracles.actor_leak.on_spawn(actor_id, region, now);
-    harness.oracles.actor_leak.on_region_close(region, now);
+    harness
+        .oracles
+        .mailbox
+        .configure_mailbox(actor(300), 2, false);
+    harness.oracles.mailbox.on_send(actor(300), now);
+    harness.oracles.mailbox.on_send(actor(300), now);
+    harness.oracles.mailbox.on_send(actor(300), now);
 }
 
-fn baseline_supervision_restart(harness: &mut MetaHarness) {
-    let now = harness.now();
+/// Maps an oracle violation to its invariant name.
+#[must_use]
+pub fn invariant_from_violation(violation: &OracleViolation) -> &'static str {
+    match violation {
+        OracleViolation::TaskLeak(_) => INVARIANT_TASK_LEAK,
+        OracleViolation::ObligationLeak(_) => INVARIANT_OBLIGATION_LEAK,
+        OracleViolation::Quiescence(_) => INVARIANT_QUIESCENCE,
+        OracleViolation::LoserDrain(_) => INVARIANT_LOSER_DRAIN,
+        OracleViolation::Finalizer(_) => INVARIANT_FINALIZER,
+        OracleViolation::RegionTree(_) => INVARIANT_REGION_TREE,
+        OracleViolation::AmbientAuthority(_) => INVARIANT_AMBIENT_AUTHORITY,
+        OracleViolation::DeadlineMonotone(_) => INVARIANT_DEADLINE_MONOTONE,
+        OracleViolation::CancellationProtocol(_) => INVARIANT_CANCELLATION_PROTOCOL,
+        OracleViolation::ActorLeak(_) => INVARIANT_ACTOR_LEAK,
+        OracleViolation::Supervision(_) => INVARIANT_SUPERVISION,
+        OracleViolation::Mailbox(_) => INVARIANT_MAILBOX,
+    }
+}
+
+#[cfg(test)]
+mod tests {
     use super::*;
     use std::collections::HashSet;
 
