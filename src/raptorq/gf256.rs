@@ -631,6 +631,18 @@ mod tests {
     }
 
     #[test]
+    fn mul_slice_large_inputs() {
+        // Exercise the `mul_with_table_wide` path (>= MUL_TABLE_THRESHOLD bytes).
+        const LEN: usize = 64 + 7; // 71 bytes: crosses the 64-byte threshold
+        let original: Vec<u8> = (0..LEN).map(|i| (i.wrapping_mul(37)) as u8).collect();
+        let c = Gf256(13);
+        let expected: Vec<u8> = original.iter().map(|&s| (Gf256(s) * c).0).collect();
+        let mut data = original.clone();
+        gf256_mul_slice(&mut data, c);
+        assert_eq!(data, expected);
+    }
+
+    #[test]
     fn addmul_slice_correctness() {
         let src = vec![1u8, 2, 3, 0, 255];
         let c = Gf256(7);

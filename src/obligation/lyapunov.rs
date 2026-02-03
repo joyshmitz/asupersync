@@ -148,13 +148,17 @@ impl PotentialWeights {
         }
     }
 
-    /// Validates that all weights are non-negative.
+    /// Validates that all weights are finite and non-negative.
     #[must_use]
     pub fn is_valid(&self) -> bool {
         self.w_tasks >= 0.0
+            && self.w_tasks.is_finite()
             && self.w_obligation_age >= 0.0
+            && self.w_obligation_age.is_finite()
             && self.w_draining_regions >= 0.0
+            && self.w_draining_regions.is_finite()
             && self.w_deadline_pressure >= 0.0
+            && self.w_deadline_pressure.is_finite()
     }
 }
 

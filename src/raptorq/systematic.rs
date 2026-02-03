@@ -555,7 +555,7 @@ fn build_hdpc_rows(matrix: &mut ConstraintMatrix, params: &SystematicParams, _se
     if w > 0 {
         let last_col = w - 1;
         for i in 0..h {
-            mt[i * w + last_col] = Gf256::ALPHA.pow((i & 0xFF) as u8);
+            mt[i * w + last_col] = Gf256::ALPHA.pow((i % 255) as u8);
         }
     }
 
@@ -567,7 +567,7 @@ fn build_hdpc_rows(matrix: &mut ConstraintMatrix, params: &SystematicParams, _se
             for t in 0..=r {
                 let mt_val = mt[t * w + c];
                 if !mt_val.is_zero() {
-                    let gamma_coeff = Gf256::ALPHA.pow(((r - t) & 0xFF) as u8);
+                    let gamma_coeff = Gf256::ALPHA.pow(((r - t) % 255) as u8);
                     val += gamma_coeff * mt_val;
                 }
             }
