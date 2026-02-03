@@ -155,6 +155,29 @@ impl BudgetEffect {
         has_deadline: false,
         parallelism: 1,
     };
+
+    /// Returns true if this effect is no worse than `before`.
+    ///
+    /// "No worse" means:
+    /// - does not remove a deadline
+    /// - does not increase the minimum polls required
+    /// - does not increase (or unbound) the maximum polls when previously bounded
+    #[must_use]
+    pub fn is_not_worse_than(self, before: Self) -> bool {
+        if before.has_deadline && !self.has_deadline {
+            return false;
+        }
+        if self.min_polls > before.min_polls {
+            return false;
+        }
+        if let Some(max_before) = before.max_polls {
+            match self.max_polls {
+                Some(max_after) if max_after <= max_before => {}
+                _ => return false,
+            }
+        }
+        true
+    }
 }
 
 impl fmt::Display for BudgetEffect {
@@ -520,6 +543,31 @@ impl<'a> SideConditionChecker<'a> {
         self.cancel_safe(before) && self.cancel_safe(after)
     }
 
+    /// Check if a rewrite preserves budget monotonicity.
+    #[must_use]
+    pub fn rewrite_preserves_budget(&self, before: PlanId, after: PlanId) -> bool {
+        let Some(before) = self.analysis.get(before) else {
+            return false;
+        };
+        let Some(after) = self.analysis.get(after) else {
+            return false;
+        };
+        after.budget.is_not_worse_than(before.budget)
+    }
+
+    /// Check whether all children are pairwise independent.
+    #[must_use]
+    pub fn children_pairwise_independent(&self, children: &[PlanId]) -> bool {
+        for (idx, a) in children.iter().enumerate() {
+            for b in children.iter().skip(idx + 1) {
+                if !self.are_independent(*a, *b) {
+                    return false;
+                }
+            }
+        }
+        true
+    }
+
     /// Collect all node ids reachable from a given node.
     fn reachable(&self, id: PlanId) -> Vec<usize> {
         let mut visited = Vec::new();
@@ -710,6 +758,40 @@ mod tests {
         let checker = SideConditionChecker::new(&dag);
         assert!(checker.rewrite_preserves_obligations(a, b));
         assert!(checker.rewrite_preserves_cancel(a, b));
+    }
+
+    #[test]
+    fn budget_monotonicity_rejects_unbounded_after() {
+        let before = BudgetEffect {
+            min_polls: 2,
+            max_polls: Some(10),
+            has_deadline: true,
+            parallelism: 2,
+        };
+        let after = BudgetEffect {
+            min_polls: 1,
+            max_polls: None,
+            has_deadline: true,
+            parallelism: 1,
+        };
+        assert!(!after.is_not_worse_than(before));
+    }
+
+    #[test]
+    fn budget_monotonicity_accepts_tighter_deadline() {
+        let before = BudgetEffect {
+            min_polls: 5,
+            max_polls: Some(10),
+            has_deadline: false,
+            parallelism: 2,
+        };
+        let after = BudgetEffect {
+            min_polls: 4,
+            max_polls: Some(8),
+            has_deadline: true,
+            parallelism: 1,
+        };
+        assert!(after.is_not_worse_than(before));
     }
 
     // ---- Summary ----
