@@ -149,39 +149,21 @@ impl ThreeLaneScheduler {
 
     /// Injects a task into the cancel lane for cross-thread wakeup.
     ///
-    /// Uses `wake_state.notify()` for centralized deduplication, BUT always
-    /// injects into the cancel lane to ensure priority promotion.
-    ///
-    /// If a task is already scheduled in the Ready or Timed lane, `notify()`
-    /// will return false. However, since cancellation is higher priority,
-    /// we must ensure it gets into the Cancel lane.
-    ///
-    /// This may result in the task being in multiple lanes (e.g., Ready and Cancel),
-    /// or multiple times in the Cancel lane. This is safe because `execute()`
-    /// handles double-execution via `state.remove_stored_future()`.
+    /// Uses `wake_state.notify()` for centralized deduplication.
+    /// If the task is already scheduled, this is a no-op.
+    /// If the task record doesn't exist (e.g., in tests), allows injection.
     pub fn inject_cancel(&self, task: TaskId, priority: u8) {
-        // Always inject if the task exists (or if we want to support test behavior
-        // where tasks might not exist in state but are injected).
-        // The original code allowed injection if task didn't exist (is_none_or).
-        // We preserve that behavior implicitly if we just check exists or if we
-        // follow the original logic's intent.
-        // Actually, looking at original: `is_none_or` meant "if None OR (Some and notify)".
-        // If None, it returned true.
-        // So we should inject if None OR Some.
-        // For Some, we don't care about notify result.
-
-        if let Some(record) = self
-            .state
-            .lock()
-            .expect("runtime state lock poisoned")
-            .tasks
-            .get(task.arena_index())
-        {
-            record.wake_state.notify(); // Attempt notify, ignore result
+        let should_schedule = {
+            let state = self.state.lock().expect("runtime state lock poisoned");
+            state
+                .tasks
+                .get(task.arena_index())
+                .is_none_or(|record| record.wake_state.notify())
+        };
+        if should_schedule {
+            self.global.inject_cancel(task, priority);
+            self.wake_one();
         }
-
-        self.global.inject_cancel(task, priority);
-        self.wake_one();
     }
 
     /// Injects a task into the timed lane for cross-thread wakeup.

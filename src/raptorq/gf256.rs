@@ -254,18 +254,47 @@ impl std::ops::MulAssign for Gf256 {
 
 /// XOR `src` into `dst` element-wise: `dst[i] ^= src[i]`.
 ///
+/// Uses 8-byte-wide XOR via `u64` for throughput on aligned bulk data.
+///
 /// # Panics
 ///
 /// Panics if `src.len() != dst.len()`.
 #[inline]
 pub fn gf256_add_slice(dst: &mut [u8], src: &[u8]) {
     assert_eq!(dst.len(), src.len(), "slice length mismatch");
-    for (d, s) in dst.iter_mut().zip(src.iter()) {
+    let mut d_chunks = dst.chunks_exact_mut(8);
+    let mut s_chunks = src.chunks_exact(8);
+    for (d_chunk, s_chunk) in d_chunks.by_ref().zip(s_chunks.by_ref()) {
+        let d_arr: [u8; 8] = d_chunk.try_into().expect("8 bytes");
+        let s_arr: [u8; 8] = s_chunk.try_into().expect("8 bytes");
+        let result = u64::from_ne_bytes(d_arr) ^ u64::from_ne_bytes(s_arr);
+        d_chunk.copy_from_slice(&result.to_ne_bytes());
+    }
+    for (d, s) in d_chunks.into_remainder().iter_mut().zip(s_chunks.remainder()) {
         *d ^= s;
     }
 }
 
+/// Minimum slice length to amortise building a 256-byte multiplication table.
+const MUL_TABLE_THRESHOLD: usize = 256;
+
+/// Build a 256-entry lookup table: `table[x] = x * c` in GF(256).
+///
+/// `log_c` must be `LOG[c]` for a nonzero scalar `c`.
+fn build_mul_table(log_c: usize) -> [u8; 256] {
+    let mut table = [0u8; 256];
+    let mut i = 1usize;
+    while i <= 255 {
+        table[i] = EXP[LOG[i] as usize + log_c];
+        i += 1;
+    }
+    table
+}
+
 /// Multiply every element of `dst` by scalar `c` in GF(256).
+///
+/// For slices >= `MUL_TABLE_THRESHOLD` bytes, a pre-built 256-entry table
+/// replaces per-element branch+double-lookup with a single table lookup.
 ///
 /// If `c` is zero, the entire slice is zeroed. If `c` is one, this is a no-op.
 #[inline]
@@ -278,16 +307,59 @@ pub fn gf256_mul_slice(dst: &mut [u8], c: Gf256) {
         return;
     }
     let log_c = LOG[c.0 as usize] as usize;
-    for d in dst.iter_mut() {
-        if *d != 0 {
-            *d = EXP[LOG[*d as usize] as usize + log_c];
+    if dst.len() >= MUL_TABLE_THRESHOLD {
+        let table = build_mul_table(log_c);
+        for d in dst.iter_mut() {
+            *d = table[*d as usize];
         }
+    } else {
+        for d in dst.iter_mut() {
+            if *d != 0 {
+                *d = EXP[LOG[*d as usize] as usize + log_c];
+            }
+        }
+    }
+}
+
+/// Inner loop for `gf256_addmul_slice`: batch 8 table lookups, then wide-XOR
+/// the results into `dst` via `u64`.
+///
+/// All operations are safe; the wide path uses `chunks_exact_mut(8)` +
+/// `u64::from_ne_bytes` instead of pointer casts.
+fn addmul_with_table_wide(dst: &mut [u8], src: &[u8], table: &[u8; 256]) {
+    let len = dst.len().min(src.len());
+    let chunks = len / 8;
+    let remainder = len % 8;
+
+    for i in 0..chunks {
+        let base = i * 8;
+        let s = &src[base..base + 8];
+        let t = [
+            table[s[0] as usize],
+            table[s[1] as usize],
+            table[s[2] as usize],
+            table[s[3] as usize],
+            table[s[4] as usize],
+            table[s[5] as usize],
+            table[s[6] as usize],
+            table[s[7] as usize],
+        ];
+        let d_arr: [u8; 8] = dst[base..base + 8].try_into().expect("8 bytes");
+        let result = u64::from_ne_bytes(d_arr) ^ u64::from_ne_bytes(t);
+        dst[base..base + 8].copy_from_slice(&result.to_ne_bytes());
+    }
+    let tail_start = chunks * 8;
+    for j in 0..remainder {
+        dst[tail_start + j] ^= table[src[tail_start + j] as usize];
     }
 }
 
 /// Multiply-accumulate: `dst[i] += c * src[i]` in GF(256).
 ///
-/// Equivalent to `gf256_add_slice(dst, &(c * src))` but avoids allocation.
+/// For slices >= 64 bytes the hot path builds a 256-entry multiplication
+/// table and processes 8 bytes at a time via `u64` wide-XOR
+/// (`addmul_with_table_wide`). Smaller slices fall back to scalar
+/// log/exp lookups.
 ///
 /// # Panics
 ///
@@ -306,13 +378,8 @@ pub fn gf256_addmul_slice(dst: &mut [u8], src: &[u8], c: Gf256) {
     }
     let log_c = LOG[c.0 as usize] as usize;
     if src.len() >= ADDMUL_TABLE_THRESHOLD {
-        let mut table = [0u8; 256];
-        for i in 1..=255usize {
-            table[i] = EXP[LOG[i] as usize + log_c];
-        }
-        for (d, s) in dst.iter_mut().zip(src.iter()) {
-            *d ^= table[*s as usize];
-        }
+        let table = build_mul_table(log_c);
+        addmul_with_table_wide(dst, src, &table);
         return;
     }
     for (d, s) in dst.iter_mut().zip(src.iter()) {

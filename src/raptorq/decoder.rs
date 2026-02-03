@@ -838,6 +838,9 @@ impl InactivationDecoder {
     /// Generate the equation (columns + coefficients) for a repair symbol.
     ///
     /// This reconstructs the LT encoding pattern for the given ESI.
+    /// Must exactly mirror `SystematicEncoder::repair_symbol_with_degree`:
+    /// degree is capped to L and indices are rejection-sampled without
+    /// replacement so the RNG state stays in sync.
     #[must_use]
     pub fn repair_equation(&self, esi: u32) -> (Vec<usize>, Vec<Gf256>) {
         let l = self.params.l;
@@ -849,12 +852,17 @@ impl InactivationDecoder {
         let mut rng = DetRng::new(sym_seed);
 
         let degree = self.soliton.sample(rng.next_u64() as u32);
+        let capped_degree = degree.min(l);
 
-        let mut columns = Vec::with_capacity(degree);
-        let mut coefficients = Vec::with_capacity(degree);
+        let mut columns = Vec::with_capacity(capped_degree);
+        let mut coefficients = Vec::with_capacity(capped_degree);
 
-        for _ in 0..degree {
-            let idx = rng.next_usize(l);
+        for _ in 0..capped_degree {
+            let mut idx = rng.next_usize(l);
+            // Rejection-sample to avoid duplicates (matches encoder exactly).
+            while columns.contains(&idx) {
+                idx = rng.next_usize(l);
+            }
             columns.push(idx);
             coefficients.push(Gf256::ONE); // XOR-based LT uses coefficient 1
         }

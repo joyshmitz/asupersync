@@ -97,44 +97,78 @@ impl SystematicParams {
 
 /// Compute S (LDPC symbol count) for given K.
 ///
-/// Uses a simplified formula inspired by RFC 6330 Table 2:
-/// S = max(1, ceil(0.01 * K) + X) where X provides minimum LDPC density.
+/// S must be **prime** so that the LDPC circulant step sizes are coprime
+/// with S, guaranteeing that 3 consecutive positions modulo S are always
+/// distinct and producing linearly independent rows. RFC 6330 Table 2
+/// always picks S as a prime >= 7.
 fn compute_s(k: usize) -> usize {
-    let base = k.div_ceil(100);
-    // Ensure minimum LDPC coverage
-    let x = if k <= 8 {
-        2
-    } else if k <= 64 {
-        3
-    } else {
-        4
-    };
-    (base + x).max(2)
+    let target = k.div_ceil(100)
+        + if k <= 40 {
+            6
+        } else if k <= 200 {
+            8
+        } else {
+            10
+        };
+    next_prime_gte(target.max(7))
 }
 
 /// Compute H (HDPC symbol count) for given K.
 ///
-/// H ≈ ceil(sqrt(K)) provides half-distance parity coverage.
+/// H >= ceil(sqrt(K)) provides half-distance parity coverage. The HDPC
+/// identity block in the constraint matrix has size H, so H must be large
+/// enough for GAMMA x MT to produce H independent rows. Minimum of 3.
 fn compute_h(k: usize) -> usize {
-    fn ceil_sqrt(value: usize) -> usize {
-        if value <= 1 {
-            return value;
-        }
-        let target = value as u128;
-        let mut lo = 1u128;
-        let mut hi = target;
-        while lo < hi {
-            let mid = u128::midpoint(lo, hi);
-            if mid * mid < target {
-                lo = mid + 1;
-            } else {
-                hi = mid;
-            }
-        }
-        lo as usize
-    }
+    ceil_isqrt(k).max(3)
+}
 
-    ceil_sqrt(k).max(1)
+/// Integer ceiling square root.
+fn ceil_isqrt(value: usize) -> usize {
+    if value <= 1 {
+        return value;
+    }
+    let target = value as u128;
+    let mut lo = 1u128;
+    let mut hi = target;
+    while lo < hi {
+        let mid = u128::midpoint(lo, hi);
+        if mid * mid < target {
+            lo = mid + 1;
+        } else {
+            hi = mid;
+        }
+    }
+    lo as usize
+}
+
+/// Simple primality test (sufficient for our small parameter range).
+const fn is_prime(n: usize) -> bool {
+    if n < 2 {
+        return false;
+    }
+    if n < 4 {
+        return true;
+    }
+    if n % 2 == 0 || n % 3 == 0 {
+        return false;
+    }
+    let mut i = 5;
+    while i * i <= n {
+        if n % i == 0 || n % (i + 2) == 0 {
+            return false;
+        }
+        i += 6;
+    }
+    true
+}
+
+/// Smallest prime >= n.
+fn next_prime_gte(n: usize) -> usize {
+    let mut candidate = n.max(2);
+    while !is_prime(candidate) {
+        candidate += 1;
+    }
+    candidate
 }
 
 // ============================================================================
@@ -487,32 +521,27 @@ fn build_ldpc_rows(matrix: &mut ConstraintMatrix, params: &SystematicParams, _se
 ///
 /// RFC 6330 Section 5.3.3.3: HDPC pre-coding relationships.
 ///
-/// The HDPC matrix uses the RFC 6330 Rand function to determine which
-/// intermediate symbols each HDPC row connects to, plus a Vandermonde-like
-/// structure for the last column.
+/// The HDPC constraint is: GAMMA x MT x C[0..W-1] + C[W..W+H-1] = 0
 ///
-/// MT[i,j] for j = 0..K+S-2:
-///   = 1 if i = Rand[j+1, 6, H] or i = (Rand[j+1, 6, H] + Rand[j+1, 7, H-1] + 1) % H
-///   = 0 otherwise
-///
-/// MT[i, K+S-1] = alpha^i (Vandermonde column for last position)
+/// Where:
+/// - MT is an H x W matrix built from the RFC 6330 Rand function
+/// - GAMMA is an H x H lower-triangular matrix with GAMMA[i][j] = alpha^(i-j)
+/// - Each HDPC row r also has a 1 in column W+r (PI symbol identity block)
 fn build_hdpc_rows(matrix: &mut ConstraintMatrix, params: &SystematicParams, _seed: u64) {
     use crate::raptorq::rfc6330::rand;
 
     let s = params.s;
     let h = params.h;
-    let k = params.k;
+    let w = params.w;
 
     if h == 0 {
         return;
     }
 
-    // Build MT matrix entries using RFC 6330 Rand function
-    // MT is H x (K + S) matrix
-    let k_plus_s = k + s;
+    // Step 1: Build MT matrix (H x W) in a temporary buffer.
+    let mut mt = vec![Gf256::ZERO; h * w];
 
-    for j in 0..k_plus_s.saturating_sub(1) {
-        // RFC 6330: MT[i,j] = 1 if conditions are met
+    for j in 0..w.saturating_sub(1) {
         let rand1 = rand((j + 1) as u32, 6, h as u32) as usize;
         let rand2 = if h > 1 {
             rand((j + 1) as u32, 7, (h - 1) as u32) as usize
@@ -521,31 +550,44 @@ fn build_hdpc_rows(matrix: &mut ConstraintMatrix, params: &SystematicParams, _se
         };
         let i2 = (rand1 + rand2 + 1) % h;
 
-        // Set MT[rand1, j] = 1
-        let row1 = s + rand1;
-        matrix.add_assign(row1, j, Gf256::ONE);
-
-        // Set MT[i2, j] = 1 (if different from rand1)
+        mt[rand1 * w + j] += Gf256::ONE;
         if i2 != rand1 {
-            let row2 = s + i2;
-            matrix.add_assign(row2, j, Gf256::ONE);
+            mt[i2 * w + j] += Gf256::ONE;
         }
     }
 
-    // Last column: MT[i, K+S-1] = alpha^i (Vandermonde column)
-    if k_plus_s > 0 {
-        let last_col = k_plus_s - 1;
+    // Last column: MT[i, W-1] = alpha^i (Vandermonde column)
+    if w > 0 {
+        let last_col = w - 1;
         for i in 0..h {
-            let row = s + i;
-            let coeff = Gf256::ALPHA.pow((i & 0xFF) as u8);
-            matrix.set(row, last_col, coeff);
+            mt[i * w + last_col] = Gf256::ALPHA.pow((i & 0xFF) as u8);
         }
     }
 
-    // Note: RFC 6330 also multiplies by GAMMA matrix, but for our simplified
-    // implementation we use the MT matrix directly. The GAMMA matrix provides
-    // additional mixing but the MT structure alone provides good coverage
-    // for typical use cases.
+    // Step 2: Compute GAMMA x MT and write into the constraint matrix.
+    // GAMMA[i][j] = alpha^(i-j) for j <= i, 0 otherwise (lower triangular).
+    for r in 0..h {
+        for c in 0..w {
+            let mut val = Gf256::ZERO;
+            for t in 0..=r {
+                let mt_val = mt[t * w + c];
+                if !mt_val.is_zero() {
+                    let gamma_coeff = Gf256::ALPHA.pow(((r - t) & 0xFF) as u8);
+                    val += gamma_coeff * mt_val;
+                }
+            }
+            if !val.is_zero() {
+                matrix.set(s + r, c, val);
+            }
+        }
+    }
+
+    // Step 3: PI symbol identity block -- column W+r for HDPC row r.
+    // In GF(2^8), -1 = 1, so the constraint GAMMA*MT*C + C_PI = 0
+    // means column W+r gets coefficient 1.
+    for r in 0..h {
+        matrix.set(s + r, w + r, Gf256::ONE);
+    }
 }
 
 /// Build LT constraint rows for systematic symbols (rows S+H..S+H+K).
@@ -1057,8 +1099,9 @@ mod tests {
     fn params_small() {
         let p = SystematicParams::for_source_block(4, 64);
         assert_eq!(p.k, 4);
-        assert!(p.s >= 2);
-        assert!(p.h >= 1);
+        assert!(p.s >= 7, "S must be prime >= 7, got {}", p.s);
+        assert!(is_prime(p.s), "S={} must be prime", p.s);
+        assert!(p.h >= 3, "H must be >= 3, got {}", p.h);
         assert_eq!(p.l, p.k + p.s + p.h);
     }
 
@@ -1066,8 +1109,9 @@ mod tests {
     fn params_medium() {
         let p = SystematicParams::for_source_block(100, 256);
         assert_eq!(p.k, 100);
-        assert!(p.s >= 3);
-        assert!(p.h >= 10);
+        assert!(p.s >= 7, "S must be >= 7, got {}", p.s);
+        assert!(is_prime(p.s), "S={} must be prime", p.s);
+        assert!(p.h >= 10, "H must be >= 10, got {}", p.h);
         assert_eq!(p.l, p.k + p.s + p.h);
     }
 
