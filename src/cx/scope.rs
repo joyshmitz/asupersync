@@ -98,7 +98,7 @@
 
 use crate::channel::oneshot;
 use crate::combinator::{Either, Select};
-use crate::cx::Cx;
+use crate::cx::{cap, Cx};
 use crate::record::{AdmissionError, TaskRecord};
 use crate::runtime::task_handle::{JoinError, TaskHandle};
 use crate::runtime::{RuntimeState, SpawnError, StoredTask};
@@ -284,14 +284,15 @@ impl<P: Policy> Scope<'_, P> {
     ///     });
     /// }
     /// ```
-    pub fn spawn<F, Fut>(
+    pub fn spawn<F, Fut, Caps>(
         &self,
         state: &mut RuntimeState,
-        cx: &Cx,
+        cx: &Cx<Caps>,
         f: F,
     ) -> Result<(TaskHandle<Fut::Output>, StoredTask), SpawnError>
     where
-        F: FnOnce(Cx) -> Fut + Send + 'static,
+        Caps: cap::HasSpawn,
+        F: FnOnce(Cx<Caps>) -> Fut + Send + 'static,
         Fut: Future + Send + 'static,
         Fut::Output: Send + 'static,
     {
@@ -330,7 +331,7 @@ impl<P: Policy> Scope<'_, P> {
         let child_observability = cx.child_observability(self.region, task_id);
         let child_entropy = cx.child_entropy(task_id);
         let io_driver = state.io_driver_handle();
-        let child_cx = Cx::new_with_observability(
+        let child_cx = Cx::<Caps>::new_with_observability(
             self.region,
             task_id,
             self.budget,
@@ -340,6 +341,7 @@ impl<P: Policy> Scope<'_, P> {
         )
         .with_blocking_pool_handle(cx.blocking_pool_handle());
         child_cx.set_trace_buffer(state.trace_handle());
+        let child_cx_full = child_cx.retype::<cap::All>();
 
         // Create the TaskHandle
         let handle = TaskHandle::new(task_id, rx, Arc::downgrade(&child_cx.inner));
@@ -348,11 +350,11 @@ impl<P: Policy> Scope<'_, P> {
         // This links the user-facing Cx to the runtime's TaskRecord
         if let Some(record) = state.tasks.get_mut(task_id.arena_index()) {
             record.set_cx_inner(child_cx.inner.clone());
-            record.set_cx(child_cx.clone());
+            record.set_cx(child_cx_full.clone());
         }
 
         // Capture child_cx for result sending
-        let cx_for_send = child_cx.clone();
+        let cx_for_send = child_cx_full.clone();
 
         // Instantiate the future with the child context.
         // We use a guard to rollback task creation if the factory panics.
@@ -443,14 +445,15 @@ impl<P: Policy> Scope<'_, P> {
     /// })?;
     /// ```
     #[inline]
-    pub fn spawn_task<F, Fut>(
+    pub fn spawn_task<F, Fut, Caps>(
         &self,
         state: &mut RuntimeState,
-        cx: &Cx,
+        cx: &Cx<Caps>,
         f: F,
     ) -> Result<(TaskHandle<Fut::Output>, StoredTask), SpawnError>
     where
-        F: FnOnce(Cx) -> Fut + Send + 'static,
+        Caps: cap::HasSpawn,
+        F: FnOnce(Cx<Caps>) -> Fut + Send + 'static,
         Fut: Future + Send + 'static,
         Fut::Output: Send + 'static,
     {
@@ -483,14 +486,15 @@ impl<P: Policy> Scope<'_, P> {
     ///
     /// let result = handle.join(&cx).await?;
     /// ```
-    pub fn spawn_registered<F, Fut>(
+    pub fn spawn_registered<F, Fut, Caps>(
         &self,
         state: &mut RuntimeState,
-        cx: &Cx,
+        cx: &Cx<Caps>,
         f: F,
     ) -> Result<TaskHandle<Fut::Output>, SpawnError>
     where
-        F: FnOnce(Cx) -> Fut + Send + 'static,
+        Caps: cap::HasSpawn,
+        F: FnOnce(Cx<Caps>) -> Fut + Send + 'static,
         Fut: Future + Send + 'static,
         Fut::Output: Send + 'static,
     {
@@ -538,14 +542,15 @@ impl<P: Policy> Scope<'_, P> {
     ///     *counter_clone.borrow_mut() += 1;
     /// });
     /// ```
-    pub fn spawn_local<F, Fut>(
+    pub fn spawn_local<F, Fut, Caps>(
         &self,
         state: &mut RuntimeState,
-        _cx: &Cx,
+        _cx: &Cx<Caps>,
         f: F,
     ) -> Result<(TaskHandle<Fut::Output>, StoredTask), SpawnError>
     where
-        F: FnOnce(Cx) -> Fut + 'static,
+        Caps: cap::HasSpawn,
+        F: FnOnce(Cx<Caps>) -> Fut + 'static,
         Fut: Future + 'static,
         Fut::Output: Send + 'static,
     {
@@ -553,11 +558,13 @@ impl<P: Policy> Scope<'_, P> {
         use crate::runtime::task_handle::JoinError;
 
         // Use the infrastructure helper to create the record, channel, etc.
-        let (task_id, handle, child_cx, result_tx) =
+        let (task_id, handle, child_cx_full, result_tx) =
             state.create_task_infrastructure(self.region, self.budget)?;
 
+        let child_cx = child_cx_full.retype::<Caps>();
+
         // Capture child_cx for result sending
-        let cx_for_send = child_cx.clone();
+        let cx_for_send = child_cx_full.clone();
 
         // Instantiate the future with the child context.
         // We use a guard to rollback task creation if the factory panics.
@@ -680,14 +687,15 @@ impl<P: Policy> Scope<'_, P> {
     ///
     /// In Phase 0 (single-threaded), blocking operations run inline.
     /// A proper blocking pool is implemented in Phase 1+.
-    pub fn spawn_blocking<F, R>(
+    pub fn spawn_blocking<F, R, Caps>(
         &self,
         state: &mut RuntimeState,
-        cx: &Cx, // Parent Cx
+        cx: &Cx<Caps>, // Parent Cx
         f: F,
     ) -> Result<(TaskHandle<R>, StoredTask), SpawnError>
     where
-        F: FnOnce(Cx) -> R + Send + 'static,
+        Caps: cap::HasSpawn,
+        F: FnOnce(Cx<Caps>) -> R + Send + 'static,
         R: Send + 'static,
     {
         // Create oneshot channel for result delivery
@@ -710,7 +718,7 @@ impl<P: Policy> Scope<'_, P> {
         let child_observability = cx.child_observability(self.region, task_id);
         let child_entropy = cx.child_entropy(task_id);
         let io_driver = state.io_driver_handle();
-        let child_cx = Cx::new_with_observability(
+        let child_cx = Cx::<Caps>::new_with_observability(
             self.region,
             task_id,
             self.budget,
@@ -719,6 +727,7 @@ impl<P: Policy> Scope<'_, P> {
             Some(child_entropy),
         );
         child_cx.set_trace_buffer(state.trace_handle());
+        let child_cx_full = child_cx.retype::<cap::All>();
 
         // Create the TaskHandle
         let handle = TaskHandle::new(task_id, rx, Arc::downgrade(&child_cx.inner));
@@ -726,11 +735,11 @@ impl<P: Policy> Scope<'_, P> {
         // Set the shared inner state in the TaskRecord
         if let Some(record) = state.tasks.get_mut(task_id.arena_index()) {
             record.set_cx_inner(child_cx.inner.clone());
-            record.set_cx(child_cx.clone());
+            record.set_cx(child_cx_full.clone());
         }
 
         // Capture child_cx for result sending
-        let cx_for_send = child_cx.clone();
+        let cx_for_send = child_cx_full.clone();
 
         // For Phase 0, we run blocking code as an async task
         // In Phase 1+, this would spawn on a blocking thread pool

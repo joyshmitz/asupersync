@@ -65,34 +65,10 @@ impl<const SPAWN: bool, const TIME: bool, const RANDOM: bool, const IO: bool> Ha
 /// Marker: subset relation between capability sets.
 ///
 /// This encodes "A is a subset of B" at the type level.
+/// Concrete impls are provided for common cases; the full
+/// const-generic version requires `generic_const_exprs` (nightly).
 pub trait SubsetOf<Super> {}
 
-struct Assert<const CHECK: bool>;
-trait IsTrue {}
-impl IsTrue for Assert<true> {}
-
-impl<
-        const SPAWN: bool,
-        const TIME: bool,
-        const RANDOM: bool,
-        const IO: bool,
-        const REMOTE: bool,
-        const SPAWN_SUP: bool,
-        const TIME_SUP: bool,
-        const RANDOM_SUP: bool,
-        const IO_SUP: bool,
-        const REMOTE_SUP: bool,
-    > SubsetOf<CapSet<SPAWN_SUP, TIME_SUP, RANDOM_SUP, IO_SUP, REMOTE_SUP>>
-    for CapSet<SPAWN, TIME, RANDOM, IO, REMOTE>
-where
-    Assert<
-        {
-            (!SPAWN || SPAWN_SUP)
-                && (!TIME || TIME_SUP)
-                && (!RANDOM || RANDOM_SUP)
-                && (!IO || IO_SUP)
-                && (!REMOTE || REMOTE_SUP)
-        },
-    >: IsTrue,
-{
-}
+// All is a superset of everything — `None ⊆ All` and `All ⊆ All`.
+impl SubsetOf<All> for All {}
+impl SubsetOf<All> for None {}

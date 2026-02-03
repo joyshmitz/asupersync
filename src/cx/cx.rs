@@ -1339,7 +1339,10 @@ impl<Caps> Cx<Caps> {
 
     /// Returns the entropy source for this context.
     #[must_use]
-    pub fn entropy(&self) -> &dyn EntropySource {
+    pub fn entropy(&self) -> &dyn EntropySource
+    where
+        Caps: cap::HasRandom,
+    {
         self.entropy.as_ref()
     }
 
@@ -1350,7 +1353,10 @@ impl<Caps> Cx<Caps> {
 
     /// Generates a random `u64` using the context entropy source.
     #[must_use]
-    pub fn random_u64(&self) -> u64 {
+    pub fn random_u64(&self) -> u64
+    where
+        Caps: cap::HasRandom,
+    {
         let value = self.entropy.next_u64();
         trace!(
             source = self.entropy.source_id(),
@@ -1362,7 +1368,10 @@ impl<Caps> Cx<Caps> {
     }
 
     /// Fills a buffer with random bytes using the context entropy source.
-    pub fn random_bytes(&self, dest: &mut [u8]) {
+    pub fn random_bytes(&self, dest: &mut [u8])
+    where
+        Caps: cap::HasRandom,
+    {
         self.entropy.fill_bytes(dest);
         trace!(
             source = self.entropy.source_id(),
@@ -1374,7 +1383,10 @@ impl<Caps> Cx<Caps> {
 
     /// Generates a random `usize` in `[0, bound)` with rejection sampling.
     #[must_use]
-    pub fn random_usize(&self, bound: usize) -> usize {
+    pub fn random_usize(&self, bound: usize) -> usize
+    where
+        Caps: cap::HasRandom,
+    {
         assert!(bound > 0, "bound must be non-zero");
         let bound_u64 = bound as u64;
         let threshold = u64::MAX - (u64::MAX % bound_u64);
@@ -1388,19 +1400,28 @@ impl<Caps> Cx<Caps> {
 
     /// Generates a random boolean.
     #[must_use]
-    pub fn random_bool(&self) -> bool {
+    pub fn random_bool(&self) -> bool
+    where
+        Caps: cap::HasRandom,
+    {
         self.random_u64() & 1 == 1
     }
 
     /// Generates a random `f64` in `[0, 1)`.
     #[must_use]
     #[allow(clippy::cast_precision_loss)]
-    pub fn random_f64(&self) -> f64 {
+    pub fn random_f64(&self) -> f64
+    where
+        Caps: cap::HasRandom,
+    {
         (self.random_u64() >> 11) as f64 / (1u64 << 53) as f64
     }
 
     /// Shuffles a slice in place using Fisher-Yates.
-    pub fn shuffle<T>(&self, slice: &mut [T]) {
+    pub fn shuffle<T>(&self, slice: &mut [T])
+    where
+        Caps: cap::HasRandom,
+    {
         for i in (1..slice.len()).rev() {
             let j = self.random_usize(i + 1);
             slice.swap(i, j);
@@ -1795,7 +1816,10 @@ impl<Caps> Cx<Caps> {
         &self,
         duration: Duration,
         futures: Vec<Pin<Box<dyn Future<Output = T> + Send>>>,
-    ) -> Result<T, JoinError> {
+    ) -> Result<T, JoinError>
+    where
+        Caps: cap::HasTime,
+    {
         let race_fut = Box::pin(self.race(futures));
         timeout(wall_clock_now(), duration, race_fut)
             .await
@@ -1813,7 +1837,10 @@ impl<Caps> Cx<Caps> {
         &self,
         duration: Duration,
         futures: NamedFutures<T>,
-    ) -> Result<T, JoinError> {
+    ) -> Result<T, JoinError>
+    where
+        Caps: cap::HasTime,
+    {
         let futures: Vec<_> = futures.into_iter().map(|(_, f)| f).collect();
         self.race_timeout(duration, futures).await
     }
@@ -1915,12 +1942,12 @@ impl<Caps> Cx<Caps> {
 ///
 /// On drop, restores the previous `DiagnosticContext` and emits a
 /// span-exit log entry.
-pub struct SpanGuard {
-    cx: Cx,
+pub struct SpanGuard<Caps = cap::All> {
+    cx: Cx<Caps>,
     prev: DiagnosticContext,
 }
 
-impl Drop for SpanGuard {
+impl<Caps> Drop for SpanGuard<Caps> {
     fn drop(&mut self) {
         let name = self
             .cx
