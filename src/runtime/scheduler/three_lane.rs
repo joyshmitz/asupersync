@@ -69,6 +69,8 @@ use std::time::Duration;
 pub type WorkerId = usize;
 
 const DEFAULT_CANCEL_STREAK_LIMIT: usize = 16;
+const SPIN_LIMIT: u32 = 64;
+const YIELD_LIMIT: u32 = 16;
 
 /// Coordination for waking workers.
 #[derive(Debug)]
@@ -218,7 +220,7 @@ pub(crate) fn remove_from_current_local_ready(task: TaskId) -> bool {
 }
 
 pub(crate) fn current_worker_id() -> Option<WorkerId> {
-    CURRENT_WORKER_ID.with(|cell| cell.borrow().clone())
+    CURRENT_WORKER_ID.with(|cell| *cell.borrow())
 }
 
 pub(crate) fn schedule_on_current_local(task: TaskId, priority: u8) -> bool {
@@ -229,8 +231,10 @@ pub(crate) fn schedule_on_current_local(task: TaskId, priority: u8) -> bool {
     // Slow path: O(log n) push to PriorityScheduler BinaryHeap
     CURRENT_LOCAL.with(|cell| {
         if let Some(local) = cell.borrow().as_ref() {
-            let mut guard = local.lock().expect("local scheduler lock poisoned");
-            guard.schedule(task, priority);
+            local
+                .lock()
+                .expect("local scheduler lock poisoned")
+                .schedule(task, priority);
             return true;
         }
         false
@@ -240,8 +244,10 @@ pub(crate) fn schedule_on_current_local(task: TaskId, priority: u8) -> bool {
 pub(crate) fn schedule_cancel_on_current_local(task: TaskId, priority: u8) -> bool {
     CURRENT_LOCAL.with(|cell| {
         if let Some(local) = cell.borrow().as_ref() {
-            let mut guard = local.lock().expect("local scheduler lock poisoned");
-            guard.move_to_cancel_lane(task, priority);
+            local
+                .lock()
+                .expect("local scheduler lock poisoned")
+                .move_to_cancel_lane(task, priority);
             let _ = remove_from_current_local_ready(task);
             return true;
         }
@@ -410,6 +416,7 @@ impl ThreeLaneScheduler {
     }
 
     /// Returns a reference to the global injector.
+    #[must_use]
     pub fn global_injector(&self) -> Arc<GlobalInjector> {
         self.global.clone()
     }
@@ -422,15 +429,15 @@ impl ThreeLaneScheduler {
     pub fn inject_cancel(&self, task: TaskId, priority: u8) {
         let (is_local, pinned_worker) = {
             let state = self.state.lock().expect("runtime state lock poisoned");
-            match state.tasks.get(task.arena_index()) {
-                Some(record) => {
+            state
+                .tasks
+                .get(task.arena_index())
+                .map_or((false, None), |record| {
                     if record.is_local() {
                         record.wake_state.notify();
                     }
                     (record.is_local(), record.pinned_worker())
-                }
-                None => (false, None),
-            }
+                })
         };
 
         if is_local {
@@ -439,8 +446,10 @@ impl ThreeLaneScheduler {
                     if let Some(local_ready) = self.local_ready.get(worker_id) {
                         let _ = remove_from_local_ready(local_ready, task);
                     }
-                    let mut guard = local.lock().expect("local scheduler lock poisoned");
-                    guard.move_to_cancel_lane(task, priority);
+                    local
+                        .lock()
+                        .expect("local scheduler lock poisoned")
+                        .move_to_cancel_lane(task, priority);
                     if let Some(parker) = self.parkers.get(worker_id) {
                         parker.unpark();
                     }
@@ -495,15 +504,18 @@ impl ThreeLaneScheduler {
     pub fn inject_ready(&self, task: TaskId, priority: u8) {
         let (should_schedule, is_local) = {
             let state = self.state.lock().expect("runtime state lock poisoned");
-            match state.tasks.get(task.arena_index()) {
-                Some(record) => (record.wake_state.notify(), record.is_local()),
-                None => (true, false),
-            }
+            state
+                .tasks
+                .get(task.arena_index())
+                .map_or((true, false), |record| {
+                    (record.wake_state.notify(), record.is_local())
+                })
         };
 
-        if is_local {
-            panic!("Attempted to globally inject local task {task:?}. Local tasks must be scheduled on their owner thread.");
-        }
+        assert!(
+            !is_local,
+            "Attempted to globally inject local task {task:?}. Local tasks must be scheduled on their owner thread."
+        );
 
         if should_schedule {
             self.global.inject_ready(task, priority);
@@ -526,10 +538,12 @@ impl ThreeLaneScheduler {
         // Dedup: check wake_state before scheduling anywhere.
         let (should_schedule, is_local) = {
             let state = self.state.lock().expect("runtime state lock poisoned");
-            match state.tasks.get(task.arena_index()) {
-                Some(record) => (record.wake_state.notify(), record.is_local()),
-                None => (true, false),
-            }
+            state
+                .tasks
+                .get(task.arena_index())
+                .map_or((true, false), |record| {
+                    (record.wake_state.notify(), record.is_local())
+                })
         };
 
         if !should_schedule {
@@ -553,8 +567,10 @@ impl ThreeLaneScheduler {
         // Fast path 2: O(log n) push to PriorityScheduler via TLS.
         let scheduled = CURRENT_LOCAL.with(|cell| {
             if let Some(local) = cell.borrow().as_ref() {
-                let mut guard = local.lock().expect("local scheduler lock poisoned");
-                guard.schedule(task, priority);
+                local
+                    .lock()
+                    .expect("local scheduler lock poisoned")
+                    .schedule(task, priority);
                 return true;
             }
             false
@@ -583,10 +599,12 @@ impl ThreeLaneScheduler {
         // Dedup check.
         let (should_schedule, is_local) = {
             let state = self.state.lock().expect("runtime state lock poisoned");
-            match state.tasks.get(task.arena_index()) {
-                Some(record) => (record.wake_state.notify(), record.is_local()),
-                None => (true, false),
-            }
+            state
+                .tasks
+                .get(task.arena_index())
+                .map_or((true, false), |record| {
+                    (record.wake_state.notify(), record.is_local())
+                })
         };
 
         if !should_schedule {
@@ -609,8 +627,10 @@ impl ThreeLaneScheduler {
         // Fast path 2: O(log n) push to PriorityScheduler via TLS.
         let scheduled = CURRENT_LOCAL.with(|cell| {
             if let Some(local) = cell.borrow().as_ref() {
-                let mut guard = local.lock().expect("local scheduler lock poisoned");
-                guard.schedule(task, priority);
+                local
+                    .lock()
+                    .expect("local scheduler lock poisoned")
+                    .schedule(task, priority);
                 return true;
             }
             false
@@ -759,9 +779,6 @@ impl ThreeLaneWorker {
         let _local_ready_guard = ScopedLocalReady::new(Arc::clone(&self.local_ready));
         // Set thread-local worker id for routing pinned local tasks.
         let _worker_guard = ScopedWorkerId::new(self.id);
-
-        const SPIN_LIMIT: u32 = 64;
-        const YIELD_LIMIT: u32 = 16;
 
         while !self.shutdown.load(Ordering::Acquire) {
             if let Some(task) = self.next_task() {
@@ -1090,7 +1107,7 @@ impl ThreeLaneWorker {
                             .expect("runtime state lock poisoned")
                             .tasks
                             .get(task.arena_index())
-                            .is_some_and(|r| r.is_local()),
+                            .is_some_and(crate::record::task::TaskRecord::is_local),
                         "BUG: stole a local (!Send) task {task:?} from another worker's fast_queue"
                     );
                     return Some(task);
@@ -1123,10 +1140,11 @@ impl ThreeLaneWorker {
                                 !state
                                     .tasks
                                     .get(task.arena_index())
-                                    .is_some_and(|r| r.is_local()),
+                                    .is_some_and(crate::record::task::TaskRecord::is_local),
                                 "BUG: stole a local (!Send) task {task:?} from PriorityScheduler"
                             );
                         }
+                        drop(state);
                     }
 
                     // Take the first task to execute
@@ -1369,12 +1387,14 @@ impl ThreeLaneWorker {
                                             "Pinned local waiter {waiter:?} has invalid worker id {worker_id}"
                                         );
                                     }
-                                } else if schedule_local_task(waiter) {
-                                    self.parker.unpark();
                                 } else {
-                                    panic!(
-                                        "Attempted to wake local waiter {waiter:?} without owner worker"
-                                    );
+                                    // Local task without a pinned worker yet.
+                                    // Schedule on the current worker's local queue.
+                                    self.local_ready
+                                        .lock()
+                                        .expect("local_ready lock poisoned")
+                                        .push(waiter);
+                                    self.parker.unpark();
                                 }
                             } else {
                                 // Global waiters are ready tasks.
@@ -3711,5 +3731,164 @@ mod tests {
         let task = TaskId::new_for_test(1, 1);
         let scheduled = schedule_local_task(task);
         assert!(!scheduled, "should fail without TLS");
+    }
+
+    /// When a completing task has a local waiter without a pinned worker,
+    /// the waiter is routed to the current worker's local_ready queue.
+    #[test]
+    fn local_waiter_routes_to_current_worker_local_ready() {
+        let state = Arc::new(Mutex::new(RuntimeState::new()));
+        let region = state
+            .lock()
+            .expect("runtime state lock poisoned")
+            .create_root_region(Budget::INFINITE);
+
+        let task_id = {
+            let mut guard = state.lock().expect("lock");
+            let (id, _) = guard
+                .create_task(region, Budget::INFINITE, async {})
+                .expect("create task");
+            id
+        };
+        let waiter_id = {
+            let mut guard = state.lock().expect("lock");
+            let (id, _) = guard
+                .create_task(region, Budget::INFINITE, async {})
+                .expect("create task");
+            if let Some(record) = guard.tasks.get_mut(id.arena_index()) {
+                record.mark_local();
+            }
+            id
+        };
+
+        {
+            let mut guard = state.lock().expect("lock");
+            if let Some(record) = guard.tasks.get_mut(task_id.arena_index()) {
+                record.add_waiter(waiter_id);
+            }
+        }
+
+        let mut scheduler = ThreeLaneScheduler::new(1, &state);
+        let workers = scheduler.take_workers();
+        let worker = &workers[0];
+        let local_ready = Arc::clone(&worker.local_ready);
+
+        worker.execute(task_id);
+
+        let queued: Vec<TaskId> = local_ready.lock().unwrap().drain(..).collect();
+        assert!(
+            queued.contains(&waiter_id),
+            "local waiter should be routed to current worker's local_ready, got {queued:?}"
+        );
+        assert!(
+            worker.global.pop_ready().is_none(),
+            "local waiter should not be in the global injector"
+        );
+    }
+
+    /// When a completing task has a local waiter pinned to a different worker,
+    /// the waiter is routed to the owner worker's local_ready queue.
+    #[test]
+    fn local_waiter_pinned_routes_to_owner_worker() {
+        let state = Arc::new(Mutex::new(RuntimeState::new()));
+        let region = state
+            .lock()
+            .expect("runtime state lock poisoned")
+            .create_root_region(Budget::INFINITE);
+
+        let task_id = {
+            let mut guard = state.lock().expect("lock");
+            let (id, _) = guard
+                .create_task(region, Budget::INFINITE, async {})
+                .expect("create task");
+            id
+        };
+        let waiter_id = {
+            let mut guard = state.lock().expect("lock");
+            let (id, _) = guard
+                .create_task(region, Budget::INFINITE, async {})
+                .expect("create task");
+            if let Some(record) = guard.tasks.get_mut(id.arena_index()) {
+                record.pin_to_worker(1);
+            }
+            id
+        };
+
+        {
+            let mut guard = state.lock().expect("lock");
+            if let Some(record) = guard.tasks.get_mut(task_id.arena_index()) {
+                record.add_waiter(waiter_id);
+            }
+        }
+
+        let mut scheduler = ThreeLaneScheduler::new(2, &state);
+        let workers = scheduler.take_workers();
+        let worker0 = &workers[0];
+        let worker1_local_ready = Arc::clone(&workers[1].local_ready);
+
+        worker0.execute(task_id);
+
+        let queued: Vec<TaskId> = worker1_local_ready.lock().unwrap().drain(..).collect();
+        assert!(
+            queued.contains(&waiter_id),
+            "local waiter should be routed to owner worker 1, got {queued:?}"
+        );
+        assert!(
+            !worker0.local_ready.lock().unwrap().contains(&waiter_id),
+            "local waiter should NOT be in worker 0's local_ready"
+        );
+        assert!(
+            worker0.global.pop_ready().is_none(),
+            "local waiter should not be in the global injector"
+        );
+    }
+
+    /// Global waiters still go through the global injector (regression).
+    #[test]
+    fn global_waiter_routes_to_global_injector() {
+        let state = Arc::new(Mutex::new(RuntimeState::new()));
+        let region = state
+            .lock()
+            .expect("runtime state lock poisoned")
+            .create_root_region(Budget::INFINITE);
+
+        let task_id = {
+            let mut guard = state.lock().expect("lock");
+            let (id, _) = guard
+                .create_task(region, Budget::INFINITE, async {})
+                .expect("create task");
+            id
+        };
+        let waiter_id = {
+            let mut guard = state.lock().expect("lock");
+            let (id, _) = guard
+                .create_task(region, Budget::INFINITE, async {})
+                .expect("create task");
+            id
+        };
+
+        {
+            let mut guard = state.lock().expect("lock");
+            if let Some(record) = guard.tasks.get_mut(task_id.arena_index()) {
+                record.add_waiter(waiter_id);
+            }
+        }
+
+        let mut scheduler = ThreeLaneScheduler::new(1, &state);
+        let workers = scheduler.take_workers();
+        let worker = &workers[0];
+
+        worker.execute(task_id);
+
+        let popped = worker.global.pop_ready();
+        assert!(
+            popped.is_some(),
+            "global waiter should be in the global injector"
+        );
+        assert_eq!(popped.unwrap().task, waiter_id);
+        assert!(
+            worker.local_ready.lock().unwrap().is_empty(),
+            "global waiter should NOT be in local_ready"
+        );
     }
 }
