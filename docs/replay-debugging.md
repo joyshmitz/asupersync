@@ -81,56 +81,83 @@ Where `H` is a stable 64-bit hash (e.g., SplitMix64 or xxhash64) and
 
 ### Artifact Schema (Repro Manifest)
 
-Artifacts are emitted **only on failure** unless explicitly enabled.
-Artifacts live under `target/test-artifacts/` to keep the repo clean.
+Artifacts are emitted **only on failure** unless explicitly enabled. The
+artifact root is controlled by `ASUPERSYNC_TEST_ARTIFACTS_DIR` so CI and
+local runs can write to stable, deterministic locations.
 
-**Directory layout (deterministic):**
+**Directory layout (current harness):**
 ```
-target/test-artifacts/{test_id}/{seed_hash}/
-  repro.json
-  trace.async
-  stdout.log
-  stderr.log
-  inputs.bin
+$ASUPERSYNC_TEST_ARTIFACTS_DIR/
+  {test_id}/
+    repro_manifest.json
+    event_log.txt
+    failed_assertions.json
+    trace.async          # optional (if captured)
+    inputs.bin           # optional (failing input payload)
+  {test_id}_summary.json  # summary for the latest run
 ```
 
-**Naming rules:**
-- `seed_hash = H(test_seed || test_id)` (stable, no timestamps)
-- `trace.async` is the replay trace file
-- `inputs.bin` (optional) is the failing input payload
+**Notes:**
+- The `test_id` directory is sanitized (non-alphanumeric → `_`).
+- The seed is stored in `repro_manifest.json` (future work may add a seed-hash
+  subdirectory when bd-30pc lands).
 
-**`repro.json` schema (minimum):**
+**`repro_manifest.json` schema (minimum, current):**
 ```json
 {
   "schema_version": 1,
-  "test_id": "cancel_request_drain_finalize",
-  "test_seed": 42,
-  "derived_seeds": {
-    "schedule_seed": 123,
-    "entropy_seed": 456,
-    "fault_seed": 789,
-    "fuzz_seed": 321
-  },
+  "seed": 42,
+  "scenario_id": "cancel_request_drain_finalize",
+  "entropy_seed": 123,
   "config_hash": "sha256:...",
-  "git": { "commit": "abc123", "dirty": false },
-  "runtime": { "lab": true, "trace_schema": 3 },
-  "artifacts": {
-    "trace_file": "trace.async",
-    "stdout_log": "stdout.log",
-    "stderr_log": "stderr.log",
-    "inputs": "inputs.bin"
-  },
-  "repro_command": "ASUPERSYNC_SEED=42 cargo test cancel_request_drain_finalize",
-  "notes": "Failure at event 1042 (see trace)"
+  "trace_fingerprint": "sha256:...",
+  "input_digest": "sha256:...",
+  "oracle_violations": ["loser_drain"],
+  "passed": false,
+  "subsystem": "cancel",
+  "invariant": "request_drain_finalize",
+  "trace_file": "trace.async",
+  "input_file": "inputs.bin",
+  "env_snapshot": [["ASUPERSYNC_SEED","42"]],
+  "phases_executed": ["setup","run","assertions"],
+  "failure_reason": "cancelled completions count mismatch"
 }
 ```
 
 ### Replay Workflow (Required)
 
-1. Load `repro.json`.
+1. Load `repro_manifest.json`.
 2. Verify `schema_version`, `config_hash`, and `trace_schema`.
 3. Re-run with `ASUPERSYNC_SEED` and same inputs (or load `trace.async` directly).
 4. If divergence happens, emit a **divergence artifact** with the first mismatched event.
+
+### Failure Triage + Repro Pipeline (bd-1ex7)
+
+This is the standard failure triage pipeline used across unit, integration,
+and E2E tests. It defines the minimum information needed to reproduce any
+failure without guesswork.
+
+**Failure summary (required):**
+- Emit a structured log entry with `test_id`, `seed`, `subsystem`, `invariant`,
+  and a human-readable `reason`.
+- Use `TestContext::log_failure` so failures show up as:
+  `TEST FAILURE — reproduce with seed 0x{SEED}` plus structured fields.
+
+**Artifacts (required on failure when `ASUPERSYNC_TEST_ARTIFACTS_DIR` is set):**
+- `event_log.txt` (high-signal event timeline)
+- `failed_assertions.json` (all failed assertions)
+- `repro_manifest.json` (canonical repro manifest)
+- `trace.async` (if replay recording enabled)
+- `inputs.bin` (if the failure depends on input bytes)
+
+**Fast local repro workflow:**
+1. Read `seed` + `test_id` from `repro_manifest.json` or the failure summary.
+2. Re-run locally:
+   `ASUPERSYNC_SEED=<seed> ASUPERSYNC_TEST_ARTIFACTS_DIR=target/test-artifacts cargo test <test_id> -- --nocapture`
+3. Inspect trace artifacts (if present):
+   `cargo run --bin asupersync trace info <trace.async>`
+4. If two traces differ, use:
+   `cargo run --bin asupersync trace diff <trace_a> <trace_b>`
 
 ### Deterministic Logging Rules (Reference)
 
