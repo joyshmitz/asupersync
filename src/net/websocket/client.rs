@@ -192,19 +192,22 @@ fn message_from_payload(opcode: Opcode, payload: Bytes) -> Result<Message, WsErr
     }
 }
 
-impl From<Frame> for Message {
-    fn from(frame: Frame) -> Self {
+impl TryFrom<Frame> for Message {
+    type Error = WsError;
+
+    fn try_from(frame: Frame) -> Result<Self, WsError> {
         match frame.opcode {
             Opcode::Text => {
-                let text = String::from_utf8_lossy(&frame.payload).into_owned();
-                Self::Text(text)
+                let text = std::str::from_utf8(frame.payload.as_ref())
+                    .map_err(|_| WsError::InvalidUtf8)?;
+                Ok(Self::Text(text.to_owned()))
             }
-            Opcode::Binary | Opcode::Continuation => Self::Binary(frame.payload), // Simplified
-            Opcode::Ping => Self::Ping(frame.payload),
-            Opcode::Pong => Self::Pong(frame.payload),
+            Opcode::Binary | Opcode::Continuation => Ok(Self::Binary(frame.payload)),
+            Opcode::Ping => Ok(Self::Ping(frame.payload)),
+            Opcode::Pong => Ok(Self::Pong(frame.payload)),
             Opcode::Close => {
                 let reason = CloseReason::parse(&frame.payload).ok();
-                Self::Close(reason)
+                Ok(Self::Close(reason))
             }
         }
     }
@@ -647,8 +650,10 @@ impl WebSocket<TcpStream> {
         config: &WebSocketConfig,
     ) -> Result<Self, WsConnectError> {
         // Build handshake request
-        let mut handshake =
-            ClientHandshake::new(&format!("ws://{}:{}{}", url.host, url.port, url.path))?;
+        let mut handshake = ClientHandshake::new(
+            &format!("ws://{}:{}{}", url.host, url.port, url.path),
+            cx.entropy(),
+        )?;
 
         for protocol in &config.protocols {
             handshake = handshake.protocol(protocol);
@@ -812,19 +817,19 @@ mod tests {
     #[test]
     fn test_message_from_frame() {
         let frame = Frame::text("Hello");
-        let msg = Message::from(frame);
+        let msg = Message::try_from(frame).unwrap();
         assert!(matches!(msg, Message::Text(s) if s == "Hello"));
 
         let frame = Frame::binary(vec![1, 2, 3]);
-        let msg = Message::from(frame);
+        let msg = Message::try_from(frame).unwrap();
         assert!(matches!(msg, Message::Binary(b) if b.as_ref() == [1, 2, 3]));
 
         let frame = Frame::ping("ping");
-        let msg = Message::from(frame);
+        let msg = Message::try_from(frame).unwrap();
         assert!(matches!(msg, Message::Ping(_)));
 
         let frame = Frame::pong("pong");
-        let msg = Message::from(frame);
+        let msg = Message::try_from(frame).unwrap();
         assert!(matches!(msg, Message::Pong(_)));
     }
 

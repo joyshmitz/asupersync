@@ -11,7 +11,7 @@ use crate::error::{Error, ErrorKind};
 use crate::types::symbol::{ObjectId, Symbol, SymbolId};
 use crate::types::Time;
 use std::collections::{BTreeMap, HashMap, HashSet};
-use std::sync::atomic::{AtomicU64, Ordering};
+use std::sync::atomic::{AtomicU64, AtomicU8, Ordering};
 use std::sync::{Arc, RwLock};
 
 // ============================================================================
@@ -38,18 +38,19 @@ impl std::fmt::Display for PathId {
 
 /// State of a transport path.
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
+#[repr(u8)]
 pub enum PathState {
     /// Path is active and healthy.
-    Active,
+    Active = 0,
 
     /// Path is experiencing issues but still usable.
-    Degraded,
+    Degraded = 1,
 
     /// Path is temporarily unavailable.
-    Unavailable,
+    Unavailable = 2,
 
     /// Path has been permanently closed.
-    Closed,
+    Closed = 3,
 }
 
 impl PathState {
@@ -57,6 +58,16 @@ impl PathState {
     #[must_use]
     pub const fn is_usable(&self) -> bool {
         matches!(self, Self::Active | Self::Degraded)
+    }
+
+    /// Converts from a raw `u8` value.
+    fn from_u8(v: u8) -> Self {
+        match v {
+            0 => Self::Active,
+            1 => Self::Degraded,
+            2 => Self::Unavailable,
+            _ => Self::Closed,
+        }
     }
 }
 
@@ -145,8 +156,8 @@ pub struct TransportPath {
     /// Human-readable name.
     pub name: String,
 
-    /// Current state.
-    pub state: PathState,
+    /// Current state (stored as `AtomicU8` for interior mutability through `Arc`).
+    state: AtomicU8,
 
     /// Path characteristics.
     pub characteristics: PathCharacteristics,
@@ -177,7 +188,7 @@ impl TransportPath {
         Self {
             id,
             name: name.into(),
-            state: PathState::Active,
+            state: AtomicU8::new(PathState::Active as u8),
             characteristics: PathCharacteristics::default(),
             remote_address: remote.into(),
             symbols_received: AtomicU64::new(0),
@@ -193,6 +204,17 @@ impl TransportPath {
     pub fn with_characteristics(mut self, chars: PathCharacteristics) -> Self {
         self.characteristics = chars;
         self
+    }
+
+    /// Returns the current path state.
+    #[must_use]
+    pub fn state(&self) -> PathState {
+        PathState::from_u8(self.state.load(Ordering::Relaxed))
+    }
+
+    /// Updates the path state.
+    pub fn set_state(&self, state: PathState) {
+        self.state.store(state as u8, Ordering::Relaxed);
     }
 
     /// Records symbol receipt.
@@ -335,7 +357,7 @@ impl PathSet {
             let paths = self.paths.read().expect("lock poisoned");
             paths
                 .values()
-                .filter(|p| p.state.is_usable())
+                .filter(|p| p.state().is_usable())
                 .cloned()
                 .collect()
         };
@@ -376,8 +398,15 @@ impl PathSet {
     }
 
     /// Updates path state.
-    pub fn set_state(&self, id: PathId, _state: PathState) -> bool {
-        self.paths.read().expect("lock poisoned").contains_key(&id)
+    pub fn set_state(&self, id: PathId, state: PathState) -> bool {
+        self.paths
+            .read()
+            .expect("lock poisoned")
+            .get(&id)
+            .is_some_and(|path| {
+                path.set_state(state);
+                true
+            })
     }
 
     /// Returns the number of paths.
@@ -393,7 +422,7 @@ impl PathSet {
             .read()
             .expect("lock poisoned")
             .values()
-            .filter(|p| p.state.is_usable())
+            .filter(|p| p.state().is_usable())
             .count()
     }
 
@@ -411,14 +440,14 @@ impl PathSet {
             total_received += path.symbols_received.load(Ordering::Relaxed);
             total_lost += path.symbols_lost.load(Ordering::Relaxed);
             total_duplicates += path.duplicates_received.load(Ordering::Relaxed);
-            if path.state.is_usable() {
+            if path.state().is_usable() {
                 total_bandwidth += path.characteristics.bandwidth_bps;
             }
         }
 
         PathSetStats {
             path_count: paths.len(),
-            usable_count: paths.values().filter(|p| p.state.is_usable()).count(),
+            usable_count: paths.values().filter(|p| p.state().is_usable()).count(),
             total_received,
             total_lost,
             total_duplicates,
@@ -1225,10 +1254,10 @@ mod tests {
         init_test("test_path_set_skips_unusable");
         let set = PathSet::new(PathSelectionPolicy::UseAll);
 
-        let mut down = test_path(1);
-        down.state = PathState::Unavailable;
-        let mut up = test_path(2);
-        up.state = PathState::Active;
+        let down = test_path(1);
+        down.set_state(PathState::Unavailable);
+        let up = test_path(2);
+        up.set_state(PathState::Active);
 
         set.register(down);
         set.register(up);

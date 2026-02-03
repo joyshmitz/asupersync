@@ -31,6 +31,7 @@
 
 use crate::bytes::{BufMut, Bytes, BytesMut};
 use crate::codec::{Decoder, Encoder};
+use crate::util::check_ambient_entropy;
 use std::io;
 
 /// WebSocket frame opcode (4 bits).
@@ -714,6 +715,7 @@ pub fn apply_mask(payload: &mut [u8], mask_key: [u8; 4]) {
 /// entropy to prevent cross-protocol attacks via intermediary cache poisoning.
 fn generate_mask_key() -> [u8; 4] {
     let mut key = [0u8; 4];
+    check_ambient_entropy("websocket_mask");
     getrandom::fill(&mut key).expect("OS RNG unavailable");
     key
 }

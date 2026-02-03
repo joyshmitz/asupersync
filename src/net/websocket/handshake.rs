@@ -22,6 +22,7 @@
 //! Sec-WebSocket-Accept: s3pPLMBiTxaQ9kYGzzhZRbK+xOo=
 //! ```
 
+use crate::util::EntropySource;
 use base64::Engine;
 use sha1::{Digest, Sha1};
 use std::collections::HashMap;
@@ -56,9 +57,9 @@ pub fn compute_accept_key(client_key: &str) -> String {
 }
 
 /// Generate a random 16-byte key for the client handshake.
-fn generate_client_key() -> String {
+fn generate_client_key(entropy: &dyn EntropySource) -> String {
     let mut key = [0u8; 16];
-    getrandom::fill(&mut key).expect("failed to generate random key");
+    entropy.fill_bytes(&mut key);
     base64::engine::general_purpose::STANDARD.encode(key)
 }
 
@@ -259,11 +260,11 @@ impl ClientHandshake {
     /// # Errors
     ///
     /// Returns `HandshakeError::InvalidUrl` if the URL is malformed.
-    pub fn new(url: &str) -> Result<Self, HandshakeError> {
+    pub fn new(url: &str, entropy: &dyn EntropySource) -> Result<Self, HandshakeError> {
         let parsed_url = WsUrl::parse(url)?;
         Ok(Self {
             url: parsed_url,
-            key: generate_client_key(),
+            key: generate_client_key(entropy),
             protocols: Vec::new(),
             extensions: Vec::new(),
             headers: HashMap::new(),
@@ -687,6 +688,7 @@ impl HttpResponse {
 #[cfg(test)]
 mod tests {
     use super::*;
+    use crate::util::DetEntropy;
 
     #[test]
     fn test_compute_accept_key() {
@@ -742,7 +744,8 @@ mod tests {
 
     #[test]
     fn test_client_handshake_request() {
-        let handshake = ClientHandshake::new("ws://example.com/chat")
+        let entropy = DetEntropy::new(7);
+        let handshake = ClientHandshake::new("ws://example.com/chat", &entropy)
             .unwrap()
             .protocol("chat");
 
@@ -900,7 +903,8 @@ mod tests {
 
     #[test]
     fn test_generate_client_key() {
-        let key = generate_client_key();
+        let entropy = DetEntropy::new(42);
+        let key = generate_client_key(&entropy);
         // Should be valid base64 of 16 bytes = 24 chars with padding
         let decoded = base64::engine::general_purpose::STANDARD
             .decode(&key)
