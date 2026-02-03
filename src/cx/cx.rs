@@ -249,6 +249,29 @@ impl Drop for CurrentCxGuard {
     }
 }
 
+impl FullCx {
+    /// Returns the current task context, if one is set.
+    ///
+    /// This is set by the runtime while polling a task.
+    #[must_use]
+    pub fn current() -> Option<FullCx> {
+        CURRENT_CX.with(|slot| slot.borrow().clone())
+    }
+
+    /// Sets the current task context for the duration of the guard.
+    #[must_use]
+    #[cfg_attr(feature = "test-internals", visibility::make(pub))]
+    pub(crate) fn set_current(cx: Option<FullCx>) -> CurrentCxGuard {
+        let prev = CURRENT_CX.with(|slot| {
+            let mut guard = slot.borrow_mut();
+            let prev = guard.take();
+            *guard = cx;
+            prev
+        });
+        CurrentCxGuard { prev }
+    }
+}
+
 impl<Caps> Cx<Caps> {
     /// Creates a new capability context (internal use).
     #[must_use]
