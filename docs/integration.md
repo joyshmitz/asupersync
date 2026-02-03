@@ -309,6 +309,36 @@ The artifact must be:
 - bounded in size (explicit caps)
 - sufficient to reproduce decoder state transitions and explain failures
 
+#### Proof Artifact Schema + Versioning + Bounds
+
+Schema versioning:
+- `PROOF_SCHEMA_VERSION` is a u8 on the artifact. A breaking schema change must bump it.
+- Readers version-gate: unknown versions are rejected with a clear error.
+- Forward-compat is allowed only for additive fields when the encoding supports it; unknown fields are ignored in that case.
+
+Canonical serialization (for hashing):
+- `DecodeProof::content_hash()` must use a deterministic hasher (`util::DetHasher`) and a fixed field order.
+- Integer fields are serialized in little-endian fixed-width form.
+- Vectors are serialized in recorded order with a length prefix.
+
+Deterministic ordering requirements:
+- `received.esis`, `peeling.solved_indices`, `elimination.inactive_cols`, and `elimination.pivot_events` must be recorded in deterministic order.
+- Recommended: sort `esis` by ESI; record peel/inactivation/pivot events in stable row/col order used by the decoder.
+
+Size bounds + truncation:
+- `MAX_RECEIVED_SYMBOLS` and `MAX_PIVOT_EVENTS` are hard caps.
+- When limits are exceeded, the artifact keeps the first N entries in the deterministic order and sets `truncated = true`.
+- Counts (`total`, `solved`, `pivots`, `row_ops`) always reflect the full execution, not just the recorded prefix.
+
+Schema fields (v1):
+- `version`: u8 (`PROOF_SCHEMA_VERSION`)
+- `config`: { `object_id`, `sbn`, `k`, `s`, `h`, `l`, `symbol_size`, `seed` }
+- `received`: { `total`, `source_count`, `repair_count`, `esis[]`, `truncated` }
+- `peeling`: { `solved`, `solved_indices[]`, `truncated` }
+- `elimination`: { `inactivated`, `inactive_cols[]`, `pivots`, `pivot_events[]`, `row_ops`, `truncated` }
+- `outcome`: `Success { symbols_recovered }` | `Failure { reason }`
+- `reason`: `InsufficientSymbols { received, required }` | `SingularMatrix { row, attempted_cols[] }` | `SymbolSizeMismatch { expected, actual }`
+
 ### Formal Semantics (v4.0.0)
 
 The canonical small-step semantics live in `docs/asupersync_v4_formal_semantics.md`
