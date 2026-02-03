@@ -36,6 +36,21 @@ structure CancelReason where
   kind : CancelKind
   message : Option String
 
+def CancelKind.rank : CancelKind -> Nat
+  | CancelKind.user => 0
+  | CancelKind.timeout => 1
+  | CancelKind.failFast => 2
+  | CancelKind.parentCancelled => 3
+  | CancelKind.shutdown => 4
+
+def strengthenReason (a b : CancelReason) : CancelReason :=
+  if CancelKind.rank a.kind >= CancelKind.rank b.kind then a else b
+
+def strengthenOpt (current : Option CancelReason) (incoming : CancelReason) : CancelReason :=
+  match current with
+  | none => incoming
+  | some r => strengthenReason r incoming
+
 /-- Budget semiring (min-plus with priority max). -/
 structure Budget where
   deadline : Option Time
@@ -63,8 +78,8 @@ inductive TaskState (Value Error Panic : Type) where
   | created
   | running
   | cancelRequested (reason : CancelReason) (cleanup : Budget)
-  | cancelling (cleanup : Budget)
-  | finalizing (cleanup : Budget)
+  | cancelling (reason : CancelReason) (cleanup : Budget)
+  | finalizing (reason : CancelReason) (cleanup : Budget)
   | completed (outcome : Outcome Value Error CancelReason Panic)
 
 /-- Region states. -/
@@ -101,6 +116,7 @@ structure Task (Value Error Panic : Type) where
 /-- Region record (minimal, extend as needed). -/
 structure Region (Value Error Panic : Type) where
   state : RegionState Value Error Panic
+  cancel : Option CancelReason
   children : List TaskId
   subregions : List RegionId
   ledger : List ObligationId
@@ -155,21 +171,29 @@ def setObligation (s : State Value Error Panic) (o : ObligationId) (ob : Obligat
     State Value Error Panic :=
   { s with obligations := fun o' => if o' = o then some ob else s.obligations o' }
 
+def removeObligationId (o : ObligationId) (xs : List ObligationId) : List ObligationId :=
+  xs.filter (fun x => x ≠ o)
+
+def holdsObligation (s : State Value Error Panic) (t : TaskId) (o : ObligationId) : Prop :=
+  match getObligation s o with
+  | some ob => ob.holder = t ∧ ob.state = ObligationState.reserved
+  | none => False
+
 def runnable {Value Error Panic : Type} (st : TaskState Value Error Panic) : Prop :=
   match st with
   | TaskState.created => True
   | TaskState.running => True
   | TaskState.cancelRequested _ _ => True
-  | TaskState.cancelling _ => True
-  | TaskState.finalizing _ => True
+  | TaskState.cancelling _ _ => True
+  | TaskState.finalizing _ _ => True
   | TaskState.completed _ => False
 
 def laneOf {Value Error Panic : Type} (task : Task Value Error Panic) (region : Region Value Error Panic) :
     Lane :=
   match task.state with
   | TaskState.cancelRequested _ _ => Lane.cancel
-  | TaskState.cancelling _ => Lane.cancel
-  | TaskState.finalizing _ => Lane.cancel
+  | TaskState.cancelling _ _ => Lane.cancel
+  | TaskState.finalizing _ _ => Lane.cancel
   | _ =>
       match region.deadline with
       | some _ => Lane.timed
@@ -309,6 +333,146 @@ inductive Step (Value Error Panic : Type) :
         s' = setTask s t { task with state := TaskState.completed outcome }) :
       Step s (Label.complete t outcome) s'
 
-  -- Rules to be added here (complete, cancel, join, obligations, close, ...)
+  /-- RESERVE: acquire a new obligation and add it to the region ledger. -/
+  | reserve {s s' : State Value Error Panic} {t : TaskId} {o : ObligationId}
+      {task : Task Value Error Panic} {region : Region Value Error Panic} {k : ObligationKind}
+      (hTask : getTask s t = some task)
+      (hRegion : getRegion s task.region = some region)
+      (hAbsent : getObligation s o = none)
+      (hUpdate :
+        s' =
+          setRegion
+            (setObligation s o
+              { kind := k, holder := t, region := task.region, state := ObligationState.reserved })
+            task.region
+            { region with ledger := region.ledger ++ [o] }) :
+      Step s (Label.reserve o) s'
+
+  /-- COMMIT: resolve an obligation held by the task. -/
+  | commit {s s' : State Value Error Panic} {t : TaskId} {o : ObligationId}
+      {ob : ObligationRecord} {region : Region Value Error Panic}
+      (hOb : getObligation s o = some ob)
+      (hHolder : ob.holder = t)
+      (hState : ob.state = ObligationState.reserved)
+      (hRegion : getRegion s ob.region = some region)
+      (hUpdate :
+        s' =
+          setRegion
+            (setObligation s o { ob with state := ObligationState.committed })
+            ob.region
+            { region with ledger := removeObligationId o region.ledger }) :
+      Step s (Label.commit o) s'
+
+  /-- ABORT: abort an obligation held by the task. -/
+  | abort {s s' : State Value Error Panic} {t : TaskId} {o : ObligationId}
+      {ob : ObligationRecord} {region : Region Value Error Panic}
+      (hOb : getObligation s o = some ob)
+      (hHolder : ob.holder = t)
+      (hState : ob.state = ObligationState.reserved)
+      (hRegion : getRegion s ob.region = some region)
+      (hUpdate :
+        s' =
+          setRegion
+            (setObligation s o { ob with state := ObligationState.aborted })
+            ob.region
+            { region with ledger := removeObligationId o region.ledger }) :
+      Step s (Label.abort o) s'
+
+  /-- LEAK: a task completes while still holding a reserved obligation. -/
+  | leak {s s' : State Value Error Panic} {t : TaskId} {o : ObligationId}
+      {task : Task Value Error Panic} {ob : ObligationRecord} {region : Region Value Error Panic}
+      (outcome : Outcome Value Error CancelReason Panic)
+      (hTask : getTask s t = some task)
+      (hTaskState : task.state = TaskState.completed outcome)
+      (hOb : getObligation s o = some ob)
+      (hHolder : ob.holder = t)
+      (hState : ob.state = ObligationState.reserved)
+      (hRegion : getRegion s ob.region = some region)
+      (hUpdate :
+        s' =
+          setRegion
+            (setObligation s o { ob with state := ObligationState.leaked })
+            ob.region
+            { region with ledger := removeObligationId o region.ledger }) :
+      Step s (Label.leak o) s'
+
+  /-- CANCEL-REQUEST: mark a task for cancellation and set region cancel reason. -/
+  | cancelRequest {s s' : State Value Error Panic} {r : RegionId} {t : TaskId}
+      {task : Task Value Error Panic} {region : Region Value Error Panic}
+      (reason : CancelReason) (cleanup : Budget)
+      (hTask : getTask s t = some task)
+      (hRegion : getRegion s r = some region)
+      (hRegionMatch : task.region = r)
+      (hNotCompleted :
+        match task.state with
+        | TaskState.completed _ => False
+        | _ => True)
+      (hUpdate :
+        s' =
+          setTask
+            (setRegion s r { region with cancel := some (strengthenOpt region.cancel reason) })
+            t
+            { task with state := TaskState.cancelRequested reason cleanup }) :
+      Step s (Label.cancel r reason) s'
+
+  /-- CHECKPOINT-MASKED: defer cancellation by consuming one mask unit. -/
+  | cancelMasked {s s' : State Value Error Panic} {t : TaskId} {task : Task Value Error Panic}
+      (reason : CancelReason) (cleanup : Budget)
+      (hTask : getTask s t = some task)
+      (hState : task.state = TaskState.cancelRequested reason cleanup)
+      (hMask : task.mask > 0)
+      (hUpdate :
+        s' =
+          setTask s t
+            { task with
+                mask := task.mask - 1,
+                state := TaskState.cancelRequested reason cleanup }) :
+      Step s (Label.tau) s'
+
+  /-- CANCEL-ACKNOWLEDGE: task observes cancellation and enters cancelling. -/
+  | cancelAcknowledge {s s' : State Value Error Panic} {t : TaskId} {task : Task Value Error Panic}
+      (reason : CancelReason) (cleanup : Budget)
+      (hTask : getTask s t = some task)
+      (hState : task.state = TaskState.cancelRequested reason cleanup)
+      (hMask : task.mask = 0)
+      (hUpdate :
+        s' = setTask s t { task with state := TaskState.cancelling reason cleanup }) :
+      Step s (Label.tau) s'
+
+  /-- CANCEL-ENTER-FINALIZE: cancelling task moves to finalizing. -/
+  | cancelFinalize {s s' : State Value Error Panic} {t : TaskId} {task : Task Value Error Panic}
+      (reason : CancelReason) (cleanup : Budget)
+      (hTask : getTask s t = some task)
+      (hState : task.state = TaskState.cancelling reason cleanup)
+      (hUpdate :
+        s' = setTask s t { task with state := TaskState.finalizing reason cleanup }) :
+      Step s (Label.tau) s'
+
+  /-- CANCEL-COMPLETE: finalizing task completes as Cancelled(reason). -/
+  | cancelComplete {s s' : State Value Error Panic} {t : TaskId} {task : Task Value Error Panic}
+      (reason : CancelReason) (cleanup : Budget)
+      (hTask : getTask s t = some task)
+      (hState : task.state = TaskState.finalizing reason cleanup)
+      (hUpdate :
+        s' =
+          setTask s t
+            { task with state := TaskState.completed (Outcome.cancelled reason) }) :
+      Step s (Label.tau) s'
+
+  /-- CLOSE: close a quiescent region with an outcome. -/
+  | close {s s' : State Value Error Panic} {r : RegionId}
+      {region : Region Value Error Panic}
+      (outcome : Outcome Value Error CancelReason Panic)
+      (hRegion : getRegion s r = some region)
+      (hState :
+        region.state = RegionState.closing ∨
+        region.state = RegionState.draining ∨
+        region.state = RegionState.finalizing)
+      (hQuiescent : Quiescent s region)
+      (hUpdate :
+        s' = setRegion s r { region with state := RegionState.closed outcome }) :
+      Step s (Label.close r outcome) s'
+
+  -- Rules to be added here (join, cancel propagation, ...)
 
 end Asupersync
