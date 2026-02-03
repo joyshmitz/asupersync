@@ -1759,4 +1759,121 @@ mod tests {
         );
         crate::test_complete!("any_truncated_finds_nested_truncation");
     }
+
+    #[test]
+    fn stress_deep_chain_bounded_by_config() {
+        init_test("stress_deep_chain_bounded_by_config");
+        let config = CancelAttributionConfig::new(16, 4096);
+        let mut current = CancelReason::timeout();
+        for _ in 1..100 {
+            current = CancelReason::parent_cancelled().with_cause_limited(current, &config);
+        }
+        crate::assert_with_log!(
+            current.chain_depth() <= 16,
+            "deep chain must be bounded by max_chain_depth",
+            true,
+            current.chain_depth() <= 16
+        );
+        crate::assert_with_log!(
+            current.any_truncated(),
+            "deep chain must report truncation",
+            true,
+            current.any_truncated()
+        );
+        crate::test_complete!("stress_deep_chain_bounded_by_config");
+    }
+
+    #[test]
+    fn stress_wide_fanout_bounded() {
+        init_test("stress_wide_fanout_bounded");
+        let config = CancelAttributionConfig::new(4, 4096);
+        let root = CancelReason::shutdown();
+        for _i in 0..200 {
+            let child = CancelReason::parent_cancelled().with_cause_limited(root.clone(), &config);
+            crate::assert_with_log!(
+                child.chain_depth() <= 4,
+                "fanout child must respect depth limit",
+                true,
+                child.chain_depth() <= 4
+            );
+        }
+        crate::test_complete!("stress_wide_fanout_bounded");
+    }
+
+    #[test]
+    fn zero_depth_config_drops_all_causes() {
+        init_test("zero_depth_config_drops_all_causes");
+        let config = CancelAttributionConfig::new(0, usize::MAX);
+        let cause = CancelReason::timeout();
+        let result = CancelReason::shutdown().with_cause_limited(cause, &config);
+        crate::assert_with_log!(
+            result.cause.is_none(),
+            "zero depth config should prevent cause attachment",
+            true,
+            result.cause.is_none()
+        );
+        crate::assert_with_log!(
+            result.truncated,
+            "should be marked truncated when cause is dropped",
+            true,
+            result.truncated
+        );
+        crate::test_complete!("zero_depth_config_drops_all_causes");
+    }
+
+    #[test]
+    fn depth_one_config_keeps_only_self() {
+        init_test("depth_one_config_keeps_only_self");
+        let config = CancelAttributionConfig::new(1, usize::MAX);
+        let deep = CancelReason::timeout().with_cause(CancelReason::parent_cancelled());
+        let result = CancelReason::shutdown().with_cause_limited(deep, &config);
+        crate::assert_with_log!(
+            result.chain_depth() <= 1,
+            "depth-1 config should keep only the outermost level",
+            true,
+            result.chain_depth() <= 1
+        );
+        crate::test_complete!("depth_one_config_keeps_only_self");
+    }
+
+    #[test]
+    fn zero_memory_config_drops_all_causes() {
+        init_test("zero_memory_config_drops_all_causes");
+        let config = CancelAttributionConfig::new(usize::MAX, 0);
+        let cause = CancelReason::timeout();
+        let result = CancelReason::shutdown().with_cause_limited(cause, &config);
+        crate::assert_with_log!(
+            result.truncated || result.any_truncated(),
+            "zero memory should trigger truncation",
+            true,
+            result.truncated || result.any_truncated()
+        );
+        crate::test_complete!("zero_memory_config_drops_all_causes");
+    }
+
+    #[test]
+    fn stress_incremental_chain_growth() {
+        init_test("stress_incremental_chain_growth");
+        let config = CancelAttributionConfig::default();
+        let root_reason = CancelReason::shutdown();
+        let mut parent_reason = root_reason;
+        for _i in 0..50 {
+            let child_reason =
+                CancelReason::parent_cancelled().with_cause_limited(parent_reason.clone(), &config);
+            crate::assert_with_log!(
+                child_reason.chain_depth() <= config.max_chain_depth,
+                "incremental chain must stay within configured depth",
+                true,
+                child_reason.chain_depth() <= config.max_chain_depth
+            );
+            parent_reason = child_reason;
+        }
+        crate::assert_with_log!(
+            parent_reason.any_truncated(),
+            "deeply nested region chain must report truncation",
+            true,
+            parent_reason.any_truncated()
+        );
+        crate::test_complete!("stress_incremental_chain_growth");
+    }
 }

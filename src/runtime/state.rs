@@ -1376,12 +1376,12 @@ impl RuntimeState {
                 CancelReason::parent_cancelled()
                     .with_region(parent_id)
                     .with_timestamp(reason.timestamp)
-                    .with_cause(parent_reason)
+                    .with_cause_limited(parent_reason, &self.cancel_attribution)
             } else {
                 // Fallback: no parent but not root (shouldn't happen)
                 CancelReason::parent_cancelled()
                     .with_timestamp(reason.timestamp)
-                    .with_cause(reason.clone())
+                    .with_cause_limited(reason.clone(), &self.cancel_attribution)
             };
 
             // Store this region's reason for child chain building
