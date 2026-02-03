@@ -1,0 +1,60 @@
+{
+  "status": "in_progress",
+  "current": "",
+  "completed": [
+    "base64",
+    "bytes",
+    "getrandom"
+  ],
+  "failed": [
+    "bincode"
+  ],
+  "skipped": [
+    "clap",
+    "criterion",
+    "crossbeam-queue",
+    "futures-lite",
+    "h3"
+  ],
+  "pending": [
+    "h3-quinn",
+    "http",
+    "io-uring",
+    "libc",
+    "loom",
+    "lz4_flex",
+    "nix",
+    "opentelemetry",
+    "opentelemetry_sdk",
+    "parking_lot",
+    "pin-project",
+    "polling",
+    "proptest",
+    "quinn",
+    "rcgen",
+    "rdkafka",
+    "ring",
+    "rmp-serde",
+    "rusqlite",
+    "rustls",
+    "rustls-native-certs",
+    "rustls-pemfile",
+    "rustls-pki-types",
+    "serde",
+    "serde_json",
+    "sha1",
+    "sha2",
+    "slab",
+    "socket2",
+    "tempfile",
+    "thiserror",
+    "time",
+    "toml",
+    "tower",
+    "tracing",
+    "tracing-subscriber",
+    "visibility",
+    "webpki-roots",
+    "x509-parser"
+  ]
+}

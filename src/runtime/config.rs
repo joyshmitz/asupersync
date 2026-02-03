@@ -224,6 +224,7 @@ mod tests {
             metrics_provider: Arc::new(NoOpMetrics),
             observability: None,
             obligation_leak_response: ObligationLeakResponse::Log,
+            logical_clock_mode: None,
         };
 
         config.normalize();
@@ -314,6 +315,7 @@ mod tests {
             metrics_provider: Arc::new(NoOpMetrics),
             observability: None,
             obligation_leak_response: ObligationLeakResponse::Silent,
+            logical_clock_mode: None,
         };
 
         config.normalize();

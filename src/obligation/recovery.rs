@@ -45,7 +45,7 @@
 //!   decreasing under recovery.
 //! - No recovery action can create new obligations or resurrect resolved ones.
 
-use crate::obligation::crdt::{CrdtObligationLedger, CrdtObligationEntry, LinearityViolation};
+use crate::obligation::crdt::{CrdtObligationLedger, LinearityViolation};
 use crate::trace::distributed::lattice::LatticeState;
 use crate::types::ObligationId;
 use std::collections::BTreeMap;
@@ -114,22 +114,30 @@ impl fmt::Display for RecoveryPhase {
 pub enum RecoveryAction {
     /// A stale obligation was forcibly aborted.
     StaleAbort {
+        /// Obligation that was aborted.
         id: ObligationId,
+        /// Age in nanoseconds at the time of abort.
         age_ns: u64,
     },
     /// A conflict was resolved by aborting.
     ConflictResolved {
+        /// Obligation that was resolved by abort.
         id: ObligationId,
     },
     /// A linearity violation was detected and the obligation aborted.
     ViolationAborted {
+        /// Obligation that violated linearity.
         id: ObligationId,
+        /// Total acquire count observed.
         total_acquires: u64,
+        /// Total resolve count observed.
         total_resolves: u64,
     },
     /// An anomaly was flagged but not auto-resolved.
     Flagged {
+        /// Obligation that was flagged.
         id: ObligationId,
+        /// Human-readable reason for the flag.
         reason: String,
     },
 }
@@ -237,11 +245,7 @@ impl RecoveryGovernor {
     /// monotonically increasing for correct stale detection).
     ///
     /// Returns the actions taken and the resulting system state.
-    pub fn tick(
-        &mut self,
-        ledger: &mut CrdtObligationLedger,
-        now_ns: u64,
-    ) -> RecoveryTickResult {
+    pub fn tick(&mut self, ledger: &mut CrdtObligationLedger, now_ns: u64) -> RecoveryTickResult {
         self.total_ticks += 1;
         self.phase = RecoveryPhase::Scanning;
 
@@ -262,9 +266,8 @@ impl RecoveryGovernor {
                     break;
                 }
                 ledger.record_abort(id);
-                let age = now_ns.saturating_sub(
-                    self.first_seen_reserved.get(&id).copied().unwrap_or(now_ns),
-                );
+                let age = now_ns
+                    .saturating_sub(self.first_seen_reserved.get(&id).copied().unwrap_or(now_ns));
                 actions.push(RecoveryAction::StaleAbort { id, age_ns: age });
                 self.first_seen_reserved.remove(&id);
                 budget -= 1;
@@ -363,7 +366,9 @@ impl RecoveryGovernor {
 
         self.first_seen_reserved
             .iter()
-            .filter(|(_, &first_seen)| now_ns.saturating_sub(first_seen) >= self.config.stale_timeout_ns)
+            .filter(|(_, &first_seen)| {
+                now_ns.saturating_sub(first_seen) >= self.config.stale_timeout_ns
+            })
             .map(|(id, _)| *id)
             .collect()
     }
@@ -385,8 +390,8 @@ mod tests {
     use crate::obligation::crdt::CrdtObligationLedger;
     use crate::record::ObligationKind;
     use crate::remote::NodeId;
+    use crate::trace::distributed::crdt::Merge;
     use crate::types::ObligationId;
-    use crate::util::ArenaIndex;
 
     fn oid(index: u32) -> ObligationId {
         ObligationId::new_for_test(index, 0)
@@ -501,7 +506,10 @@ mod tests {
 
         // Recovery resolves it
         let result = gov.tick(&mut a, 0);
-        assert!(result.actions.iter().any(|a| matches!(a, RecoveryAction::ConflictResolved { .. })));
+        assert!(result
+            .actions
+            .iter()
+            .any(|a| matches!(a, RecoveryAction::ConflictResolved { .. })));
     }
 
     #[test]
@@ -521,7 +529,10 @@ mod tests {
         a.merge(&b);
 
         let result = gov.tick(&mut a, 0);
-        assert!(result.actions.iter().any(|a| matches!(a, RecoveryAction::Flagged { .. })));
+        assert!(result
+            .actions
+            .iter()
+            .any(|a| matches!(a, RecoveryAction::Flagged { .. })));
         assert!(result.remaining_conflicts > 0);
     }
 
@@ -552,7 +563,10 @@ mod tests {
         ledger.record_acquire(oid(1), ObligationKind::SendPermit);
 
         let result = gov.tick(&mut ledger, 0);
-        assert!(result.actions.iter().any(|a| matches!(a, RecoveryAction::Flagged { .. })));
+        assert!(result
+            .actions
+            .iter()
+            .any(|a| matches!(a, RecoveryAction::Flagged { .. })));
     }
 
     // ── Convergence ─────────────────────────────────────────────────────
@@ -588,9 +602,7 @@ mod tests {
         assert!(
             r3.is_quiescent,
             "not quiescent: pending={}, conflicts={}, violations={}",
-            r3.remaining_pending,
-            r3.remaining_conflicts,
-            r3.remaining_violations
+            r3.remaining_pending, r3.remaining_conflicts, r3.remaining_violations
         );
     }
 
@@ -708,6 +720,9 @@ mod tests {
         // Recovery resolves the conflict
         let mut gov2 = RecoveryGovernor::new(test_config());
         let result = gov2.tick(&mut a, 0);
-        assert!(result.actions.iter().any(|a| matches!(a, RecoveryAction::ConflictResolved { .. })));
+        assert!(result
+            .actions
+            .iter()
+            .any(|a| matches!(a, RecoveryAction::ConflictResolved { .. })));
     }
 }

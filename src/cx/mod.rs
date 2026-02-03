@@ -40,6 +40,7 @@
 pub mod cap;
 pub mod cx;
 pub mod scope;
+pub mod wrappers;
 
 pub use cap::{
     All as AllCaps, CapSet, HasIo, HasRandom, HasRemote, HasSpawn, HasTime, None as NoCaps,
@@ -47,3 +48,7 @@ pub use cap::{
 };
 pub use cx::{Cx, SpanGuard};
 pub use scope::Scope;
+pub use wrappers::{
+    narrow, BackgroundCaps, BackgroundContext, EntropyCaps, GrpcCaps, GrpcContext, PureCaps,
+    WebCaps, WebContext,
+};

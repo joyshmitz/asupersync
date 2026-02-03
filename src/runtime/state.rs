@@ -635,8 +635,6 @@ impl RuntimeState {
             return Err(SpawnError::RegionNotFound(region));
         }
 
-        self.record_task_spawn(task_id, region);
-
         // Create the task's capability context
         let entropy = self.entropy_source.fork(task_id);
         let observability = self
@@ -666,6 +664,8 @@ impl RuntimeState {
             record.set_cx_inner(cx.inner.clone());
             record.set_cx(cx.clone());
         }
+
+        self.record_task_spawn(task_id, region);
 
         // Trace task creation
         debug!(
@@ -733,17 +733,33 @@ impl RuntimeState {
         Ok((task_id, handle))
     }
 
+    fn attach_logical_time_for_task(
+        &self,
+        task_id: TaskId,
+        event: TraceEvent,
+    ) -> TraceEvent {
+        let Some(record) = self.tasks.get(task_id.arena_index()) else {
+            return event;
+        };
+        let Some(cx) = record.cx.as_ref() else {
+            return event;
+        };
+        event.with_logical_time(cx.logical_tick())
+    }
+
     pub(crate) fn record_task_spawn(&self, task_id: TaskId, region: RegionId) {
         let seq = self.next_trace_seq();
+        let event = TraceEvent::spawn(seq, self.now, task_id, region);
         self.trace
-            .push_event(TraceEvent::spawn(seq, self.now, task_id, region));
+            .push_event(self.attach_logical_time_for_task(task_id, event));
         self.metrics.task_spawned(region, task_id);
     }
 
     fn record_task_complete(&self, task: &TaskRecord) {
         let seq = self.next_trace_seq();
+        let event = TraceEvent::complete(seq, self.now, task.id, task.owner);
         self.trace
-            .push_event(TraceEvent::complete(seq, self.now, task.id, task.owner));
+            .push_event(self.attach_logical_time_for_task(task.id, event));
 
         let duration = Duration::from_nanos(self.now.duration_since(task.created_at()));
         let outcome_kind = match &task.state {
@@ -894,14 +910,16 @@ impl RuntimeState {
         );
 
         let seq = self.next_trace_seq();
-        self.trace.push_event(TraceEvent::obligation_reserve(
+        let event = TraceEvent::obligation_reserve(
             seq,
             self.now,
             obligation_id,
             holder,
             region,
             kind,
-        ));
+        );
+        self.trace
+            .push_event(self.attach_logical_time_for_task(holder, event));
         self.metrics.obligation_created(region);
 
         Ok(obligation_id)
@@ -955,9 +973,11 @@ impl RuntimeState {
         );
 
         let seq = self.next_trace_seq();
-        self.trace.push_event(TraceEvent::obligation_commit(
+        let event = TraceEvent::obligation_commit(
             seq, self.now, id, holder, region, kind, duration,
-        ));
+        );
+        self.trace
+            .push_event(self.attach_logical_time_for_task(holder, event));
         self.metrics.obligation_discharged(region);
 
         if let Some(region_record) = self.regions.get(region.arena_index()) {
@@ -1023,9 +1043,11 @@ impl RuntimeState {
         );
 
         let seq = self.next_trace_seq();
-        self.trace.push_event(TraceEvent::obligation_abort(
+        let event = TraceEvent::obligation_abort(
             seq, self.now, id, holder, region, kind, duration, reason,
-        ));
+        );
+        self.trace
+            .push_event(self.attach_logical_time_for_task(holder, event));
         self.metrics.obligation_discharged(region);
 
         if let Some(region_record) = self.regions.get(region.arena_index()) {
@@ -1070,9 +1092,10 @@ impl RuntimeState {
         };
 
         let seq = self.next_trace_seq();
-        self.trace.push_event(TraceEvent::obligation_leak(
-            seq, self.now, id, holder, region, kind, duration,
-        ));
+        let event =
+            TraceEvent::obligation_leak(seq, self.now, id, holder, region, kind, duration);
+        self.trace
+            .push_event(self.attach_logical_time_for_task(holder, event));
         self.metrics.obligation_leaked(region);
         if self.obligation_leak_response != ObligationLeakResponse::Silent {
             let span = crate::tracing_compat::error_span!(
@@ -1252,13 +1275,15 @@ impl RuntimeState {
             };
             if newly_cancelled {
                 let seq = self.trace.next_seq();
-                self.trace.push_event(TraceEvent::cancel_request(
+                let event = TraceEvent::cancel_request(
                     seq,
                     self.now,
                     task_id,
                     region,
                     reason.clone(),
-                ));
+                );
+                self.trace
+                    .push_event(self.attach_logical_time_for_task(task_id, event));
             }
             if newly_cancelled || is_cancelling {
                 tasks_to_cancel.push((task_id, budget.priority));
@@ -1448,13 +1473,15 @@ impl RuntimeState {
                     let cancel_kind = task.cancel_reason().map(|r| r.kind);
                     if newly_cancelled {
                         let seq = self.trace.next_seq();
-                        self.trace.push_event(TraceEvent::cancel_request(
+                        let event = TraceEvent::cancel_request(
                             seq,
                             self.now,
                             task_id,
                             rid,
                             task_reason.clone(),
-                        ));
+                        );
+                        self.trace
+                            .push_event(self.attach_logical_time_for_task(task_id, event));
                     }
                     let span = trace_span!(
                         "cancel_propagate_task",
@@ -2964,6 +2991,30 @@ mod tests {
             cancellations
         );
         crate::test_complete!("cancel_request_emits_trace_and_metrics");
+    }
+
+    #[test]
+    fn spawn_trace_attaches_logical_time() {
+        init_test("spawn_trace_attaches_logical_time");
+        let mut state = RuntimeState::new();
+        let root = state.create_root_region(Budget::INFINITE);
+
+        let _ = state
+            .create_task(root, Budget::INFINITE, async { 1_u8 })
+            .expect("task spawn");
+
+        let events = state.trace.snapshot();
+        let spawn_event = events
+            .iter()
+            .find(|event| event.kind == TraceEventKind::Spawn)
+            .expect("spawn event");
+        crate::assert_with_log!(
+            spawn_event.logical_time.is_some(),
+            "spawn logical time present",
+            true,
+            spawn_event.logical_time.is_some()
+        );
+        crate::test_complete!("spawn_trace_attaches_logical_time");
     }
 
     #[test]
