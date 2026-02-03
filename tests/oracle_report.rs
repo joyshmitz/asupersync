@@ -11,6 +11,7 @@ mod common;
 use common::*;
 
 use asupersync::lab::meta::{builtin_mutations, MetaRunner};
+use asupersync::lab::oracle::evidence::{DetectionModel, EvidenceLedger, EvidenceStrength};
 use asupersync::lab::oracle::OracleSuite;
 use asupersync::lab::OracleReport;
 use asupersync::types::Time;
@@ -306,4 +307,236 @@ fn meta_runner_deterministic_with_new_mutations() {
     }
 
     test_complete!("meta_runner_deterministic_with_new_mutations");
+}
+
+// ==================== Evidence Ledger E2E Tests ====================
+
+#[test]
+fn evidence_ledger_clean_suite_all_against_violation() {
+    init_test_logging();
+    test_phase!("evidence_ledger_clean_suite_all_against_violation");
+
+    let suite = OracleSuite::new();
+    let report = suite.report(Time::ZERO);
+    let ledger = EvidenceLedger::from_report(&report);
+
+    assert_eq!(ledger.entries.len(), 12, "should have 12 evidence entries");
+    assert_eq!(ledger.summary.violations_detected, 0);
+    assert!(ledger.summary.strongest_violation.is_none());
+
+    for entry in &ledger.entries {
+        assert!(entry.passed);
+        assert_eq!(
+            entry.bayes_factor.strength,
+            EvidenceStrength::Against,
+            "clean invariant '{}' should have evidence AGAINST violation",
+            entry.invariant,
+        );
+        assert!(
+            entry.bayes_factor.log10_bf < 0.0,
+            "clean '{}' log10_bf should be negative, got {}",
+            entry.invariant,
+            entry.bayes_factor.log10_bf,
+        );
+    }
+
+    test_complete!("evidence_ledger_clean_suite_all_against_violation");
+}
+
+#[test]
+fn evidence_ledger_json_roundtrip() {
+    init_test_logging();
+    test_phase!("evidence_ledger_json_roundtrip");
+
+    let suite = OracleSuite::new();
+    let report = suite.report(Time::from_nanos(42));
+    let ledger = EvidenceLedger::from_report(&report);
+
+    let json_str = serde_json::to_string(&ledger).expect("serialize");
+    let deserialized: EvidenceLedger = serde_json::from_str(&json_str).expect("deserialize");
+
+    assert_eq!(deserialized.entries.len(), ledger.entries.len());
+    assert_eq!(
+        deserialized.summary.total_invariants,
+        ledger.summary.total_invariants
+    );
+    assert_eq!(deserialized.check_time_nanos, ledger.check_time_nanos);
+
+    for (orig, deser) in ledger.entries.iter().zip(deserialized.entries.iter()) {
+        assert_eq!(orig.invariant, deser.invariant);
+        assert_eq!(orig.passed, deser.passed);
+        assert!(
+            (orig.bayes_factor.log10_bf - deser.bayes_factor.log10_bf).abs() < 1e-10,
+            "BF mismatch for '{}'",
+            orig.invariant,
+        );
+    }
+
+    test_complete!("evidence_ledger_json_roundtrip");
+}
+
+#[test]
+fn evidence_ledger_deterministic() {
+    init_test_logging();
+    test_phase!("evidence_ledger_deterministic");
+
+    let suite1 = OracleSuite::new();
+    let suite2 = OracleSuite::new();
+    let t = Time::from_nanos(100);
+
+    let ledger1 = EvidenceLedger::from_report(&suite1.report(t));
+    let ledger2 = EvidenceLedger::from_report(&suite2.report(t));
+
+    let json1 = serde_json::to_string(&ledger1).unwrap();
+    let json2 = serde_json::to_string(&ledger2).unwrap();
+    assert_eq!(
+        json1, json2,
+        "identical suites should produce identical evidence ledgers"
+    );
+
+    test_complete!("evidence_ledger_deterministic");
+}
+
+#[test]
+fn evidence_ledger_text_output() {
+    init_test_logging();
+    test_phase!("evidence_ledger_text_output");
+
+    let suite = OracleSuite::new();
+    let report = suite.report(Time::ZERO);
+    let ledger = EvidenceLedger::from_report(&report);
+    let text = ledger.to_text();
+
+    assert!(text.contains("EVIDENCE LEDGER"), "should contain header");
+    assert!(
+        text.contains("Invariants examined: 12"),
+        "should report 12 invariants"
+    );
+    assert!(
+        text.contains("Violations detected: 0"),
+        "should report 0 violations"
+    );
+    assert!(
+        text.contains("CLEAN INVARIANTS"),
+        "should have clean section"
+    );
+    assert!(text.contains("task_leak"), "should mention task_leak");
+    assert!(text.contains("BF ="), "should show Bayes factor values");
+    assert!(
+        text.contains("log₁₀(BF)"),
+        "should show log BF decomposition"
+    );
+
+    test_complete!("evidence_ledger_text_output");
+}
+
+#[test]
+fn evidence_ledger_custom_detection_model() {
+    init_test_logging();
+    test_phase!("evidence_ledger_custom_detection_model");
+
+    let suite = OracleSuite::new();
+    let report = suite.report(Time::ZERO);
+
+    let conservative = DetectionModel {
+        per_entity_detection_rate: 0.5,
+        false_positive_rate: 0.01,
+    };
+    let default_ledger = EvidenceLedger::from_report(&report);
+    let conservative_ledger = EvidenceLedger::from_report_with_model(&report, &conservative);
+
+    // Both should have 12 entries with 0 violations.
+    assert_eq!(conservative_ledger.entries.len(), 12);
+    assert_eq!(conservative_ledger.summary.violations_detected, 0);
+
+    // With lower detection rate + higher FP rate, evidence against violation
+    // should be weaker (log10_bf closer to 0).
+    for (def, cons) in default_ledger
+        .entries
+        .iter()
+        .zip(conservative_ledger.entries.iter())
+    {
+        assert!(
+            cons.bayes_factor.log10_bf >= def.bayes_factor.log10_bf,
+            "conservative model should produce weaker evidence against violation for '{}': cons={:.4} vs def={:.4}",
+            def.invariant,
+            cons.bayes_factor.log10_bf,
+            def.bayes_factor.log10_bf,
+        );
+    }
+
+    test_complete!("evidence_ledger_custom_detection_model");
+}
+
+#[test]
+fn evidence_ledger_violations_by_strength() {
+    init_test_logging();
+    test_phase!("evidence_ledger_violations_by_strength");
+
+    let suite = OracleSuite::new();
+    let report = suite.report(Time::ZERO);
+    let ledger = EvidenceLedger::from_report(&report);
+
+    // No violations in clean suite.
+    assert!(ledger.violations_by_strength().is_empty());
+
+    // Clean entries should be sorted by ascending log10_bf (most confident first).
+    let clean = ledger.clean_by_confidence();
+    assert_eq!(clean.len(), 12);
+    for w in clean.windows(2) {
+        assert!(
+            w[0].bayes_factor.log10_bf <= w[1].bayes_factor.log10_bf,
+            "clean entries should be sorted ascending"
+        );
+    }
+
+    test_complete!("evidence_ledger_violations_by_strength");
+}
+
+#[test]
+fn evidence_ledger_evidence_lines_present() {
+    init_test_logging();
+    test_phase!("evidence_ledger_evidence_lines_present");
+
+    let suite = OracleSuite::new();
+    let report = suite.report(Time::ZERO);
+    let ledger = EvidenceLedger::from_report(&report);
+
+    for entry in &ledger.entries {
+        assert!(
+            !entry.evidence_lines.is_empty(),
+            "'{}' should have evidence lines",
+            entry.invariant,
+        );
+        let first = &entry.evidence_lines[0];
+        assert!(!first.equation.is_empty(), "equation should not be empty");
+        assert!(
+            !first.substitution.is_empty(),
+            "substitution should not be empty"
+        );
+        assert!(!first.intuition.is_empty(), "intuition should not be empty");
+    }
+
+    test_complete!("evidence_ledger_evidence_lines_present");
+}
+
+#[test]
+fn evidence_ledger_log_likelihood_totals() {
+    init_test_logging();
+    test_phase!("evidence_ledger_log_likelihood_totals");
+
+    let suite = OracleSuite::new();
+    let report = suite.report(Time::ZERO);
+    let ledger = EvidenceLedger::from_report(&report);
+
+    for entry in &ledger.entries {
+        let expected = entry.log_likelihoods.structural + entry.log_likelihoods.detection;
+        assert!(
+            (entry.log_likelihoods.total - expected).abs() < 1e-10,
+            "'{}': total should equal structural + detection",
+            entry.invariant,
+        );
+    }
+
+    test_complete!("evidence_ledger_log_likelihood_totals");
 }

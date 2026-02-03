@@ -30,6 +30,7 @@ pub mod ambient_authority;
 pub mod cancellation_protocol;
 pub mod deadline_monotone;
 pub mod determinism;
+pub mod evidence;
 pub mod finalizer;
 pub mod loser_drain;
 pub mod obligation_leak;
@@ -51,6 +52,10 @@ pub use deadline_monotone::{DeadlineMonotoneOracle, DeadlineMonotoneViolation};
 pub use determinism::{
     assert_deterministic, assert_deterministic_multi, DeterminismOracle, DeterminismViolation,
     TraceEventSummary,
+};
+pub use evidence::{
+    BayesFactor, DetectionModel, EvidenceEntry, EvidenceLedger, EvidenceLine, EvidenceStrength,
+    EvidenceSummary, LogLikelihoodContributions,
 };
 pub use finalizer::{FinalizerId, FinalizerOracle, FinalizerViolation};
 pub use loser_drain::{LoserDrainOracle, LoserDrainViolation};
