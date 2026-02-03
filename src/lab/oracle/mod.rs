@@ -365,7 +365,7 @@ pub struct OracleStats {
 #[derive(Debug, Clone, Serialize, Deserialize)]
 pub struct OracleEntryReport {
     /// Oracle invariant name (e.g., "task_leak", "quiescence").
-    pub invariant: &'static str,
+    pub invariant: String,
     /// Whether this oracle passed (no violations).
     pub passed: bool,
     /// Violation description, if any.
@@ -382,7 +382,7 @@ impl OracleEntryReport {
         stats: OracleStats,
     ) -> Self {
         Self {
-            invariant,
+            invariant: invariant.to_owned(),
             passed: violation.is_none(),
             violation: violation.map(|v| v.to_string()),
             stats,
@@ -424,7 +424,7 @@ impl OracleReport {
     /// Returns the entry for a specific invariant.
     #[must_use]
     pub fn entry(&self, invariant: &str) -> Option<&OracleEntryReport> {
-        self.entries.iter().find(|e| e.invariant == invariant)
+        self.entries.iter().find(|e| e.invariant.as_str() == invariant)
     }
 
     /// Serializes the report to JSON.
