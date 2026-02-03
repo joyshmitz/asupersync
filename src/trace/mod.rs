@@ -214,8 +214,8 @@ mod normalize_tests {
         // Events in "bad" order: A1, B1, A2, B2 (3 switches)
         // Optimal order: A1, A2, B1, B2 or B1, B2, A1, A2 (1 switch)
         let events = vec![
-            TraceEvent::spawn(1, Time::ZERO, tid(1), rid(1)),    // A1
-            TraceEvent::spawn(2, Time::ZERO, tid(2), rid(2)),    // B1
+            TraceEvent::spawn(1, Time::ZERO, tid(1), rid(1)), // A1
+            TraceEvent::spawn(2, Time::ZERO, tid(2), rid(2)), // B1
             TraceEvent::complete(3, Time::ZERO, tid(1), rid(1)), // A2
             TraceEvent::complete(4, Time::ZERO, tid(2), rid(2)), // B2
         ];
