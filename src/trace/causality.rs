@@ -147,7 +147,7 @@ impl CausalOrderVerifier {
                 let lt_b = ev_b.logical_time.as_ref().unwrap();
 
                 match causal_order(lt_a, lt_b) {
-                    CausalOrder::After | CausalOrder::Concurrent => {
+                    CausalOrder::After | CausalOrder::Concurrent | CausalOrder::Equal => {
                         self.violations.push(CausalityViolation {
                             kind: CausalityViolationKind::SameTaskConcurrent,
                             earlier_idx: idx_a,
@@ -156,7 +156,7 @@ impl CausalOrderVerifier {
                             later_seq: ev_b.seq,
                         });
                     }
-                    CausalOrder::Before | CausalOrder::Equal => {}
+                    CausalOrder::Before => {}
                 }
             }
         }

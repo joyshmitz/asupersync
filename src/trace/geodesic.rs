@@ -433,7 +433,7 @@ fn exact_search_with_ledger(
             let mut new_g = entry.g;
             if let Some(prev_owner) = state.last_owner {
                 if prev_owner != owner {
-                    new_g += 1;
+                    new_g = new_g.saturating_add(1);
                 }
             }
             let new_state = ExactState {
@@ -453,7 +453,7 @@ fn exact_search_with_ledger(
                 );
                 let h = owner_switch_lower_bound(poset, new_state.mask, new_state.last_owner);
                 open.push(ExactQueueEntry {
-                    f: new_g + h,
+                    f: new_g.saturating_add(h),
                     g: new_g,
                     mask: new_state.mask,
                     last_owner: new_state.last_owner,
@@ -489,10 +489,12 @@ fn greedy_with_ledger(
     let mut available: Vec<usize> = (0..n).filter(|&i| indeg[i] == 0).collect();
     let mut schedule = Vec::with_capacity(n);
     let mut current_owner: Option<OwnerKey> = None;
-    let mut switch_count = 0;
+    let mut switch_count: usize = 0;
     let mut steps = 0;
 
     while !available.is_empty() && steps < step_budget {
+        steps += 1;
+
         available.sort_by(|&a, &b| {
             let owner_a = poset.owner(a);
             let owner_b = poset.owner(b);
@@ -520,7 +522,7 @@ fn greedy_with_ledger(
         };
 
         ledger.push(DecisionEntry::GreedyChoice {
-            step: steps,
+            step: steps - 1,
             chosen,
             chosen_owner,
             owner_match,
@@ -530,7 +532,6 @@ fn greedy_with_ledger(
         });
 
         available.remove(0);
-        steps += 1;
 
         if let Some(prev) = current_owner {
             if prev != chosen_owner {
@@ -578,6 +579,7 @@ fn beam_search_with_ledger(
 
     let init_state = BeamState {
         schedule: Vec::with_capacity(n),
+        scheduled: vec![false; n],
         indeg: init_indeg,
         current_owner: None,
         switch_count: 0,
@@ -616,11 +618,12 @@ fn beam_search_with_ledger(
 
                 if let Some(prev) = new_state.current_owner {
                     if prev != chosen_owner {
-                        new_state.switch_count += 1;
+                        new_state.switch_count = new_state.switch_count.saturating_add(1);
                     }
                 }
                 new_state.current_owner = Some(chosen_owner);
                 new_state.schedule.push(chosen);
+                new_state.scheduled[chosen] = true;
 
                 for &succ in poset.succs(chosen) {
                     new_state.indeg[succ] -= 1;
@@ -847,7 +850,7 @@ fn exact_search(poset: &TracePoset, step_budget: usize) -> Option<GeodesicResult
             let mut new_g = entry.g;
             if let Some(prev_owner) = state.last_owner {
                 if prev_owner != owner {
-                    new_g += 1;
+                    new_g = new_g.saturating_add(1);
                 }
             }
             let new_state = ExactState {
@@ -868,7 +871,7 @@ fn exact_search(poset: &TracePoset, step_budget: usize) -> Option<GeodesicResult
 
                 let h = owner_switch_lower_bound(poset, new_state.mask, new_state.last_owner);
                 open.push(ExactQueueEntry {
-                    f: new_g + h,
+                    f: new_g.saturating_add(h),
                     g: new_g,
                     mask: new_state.mask,
                     last_owner: new_state.last_owner,
@@ -911,7 +914,13 @@ fn owner_switch_lower_bound(poset: &TracePoset, mask: u64, last_owner: Option<Ow
 
     last_owner.map_or_else(
         || k.saturating_sub(1),
-        |owner| if owners.contains(&owner) { k - 1 } else { k },
+        |owner| {
+            if owners.contains(&owner) {
+                k.saturating_sub(1)
+            } else {
+                k
+            }
+        },
     )
 }
 
@@ -942,7 +951,7 @@ fn greedy(poset: &TracePoset, step_budget: usize) -> GeodesicResult {
     let mut available: Vec<usize> = (0..n).filter(|&i| indeg[i] == 0).collect();
     let mut schedule = Vec::with_capacity(n);
     let mut current_owner: Option<OwnerKey> = None;
-    let mut switch_count = 0;
+    let mut switch_count: usize = 0;
     let mut steps = 0;
 
     while !available.is_empty() && steps < step_budget {
@@ -979,7 +988,7 @@ fn greedy(poset: &TracePoset, step_budget: usize) -> GeodesicResult {
         // Count switch
         if let Some(prev) = current_owner {
             if prev != chosen_owner {
-                switch_count += 1;
+                switch_count = switch_count.saturating_add(1);
             }
         }
         current_owner = Some(chosen_owner);
@@ -1023,6 +1032,7 @@ fn count_same_owner_successors(poset: &TracePoset, idx: usize, indeg: &[usize]) 
 #[derive(Clone)]
 struct BeamState {
     schedule: Vec<usize>,
+    scheduled: Vec<bool>,
     indeg: Vec<usize>,
     current_owner: Option<OwnerKey>,
     switch_count: usize,
@@ -1034,7 +1044,7 @@ impl BeamState {
             .iter()
             .enumerate()
             .filter_map(|(i, &deg)| {
-                if deg == 0 && !self.schedule.contains(&i) {
+                if deg == 0 && !self.scheduled[i] {
                     Some(i)
                 } else {
                     None
@@ -1060,6 +1070,7 @@ fn beam_search(poset: &TracePoset, beam_width: usize, step_budget: usize) -> Geo
 
     let init_state = BeamState {
         schedule: Vec::with_capacity(n),
+        scheduled: vec![false; n],
         indeg: init_indeg,
         current_owner: None,
         switch_count: 0,
@@ -1101,11 +1112,12 @@ fn beam_search(poset: &TracePoset, beam_width: usize, step_budget: usize) -> Geo
                 // Count switch
                 if let Some(prev) = new_state.current_owner {
                     if prev != chosen_owner {
-                        new_state.switch_count += 1;
+                        new_state.switch_count = new_state.switch_count.saturating_add(1);
                     }
                 }
                 new_state.current_owner = Some(chosen_owner);
                 new_state.schedule.push(chosen);
+                new_state.scheduled[chosen] = true;
 
                 // Update in-degrees
                 for &succ in poset.succs(chosen) {
@@ -1905,13 +1917,13 @@ mod tests {
 
     #[test]
     fn ledger_greedy_records_choices() {
-        let events: Vec<TraceEvent> = (0..10)
+        let events: Vec<TraceEvent> = (0u32..10)
             .map(|i| {
                 TraceEvent::spawn(
-                    (i + 1) as u64,
-                    Time::from_nanos(i as u64 * 1000),
-                    tid((i % 3) as u32),
-                    rid((i % 3) as u32),
+                    u64::from(i + 1),
+                    Time::from_nanos(u64::from(i) * 1000),
+                    tid(i % 3),
+                    rid(i % 3),
                 )
             })
             .collect();
@@ -1925,12 +1937,12 @@ mod tests {
         let ledger = normalize_with_ledger(&poset, &config);
 
         // Must have greedy choice entries
-        let greedy_choices: Vec<_> = ledger
+        let greedy_count = ledger
             .entries
             .iter()
             .filter(|e| matches!(e, DecisionEntry::GreedyChoice { .. }))
-            .collect();
-        assert_eq!(greedy_choices.len(), 10, "one greedy choice per event");
+            .count();
+        assert_eq!(greedy_count, 10, "one greedy choice per event");
 
         // Result must match normalize()
         let plain = normalize(&poset, &config);
@@ -1940,13 +1952,13 @@ mod tests {
 
     #[test]
     fn ledger_beam_records_prunes() {
-        let events: Vec<TraceEvent> = (0..15)
+        let events: Vec<TraceEvent> = (0u32..15)
             .map(|i| {
                 TraceEvent::spawn(
-                    (i + 1) as u64,
-                    Time::from_nanos(i as u64 * 1000),
-                    tid((i % 4) as u32),
-                    rid((i % 4) as u32),
+                    u64::from(i + 1),
+                    Time::from_nanos(u64::from(i) * 1000),
+                    tid(i % 4),
+                    rid(i % 4),
                 )
             })
             .collect();
@@ -1971,13 +1983,13 @@ mod tests {
 
     #[test]
     fn ledger_deterministic() {
-        let events: Vec<TraceEvent> = (0..12)
+        let events: Vec<TraceEvent> = (0u32..12)
             .map(|i| {
                 TraceEvent::spawn(
-                    (i + 1) as u64,
-                    Time::from_nanos(i as u64 * 1000),
-                    tid((i % 3) as u32),
-                    rid((i % 3) as u32),
+                    u64::from(i + 1),
+                    Time::from_nanos(u64::from(i) * 1000),
+                    tid(i % 3),
+                    rid(i % 3),
                 )
             })
             .collect();

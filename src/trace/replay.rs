@@ -554,6 +554,9 @@ pub struct ReplayTrace {
     pub metadata: TraceMetadata,
     /// Sequence of replay events.
     pub events: Vec<ReplayEvent>,
+    /// Cursor for O(1) event consumption via [`EventSource`](super::replayer::EventSource).
+    #[serde(skip)]
+    pub cursor: usize,
 }
 
 impl ReplayTrace {
@@ -563,6 +566,7 @@ impl ReplayTrace {
         Self {
             metadata,
             events: Vec::new(),
+            cursor: 0,
         }
     }
 
@@ -572,6 +576,7 @@ impl ReplayTrace {
         Self {
             metadata,
             events: Vec::with_capacity(capacity),
+            cursor: 0,
         }
     }
 

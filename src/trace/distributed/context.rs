@@ -237,7 +237,9 @@ impl SymbolTraceContext {
     /// Deserializes from bytes.
     #[must_use]
     pub fn from_bytes(data: &[u8]) -> Option<Self> {
-        if data.len() < 49 {
+        // Fixed header: trace_id(16) + parent_span(8) + span(8) + flags(1)
+        //             + created_at(8) + region_len(2) = 43 bytes minimum.
+        if data.len() < 43 {
             return None;
         }
 

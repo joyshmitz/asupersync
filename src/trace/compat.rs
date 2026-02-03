@@ -37,6 +37,7 @@ use super::replay::{ReplayEvent, TraceMetadata, REPLAY_SCHEMA_VERSION};
 use std::fs::File;
 use std::io::{BufReader, Read, Seek, SeekFrom};
 use std::path::Path;
+use tracing::warn;
 
 type SkipHandler = dyn Fn(&str, &[u8]) + Send + Sync;
 
@@ -258,10 +259,11 @@ impl CompatReader {
                 max_supported,
             } => {
                 // For forward compat with newer traces, we proceed but may skip events
-                // Log a warning (caller can check stats)
-                eprintln!(
-                    "Warning: trace schema version {found} is newer than supported version {max_supported}. \
-                     Some events may be skipped."
+                // Log a warning via structured tracing (caller can also check stats).
+                warn!(
+                    found,
+                    max_supported,
+                    "trace schema version is newer than supported; some events may be skipped"
                 );
             }
         }

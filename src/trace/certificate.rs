@@ -19,7 +19,7 @@
 //! The `CertificateVerifier` replays a certificate against a trace buffer
 //! and checks that all invariant claims hold.
 
-use crate::trace::event::{TraceEvent, TraceEventKind};
+use crate::trace::event::{TraceData, TraceEvent, TraceEventKind};
 use std::collections::HashSet;
 use std::hash::{Hash, Hasher};
 
@@ -279,18 +279,21 @@ impl CertificateVerifier {
 
 /// Check that every cancel ack is preceded by a cancel request for the same task.
 fn verify_cancel_ordering(events: &[TraceEvent]) -> bool {
-    let mut pending_cancels: HashSet<u64> = HashSet::new();
+    let mut pending_cancels: HashSet<crate::types::TaskId> = HashSet::new();
 
     for event in events {
         match event.kind {
             TraceEventKind::CancelRequest => {
-                // Extract task ID from event data if available.
-                let task_key = event.seq;
-                pending_cancels.insert(task_key);
+                let Some(task_id) = cancel_task_id(event) else {
+                    return false;
+                };
+                pending_cancels.insert(task_id);
             }
             TraceEventKind::CancelAck => {
-                let task_key = event.seq;
-                if !pending_cancels.contains(&task_key) {
+                let Some(task_id) = cancel_task_id(event) else {
+                    return false;
+                };
+                if !pending_cancels.remove(&task_id) {
                     return false;
                 }
             }
@@ -299,6 +302,13 @@ fn verify_cancel_ordering(events: &[TraceEvent]) -> bool {
     }
 
     true
+}
+
+fn cancel_task_id(event: &TraceEvent) -> Option<crate::types::TaskId> {
+    match &event.data {
+        TraceData::Cancel { task, .. } | TraceData::Task { task, .. } => Some(*task),
+        _ => None,
+    }
 }
 
 impl std::fmt::Display for VerificationResult {
@@ -324,7 +334,7 @@ impl std::fmt::Display for VerificationResult {
 mod tests {
     use super::*;
     use crate::trace::event::TraceData;
-    use crate::types::Time;
+    use crate::types::{CancelReason, RegionId, TaskId, Time};
 
     fn make_event(seq: u64, kind: TraceEventKind) -> TraceEvent {
         TraceEvent::new(seq, Time::ZERO, kind, TraceData::None)
@@ -464,9 +474,29 @@ mod tests {
 
     #[test]
     fn cancel_ordering_valid() {
+        let task = TaskId::new_for_test(1, 0);
+        let region = RegionId::new_for_test(0, 0);
         let events = vec![
-            make_event(1, TraceEventKind::CancelRequest),
-            make_event(1, TraceEventKind::CancelAck),
+            TraceEvent::new(
+                1,
+                Time::ZERO,
+                TraceEventKind::CancelRequest,
+                TraceData::Cancel {
+                    task,
+                    region,
+                    reason: CancelReason::user("test"),
+                },
+            ),
+            TraceEvent::new(
+                2,
+                Time::ZERO,
+                TraceEventKind::CancelAck,
+                TraceData::Cancel {
+                    task,
+                    region,
+                    reason: CancelReason::user("test"),
+                },
+            ),
         ];
         assert!(verify_cancel_ordering(&events));
     }

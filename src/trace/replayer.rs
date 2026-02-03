@@ -454,10 +454,12 @@ pub trait EventSource {
 
 impl EventSource for ReplayTrace {
     fn next_event(&mut self) -> Option<ReplayEvent> {
-        if self.events.is_empty() {
-            None
+        if self.cursor < self.events.len() {
+            let event = self.events[self.cursor].clone();
+            self.cursor += 1;
+            Some(event)
         } else {
-            Some(self.events.remove(0))
+            None
         }
     }
 
@@ -479,6 +481,7 @@ mod tests {
         ReplayTrace {
             metadata: TraceMetadata::new(42),
             events,
+            cursor: 0,
         }
     }
 
