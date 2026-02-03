@@ -46,8 +46,8 @@ impl Default for EncodingConfig {
 
 /// Encodes region state into RaptorQ symbols.
 ///
-/// The encoder serializes a [`RegionSnapshot`] to bytes, splits them into
-/// source symbols, and generates XOR-parity repair symbols.
+/// The encoder serializes a [`RegionSnapshot`] to bytes and delegates to the
+/// deterministic RaptorQ pipeline for source + repair symbol generation.
 #[derive(Debug)]
 pub struct StateEncoder {
     config: EncodingConfig,
@@ -179,69 +179,7 @@ impl StateEncoder {
         )
     }
 
-    fn create_source_symbols(
-        data: &[u8],
-        params: &ObjectParams,
-        symbol_size: usize,
-    ) -> Vec<Symbol> {
-        let k = params.symbols_per_block as usize;
-        let mut symbols = Vec::with_capacity(k);
-
-        for i in 0..k {
-            let start = i * symbol_size;
-            let end = std::cmp::min(start + symbol_size, data.len());
-
-            // Pad final symbol with zeros if needed.
-            let mut sym_data = vec![0u8; symbol_size];
-            if start < data.len() {
-                let copy_len = end - start;
-                sym_data[..copy_len].copy_from_slice(&data[start..end]);
-            }
-
-            let id = SymbolId::new(params.object_id, 0, i as u32);
-            symbols.push(Symbol::new(id, sym_data, SymbolKind::Source));
-        }
-
-        symbols
-    }
-
-    fn create_repair_symbols(
-        &self,
-        source_symbols: &[Symbol],
-        params: &ObjectParams,
-        symbol_size: usize,
-    ) -> Vec<Symbol> {
-        let repair_count = self.config.min_repair_symbols as usize;
-        let source_count = source_symbols.len();
-        let mut repairs = Vec::with_capacity(repair_count);
-
-        for r in 0..repair_count {
-            let mut repair_data = vec![0u8; symbol_size];
-
-            // XOR parity with rotation: each repair symbol XORs a different
-            // subset of source symbols.
-            for (j, _) in source_symbols.iter().enumerate() {
-                let idx = (j + r) % source_count;
-                if idx < source_count {
-                    xor_into(&mut repair_data, source_symbols[idx].data());
-                }
-            }
-
-            let esi = source_count as u32 + r as u32;
-            let id = SymbolId::new(params.object_id, 0, esi);
-            repairs.push(Symbol::new(id, repair_data, SymbolKind::Repair));
-        }
-
-        repairs
-    }
 }
-
-/// XORs `src` into `dst` in place.
-fn xor_into(dst: &mut [u8], src: &[u8]) {
-    let len = std::cmp::min(dst.len(), src.len());
-    for i in 0..len {
-        dst[i] ^= src[i];
-    }
 }
 
 /// Rebuild source data bytes from an encoded state by concatenating source symbols.
