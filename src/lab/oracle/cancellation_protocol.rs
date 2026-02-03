@@ -547,6 +547,18 @@ impl CancellationProtocolOracle {
             .is_some_and(|r| r.cancel_request.is_some())
     }
 
+    /// Returns the number of tracked regions.
+    #[must_use]
+    pub fn region_count(&self) -> usize {
+        self.region_parents.len()
+    }
+
+    /// Returns the number of cancelled regions.
+    #[must_use]
+    pub fn cancel_count(&self) -> usize {
+        self.cancelled_regions.len()
+    }
+
     /// Resets the oracle to its initial state.
     pub fn reset(&mut self) {
         self.tasks.clear();

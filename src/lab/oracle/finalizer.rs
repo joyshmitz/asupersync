@@ -194,6 +194,12 @@ impl FinalizerOracle {
     pub fn ran_count(&self) -> usize {
         self.ran_finalizers.len()
     }
+
+    /// Returns the number of regions that have closed.
+    #[must_use]
+    pub fn closed_region_count(&self) -> usize {
+        self.region_closes.len()
+    }
 }
 
 #[cfg(test)]

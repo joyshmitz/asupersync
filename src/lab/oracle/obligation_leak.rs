@@ -139,6 +139,18 @@ impl ObligationLeakOracle {
         }
     }
 
+    /// Returns the number of tracked obligations.
+    #[must_use]
+    pub fn obligation_count(&self) -> usize {
+        self.obligations.len()
+    }
+
+    /// Returns the number of closed regions tracked.
+    #[must_use]
+    pub fn closed_region_count(&self) -> usize {
+        self.region_closes.len()
+    }
+
     /// Checks for leaked obligations at region close.
     pub fn check(&self, _now: Time) -> Result<(), ObligationLeakViolation> {
         for (region, close_time) in &self.region_closes {

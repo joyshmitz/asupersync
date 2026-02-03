@@ -201,6 +201,12 @@ impl LoserDrainOracle {
         // Don't reset next_race_id to avoid ID collisions across tests
     }
 
+    /// Returns the total number of races (active + completed).
+    #[must_use]
+    pub fn race_count(&self) -> usize {
+        self.active_races.len() + self.completed_races.len()
+    }
+
     /// Returns the number of active races.
     #[must_use]
     pub fn active_race_count(&self) -> usize {

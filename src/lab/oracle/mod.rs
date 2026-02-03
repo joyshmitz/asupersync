@@ -59,6 +59,9 @@ pub use quiescence::{QuiescenceOracle, QuiescenceViolation};
 pub use region_tree::{RegionTreeEntry, RegionTreeOracle, RegionTreeViolation};
 pub use task_leak::{TaskLeakOracle, TaskLeakViolation};
 
+use serde::{Deserialize, Serialize};
+use std::fmt::Write as _;
+
 use crate::types::Time;
 
 /// A violation detected by an oracle.
@@ -217,6 +220,243 @@ impl OracleSuite {
         self.actor_leak.reset();
         self.supervision.reset();
         self.mailbox.reset();
+    }
+
+    /// Generates a unified oracle report with per-oracle status and statistics.
+    #[must_use]
+    pub fn report(&self, now: Time) -> OracleReport {
+        let entries = vec![
+            OracleEntryReport::from_result(
+                "task_leak",
+                self.task_leak.check(now).err().map(OracleViolation::TaskLeak),
+                OracleStats {
+                    entities_tracked: self.task_leak.task_count(),
+                    events_recorded: self.task_leak.task_count()
+                        + self.task_leak.completed_count()
+                        + self.task_leak.closed_region_count(),
+                },
+            ),
+            OracleEntryReport::from_result(
+                "obligation_leak",
+                self.obligation_leak.check(now).err().map(OracleViolation::ObligationLeak),
+                OracleStats {
+                    entities_tracked: self.obligation_leak.obligation_count(),
+                    events_recorded: self.obligation_leak.obligation_count()
+                        + self.obligation_leak.closed_region_count(),
+                },
+            ),
+            OracleEntryReport::from_result(
+                "quiescence",
+                self.quiescence.check().err().map(OracleViolation::Quiescence),
+                OracleStats {
+                    entities_tracked: self.quiescence.region_count(),
+                    events_recorded: self.quiescence.region_count()
+                        + self.quiescence.closed_count(),
+                },
+            ),
+            OracleEntryReport::from_result(
+                "loser_drain",
+                self.loser_drain.check().err().map(OracleViolation::LoserDrain),
+                OracleStats {
+                    entities_tracked: self.loser_drain.race_count(),
+                    events_recorded: self.loser_drain.race_count()
+                        + self.loser_drain.completed_race_count(),
+                },
+            ),
+            OracleEntryReport::from_result(
+                "finalizer",
+                self.finalizer.check().err().map(OracleViolation::Finalizer),
+                OracleStats {
+                    entities_tracked: self.finalizer.registered_count(),
+                    events_recorded: self.finalizer.registered_count()
+                        + self.finalizer.ran_count()
+                        + self.finalizer.closed_region_count(),
+                },
+            ),
+            OracleEntryReport::from_result(
+                "region_tree",
+                self.region_tree.check().err().map(OracleViolation::RegionTree),
+                OracleStats {
+                    entities_tracked: self.region_tree.region_count(),
+                    events_recorded: self.region_tree.region_count(),
+                },
+            ),
+            OracleEntryReport::from_result(
+                "ambient_authority",
+                self.ambient_authority.check().err().map(OracleViolation::AmbientAuthority),
+                OracleStats {
+                    entities_tracked: self.ambient_authority.task_count(),
+                    events_recorded: self.ambient_authority.task_count()
+                        + self.ambient_authority.effect_count(),
+                },
+            ),
+            OracleEntryReport::from_result(
+                "deadline_monotone",
+                self.deadline_monotone.check().err().map(OracleViolation::DeadlineMonotone),
+                OracleStats {
+                    entities_tracked: self.deadline_monotone.region_count(),
+                    events_recorded: self.deadline_monotone.region_count(),
+                },
+            ),
+            OracleEntryReport::from_result(
+                "cancellation_protocol",
+                self.cancellation_protocol.check().err().map(OracleViolation::CancellationProtocol),
+                OracleStats {
+                    entities_tracked: self.cancellation_protocol.region_count(),
+                    events_recorded: self.cancellation_protocol.region_count()
+                        + self.cancellation_protocol.cancel_count(),
+                },
+            ),
+            OracleEntryReport::from_result(
+                "actor_leak",
+                self.actor_leak.check(now).err().map(OracleViolation::ActorLeak),
+                OracleStats {
+                    entities_tracked: self.actor_leak.actor_count(),
+                    events_recorded: self.actor_leak.actor_count()
+                        + self.actor_leak.stopped_count()
+                        + self.actor_leak.closed_region_count(),
+                },
+            ),
+            OracleEntryReport::from_result(
+                "supervision",
+                self.supervision.check(now).err().map(OracleViolation::Supervision),
+                OracleStats {
+                    entities_tracked: self.supervision.failure_count()
+                        + self.supervision.restart_count(),
+                    events_recorded: self.supervision.failure_count()
+                        + self.supervision.restart_count()
+                        + self.supervision.escalation_count(),
+                },
+            ),
+            OracleEntryReport::from_result(
+                "mailbox",
+                self.mailbox.check(now).err().map(OracleViolation::Mailbox),
+                OracleStats {
+                    entities_tracked: self.mailbox.mailbox_count(),
+                    events_recorded: self.mailbox.mailbox_count(),
+                },
+            ),
+        ];
+
+        let total = entries.len();
+        let passed = entries.iter().filter(|e| e.passed).count();
+        let failed = total - passed;
+
+        OracleReport {
+            entries,
+            total,
+            passed,
+            failed,
+            check_time_nanos: now.as_nanos(),
+        }
+    }
+}
+
+/// Per-oracle statistics snapshot.
+#[derive(Debug, Clone, Serialize, Deserialize, PartialEq, Eq)]
+pub struct OracleStats {
+    /// Number of entities (tasks, regions, actors, etc.) tracked by this oracle.
+    pub entities_tracked: usize,
+    /// Number of events (spawns, stops, closes, etc.) recorded.
+    pub events_recorded: usize,
+}
+
+/// Report for a single oracle within the unified report.
+#[derive(Debug, Clone, Serialize, Deserialize)]
+pub struct OracleEntryReport {
+    /// Oracle invariant name (e.g., "task_leak", "quiescence").
+    pub invariant: &'static str,
+    /// Whether this oracle passed (no violations).
+    pub passed: bool,
+    /// Violation description, if any.
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub violation: Option<String>,
+    /// Statistics for this oracle.
+    pub stats: OracleStats,
+}
+
+impl OracleEntryReport {
+    fn from_result(
+        invariant: &'static str,
+        violation: Option<OracleViolation>,
+        stats: OracleStats,
+    ) -> Self {
+        Self {
+            invariant,
+            passed: violation.is_none(),
+            violation: violation.map(|v| v.to_string()),
+            stats,
+        }
+    }
+}
+
+/// Unified oracle report covering all oracles with per-oracle status and statistics.
+///
+/// Produced by [`OracleSuite::report()`]. Serializable to JSON for artifact storage
+/// and renderable as human-readable text.
+#[derive(Debug, Clone, Serialize, Deserialize)]
+pub struct OracleReport {
+    /// Per-oracle entries in a stable order.
+    pub entries: Vec<OracleEntryReport>,
+    /// Total number of oracles checked.
+    pub total: usize,
+    /// Number of oracles that passed.
+    pub passed: usize,
+    /// Number of oracles that failed (had violations).
+    pub failed: usize,
+    /// The time (nanoseconds) at which the check was performed.
+    pub check_time_nanos: u64,
+}
+
+impl OracleReport {
+    /// Returns true if all oracles passed.
+    #[must_use]
+    pub fn all_passed(&self) -> bool {
+        self.failed == 0
+    }
+
+    /// Returns entries that failed.
+    #[must_use]
+    pub fn failures(&self) -> Vec<&OracleEntryReport> {
+        self.entries.iter().filter(|e| !e.passed).collect()
+    }
+
+    /// Returns the entry for a specific invariant.
+    #[must_use]
+    pub fn entry(&self, invariant: &str) -> Option<&OracleEntryReport> {
+        self.entries.iter().find(|e| e.invariant == invariant)
+    }
+
+    /// Serializes the report to JSON.
+    #[must_use]
+    pub fn to_json(&self) -> serde_json::Value {
+        serde_json::to_value(self).unwrap_or_default()
+    }
+
+    /// Renders the report as human-readable text.
+    #[must_use]
+    pub fn to_text(&self) -> String {
+        let mut out = String::new();
+        let _ = writeln!(
+            &mut out,
+            "Oracle Report: {}/{} passed ({} failed)",
+            self.passed, self.total, self.failed
+        );
+        let _ = writeln!(&mut out, "Check time: {}ns", self.check_time_nanos);
+        let _ = writeln!(&mut out, "---");
+        for entry in &self.entries {
+            let status = if entry.passed { "PASS" } else { "FAIL" };
+            let _ = write!(
+                &mut out,
+                "[{}] {} (tracked={}, events={})",
+                status, entry.invariant, entry.stats.entities_tracked, entry.stats.events_recorded
+            );
+            if let Some(ref v) = entry.violation {
+                let _ = write!(&mut out, " -- {v}");
+            }
+            let _ = writeln!(&mut out);
+        }
+        out
     }
 }
 
