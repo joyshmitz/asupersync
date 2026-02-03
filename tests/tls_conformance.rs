@@ -14,6 +14,7 @@ mod common;
 
 #[cfg(feature = "tls")]
 mod tls_tests {
+    use crate::common::init_test_logging;
     use asupersync::net::tcp::VirtualTcpStream;
     use asupersync::tls::{
         Certificate, CertificateChain, CertificatePin, CertificatePinSet, ClientAuth, PrivateKey,
@@ -181,6 +182,24 @@ W7n9v0wIyo4e/O0DO2fczXZD
         (client_result, server_result)
     }
 
+    fn handshake_pair_with_domain(
+        connector: TlsConnector,
+        acceptor: asupersync::tls::TlsAcceptor,
+        domain: &str,
+        port_base: u16,
+    ) -> (
+        Result<asupersync::tls::TlsStream<VirtualTcpStream>, TlsError>,
+        Result<asupersync::tls::TlsStream<VirtualTcpStream>, TlsError>,
+    ) {
+        let (client_io, server_io) = make_pair(port_base);
+        let (client_result, server_result) =
+            futures_lite::future::block_on(futures_lite::future::zip(
+                connector.connect(domain, client_io),
+                acceptor.accept(server_io),
+            ));
+        (client_result, server_result)
+    }
+
     // -----------------------------------------------------------------------
     // VirtualTcpStream cross-thread sanity check
     // -----------------------------------------------------------------------
@@ -319,6 +338,39 @@ W7n9v0wIyo4e/O0DO2fczXZD
         assert_eq!(received, msg);
     }
 
+    #[test]
+    fn close_notify_shutdowns_streams() {
+        use futures_lite::io::{AsyncReadExt, AsyncWriteExt};
+
+        init_test_logging();
+        test_phase!("tls_close_notify_shutdowns_streams");
+        test_section!("handshake");
+
+        let (client, server) = handshake_pair(make_connector(), make_acceptor(), 6280);
+        let mut client = client.unwrap();
+        let mut server = server.unwrap();
+
+        futures_lite::future::block_on(async {
+            test_section!("exchange");
+            client.write_all(b"ping").await.unwrap();
+            client.flush().await.unwrap();
+
+            let mut buf = [0u8; 4];
+            server.read_exact(&mut buf).await.unwrap();
+            assert_eq!(&buf, b"ping");
+
+            test_section!("client close");
+            client.close().await.unwrap();
+            assert!(client.is_closed());
+
+            test_section!("server close");
+            server.close().await.unwrap();
+            assert!(server.is_closed());
+        });
+
+        test_complete!("tls_close_notify_shutdowns_streams");
+    }
+
     // -----------------------------------------------------------------------
     // ALPN negotiation
     // -----------------------------------------------------------------------
@@ -390,6 +442,36 @@ W7n9v0wIyo4e/O0DO2fczXZD
         let server = server.unwrap();
         assert!(client.alpn_protocol().is_none());
         assert!(server.alpn_protocol().is_none());
+    }
+
+    #[test]
+    fn alpn_required_mismatch_fails() {
+        init_test_logging();
+        test_phase!("tls_alpn_required_mismatch_fails");
+        test_section!("build");
+
+        let chain = CertificateChain::from_pem(TEST_CERT_PEM).unwrap();
+        let key = PrivateKey::from_pem(TEST_KEY_PEM).unwrap();
+        let acceptor = TlsAcceptorBuilder::new(chain, key)
+            .alpn_h2()
+            .build()
+            .unwrap();
+
+        let certs = Certificate::from_pem(TEST_CERT_PEM).unwrap();
+        let connector = TlsConnectorBuilder::new()
+            .add_root_certificates(certs)
+            .alpn_protocols(vec![b"http/1.1".to_vec()])
+            .require_alpn()
+            .build()
+            .unwrap();
+
+        test_section!("handshake");
+        let (client, server) = handshake_pair(connector, acceptor, 6270);
+        let client_err = client.unwrap_err();
+        assert!(matches!(client_err, TlsError::AlpnNegotiationFailed { .. }));
+        assert!(server.is_err());
+
+        test_complete!("tls_alpn_required_mismatch_fails");
     }
 
     #[test]
@@ -572,6 +654,42 @@ W7n9v0wIyo4e/O0DO2fczXZD
         assert!(TlsConnector::validate_domain("example.com").is_ok());
         assert!(TlsConnector::validate_domain("localhost").is_ok());
         assert!(TlsConnector::validate_domain("a.b.c.d.example.org").is_ok());
+    }
+
+    #[test]
+    fn handshake_rejects_self_signed_without_root() {
+        init_test_logging();
+        test_phase!("tls_self_signed_rejected_without_root");
+
+        let connector = TlsConnectorBuilder::new().build().unwrap();
+        let acceptor = make_acceptor();
+
+        let (client, server) = handshake_pair(connector, acceptor, 6250);
+        let client_err = client.unwrap_err();
+        assert!(matches!(client_err, TlsError::Handshake(_)));
+        assert!(server.is_err());
+
+        test_complete!("tls_self_signed_rejected_without_root");
+    }
+
+    #[test]
+    fn handshake_rejects_wrong_hostname() {
+        init_test_logging();
+        test_phase!("tls_wrong_hostname_rejected");
+
+        let certs = Certificate::from_pem(TEST_CERT_PEM).unwrap();
+        let connector = TlsConnectorBuilder::new()
+            .add_root_certificates(certs)
+            .build()
+            .unwrap();
+        let acceptor = make_acceptor();
+
+        let (client, server) = handshake_pair_with_domain(connector, acceptor, "example.com", 6260);
+        let client_err = client.unwrap_err();
+        assert!(matches!(client_err, TlsError::Handshake(_)));
+        assert!(server.is_err());
+
+        test_complete!("tls_wrong_hostname_rejected");
     }
 
     // -----------------------------------------------------------------------

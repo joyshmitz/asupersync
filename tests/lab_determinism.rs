@@ -1022,9 +1022,13 @@ fn run_io_cancel_scenario(seed: u64) -> (bool, usize, usize, u64) {
         .expect("create task");
     runtime.scheduler.lock().unwrap().schedule(task_id, 0);
 
+    // Model an in-flight I/O operation owned by runtime infrastructure rather than the user task.
+    // If we tie the obligation to `task_id` and allow the task to complete, the runtime will
+    // correctly flag it as a leaked obligation (no task may complete while still holding one).
+    let io_holder = asupersync::types::TaskId::new_for_test(99, 0);
     let io_op = IoOp::submit(
         &mut runtime.state,
-        task_id,
+        io_holder,
         region,
         Some("io op".to_string()),
     )
@@ -1106,9 +1110,13 @@ fn test_lab_io_quiescence_waits_for_obligation() {
         .expect("create task");
     runtime.scheduler.lock().unwrap().schedule(task_id, 0);
 
+    // Model an in-flight I/O operation owned by runtime infrastructure rather than the user task.
+    // If we tie the obligation to `task_id` and allow the task to complete, the runtime will
+    // correctly flag it as a leaked obligation (no task may complete while still holding one).
+    let io_holder = asupersync::types::TaskId::new_for_test(99, 0);
     let io_op = IoOp::submit(
         &mut runtime.state,
-        task_id,
+        io_holder,
         region,
         Some("io op".to_string()),
     )

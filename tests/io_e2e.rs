@@ -533,8 +533,10 @@ fn io_e2e_lab_region_close_waits_for_io_op() {
         assert_with_log!(false, "region record", "Some", "None");
         return;
     };
-    region_record.begin_close(Some(cancel_reason.clone()));
-    region_record.begin_finalize();
+    let close_started = region_record.begin_close(Some(cancel_reason.clone()));
+    assert_with_log!(close_started, "begin_close", true, close_started);
+    let finalize_started = region_record.begin_finalize();
+    assert_with_log!(finalize_started, "begin_finalize", true, finalize_started);
 
     let task_completed = runtime.state.task_mut(task_id).is_some_and(|task| {
         task.complete(Outcome::Cancelled(cancel_reason.clone()));
@@ -552,12 +554,17 @@ fn io_e2e_lab_region_close_waits_for_io_op() {
 
     let cancel_ok = io_op.cancel(&mut runtime.state).is_ok();
     assert_with_log!(cancel_ok, "cancel io op", true, cancel_ok);
-    let can_close_after = runtime.state.can_region_complete_close(region);
+    // `abort_obligation` triggers `advance_region_state`, so the region should now be closed.
+    let region_state = runtime
+        .state
+        .region(region)
+        .map(asupersync::record::RegionRecord::state);
+    let closed = region_state == Some(asupersync::record::region::RegionState::Closed);
     assert_with_log!(
-        can_close_after,
+        closed,
         "region close completes after io op cancel",
         true,
-        can_close_after
+        closed
     );
 
     test_complete!("io_e2e_lab_region_close_waits_for_io_op");

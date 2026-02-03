@@ -423,6 +423,7 @@ fn multiple_concurrent_registrations() {
         let addr = listener.local_addr().unwrap();
         clients.push(TcpStream::connect(addr).unwrap());
     }
+    assert_eq!(clients.len(), listeners.len());
 
     // Poll should find at least some events.
     let mut events = Events::with_capacity(64);
@@ -536,7 +537,7 @@ fn pipe_read_write_via_reactor() {
         let mut fds = [0i32; 2];
         let ret = unsafe { libc::pipe2(fds.as_mut_ptr(), libc::O_NONBLOCK | libc::O_CLOEXEC) };
         assert_eq!(ret, 0, "pipe2 should succeed");
-        (fds[0], fds[1])
+        fds.into()
     };
 
     // Register read end for readable.
@@ -549,7 +550,9 @@ fn pipe_read_write_via_reactor() {
     // Write data to the pipe.
     let msg = b"pipe via io_uring";
     let written = unsafe { libc::write(write_fd, msg.as_ptr().cast::<libc::c_void>(), msg.len()) };
-    assert_eq!(written as usize, msg.len());
+    assert!(written >= 0, "write should succeed");
+    let written = usize::try_from(written).unwrap();
+    assert_eq!(written, msg.len());
 
     // Poll should detect readable.
     let mut events = Events::with_capacity(64);
@@ -575,7 +578,8 @@ fn pipe_read_write_via_reactor() {
     let mut buf = [0u8; 128];
     let n = unsafe { libc::read(read_fd, buf.as_mut_ptr().cast::<libc::c_void>(), buf.len()) };
     assert!(n > 0);
-    assert_eq!(&buf[..n as usize], msg);
+    let n = usize::try_from(n).unwrap();
+    assert_eq!(&buf[..n], msg);
 
     reactor.deregister(read_token).unwrap();
     unsafe {
@@ -592,7 +596,7 @@ fn pipe_hangup_detected() {
         let mut fds = [0i32; 2];
         let ret = unsafe { libc::pipe2(fds.as_mut_ptr(), libc::O_NONBLOCK | libc::O_CLOEXEC) };
         assert_eq!(ret, 0);
-        (fds[0], fds[1])
+        fds.into()
     };
 
     let read_source = FdSource::from_raw(read_fd);
