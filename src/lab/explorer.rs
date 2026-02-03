@@ -1036,6 +1036,9 @@ mod tests {
         // Discovery rate should be between 0 and 1 inclusive.
         assert!(cov.discovery_rate() > 0.0);
         assert!(cov.discovery_rate() <= 1.0);
+        let hist_total: usize = cov.novelty_histogram.values().copied().sum();
+        assert_eq!(hist_total, cov.total_runs);
+        assert_eq!(cov.saturation.window, DEFAULT_SATURATION_WINDOW);
     }
 
     #[test]
@@ -1065,11 +1068,22 @@ mod tests {
 
     #[test]
     fn discovery_rate_correct() {
+        let mut novelty_histogram = BTreeMap::new();
+        novelty_histogram.insert(0, 7);
+        novelty_histogram.insert(1, 3);
+        let saturation = SaturationMetrics {
+            window: DEFAULT_SATURATION_WINDOW,
+            saturated: false,
+            existing_class_hits: 7,
+            runs_since_last_new_class: Some(7),
+        };
         let metrics = CoverageMetrics {
             equivalence_classes: 3,
             total_runs: 10,
             new_class_discoveries: 3,
             class_run_counts: HashMap::new(),
+            novelty_histogram,
+            saturation,
         };
         assert!((metrics.discovery_rate() - 0.3).abs() < 1e-10);
     }
