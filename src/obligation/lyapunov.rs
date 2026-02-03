@@ -560,10 +560,15 @@ pub struct LyapunovGovernor {
     /// Weights for the potential function.
     weights: PotentialWeights,
     /// History of computed potentials (for convergence analysis).
+    /// Bounded to `MAX_HISTORY` entries to prevent unbounded memory growth.
     history: Vec<PotentialRecord>,
 }
 
 impl LyapunovGovernor {
+    /// Maximum number of history entries retained. When exceeded, the oldest
+    /// half is discarded to amortise the removal cost.
+    const MAX_HISTORY: usize = 8192;
+
     /// Creates a new governor with the given weights.
     #[must_use]
     pub fn new(weights: PotentialWeights) -> Self {
@@ -587,6 +592,10 @@ impl LyapunovGovernor {
         let record = self.compute(snapshot);
         let total = record.total;
         self.history.push(record);
+        if self.history.len() > Self::MAX_HISTORY {
+            let drain_count = Self::MAX_HISTORY / 2;
+            self.history.drain(..drain_count);
+        }
         total
     }
 

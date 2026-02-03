@@ -289,8 +289,13 @@ impl GradedScope {
     }
 
     /// Record a resolution (obligation resolved in this scope).
+    ///
+    /// # Panics
+    ///
+    /// Panics if called more times than `on_reserve`, which would indicate
+    /// a double-resolution bug.
     pub fn on_resolve(&mut self) {
-        debug_assert!(
+        assert!(
             self.resolved < self.reserved,
             "on_resolve called more times than on_reserve ({} >= {})",
             self.resolved,

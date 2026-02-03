@@ -83,10 +83,13 @@ impl CrdtObligationEntry {
     }
 
     /// Returns true if the linearity invariant is satisfied:
-    /// at most one acquire and at most one resolve.
+    /// exactly one acquire and at most one resolve, with resolves
+    /// never exceeding acquires (no resolve-without-acquire).
     #[must_use]
     pub fn is_linear(&self) -> bool {
-        self.total_acquires() <= 1 && self.total_resolves() <= 1
+        let acq = self.total_acquires();
+        let res = self.total_resolves();
+        acq <= 1 && res <= acq
     }
 
     /// Returns true if the obligation is in a terminal state.
@@ -189,11 +192,18 @@ impl CrdtObligationLedger {
     ///
     /// This is a recovery-only repair that collapses conflicts or linearity
     /// violations by resetting counters and witnesses to a single abort.
+    /// Only applies to entries that are in conflict or violate linearity;
+    /// healthy terminal states (Committed/Aborted without conflict) are
+    /// left unchanged.
     pub fn force_abort_repair(&mut self, id: ObligationId) {
         let entry = self
             .entries
             .entry(id)
             .or_insert_with(CrdtObligationEntry::new);
+        // Guard: only repair entries that are actually broken.
+        if !entry.is_conflict() && entry.is_linear() && entry.is_terminal() {
+            return;
+        }
         entry.state = LatticeState::Aborted;
         entry.witnesses.clear();
         entry

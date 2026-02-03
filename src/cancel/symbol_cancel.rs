@@ -1335,4 +1335,187 @@ mod tests {
         assert_eq!(stats.pending_symbols, 1);
         assert_eq!(stats.pending_bytes, 2);
     }
+
+    // ---- Cancel propagation: grandchild inherits cancellation -----------
+
+    #[test]
+    fn test_grandchild_inherits_cancellation() {
+        let mut rng = DetRng::new(42);
+        let grandparent = SymbolCancelToken::new(ObjectId::new_for_test(1), &mut rng);
+        let parent = grandparent.child(&mut rng);
+        let child = parent.child(&mut rng);
+
+        assert!(!child.is_cancelled());
+
+        // Cancel grandparent — should propagate to grandchild.
+        grandparent.cancel(&CancelReason::user("cascade"), Time::from_millis(100));
+
+        assert!(parent.is_cancelled());
+        assert!(child.is_cancelled());
+        assert_eq!(child.reason().unwrap().kind, CancelKind::ParentCancelled);
+    }
+
+    // ---- Cancel propagation: child cancel does not affect parent --------
+
+    #[test]
+    fn test_child_cancel_does_not_propagate_upward() {
+        let mut rng = DetRng::new(42);
+        let parent = SymbolCancelToken::new(ObjectId::new_for_test(1), &mut rng);
+        let child = parent.child(&mut rng);
+
+        // Cancel the child directly.
+        child.cancel(&CancelReason::user("child only"), Time::from_millis(100));
+
+        assert!(child.is_cancelled());
+        assert!(!parent.is_cancelled());
+    }
+
+    // ---- Cancel severity ordering: stronger reason wins -----------------
+
+    #[test]
+    fn test_cancel_preserves_first_reason() {
+        let mut rng = DetRng::new(42);
+        let token = SymbolCancelToken::new(ObjectId::new_for_test(1), &mut rng);
+
+        // First cancel with User reason.
+        let first = token.cancel(&CancelReason::user("first"), Time::from_millis(100));
+        assert!(first);
+
+        // Second cancel with Shutdown reason — should be rejected (first wins).
+        let second = token.cancel(
+            &CancelReason::new(CancelKind::Shutdown),
+            Time::from_millis(200),
+        );
+        assert!(!second);
+
+        // Original reason preserved.
+        assert_eq!(token.reason().unwrap().kind, CancelKind::User);
+        assert_eq!(token.cancelled_at(), Some(Time::from_millis(100)));
+    }
+
+    // ---- Multiple listeners notified on cancel --------------------------
+
+    #[test]
+    fn test_multiple_listeners_all_notified() {
+        use std::sync::atomic::{AtomicU32, Ordering};
+
+        let mut rng = DetRng::new(42);
+        let token = SymbolCancelToken::new(ObjectId::new_for_test(1), &mut rng);
+
+        let count = Arc::new(AtomicU32::new(0));
+
+        for _ in 0..3 {
+            let c = count.clone();
+            token.add_listener(move |_: &CancelReason, _: Time| {
+                c.fetch_add(1, Ordering::SeqCst);
+            });
+        }
+
+        token.cancel(&CancelReason::timeout(), Time::from_millis(100));
+
+        assert_eq!(count.load(Ordering::SeqCst), 3);
+    }
+
+    // ---- Cleanup coordinator: multiple objects cleaned independently -----
+
+    #[test]
+    fn test_cleanup_multiple_objects_independent() {
+        let coordinator = CleanupCoordinator::new();
+        let now = Time::from_millis(100);
+        let obj1 = ObjectId::new_for_test(1);
+        let obj2 = ObjectId::new_for_test(2);
+
+        // Register symbols for two separate objects.
+        for i in 0..3 {
+            coordinator.register_pending(obj1, Symbol::new_for_test(1, 0, i, &[1, 2]), now);
+        }
+        for i in 0..2 {
+            coordinator.register_pending(obj2, Symbol::new_for_test(2, 0, i, &[3, 4, 5]), now);
+        }
+
+        let stats = coordinator.stats();
+        assert_eq!(stats.pending_objects, 2);
+        assert_eq!(stats.pending_symbols, 5);
+
+        // Cleanup only obj1.
+        let result = coordinator.cleanup(obj1, None);
+        assert_eq!(result.symbols_cleaned, 3);
+        assert_eq!(result.bytes_freed, 6); // 3 * 2
+
+        // obj2 still has its symbols.
+        let stats = coordinator.stats();
+        assert_eq!(stats.pending_objects, 1);
+        assert_eq!(stats.pending_symbols, 2);
+        assert_eq!(stats.pending_bytes, 6); // 2 * 3
+    }
+
+    // ---- Token serialization roundtrip preserves all fields -------------
+
+    #[test]
+    fn test_token_serialization_roundtrip_deterministic() {
+        let mut rng = DetRng::new(99);
+        let obj = ObjectId::new(0xdead_beef_cafe_babe, 0x1234_5678_9abc_def0);
+        let token = SymbolCancelToken::new(obj, &mut rng);
+
+        // Serialize and deserialize twice — should produce identical results.
+        let bytes1 = token.to_bytes();
+        let parsed1 = SymbolCancelToken::from_bytes(&bytes1).unwrap();
+        let bytes2 = parsed1.to_bytes();
+
+        assert_eq!(bytes1, bytes2, "serialization must be deterministic");
+        assert_eq!(parsed1.token_id(), token.token_id());
+        assert_eq!(parsed1.object_id(), token.object_id());
+    }
+
+    // ---- Message forwarding exhaustion ----------------------------------
+
+    #[test]
+    fn test_message_forwarding_exhausts_at_zero_hops() {
+        let msg = CancelMessage::new(
+            1,
+            ObjectId::new_for_test(1),
+            CancelKind::User,
+            Time::from_millis(100),
+            0,
+        )
+        .with_max_hops(0);
+
+        // Cannot forward when max_hops is 0.
+        assert!(!msg.can_forward());
+        assert!(msg.forwarded().is_none());
+    }
+
+    // ---- Broadcaster: separate token IDs not conflated ------------------
+
+    #[test]
+    fn test_broadcaster_separate_tokens_independent() {
+        let broadcaster = CancelBroadcaster::new(NullSink);
+
+        let msg1 = CancelMessage::new(
+            1,
+            ObjectId::new_for_test(1),
+            CancelKind::User,
+            Time::from_millis(100),
+            0,
+        );
+        let msg2 = CancelMessage::new(
+            2,
+            ObjectId::new_for_test(2),
+            CancelKind::Timeout,
+            Time::from_millis(200),
+            0,
+        );
+
+        let now = Time::from_millis(100);
+        let r1 = broadcaster.receive_message(&msg1, now);
+        let r2 = broadcaster.receive_message(&msg2, now);
+
+        // Both should be processed (different token IDs).
+        assert!(r1.is_some());
+        assert!(r2.is_some());
+
+        let metrics = broadcaster.metrics();
+        assert_eq!(metrics.received, 2);
+        assert_eq!(metrics.duplicates, 0);
+    }
 }

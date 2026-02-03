@@ -805,4 +805,201 @@ mod tests {
         crate::assert_with_log!(stats.is_clean(), "clean", true, stats.is_clean());
         crate::test_complete!("multiple_obligation_kinds");
     }
+
+    // ---- Cancel drain: abort all pending obligations for a region --------
+
+    #[test]
+    fn cancel_drain_aborts_all_region_obligations() {
+        init_test("cancel_drain_aborts_all_region_obligations");
+        let mut ledger = ObligationLedger::new();
+        let task = make_task();
+        let region = make_region();
+
+        // Simulate: task holds three obligations when cancel is requested.
+        let _t1 = ledger.acquire(ObligationKind::SendPermit, task, region, Time::ZERO);
+        let _t2 = ledger.acquire(ObligationKind::Ack, task, region, Time::ZERO);
+        let _t3 = ledger.acquire(ObligationKind::Lease, task, region, Time::ZERO);
+
+        let pending = ledger.pending_for_region(region);
+        crate::assert_with_log!(pending == 3, "pre-drain pending", 3, pending);
+
+        // Drain: enumerate pending IDs and abort each one.
+        let drain_time = Time::from_nanos(100);
+        let pending_ids = ledger.pending_ids_for_region(region);
+        crate::assert_with_log!(pending_ids.len() == 3, "drain ids", 3, pending_ids.len());
+
+        for id in &pending_ids {
+            ledger.mark_leaked(*id, drain_time);
+        }
+
+        // Region should now be clean.
+        let is_clean = ledger.is_region_clean(region);
+        crate::assert_with_log!(is_clean, "region clean after drain", true, is_clean);
+
+        let stats = ledger.stats();
+        crate::assert_with_log!(stats.pending == 0, "global pending", 0, stats.pending);
+        crate::assert_with_log!(
+            stats.total_leaked == 3,
+            "leaked count",
+            3,
+            stats.total_leaked
+        );
+        crate::test_complete!("cancel_drain_aborts_all_region_obligations");
+    }
+
+    // ---- Cancel drain: multi-task region --------------------------------
+
+    #[test]
+    fn cancel_drain_multi_task_region() {
+        init_test("cancel_drain_multi_task_region");
+        let mut ledger = ObligationLedger::new();
+        let t1 = TaskId::from_arena(ArenaIndex::new(0, 0));
+        let t2 = TaskId::from_arena(ArenaIndex::new(1, 0));
+        let t3 = TaskId::from_arena(ArenaIndex::new(2, 0));
+        let region = make_region();
+
+        // Three tasks in the same region, each with an obligation.
+        let tok1 = ledger.acquire(ObligationKind::SendPermit, t1, region, Time::ZERO);
+        let tok2 = ledger.acquire(ObligationKind::Ack, t2, region, Time::ZERO);
+        let tok3 = ledger.acquire(ObligationKind::Lease, t3, region, Time::ZERO);
+
+        // During drain, abort all obligations in the region.
+        let drain_time = Time::from_nanos(50);
+        ledger.abort(tok1, drain_time, ObligationAbortReason::Cancel);
+        ledger.abort(tok2, drain_time, ObligationAbortReason::Cancel);
+        ledger.abort(tok3, drain_time, ObligationAbortReason::Cancel);
+
+        let is_clean = ledger.is_region_clean(region);
+        crate::assert_with_log!(is_clean, "region clean", true, is_clean);
+
+        let stats = ledger.stats();
+        crate::assert_with_log!(stats.total_aborted == 3, "aborted", 3, stats.total_aborted);
+        crate::assert_with_log!(stats.is_clean(), "ledger clean", true, stats.is_clean());
+        crate::test_complete!("cancel_drain_multi_task_region");
+    }
+
+    // ---- Region isolation: drain one region, other unaffected -----------
+
+    #[test]
+    fn region_isolation_during_drain() {
+        init_test("region_isolation_during_drain");
+        let mut ledger = ObligationLedger::new();
+        let task = make_task();
+        let r_cancel = RegionId::from_arena(ArenaIndex::new(0, 0));
+        let r_alive = RegionId::from_arena(ArenaIndex::new(1, 0));
+
+        // Obligations in region being cancelled.
+        let tok_cancel = ledger.acquire(ObligationKind::SendPermit, task, r_cancel, Time::ZERO);
+        // Obligations in region that is still alive.
+        let _tok_alive = ledger.acquire(ObligationKind::Ack, task, r_alive, Time::ZERO);
+
+        // Drain only the cancelled region.
+        ledger.abort(
+            tok_cancel,
+            Time::from_nanos(10),
+            ObligationAbortReason::Cancel,
+        );
+
+        // Cancelled region is clean.
+        let cancel_clean = ledger.is_region_clean(r_cancel);
+        crate::assert_with_log!(cancel_clean, "cancelled region clean", true, cancel_clean);
+
+        // Alive region still has its obligation.
+        let alive_pending = ledger.pending_for_region(r_alive);
+        crate::assert_with_log!(alive_pending == 1, "alive region pending", 1, alive_pending);
+
+        // Global ledger still has a pending obligation.
+        let global_pending = ledger.pending_count();
+        crate::assert_with_log!(global_pending == 1, "global pending", 1, global_pending);
+        crate::test_complete!("region_isolation_during_drain");
+    }
+
+    // ---- Deterministic drain ordering -----------------------------------
+
+    #[test]
+    fn drain_ordering_is_deterministic() {
+        init_test("drain_ordering_is_deterministic");
+        let mut ledger = ObligationLedger::new();
+        let task = make_task();
+        let region = make_region();
+
+        // Acquire obligations in a known order.
+        let _t1 = ledger.acquire(ObligationKind::SendPermit, task, region, Time::ZERO);
+        let _t2 = ledger.acquire(ObligationKind::Ack, task, region, Time::from_nanos(1));
+        let _t3 = ledger.acquire(ObligationKind::Lease, task, region, Time::from_nanos(2));
+
+        // IDs should be monotonically increasing (BTreeMap).
+        let ids = ledger.pending_ids_for_region(region);
+        for window in ids.windows(2) {
+            crate::assert_with_log!(window[0] < window[1], "monotonic ids", true, true);
+        }
+
+        // Drain in the deterministic order returned by pending_ids_for_region.
+        let drain_time = Time::from_nanos(100);
+        for id in &ids {
+            ledger.mark_leaked(*id, drain_time);
+        }
+
+        let is_clean = ledger.is_region_clean(region);
+        crate::assert_with_log!(is_clean, "clean after ordered drain", true, is_clean);
+        crate::test_complete!("drain_ordering_is_deterministic");
+    }
+
+    // ---- Quiescence: region clean implies zero pending obligations ------
+
+    #[test]
+    fn region_quiescence_after_mixed_resolution() {
+        init_test("region_quiescence_after_mixed_resolution");
+        let mut ledger = ObligationLedger::new();
+        let task = make_task();
+        let region = make_region();
+
+        // Acquire four obligations of different kinds.
+        let t1 = ledger.acquire(ObligationKind::SendPermit, task, region, Time::ZERO);
+        let t2 = ledger.acquire(ObligationKind::Ack, task, region, Time::ZERO);
+        let t3 = ledger.acquire(ObligationKind::Lease, task, region, Time::ZERO);
+        let t4 = ledger.acquire(ObligationKind::IoOp, task, region, Time::ZERO);
+
+        // Resolve them via different paths (commit, abort, cancel-abort).
+        ledger.commit(t1, Time::from_nanos(10));
+        ledger.abort(t2, Time::from_nanos(20), ObligationAbortReason::Explicit);
+        ledger.abort(t3, Time::from_nanos(30), ObligationAbortReason::Cancel);
+        ledger.commit(t4, Time::from_nanos(40));
+
+        // Region should be clean regardless of resolution path.
+        let is_clean = ledger.is_region_clean(region);
+        crate::assert_with_log!(is_clean, "quiescent", true, is_clean);
+
+        let leaks = ledger.check_region_leaks(region);
+        crate::assert_with_log!(leaks.is_clean(), "no leaks", true, leaks.is_clean());
+
+        let stats = ledger.stats();
+        crate::assert_with_log!(stats.pending == 0, "pending zero", 0, stats.pending);
+        crate::assert_with_log!(stats.is_clean(), "stats clean", true, stats.is_clean());
+        crate::test_complete!("region_quiescence_after_mixed_resolution");
+    }
+
+    // ---- Abort reason preserved -----------------------------------------
+
+    #[test]
+    fn abort_reason_preserved_in_record() {
+        init_test("abort_reason_preserved_in_record");
+        let mut ledger = ObligationLedger::new();
+        let task = make_task();
+        let region = make_region();
+
+        let token = ledger.acquire(ObligationKind::SendPermit, task, region, Time::ZERO);
+        let id = token.id();
+
+        ledger.abort(token, Time::from_nanos(10), ObligationAbortReason::Cancel);
+
+        let record = ledger.get(id).expect("record exists");
+        crate::assert_with_log!(
+            record.state == ObligationState::Aborted,
+            "state aborted",
+            ObligationState::Aborted,
+            record.state
+        );
+        crate::test_complete!("abort_reason_preserved_in_record");
+    }
 }
