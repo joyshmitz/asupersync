@@ -10,7 +10,7 @@ use std::time::Duration;
 use asupersync::distributed::assignment::{AssignmentStrategy, SymbolAssigner};
 use asupersync::distributed::bridge::{EffectiveState, RegionBridge, RegionMode};
 use asupersync::distributed::distribution::{
-    DistributionConfig, ReplicaAck, ReplicaFailure, SymbolDistributor,
+    DistributionConfig, DistributionResult, ReplicaAck, ReplicaFailure, SymbolDistributor,
 };
 use asupersync::distributed::encoding::{EncodedState, EncodingConfig, StateEncoder};
 use asupersync::distributed::recovery::{
@@ -18,9 +18,11 @@ use asupersync::distributed::recovery::{
     RecoveryDecodingConfig, RecoveryOrchestrator, RecoveryTrigger, StateDecoder,
 };
 use asupersync::distributed::snapshot::{BudgetSnapshot, RegionSnapshot, TaskSnapshot, TaskState};
+use asupersync::distributed::HashRing;
 use asupersync::error::ErrorKind;
 use asupersync::record::distributed_region::{
-    ConsistencyLevel, DistributedRegionConfig, DistributedRegionRecord, ReplicaInfo, ReplicaStatus,
+    ConsistencyLevel, DistributedRegionConfig, DistributedRegionRecord, DistributedRegionState,
+    ReplicaInfo, ReplicaStatus,
 };
 use asupersync::record::region::RegionState;
 use asupersync::types::budget::Budget;
@@ -97,6 +99,138 @@ fn make_failure(id: &str) -> ReplicaFailure {
         replica_id: id.to_string(),
         error: "timeout".to_string(),
         error_kind: ErrorKind::NodeUnavailable,
+    }
+}
+
+fn make_cluster_snapshot(region_id: RegionId, sequence: u64, timestamp: Time) -> RegionSnapshot {
+    let mut snapshot = make_region_snapshot();
+    snapshot.region_id = region_id;
+    snapshot.sequence = sequence;
+    snapshot.timestamp = timestamp;
+    snapshot
+}
+
+fn replica_can_ack(replica: &ReplicaInfo) -> bool {
+    matches!(
+        replica.status,
+        ReplicaStatus::Healthy | ReplicaStatus::Syncing
+    )
+}
+
+struct TestCluster {
+    record: DistributedRegionRecord,
+    election_term: u64,
+    leader_id: Option<String>,
+}
+
+impl TestCluster {
+    fn bootstrap(
+        id: RegionId,
+        config: DistributedRegionConfig,
+        replicas: Vec<ReplicaInfo>,
+        now: Time,
+    ) -> Self {
+        let mut record = DistributedRegionRecord::new(id, config, None, Budget::default());
+        for replica in replicas {
+            record.add_replica(replica).unwrap();
+        }
+        record.activate(now).unwrap();
+        Self {
+            record,
+            election_term: 0,
+            leader_id: None,
+        }
+    }
+
+    fn elect_leader(&mut self) -> Option<String> {
+        let mut ring = HashRing::new(8);
+        for replica in self.record.replicas.iter().filter(|r| replica_can_ack(r)) {
+            ring.add_node(replica.id.clone());
+        }
+        let leader = ring.node_for_key(&self.election_term).map(str::to_string);
+        self.leader_id = leader.clone();
+        self.election_term = self.election_term.wrapping_add(1);
+        leader
+    }
+
+    fn pick_follower(&self, leader_id: &str) -> Option<String> {
+        self.record
+            .replicas
+            .iter()
+            .find(|replica| replica.id != leader_id && replica_can_ack(replica))
+            .map(|replica| replica.id.clone())
+    }
+
+    fn mark_unavailable(&mut self, replica_id: &str, now: Time) {
+        match self.record.replica_lost(replica_id, now) {
+            Ok(transition) => {
+                tracing::info!(
+                    replica = %replica_id,
+                    state = ?transition.to,
+                    "replica lost triggered state transition"
+                );
+            }
+            Err(err) => {
+                tracing::info!(
+                    replica = %replica_id,
+                    error = %err,
+                    "replica lost but quorum maintained"
+                );
+            }
+        }
+    }
+
+    fn heal_replica(&mut self, replica_id: &str, now: Time) {
+        self.record
+            .update_replica_status(replica_id, ReplicaStatus::Healthy, now)
+            .unwrap();
+    }
+
+    fn healthy_count(&self) -> u32 {
+        self.record.healthy_replicas()
+    }
+
+    fn read_quorum_ok(&self) -> bool {
+        let required = SymbolDistributor::required_acks(
+            self.record.config.read_consistency,
+            self.record.replicas.len(),
+        ) as u32;
+        self.healthy_count() >= required
+    }
+
+    fn write_snapshot(&mut self, snapshot: &RegionSnapshot, now: Time) -> DistributionResult {
+        let config = EncodingConfig {
+            symbol_size: 128,
+            min_repair_symbols: 4,
+            ..Default::default()
+        };
+        let encoded = StateEncoder::new(config, DetRng::new(7))
+            .encode(snapshot, now)
+            .unwrap();
+
+        let outcomes = self
+            .record
+            .replicas
+            .iter()
+            .map(|replica| {
+                if replica_can_ack(replica) {
+                    Outcome::Ok(make_ack(&replica.id, encoded.symbols.len() as u32))
+                } else {
+                    Outcome::Err(make_failure(&replica.id))
+                }
+            })
+            .collect();
+
+        let mut distributor = SymbolDistributor::new(DistributionConfig {
+            consistency: self.record.config.write_consistency,
+            ..Default::default()
+        });
+        distributor.evaluate_outcomes(
+            &encoded,
+            &self.record.replicas,
+            outcomes,
+            Duration::from_millis(12),
+        )
     }
 }
 
@@ -663,4 +797,89 @@ fn e2e_insufficient_symbols_fails_cleanly() {
     tracing::info!(error = ?result.unwrap_err(), "correctly rejected insufficient symbols");
 
     test_complete!("e2e_insufficient_symbols");
+}
+
+// =========================================================================
+// Multi-node cluster: bootstrap, leader election, replication, partition, heal
+// =========================================================================
+
+#[test]
+fn e2e_distributed_multi_node_cluster() {
+    common::init_test_logging();
+    test_phase!("Bootstrap");
+
+    let region_id = RegionId::new_for_test(42, 0);
+    let config = DistributedRegionConfig {
+        min_quorum: 2,
+        replication_factor: 3,
+        read_consistency: ConsistencyLevel::Quorum,
+        write_consistency: ConsistencyLevel::Quorum,
+        ..Default::default()
+    };
+    let mut cluster =
+        TestCluster::bootstrap(region_id, config, test_replicas(3), Time::from_secs(0));
+    assert_eq!(cluster.record.state, DistributedRegionState::Active);
+    assert!(cluster.record.has_quorum());
+
+    test_phase!("Leader Election");
+    let leader = cluster.elect_leader().expect("leader elected");
+    tracing::info!(leader = %leader, "leader elected");
+
+    test_phase!("Write Replication");
+    let snapshot = make_cluster_snapshot(region_id, 10, Time::from_secs(1));
+    let write_result = cluster.write_snapshot(&snapshot, Time::from_secs(1));
+    assert!(write_result.quorum_achieved);
+
+    test_phase!("Read Consistency");
+    assert!(cluster.read_quorum_ok());
+
+    test_phase!("Network Partition");
+    let follower = cluster
+        .pick_follower(&leader)
+        .expect("follower available for partition");
+    cluster.mark_unavailable(&follower, Time::from_secs(2));
+    assert!(cluster.record.has_quorum());
+    let write_after_partition = cluster.write_snapshot(&snapshot, Time::from_secs(2));
+    assert!(write_after_partition.quorum_achieved);
+
+    test_phase!("Leader Failure + Re-election");
+    cluster.mark_unavailable(&leader, Time::from_secs(3));
+    assert_eq!(cluster.record.state, DistributedRegionState::Degraded);
+    assert!(cluster.healthy_count() < cluster.record.config.min_quorum);
+    let new_leader = cluster.elect_leader().expect("leader after failure");
+    assert_ne!(new_leader, leader);
+    let write_after_leader_loss = cluster.write_snapshot(&snapshot, Time::from_secs(3));
+    assert!(!write_after_leader_loss.quorum_achieved);
+    assert!(!cluster.read_quorum_ok());
+
+    test_phase!("Partition Heal");
+    cluster
+        .record
+        .update_replica_status(&follower, ReplicaStatus::Syncing, Time::from_secs(4))
+        .unwrap();
+    cluster.heal_replica(&follower, Time::from_secs(5));
+    cluster.heal_replica(&leader, Time::from_secs(5));
+    assert!(cluster.record.has_quorum());
+    assert_eq!(cluster.record.state, DistributedRegionState::Degraded);
+    cluster
+        .record
+        .trigger_recovery("e2e-test", Time::from_secs(6))
+        .unwrap();
+    cluster
+        .record
+        .complete_recovery(8, Time::from_secs(7))
+        .unwrap();
+    assert_eq!(cluster.record.state, DistributedRegionState::Active);
+
+    let healed_leader = cluster.elect_leader().expect("leader after heal");
+    tracing::info!(leader = %healed_leader, "leader after heal");
+    let write_after_heal = cluster.write_snapshot(&snapshot, Time::from_secs(7));
+    assert!(write_after_heal.quorum_achieved);
+    assert!(cluster.read_quorum_ok());
+
+    test_complete!(
+        "e2e_distributed_multi_node_cluster",
+        initial_leader = leader,
+        healed_leader = healed_leader,
+    );
 }

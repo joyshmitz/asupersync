@@ -445,7 +445,21 @@ impl<T> SendPermit<'_, T> {
             .lock()
             .expect("channel lock poisoned");
 
-        inner.reserved -= 1;
+        if inner.reserved == 0 {
+            debug_assert!(false, "send permit without reservation");
+        } else {
+            inner.reserved -= 1;
+        }
+
+        if inner.receiver_dropped {
+            // Receiver is gone; drop the value and release capacity.
+            for waiter in inner.send_wakers.drain(..) {
+                waiter.queued.store(false, Ordering::Release);
+                waiter.waker.wake();
+            }
+            return;
+        }
+
         inner.queue.push_back(value);
 
         if let Some(waker) = inner.recv_waker.take() {
@@ -462,7 +476,11 @@ impl<T> SendPermit<'_, T> {
             .inner
             .lock()
             .expect("channel lock poisoned");
-        inner.reserved -= 1;
+        if inner.reserved == 0 {
+            debug_assert!(false, "abort permit without reservation");
+        } else {
+            inner.reserved -= 1;
+        }
 
         // Wake all waiting senders (simple strategy)
         for waiter in inner.send_wakers.drain(..) {
@@ -481,7 +499,11 @@ impl<T> Drop for SendPermit<'_, T> {
                 .inner
                 .lock()
                 .expect("channel lock poisoned");
-            inner.reserved -= 1;
+            if inner.reserved == 0 {
+                debug_assert!(false, "dropped permit without reservation");
+            } else {
+                inner.reserved -= 1;
+            }
 
             for waiter in inner.send_wakers.drain(..) {
                 waiter.queued.store(false, Ordering::Release);
@@ -634,7 +656,6 @@ impl<T> Drop for Receiver<T> {
         // Drain queued items to prevent memory leaks when senders are
         // long-lived (they hold Arc refs that keep the queue alive).
         inner.queue.clear();
-        inner.reserved = 0;
         for waiter in inner.send_wakers.drain(..) {
             waiter.queued.store(false, Ordering::Release);
             waiter.waker.wake();
@@ -1017,6 +1038,23 @@ mod tests {
             format!("{:?}", result)
         );
         crate::test_complete!("try_recv_disconnected_when_closed_and_empty");
+    }
+
+    #[test]
+    fn permit_send_after_receiver_drop_does_not_enqueue() {
+        init_test("permit_send_after_receiver_drop_does_not_enqueue");
+        let (tx, rx) = channel::<i32>(1);
+        let cx = test_cx();
+
+        let permit = block_on(tx.reserve(&cx)).expect("reserve failed");
+        drop(rx);
+        permit.send(5);
+
+        let inner = tx.shared.inner.lock().expect("channel lock poisoned");
+        let queue_empty = inner.queue.is_empty();
+        crate::assert_with_log!(queue_empty, "queue empty", true, queue_empty);
+        crate::assert_with_log!(inner.reserved == 0, "reserved cleared", 0, inner.reserved);
+        crate::test_complete!("permit_send_after_receiver_drop_does_not_enqueue");
     }
 
     #[test]

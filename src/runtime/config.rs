@@ -21,6 +21,7 @@
 use crate::observability::metrics::{MetricsProvider, NoOpMetrics};
 use crate::observability::ObservabilityConfig;
 use crate::record::RegionLimits;
+use crate::trace::distributed::LogicalClockMode;
 use crate::runtime::deadline_monitor::{DeadlineWarning, MonitorConfig};
 use std::sync::Arc;
 
@@ -72,6 +73,8 @@ pub struct RuntimeConfig {
     pub enable_parking: bool,
     /// Time slice for cooperative yielding (polls).
     pub poll_budget: u32,
+    /// Logical clock mode used for trace causal ordering.
+    pub logical_clock_mode: LogicalClockMode,
     /// Admission limits applied to the root region (if set).
     pub root_region_limits: Option<RegionLimits>,
     /// Callback executed when a worker thread starts.
@@ -129,6 +132,7 @@ impl Default for RuntimeConfig {
             blocking: BlockingPoolConfig::default(),
             enable_parking: true,
             poll_budget: 128,
+            logical_clock_mode: LogicalClockMode::Lamport,
             root_region_limits: None,
             on_thread_start: None,
             on_thread_stop: None,
@@ -144,6 +148,7 @@ impl Default for RuntimeConfig {
 #[cfg(test)]
 mod tests {
     use super::*;
+    use crate::trace::distributed::LogicalClockMode;
 
     fn init_test(name: &str) {
         crate::test_utils::init_test_logging();
@@ -177,6 +182,12 @@ mod tests {
             "poll_budget",
             128,
             config.poll_budget
+        );
+        crate::assert_with_log!(
+            matches!(config.logical_clock_mode, LogicalClockMode::Lamport),
+            "logical_clock_mode",
+            "Lamport",
+            format!("{:?}", config.logical_clock_mode)
         );
         crate::assert_with_log!(
             config.obligation_leak_response == ObligationLeakResponse::Log,
