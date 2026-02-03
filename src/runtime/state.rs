@@ -226,6 +226,8 @@ pub struct RuntimeState {
     timer_driver: Option<TimerDriverHandle>,
     /// Logical clock mode used for task contexts.
     logical_clock_mode: LogicalClockMode,
+    /// Cancel attribution configuration (cause-chain limits, memory caps).
+    cancel_attribution: CancelAttributionConfig,
     /// Entropy source for capability-based randomness.
     entropy_source: Arc<dyn EntropySource>,
     /// Optional observability configuration for runtime contexts.

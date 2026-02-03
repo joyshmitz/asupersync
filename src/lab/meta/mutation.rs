@@ -404,6 +404,94 @@ fn mutation_mailbox_capacity(harness: &mut MetaHarness) {
     harness.oracles.mailbox.on_send(actor(300), now);
 }
 
+fn baseline_actor_leak(harness: &mut MetaHarness) {
+    let now = harness.now();
+    let region = harness.next_region();
+    let actor_id = actor(1);
+
+    harness.oracles.actor_leak.on_spawn(actor_id, region, now);
+    harness.oracles.actor_leak.on_stop(actor_id, now);
+    harness.oracles.actor_leak.on_region_close(region, now);
+}
+
+fn mutation_actor_leak(harness: &mut MetaHarness) {
+    let now = harness.now();
+    let region = harness.next_region();
+    let actor_id = actor(1);
+
+    harness.oracles.actor_leak.on_spawn(actor_id, region, now);
+    harness.oracles.actor_leak.on_region_close(region, now);
+}
+
+fn baseline_supervision_restart(harness: &mut MetaHarness) {
+    let now = harness.now();
+    let supervisor = actor(1);
+    let child = actor(2);
+
+    harness.oracles.supervision.register_supervisor(
+        supervisor,
+        RestartPolicy::OneForOne,
+        2,
+        EscalationPolicy::Escalate,
+    );
+    harness
+        .oracles
+        .supervision
+        .register_child(supervisor, child);
+    harness
+        .oracles
+        .supervision
+        .on_child_failed(supervisor, child, now, "child failed".to_string());
+
+    // Within restart budget: no escalation required.
+    harness.oracles.supervision.on_restart(child, 2, now);
+}
+
+fn mutation_supervision_restart(harness: &mut MetaHarness) {
+    let now = harness.now();
+    let supervisor = actor(1);
+    let child = actor(2);
+
+    harness.oracles.supervision.register_supervisor(
+        supervisor,
+        RestartPolicy::OneForOne,
+        2,
+        EscalationPolicy::Escalate,
+    );
+    harness
+        .oracles
+        .supervision
+        .register_child(supervisor, child);
+    harness
+        .oracles
+        .supervision
+        .on_child_failed(supervisor, child, now, "child failed".to_string());
+
+    // Exceeds restart budget without escalation: should violate supervision invariant.
+    harness.oracles.supervision.on_restart(child, 3, now);
+}
+
+fn baseline_mailbox_capacity(harness: &mut MetaHarness) {
+    let now = harness.now();
+    let actor_id = actor(1);
+
+    harness.oracles.mailbox.configure_mailbox(actor_id, 2, true);
+    harness.oracles.mailbox.on_send(actor_id, now);
+    harness.oracles.mailbox.on_send(actor_id, now);
+    harness.oracles.mailbox.on_receive(actor_id, now);
+    harness.oracles.mailbox.on_receive(actor_id, now);
+}
+
+fn mutation_mailbox_capacity(harness: &mut MetaHarness) {
+    let now = harness.now();
+    let actor_id = actor(1);
+
+    harness.oracles.mailbox.configure_mailbox(actor_id, 2, true);
+    harness.oracles.mailbox.on_send(actor_id, now);
+    harness.oracles.mailbox.on_send(actor_id, now);
+    harness.oracles.mailbox.on_send(actor_id, now);
+}
+
 /// Maps an oracle violation to its invariant name.
 #[must_use]
 pub fn invariant_from_violation(violation: &OracleViolation) -> &'static str {

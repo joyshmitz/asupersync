@@ -22,6 +22,7 @@ fn arb_u128() -> impl Strategy<Value = u128> {
     any::<u128>()
 }
 
+#[allow(dead_code)]
 fn arb_span_id() -> impl Strategy<Value = SymbolSpanId> {
     any::<u64>().prop_map(SymbolSpanId::new)
 }
