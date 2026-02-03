@@ -413,6 +413,156 @@ pub fn estimated_classes(events: &[TraceEvent]) -> usize {
     non_overlapping
 }
 
+/// Per-resource race counts for coverage analysis.
+#[derive(Debug, Clone, Default)]
+pub struct ResourceRaceDistribution {
+    /// Races per resource type.
+    pub counts: BTreeMap<String, usize>,
+}
+
+impl ResourceRaceDistribution {
+    fn from_report(report: &RaceReport) -> Self {
+        let mut counts = BTreeMap::new();
+        for race in &report.races {
+            let key = match &race.kind {
+                RaceKind::Resource(r) => format!("{r:?}"),
+            };
+            *counts.entry(key).or_insert(0) += 1;
+        }
+        Self { counts }
+    }
+
+    /// Total races across all resources.
+    #[must_use]
+    pub fn total(&self) -> usize {
+        self.counts.values().sum()
+    }
+
+    /// Number of distinct resource types involved in races.
+    #[must_use]
+    pub fn resource_count(&self) -> usize {
+        self.counts.len()
+    }
+}
+
+/// Comprehensive DPOR coverage analysis for a trace.
+#[derive(Debug, Clone)]
+pub struct TraceCoverageAnalysis {
+    /// Number of events in the trace.
+    pub event_count: usize,
+    /// Races detected (O(n³) immediate races).
+    pub immediate_race_count: usize,
+    /// HB-races detected (vector-clock based).
+    pub hb_race_count: usize,
+    /// Estimated equivalence classes reachable.
+    pub estimated_classes: usize,
+    /// Backtrack points generated.
+    pub backtrack_point_count: usize,
+    /// Events involved in at least one race.
+    pub racing_event_count: usize,
+    /// Fraction of events involved in races.
+    pub race_density: f64,
+    /// Per-resource race distribution.
+    pub resource_distribution: ResourceRaceDistribution,
+}
+
+/// Compute a comprehensive coverage analysis for a trace.
+///
+/// Runs both the O(n³) immediate race detector and the HB-based race
+/// detector, then combines results into a single analysis.
+#[must_use]
+#[allow(clippy::cast_precision_loss)]
+pub fn trace_coverage_analysis(events: &[TraceEvent]) -> TraceCoverageAnalysis {
+    let immediate = detect_races(events);
+    let hb_report = detect_hb_races(events);
+    let est = estimated_classes(events);
+    let racing = racing_events(events);
+    let resource_distribution = ResourceRaceDistribution::from_report(&hb_report);
+
+    let race_density = if events.is_empty() {
+        0.0
+    } else {
+        racing.len() as f64 / events.len() as f64
+    };
+
+    TraceCoverageAnalysis {
+        event_count: events.len(),
+        immediate_race_count: immediate.race_count(),
+        hb_race_count: hb_report.race_count(),
+        estimated_classes: est,
+        backtrack_point_count: immediate.backtrack_points.len(),
+        racing_event_count: racing.len(),
+        race_density,
+        resource_distribution,
+    }
+}
+
+/// Sleep set for DPOR exploration.
+///
+/// Tracks which (event-index, alternative-task) pairs have already been
+/// explored, preventing re-exploration of equivalent schedules. This is
+/// an approximation of the full DPOR sleep set: we hash the combination
+/// of divergence index and the tasks involved in the race to create a
+/// deduplication key.
+#[derive(Debug, Clone, Default)]
+pub struct SleepSet {
+    /// Explored (divergence_index, race_hash) pairs.
+    explored: HashSet<u64>,
+}
+
+impl SleepSet {
+    /// Create a new empty sleep set.
+    #[must_use]
+    pub fn new() -> Self {
+        Self::default()
+    }
+
+    /// Check if a backtrack point has already been explored.
+    #[must_use]
+    pub fn contains(&self, bp: &BacktrackPoint, events: &[TraceEvent]) -> bool {
+        self.explored.contains(&Self::bp_key(bp, events))
+    }
+
+    /// Mark a backtrack point as explored.
+    pub fn insert(&mut self, bp: &BacktrackPoint, events: &[TraceEvent]) {
+        self.explored.insert(Self::bp_key(bp, events));
+    }
+
+    /// Number of explored entries.
+    #[must_use]
+    pub fn len(&self) -> usize {
+        self.explored.len()
+    }
+
+    /// True if no entries have been recorded.
+    #[must_use]
+    pub fn is_empty(&self) -> bool {
+        self.explored.is_empty()
+    }
+
+    /// Compute a deduplication key for a backtrack point.
+    ///
+    /// Hashes the divergence index together with the event kinds at the
+    /// race endpoints to create a stable identifier for "we already tried
+    /// reversing this specific race".
+    fn bp_key(bp: &BacktrackPoint, events: &[TraceEvent]) -> u64 {
+        use std::hash::{Hash, Hasher};
+        let mut hasher = std::collections::hash_map::DefaultHasher::new();
+        bp.divergence_index.hash(&mut hasher);
+        bp.race.earlier.hash(&mut hasher);
+        bp.race.later.hash(&mut hasher);
+        if let Some(e) = events.get(bp.race.earlier) {
+            std::mem::discriminant(&e.kind).hash(&mut hasher);
+        }
+        if let Some(e) = events.get(bp.race.later) {
+            std::mem::discriminant(&e.kind).hash(&mut hasher);
+        }
+        hasher.finish()
+    }
+}
+
+use std::collections::HashSet;
+
 #[cfg(test)]
 mod tests {
     use super::*;
@@ -567,5 +717,64 @@ mod tests {
         ];
         let report = detect_hb_races(&events);
         assert!(report.is_race_free());
+    }
+
+    #[test]
+    fn trace_coverage_analysis_empty() {
+        let analysis = trace_coverage_analysis(&[]);
+        assert_eq!(analysis.event_count, 0);
+        assert_eq!(analysis.immediate_race_count, 0);
+        assert_eq!(analysis.hb_race_count, 0);
+        assert_eq!(analysis.estimated_classes, 1);
+        assert_eq!(analysis.racing_event_count, 0);
+        assert!((analysis.race_density - 0.0).abs() < f64::EPSILON);
+    }
+
+    #[test]
+    fn trace_coverage_analysis_concurrent_tasks() {
+        let events = [
+            TraceEvent::region_created(1, Time::ZERO, rid(1), None),
+            TraceEvent::spawn(2, Time::ZERO, tid(1), rid(1)),
+            TraceEvent::spawn(3, Time::ZERO, tid(2), rid(1)),
+        ];
+        let analysis = trace_coverage_analysis(&events);
+        assert_eq!(analysis.event_count, 3);
+        assert!(analysis.immediate_race_count >= 1);
+        assert!(analysis.estimated_classes >= 2);
+        assert!(analysis.racing_event_count >= 1);
+        assert!(analysis.race_density > 0.0);
+    }
+
+    #[test]
+    fn resource_race_distribution_from_hb() {
+        let reason = CancelReason::user("test");
+        let events = [
+            TraceEvent::cancel_request(1, Time::ZERO, tid(1), rid(1), reason.clone()),
+            TraceEvent::cancel_request(2, Time::ZERO, tid(2), rid(1), reason),
+        ];
+        let report = detect_hb_races(&events);
+        let dist = ResourceRaceDistribution::from_report(&report);
+        assert_eq!(dist.total(), 1);
+        assert_eq!(dist.resource_count(), 1);
+    }
+
+    #[test]
+    fn sleep_set_deduplication() {
+        let events = [
+            TraceEvent::spawn(1, Time::ZERO, tid(1), rid(1)),
+            TraceEvent::complete(2, Time::ZERO, tid(1), rid(1)),
+        ];
+        let bp = BacktrackPoint {
+            race: Race {
+                earlier: 0,
+                later: 1,
+            },
+            divergence_index: 0,
+        };
+        let mut sleep = SleepSet::new();
+        assert!(!sleep.contains(&bp, &events));
+        sleep.insert(&bp, &events);
+        assert!(sleep.contains(&bp, &events));
+        assert_eq!(sleep.len(), 1);
     }
 }

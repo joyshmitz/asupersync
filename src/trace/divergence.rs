@@ -326,7 +326,9 @@ pub fn diagnose_divergence(
     let replay_progress_pct = if trace_len == 0 {
         0.0
     } else {
-        (idx as f64 / trace_len as f64) * 100.0
+        let idx_f = f64::from(idx.min(u32::MAX as usize) as u32);
+        let len_f = f64::from(trace_len.min(u32::MAX as usize) as u32);
+        (idx_f / len_f) * 100.0
     };
 
     DivergenceReport {
@@ -456,16 +458,14 @@ fn extract_affected_entities(expected: &ReplayEvent, actual: &ReplayEvent) -> Af
     collect_event_entities(actual, &mut tasks, &mut regions, &mut timers);
 
     // Determine scheduler lane from scheduling events
-    match (expected, actual) {
-        (
-            ReplayEvent::TaskScheduled { task: e, .. },
-            ReplayEvent::TaskScheduled { task: a, .. },
-        ) => {
-            if e != a {
-                lane = Some(format!("ready (expected task {:?}, got {:?})", e, a));
-            }
+    if let (
+        ReplayEvent::TaskScheduled { task: e, .. },
+        ReplayEvent::TaskScheduled { task: a, .. },
+    ) = (expected, actual)
+    {
+        if e != a {
+            lane = Some(format!("ready (expected task {e:?}, got {a:?})"));
         }
-        _ => {}
     }
 
     AffectedEntities {
@@ -527,6 +527,7 @@ fn collect_event_entities(
 // Explanations and Suggestions
 // =============================================================================
 
+#[allow(clippy::too_many_lines)]
 fn build_explanation(
     category: DivergenceCategory,
     expected: &ReplayEvent,
@@ -549,15 +550,13 @@ fn build_explanation(
             {
                 if e == a {
                     format!(
-                        "Task {:?} was scheduled at tick {} instead of expected tick {}. \
-                         The scheduler made the same choice but at a different time.",
-                        e, at, et
+                        "Task {e:?} was scheduled at tick {at} instead of expected tick {et}. \
+                         The scheduler made the same choice but at a different time."
                     )
                 } else {
                     format!(
-                        "Scheduler chose task {:?} at tick {} instead of expected task {:?} at tick {}. \
-                         The ready queue ordering diverged.",
-                        a, at, e, et
+                        "Scheduler chose task {a:?} at tick {at} instead of expected task {e:?} at tick {et}. \
+                         The ready queue ordering diverged."
                     )
                 }
             } else {
@@ -707,17 +706,18 @@ fn build_suggestion(category: DivergenceCategory, affected: &AffectedEntities) -
 // =============================================================================
 
 /// Returns (event_type, details, optional_task_id, optional_region_id).
+#[allow(clippy::too_many_lines)]
 fn summarize_event(event: &ReplayEvent) -> (String, String, Option<u64>, Option<u64>) {
     match event {
         ReplayEvent::TaskScheduled { task, at_tick } => (
             "TaskScheduled".into(),
-            format!("task={:?} tick={at_tick}", task),
+            format!("task={task:?} tick={at_tick}"),
             Some(task.0),
             None,
         ),
         ReplayEvent::TaskYielded { task } => (
             "TaskYielded".into(),
-            format!("task={:?}", task),
+            format!("task={task:?}"),
             Some(task.0),
             None,
         ),
@@ -731,7 +731,7 @@ fn summarize_event(event: &ReplayEvent) -> (String, String, Option<u64>, Option<
             };
             (
                 "TaskCompleted".into(),
-                format!("task={:?} outcome={outcome_str}", task),
+                format!("task={task:?} outcome={outcome_str}"),
                 Some(task.0),
                 None,
             )
@@ -742,7 +742,7 @@ fn summarize_event(event: &ReplayEvent) -> (String, String, Option<u64>, Option<
             at_tick,
         } => (
             "TaskSpawned".into(),
-            format!("task={:?} region={:?} tick={at_tick}", task, region),
+            format!("task={task:?} region={region:?} tick={at_tick}"),
             Some(task.0),
             Some(region.0),
         ),
@@ -817,7 +817,7 @@ fn summarize_event(event: &ReplayEvent) -> (String, String, Option<u64>, Option<
             at_tick,
         } => (
             "RegionCreated".into(),
-            format!("region={:?} parent={parent:?} tick={at_tick}", region),
+            format!("region={region:?} parent={parent:?} tick={at_tick}"),
             None,
             Some(region.0),
         ),
@@ -831,7 +831,7 @@ fn summarize_event(event: &ReplayEvent) -> (String, String, Option<u64>, Option<
             };
             (
                 "RegionClosed".into(),
-                format!("region={:?} outcome={outcome_str}", region),
+                format!("region={region:?} outcome={outcome_str}"),
                 None,
                 Some(region.0),
             )
@@ -841,13 +841,13 @@ fn summarize_event(event: &ReplayEvent) -> (String, String, Option<u64>, Option<
             cancel_kind,
         } => (
             "RegionCancelled".into(),
-            format!("region={:?} cancel_kind={cancel_kind}", region),
+            format!("region={region:?} cancel_kind={cancel_kind}"),
             None,
             Some(region.0),
         ),
         ReplayEvent::WakerWake { task } => (
             "WakerWake".into(),
-            format!("task={:?}", task),
+            format!("task={task:?}"),
             Some(task.0),
             None,
         ),
@@ -905,7 +905,6 @@ fn event_type_name(event: &ReplayEvent) -> &'static str {
 #[cfg(test)]
 mod tests {
     use super::*;
-    use crate::trace::{CompactRegionId, CompactTaskId};
     use crate::trace::replay::TraceMetadata;
     use crate::trace::{CompactRegionId, CompactTaskId};
 

@@ -85,8 +85,9 @@ pub use divergence::{
     DivergenceCategory, DivergenceReport, EventSummary,
 };
 pub use dpor::{
-    detect_hb_races, detect_races, estimated_classes, racing_events, BacktrackPoint, DetectedRace,
-    HappensBeforeGraph, Race, RaceAnalysis, RaceDetector, RaceKind, RaceReport,
+    detect_hb_races, detect_races, estimated_classes, racing_events, trace_coverage_analysis,
+    BacktrackPoint, DetectedRace, HappensBeforeGraph, Race, RaceAnalysis, RaceDetector, RaceKind,
+    RaceReport, ResourceRaceDistribution, SleepSet, TraceCoverageAnalysis,
 };
 pub use event::{TraceData, TraceEvent, TraceEventKind, TRACE_EVENT_SCHEMA_VERSION};
 pub use event_structure::{
