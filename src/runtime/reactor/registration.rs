@@ -217,15 +217,15 @@ mod tests {
     use std::sync::atomic::{AtomicBool, AtomicUsize, Ordering};
     use std::sync::Arc;
 
-    /// Mock reactor for testing Registration RAII behavior.
-    struct MockReactor {
+    /// Test reactor for testing Registration RAII behavior.
+    struct TestReactor {
         deregistered: AtomicBool,
         deregister_count: AtomicUsize,
         last_token: std::sync::Mutex<Option<Token>>,
         last_interest: std::sync::Mutex<Option<Interest>>,
     }
 
-    impl MockReactor {
+    impl TestReactor {
         fn new() -> Arc<Self> {
             Arc::new(Self {
                 deregistered: AtomicBool::new(false),
@@ -244,7 +244,7 @@ mod tests {
         }
     }
 
-    impl ReactorHandle for MockReactor {
+    impl ReactorHandle for TestReactor {
         fn deregister_by_token(&self, token: Token) -> io::Result<()> {
             self.deregistered.store(true, Ordering::SeqCst);
             self.deregister_count.fetch_add(1, Ordering::SeqCst);
@@ -267,7 +267,7 @@ mod tests {
     #[test]
     fn drop_deregisters() {
         init_test("drop_deregisters");
-        let reactor = MockReactor::new();
+        let reactor = TestReactor::new();
         let token = Token::new(42);
 
         {
@@ -295,7 +295,7 @@ mod tests {
     #[test]
     fn set_interest_updates_reactor() {
         init_test("set_interest_updates_reactor");
-        let reactor = MockReactor::new();
+        let reactor = TestReactor::new();
         let token = Token::new(1);
 
         let reg = Registration::new(
@@ -335,7 +335,7 @@ mod tests {
         let token = Token::new(1);
 
         let reg = {
-            let reactor = MockReactor::new();
+            let reactor = TestReactor::new();
             Registration::new(
                 token,
                 Arc::downgrade(&reactor) as Weak<dyn ReactorHandle>,
@@ -360,7 +360,7 @@ mod tests {
     #[test]
     fn is_active() {
         init_test("is_active");
-        let reactor = MockReactor::new();
+        let reactor = TestReactor::new();
         let token = Token::new(1);
 
         let reg = Registration::new(
@@ -382,7 +382,7 @@ mod tests {
     #[test]
     fn explicit_deregister() {
         init_test("explicit_deregister");
-        let reactor = MockReactor::new();
+        let reactor = TestReactor::new();
         let token = Token::new(1);
 
         let reg = Registration::new(
@@ -407,7 +407,7 @@ mod tests {
         let token = Token::new(1);
 
         let reg = {
-            let reactor = MockReactor::new();
+            let reactor = TestReactor::new();
             Registration::new(
                 token,
                 Arc::downgrade(&reactor) as Weak<dyn ReactorHandle>,
@@ -424,7 +424,7 @@ mod tests {
     #[test]
     fn token_accessor() {
         init_test("token_accessor");
-        let reactor = MockReactor::new();
+        let reactor = TestReactor::new();
         let token = Token::new(999);
 
         let reg = Registration::new(
@@ -440,7 +440,7 @@ mod tests {
     #[test]
     fn debug_impl() {
         init_test("debug_impl");
-        let reactor = MockReactor::new();
+        let reactor = TestReactor::new();
         let token = Token::new(42);
 
         let reg = Registration::new(
@@ -468,7 +468,7 @@ mod tests {
     #[test]
     fn multiple_registrations() {
         init_test("multiple_registrations");
-        let reactor = MockReactor::new();
+        let reactor = TestReactor::new();
 
         {
             let _reg1 = Registration::new(

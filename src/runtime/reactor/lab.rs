@@ -933,8 +933,8 @@ mod tests {
     use super::*;
     use crate::test_utils::init_test_logging;
 
-    struct MockSource;
-    impl std::os::fd::AsRawFd for MockSource {
+    struct TestFdSource;
+    impl std::os::fd::AsRawFd for TestFdSource {
         fn as_raw_fd(&self) -> std::os::fd::RawFd {
             0
         }
@@ -950,7 +950,7 @@ mod tests {
         init_test("delivers_injected_event");
         let reactor = LabReactor::new();
         let token = Token::new(1);
-        let source = MockSource;
+        let source = TestFdSource;
 
         reactor
             .register(&source, token, Interest::readable())
@@ -985,7 +985,7 @@ mod tests {
         init_test("modify_interest");
         let reactor = LabReactor::new();
         let token = Token::new(1);
-        let source = MockSource;
+        let source = TestFdSource;
 
         reactor
             .register(&source, token, Interest::READABLE)
@@ -1016,7 +1016,7 @@ mod tests {
         init_test("deregister_by_token");
         let reactor = LabReactor::new();
         let token = Token::new(1);
-        let source = MockSource;
+        let source = TestFdSource;
 
         reactor
             .register(&source, token, Interest::READABLE)
@@ -1052,7 +1052,7 @@ mod tests {
         init_test("duplicate_register_fails");
         let reactor = LabReactor::new();
         let token = Token::new(1);
-        let source = MockSource;
+        let source = TestFdSource;
 
         reactor
             .register(&source, token, Interest::READABLE)
@@ -1086,7 +1086,7 @@ mod tests {
     fn registration_count_and_is_empty() {
         init_test("registration_count_and_is_empty");
         let reactor = LabReactor::new();
-        let source = MockSource;
+        let source = TestFdSource;
 
         crate::assert_with_log!(
             reactor.is_empty(),
@@ -1225,7 +1225,7 @@ mod tests {
         init_test("set_ready_delivers_immediately");
         let reactor = LabReactor::new();
         let token = Token::new(1);
-        let source = MockSource;
+        let source = TestFdSource;
 
         reactor
             .register(&source, token, Interest::READABLE)
@@ -1247,7 +1247,7 @@ mod tests {
     fn same_time_events_delivered_in_order() {
         init_test("same_time_events_delivered_in_order");
         let reactor = LabReactor::new();
-        let source = MockSource;
+        let source = TestFdSource;
 
         // Register multiple tokens
         let token1 = Token::new(1);
@@ -1305,7 +1305,7 @@ mod tests {
     fn different_time_events_delivered_in_time_order() {
         init_test("different_time_events_delivered_in_time_order");
         let reactor = LabReactor::new();
-        let source = MockSource;
+        let source = TestFdSource;
 
         let token1 = Token::new(1);
         let token2 = Token::new(2);
@@ -1363,7 +1363,7 @@ mod tests {
         init_test("schedule_event_alias_works");
         let reactor = LabReactor::new();
         let token = Token::new(1);
-        let source = MockSource;
+        let source = TestFdSource;
 
         reactor
             .register(&source, token, Interest::READABLE)
@@ -1386,7 +1386,7 @@ mod tests {
     fn events_before_current_time_delivered_immediately() {
         init_test("events_before_current_time_delivered_immediately");
         let reactor = LabReactor::new();
-        let source = MockSource;
+        let source = TestFdSource;
         let token = Token::new(1);
 
         reactor
@@ -1413,7 +1413,7 @@ mod tests {
     fn deregister_cleans_up_scheduled_events() {
         init_test("deregister_cleans_up_scheduled_events");
         let reactor = LabReactor::new();
-        let source = MockSource;
+        let source = TestFdSource;
 
         let token1 = Token::new(1);
         let token2 = Token::new(2);
@@ -1461,7 +1461,7 @@ mod tests {
 
         let reactor = LabReactor::with_chaos(config);
         let token = Token::new(1);
-        let source = MockSource;
+        let source = TestFdSource;
 
         reactor
             .register(&source, token, Interest::READABLE)
@@ -1499,7 +1499,7 @@ mod tests {
 
         let reactor = LabReactor::with_chaos(config);
         let token = Token::new(1);
-        let source = MockSource;
+        let source = TestFdSource;
 
         reactor
             .register(&source, token, Interest::READABLE)
@@ -1544,7 +1544,7 @@ mod tests {
 
         let token_a = Token::new(1);
         let token_b = Token::new(1);
-        let source = MockSource;
+        let source = TestFdSource;
 
         reactor_a
             .register(&source, token_a, Interest::READABLE)
@@ -1622,7 +1622,7 @@ mod tests {
             super::init_test("io_driver_with_lab_reactor_dispatches_wakers");
             let reactor = Arc::new(LabReactor::new());
             let mut driver = IoDriver::new(reactor.clone());
-            let source = MockSource;
+            let source = TestFdSource;
 
             // Register with IoDriver
             let (waker, waker_state) = create_test_waker();
@@ -1653,7 +1653,7 @@ mod tests {
             super::init_test("io_driver_with_lab_reactor_multiple_wakers");
             let reactor = Arc::new(LabReactor::new());
             let mut driver = IoDriver::new(reactor.clone());
-            let source = MockSource;
+            let source = TestFdSource;
 
             // Register multiple wakers
             let (waker1, state1) = create_test_waker();
@@ -1761,7 +1761,7 @@ mod tests {
 
             let reactor = LabReactor::new();
             let token = Token::new(1);
-            let source = MockSource;
+            let source = TestFdSource;
 
             reactor
                 .register(&source, token, Interest::READABLE)
@@ -1817,7 +1817,7 @@ mod tests {
 
             let reactor = LabReactor::new();
             let token = Token::new(1);
-            let source = MockSource;
+            let source = TestFdSource;
 
             reactor
                 .register(&source, token, Interest::READABLE)
@@ -1874,7 +1874,7 @@ mod tests {
 
             let reactor = LabReactor::new();
             let token = Token::new(1);
-            let source = MockSource;
+            let source = TestFdSource;
 
             reactor
                 .register(&source, token, Interest::READABLE)
@@ -1907,7 +1907,7 @@ mod tests {
 
             let reactor = LabReactor::new();
             let token = Token::new(1);
-            let source = MockSource;
+            let source = TestFdSource;
 
             reactor
                 .register(&source, token, Interest::READABLE)
@@ -1951,7 +1951,7 @@ mod tests {
 
             let reactor = LabReactor::new();
             let token = Token::new(42); // Use specific token for deterministic RNG
-            let source = MockSource;
+            let source = TestFdSource;
 
             reactor
                 .register(&source, token, Interest::READABLE)
@@ -1991,7 +1991,7 @@ mod tests {
             let reactor = LabReactor::new();
             let token1 = Token::new(1);
             let token2 = Token::new(2);
-            let source = MockSource;
+            let source = TestFdSource;
 
             reactor
                 .register(&source, token1, Interest::READABLE)
@@ -2031,7 +2031,7 @@ mod tests {
             let reactor_a = LabReactor::new();
             let reactor_b = LabReactor::new();
             let token = Token::new(123); // Same token = same RNG seed
-            let source = MockSource;
+            let source = TestFdSource;
 
             reactor_a
                 .register(&source, token, Interest::READABLE)
@@ -2086,7 +2086,7 @@ mod tests {
 
             let reactor = LabReactor::new();
             let token = Token::new(1);
-            let source = MockSource;
+            let source = TestFdSource;
 
             reactor
                 .register(&source, token, Interest::READABLE)
@@ -2122,7 +2122,7 @@ mod tests {
             let reactor = LabReactor::with_chaos(config);
             let token1 = Token::new(1);
             let token2 = Token::new(2);
-            let source = MockSource;
+            let source = TestFdSource;
 
             reactor
                 .register(&source, token1, Interest::READABLE)

@@ -557,8 +557,8 @@ mod tests {
         (waker, waker_state)
     }
 
-    struct MockSource;
-    impl std::os::fd::AsRawFd for MockSource {
+    struct TestFdSource;
+    impl std::os::fd::AsRawFd for TestFdSource {
         fn as_raw_fd(&self) -> std::os::fd::RawFd {
             0
         }
@@ -611,7 +611,7 @@ mod tests {
         init_test("io_driver_register_full_flow");
         let reactor = Arc::new(LabReactor::new());
         let mut driver = IoDriver::new(reactor);
-        let source = MockSource;
+        let source = TestFdSource;
 
         let (waker, _) = create_test_waker();
         let token = driver
@@ -647,7 +647,7 @@ mod tests {
         init_test("io_driver_deregister");
         let reactor = Arc::new(LabReactor::new());
         let mut driver = IoDriver::new(reactor);
-        let source = MockSource;
+        let source = TestFdSource;
 
         let (waker, _) = create_test_waker();
         let token = driver
@@ -709,7 +709,7 @@ mod tests {
     fn io_driver_turn_dispatches_wakers() {
         init_test("io_driver_turn_dispatches_wakers");
         let reactor = Arc::new(LabReactor::new());
-        let source = MockSource;
+        let source = TestFdSource;
 
         // Register waker first to get the token
         let (waker, waker_state) = create_test_waker();
@@ -771,7 +771,7 @@ mod tests {
     fn io_driver_turn_handles_unknown_tokens() {
         init_test("io_driver_turn_handles_unknown_tokens");
         let reactor = Arc::new(LabReactor::new());
-        let source = MockSource;
+        let source = TestFdSource;
 
         // Register source directly with reactor (no waker in driver)
         let token = Token::new(999);
@@ -815,7 +815,7 @@ mod tests {
     fn io_driver_stale_token_does_not_wake_new_waker() {
         init_test("io_driver_stale_token_does_not_wake_new_waker");
         let reactor = Arc::new(LabReactor::new());
-        let source = MockSource;
+        let source = TestFdSource;
         let mut driver = IoDriver::new(reactor.clone());
 
         let (waker1, _) = create_test_waker();
@@ -867,7 +867,7 @@ mod tests {
     fn io_driver_multiple_wakers() {
         init_test("io_driver_multiple_wakers");
         let reactor = Arc::new(LabReactor::new());
-        let source = MockSource;
+        let source = TestFdSource;
         let mut driver = IoDriver::new(reactor.clone());
 
         // Register multiple wakers

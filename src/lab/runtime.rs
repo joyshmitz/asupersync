@@ -1129,9 +1129,9 @@ mod tests {
     use std::time::Duration;
 
     #[cfg(unix)]
-    struct MockSource;
+    struct TestFdSource;
     #[cfg(unix)]
-    impl std::os::fd::AsRawFd for MockSource {
+    impl std::os::fd::AsRawFd for TestFdSource {
         fn as_raw_fd(&self) -> std::os::fd::RawFd {
             0
         }
@@ -1189,7 +1189,7 @@ mod tests {
         let mut runtime = LabRuntime::with_seed(42);
         let handle = runtime.state.io_driver_handle().expect("io driver");
         let waker = noop_waker();
-        let source = MockSource;
+        let source = TestFdSource;
 
         let registration = handle
             .register(&source, Interest::READABLE, waker)

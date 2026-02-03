@@ -1342,10 +1342,10 @@ mod tests {
     }
 
     #[cfg(unix)]
-    struct MockSource;
+    struct TestFdSource;
 
     #[cfg(unix)]
-    impl std::os::fd::AsRawFd for MockSource {
+    impl std::os::fd::AsRawFd for TestFdSource {
         fn as_raw_fd(&self) -> std::os::fd::RawFd {
             0
         }
@@ -1526,7 +1526,7 @@ mod tests {
         let mut lab = LabRuntime::new(LabConfig::new(7).trace_capacity(1024));
         let handle = lab.state.io_driver_handle().expect("lab io driver");
         let registration = handle
-            .register(&MockSource, Interest::READABLE, noop_waker())
+            .register(&TestFdSource, Interest::READABLE, noop_waker())
             .expect("lab register source");
         let io_key = registration.token();
         lab.lab_reactor()
@@ -1547,7 +1547,7 @@ mod tests {
         let state = RuntimeState::with_reactor(reactor_handle);
         let driver = state.io_driver_handle().expect("runtime state io driver");
         let registration = driver
-            .register(&MockSource, Interest::READABLE, noop_waker())
+            .register(&TestFdSource, Interest::READABLE, noop_waker())
             .expect("runtime state register source");
         let io_key = registration.token();
         reactor.inject_event(io_key, Event::readable(io_key), Duration::ZERO);

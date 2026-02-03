@@ -520,14 +520,14 @@ where
 mod tests {
     use super::*;
 
-    // Mock I/O for testing
-    struct MockIo {
+    // In-memory I/O for testing
+    struct TestIo {
         read_data: Vec<u8>,
         read_pos: usize,
         written: Vec<u8>,
     }
 
-    impl MockIo {
+    impl TestIo {
         fn new(read_data: Vec<u8>) -> Self {
             Self {
                 read_data,
@@ -537,7 +537,7 @@ mod tests {
         }
     }
 
-    impl AsyncRead for MockIo {
+    impl AsyncRead for TestIo {
         fn poll_read(
             mut self: Pin<&mut Self>,
             _cx: &mut std::task::Context<'_>,
@@ -551,7 +551,7 @@ mod tests {
         }
     }
 
-    impl AsyncWrite for MockIo {
+    impl AsyncWrite for TestIo {
         fn poll_write(
             mut self: Pin<&mut Self>,
             _cx: &mut std::task::Context<'_>,
