@@ -439,19 +439,29 @@ fn golden_plan_rewrite_trace_fixtures() {
             fixture.name
         );
 
-        let original_trace = build_plan_trace_fixture(seed, &original, fixture.name);
-        let rewritten_trace = build_plan_trace_fixture(seed, &rewritten, fixture.name);
+        let (original_trace, original_result) =
+            build_plan_trace_fixture(seed, &original, fixture.name);
+        let (rewritten_trace, rewritten_result) =
+            build_plan_trace_fixture(seed, &rewritten, fixture.name);
 
-        assert_eq!(
-            original_trace.fingerprint, rewritten_trace.fingerprint,
-            "fixture {}: rewrite changed trace fingerprint",
-            fixture.name
-        );
-        assert_eq!(
-            original_trace.canonical_prefix, rewritten_trace.canonical_prefix,
-            "fixture {}: rewrite changed canonical prefix",
-            fixture.name
-        );
+        if fixture.expected_step_count == 0 {
+            // No rewrites: plans are identical, so results and traces must match.
+            assert_eq!(
+                original_result, rewritten_result,
+                "fixture {}: identity rewrite changed semantic result",
+                fixture.name
+            );
+            assert_eq!(
+                original_trace.fingerprint, rewritten_trace.fingerprint,
+                "fixture {}: identity rewrite changed trace fingerprint",
+                fixture.name
+            );
+            assert_eq!(
+                original_trace.canonical_prefix, rewritten_trace.canonical_prefix,
+                "fixture {}: identity rewrite changed canonical prefix",
+                fixture.name
+            );
+        }
 
         let expected_json = golden_plan_trace_fixture_json(fixture.name);
         assert_golden_trace_fixture(fixture.name, &original_trace, expected_json);
@@ -490,17 +500,15 @@ impl<T> SharedHandle<T> {
         self.inner.handle.task_id()
     }
 
+    /// Non-blocking check: returns the result if already cached in Ready state,
+    /// or polls the inner TaskHandle for completion and caches on success.
     fn try_join(&self) -> Option<Result<T, JoinError>>
     where
         T: Clone,
     {
-        let mut state = self.inner.state.lock().expect("join state lock");
-        match &*state {
-            JoinState::Ready(result) => return Some(result.clone()),
-            JoinState::Empty => {
-                *state = JoinState::InFlight;
-            }
-            JoinState::InFlight => {}
+        let state = self.inner.state.lock().expect("join state lock");
+        if let JoinState::Ready(result) = &*state {
+            return Some(result.clone());
         }
         drop(state);
 
@@ -510,34 +518,49 @@ impl<T> SharedHandle<T> {
             Err(err) => Some(Err(err)),
         };
 
-        if let Some(result) = result.clone() {
+        if let Some(ref result) = result {
             let mut state = self.inner.state.lock().expect("join state lock");
-            *state = JoinState::Ready(result);
+            *state = JoinState::Ready(result.clone());
         }
         result
     }
 
+    /// Designated-joiner protocol: only the first caller that sees Empty
+    /// transitions to InFlight and performs the real join. All others
+    /// yield-wait for Ready, preventing waker overwrites.
     async fn join(&self, cx: &Cx) -> Result<T, JoinError>
     where
         T: Clone,
     {
-        loop {
-            if let Some(result) = self.try_join() {
-                return result;
-            }
-            let should_join = {
-                let state = self.inner.state.lock().expect("join state lock");
-                matches!(&*state, JoinState::InFlight)
-            };
-            if should_join {
-                let result = self.inner.handle.join(cx).await;
-                {
-                    let mut state = self.inner.state.lock().expect("join state lock");
-                    *state = JoinState::Ready(result.clone());
+        let i_am_joiner;
+        {
+            let mut state = self.inner.state.lock().expect("join state lock");
+            match &*state {
+                JoinState::Ready(result) => return result.clone(),
+                JoinState::InFlight => {
+                    i_am_joiner = false;
                 }
-                return result;
+                JoinState::Empty => {
+                    *state = JoinState::InFlight;
+                    i_am_joiner = true;
+                }
             }
-            yield_now().await;
+        }
+
+        if i_am_joiner {
+            let result = self.inner.handle.join(cx).await;
+            *self.inner.state.lock().expect("join state lock") = JoinState::Ready(result.clone());
+            result
+        } else {
+            loop {
+                {
+                    let state = self.inner.state.lock().expect("join state lock");
+                    if let JoinState::Ready(result) = &*state {
+                        return result.clone();
+                    }
+                }
+                yield_now().await;
+            }
         }
     }
 }
@@ -560,10 +583,14 @@ fn plan_node_count(plan: &PlanDag) -> usize {
     count
 }
 
-fn build_plan_trace_fixture(seed: u64, plan: &PlanDag, fixture_name: &str) -> GoldenTraceFixture {
+fn build_plan_trace_fixture(
+    seed: u64,
+    plan: &PlanDag,
+    fixture_name: &str,
+) -> (GoldenTraceFixture, NodeValue) {
     let config = LabConfig::new(seed).trace_capacity(8192);
     let mut runtime = LabRuntime::new(config.clone());
-    let _ = run_plan(&mut runtime, plan, fixture_name);
+    let result = run_plan(&mut runtime, plan, fixture_name);
 
     let events: Vec<TraceEvent> = runtime.trace().snapshot();
     let violations = runtime.oracles.check_all(runtime.now());
@@ -579,7 +606,8 @@ fn build_plan_trace_fixture(seed: u64, plan: &PlanDag, fixture_name: &str) -> Go
         canonical_prefix_events: 16,
     };
 
-    GoldenTraceFixture::from_events(fixture_config, &events, violation_tags)
+    let trace = GoldenTraceFixture::from_events(fixture_config, &events, violation_tags);
+    (trace, result)
 }
 
 #[allow(clippy::too_many_lines)]
