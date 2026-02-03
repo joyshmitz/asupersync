@@ -280,7 +280,11 @@ pub fn gf256_add_slice(dst: &mut [u8], src: &[u8]) {
 }
 
 /// Minimum slice length to amortise building a 256-byte multiplication table.
-const MUL_TABLE_THRESHOLD: usize = 256;
+///
+/// The table build is 255 lookups; above this threshold the per-element
+/// savings from single-lookup (vs. branch + double-lookup) outweigh the
+/// up-front cost.
+const MUL_TABLE_THRESHOLD: usize = 64;
 
 /// Build a 256-entry lookup table: `table[x] = x * c` in GF(256).
 ///
@@ -313,9 +317,7 @@ pub fn gf256_mul_slice(dst: &mut [u8], c: Gf256) {
     let log_c = LOG[c.0 as usize] as usize;
     if dst.len() >= MUL_TABLE_THRESHOLD {
         let table = build_mul_table(log_c);
-        for d in dst.iter_mut() {
-            *d = table[*d as usize];
-        }
+        mul_with_table_wide(dst, &table);
     } else {
         for d in dst.iter_mut() {
             if *d != 0 {
@@ -325,36 +327,60 @@ pub fn gf256_mul_slice(dst: &mut [u8], c: Gf256) {
     }
 }
 
+/// Inner loop for `gf256_mul_slice`: batch 8 table lookups per iteration,
+/// writing results as `u64` to avoid per-byte store overhead.
+///
+/// Uses `chunks_exact_mut(8)` iterators so the compiler can elide bounds
+/// checks in the hot loop.
+fn mul_with_table_wide(dst: &mut [u8], table: &[u8; 256]) {
+    let mut chunks = dst.chunks_exact_mut(8);
+    for chunk in chunks.by_ref() {
+        let t = [
+            table[chunk[0] as usize],
+            table[chunk[1] as usize],
+            table[chunk[2] as usize],
+            table[chunk[3] as usize],
+            table[chunk[4] as usize],
+            table[chunk[5] as usize],
+            table[chunk[6] as usize],
+            table[chunk[7] as usize],
+        ];
+        chunk.copy_from_slice(&t);
+    }
+    for d in chunks.into_remainder() {
+        *d = table[*d as usize];
+    }
+}
+
 /// Inner loop for `gf256_addmul_slice`: batch 8 table lookups, then wide-XOR
 /// the results into `dst` via `u64`.
 ///
-/// All operations are safe; the wide path uses `chunks_exact_mut(8)` +
-/// `u64::from_ne_bytes` instead of pointer casts.
+/// Uses `chunks_exact_mut(8)` / `chunks_exact(8)` iterators so the compiler
+/// can elide per-iteration bounds checks in the hot loop.
 fn addmul_with_table_wide(dst: &mut [u8], src: &[u8], table: &[u8; 256]) {
-    let len = dst.len().min(src.len());
-    let chunks = len / 8;
-    let remainder = len % 8;
-
-    for i in 0..chunks {
-        let base = i * 8;
-        let s = &src[base..base + 8];
+    let mut d_chunks = dst.chunks_exact_mut(8);
+    let mut s_chunks = src.chunks_exact(8);
+    for (d_chunk, s_chunk) in d_chunks.by_ref().zip(s_chunks.by_ref()) {
         let t = [
-            table[s[0] as usize],
-            table[s[1] as usize],
-            table[s[2] as usize],
-            table[s[3] as usize],
-            table[s[4] as usize],
-            table[s[5] as usize],
-            table[s[6] as usize],
-            table[s[7] as usize],
+            table[s_chunk[0] as usize],
+            table[s_chunk[1] as usize],
+            table[s_chunk[2] as usize],
+            table[s_chunk[3] as usize],
+            table[s_chunk[4] as usize],
+            table[s_chunk[5] as usize],
+            table[s_chunk[6] as usize],
+            table[s_chunk[7] as usize],
         ];
-        let d_arr: [u8; 8] = dst[base..base + 8].try_into().expect("8 bytes");
+        let d_arr: [u8; 8] = <[u8; 8]>::try_from(&d_chunk[..]).expect("8 bytes");
         let result = u64::from_ne_bytes(d_arr) ^ u64::from_ne_bytes(t);
-        dst[base..base + 8].copy_from_slice(&result.to_ne_bytes());
+        d_chunk.copy_from_slice(&result.to_ne_bytes());
     }
-    let tail_start = chunks * 8;
-    for j in 0..remainder {
-        dst[tail_start + j] ^= table[src[tail_start + j] as usize];
+    for (d, s) in d_chunks
+        .into_remainder()
+        .iter_mut()
+        .zip(s_chunks.remainder())
+    {
+        *d ^= table[*s as usize];
     }
 }
 
