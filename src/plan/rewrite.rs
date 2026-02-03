@@ -676,7 +676,7 @@ pub(crate) fn check_side_conditions(
                 child: inner_child,
                 duration: inner_duration,
             } = dag
-                .node(child)
+                .node(*child)
                 .ok_or_else(|| "missing inner timeout".to_string())?
             else {
                 return Err("before timeout child is not Timeout".to_string());

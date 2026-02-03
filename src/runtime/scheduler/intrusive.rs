@@ -420,11 +420,7 @@ impl IntrusiveStack {
     /// # Complexity
     ///
     /// O(k) time where k is the number stolen, O(0) allocations.
-    pub fn steal_batch(
-        &mut self,
-        max_steal: usize,
-        arena: &mut Arena<TaskRecord>,
-    ) -> Vec<TaskId> {
+    pub fn steal_batch(&mut self, max_steal: usize, arena: &mut Arena<TaskRecord>) -> Vec<TaskId> {
         let steal_count = (self.len / 2).max(1).min(max_steal);
         let mut stolen = Vec::with_capacity(steal_count);
 
@@ -655,7 +651,7 @@ mod tests {
         assert!(ring.contains(task(1), &arena));
         assert!(!ring.contains(task(2), &arena));
 
-        ring.pop_front(&mut arena);
+        let _ = ring.pop_front(&mut arena);
         assert!(!ring.contains(task(0), &arena));
         assert!(ring.contains(task(1), &arena));
     }
@@ -845,25 +841,30 @@ mod tests {
         let mut arena = setup_arena(10);
         let mut stack = IntrusiveStack::new(QUEUE_TAG_READY);
 
-        // Owner pushes 0, 1, 2, 3
-        for i in 0..4 {
+        // Owner pushes 0, 1, 2, 3, 4, 5
+        for i in 0..6 {
             stack.push(task(i), &mut arena);
         }
 
-        // Owner pops most recent (3)
-        assert_eq!(stack.pop(&mut arena), Some(task(3)));
+        // Owner pops most recent (5)
+        assert_eq!(stack.pop(&mut arena), Some(task(5)));
 
-        // Thief steals oldest (0, 1)
+        // Stack now has [0, 1, 2, 3, 4] with len=5
+        // Thief steals oldest - steal_batch takes at most half the queue
+        // (5/2).max(1).min(2) = 2, so 2 tasks stolen
         let stolen = stack.steal_batch(2, &mut arena);
         assert_eq!(stolen.len(), 2);
-        assert_eq!(stolen[0], task(0));
+        assert_eq!(stolen[0], task(0)); // Oldest is stolen first
         assert_eq!(stolen[1], task(1));
 
-        // Owner pushes 4
-        stack.push(task(4), &mut arena);
+        // Stack now has [2, 3, 4] with len=3
+        // Owner pushes 6
+        stack.push(task(6), &mut arena);
 
-        // Owner pops remaining (4, then 2)
+        // Stack is [2, 3, 4, 6] - owner pops LIFO (6, 4, 3, 2)
+        assert_eq!(stack.pop(&mut arena), Some(task(6)));
         assert_eq!(stack.pop(&mut arena), Some(task(4)));
+        assert_eq!(stack.pop(&mut arena), Some(task(3)));
         assert_eq!(stack.pop(&mut arena), Some(task(2)));
         assert!(stack.is_empty());
     }
@@ -903,7 +904,7 @@ mod tests {
         assert!(stack.contains(task(1), &arena));
         assert!(!stack.contains(task(2), &arena));
 
-        stack.pop(&mut arena); // Remove task 1
+        let _ = stack.pop(&mut arena); // Remove task 1
         assert!(stack.contains(task(0), &arena));
         assert!(!stack.contains(task(1), &arena));
     }

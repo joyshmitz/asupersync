@@ -609,29 +609,32 @@ mod tests {
         );
 
         // F10: timeout_wrapping_dedup
-        let mut f10 = timeout_wrapping_dedup();
-        let (_, cert10) = f10
+        let mut fixture_timeout = timeout_wrapping_dedup();
+        let (_, cert_timeout) = fixture_timeout
             .dag
             .apply_rewrites_certified(RewritePolicy::Conservative, &rules);
-        assert_eq!(cert10.steps.len(), 1);
-        assert!(verify(&cert10, &f10.dag).is_ok());
-        assert!(verify_steps(&cert10, &f10.dag).is_ok());
-        let fp10 = cert10.fingerprint();
-        assert_ne!(fp10, fp1);
-        assert_ne!(fp10, fp3);
+        assert_eq!(cert_timeout.steps.len(), 1);
+        assert!(verify(&cert_timeout, &fixture_timeout.dag).is_ok());
+        assert!(verify_steps(&cert_timeout, &fixture_timeout.dag).is_ok());
+        let fp_timeout = cert_timeout.fingerprint();
+        assert_ne!(fp_timeout, fp1);
+        assert_ne!(fp_timeout, fp3);
 
         // No-rewrite fixtures must produce identity certificates with matching fingerprints
         // across repeated construction.
-        let mut f4a = no_shared_child();
-        let (_, cert4a) = f4a
+        let mut fixture_no_shared_a = no_shared_child();
+        let (_, cert_no_shared_a) = fixture_no_shared_a
             .dag
             .apply_rewrites_certified(RewritePolicy::Conservative, &rules);
-        assert!(cert4a.is_identity());
-        let mut f4b = no_shared_child();
-        let (_, cert4b) = f4b
+        assert!(cert_no_shared_a.is_identity());
+        let mut fixture_no_shared_b = no_shared_child();
+        let (_, cert_no_shared_b) = fixture_no_shared_b
             .dag
             .apply_rewrites_certified(RewritePolicy::Conservative, &rules);
-        assert_eq!(cert4a.fingerprint(), cert4b.fingerprint());
+        assert_eq!(
+            cert_no_shared_a.fingerprint(),
+            cert_no_shared_b.fingerprint()
+        );
     }
 
     #[test]
