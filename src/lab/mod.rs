@@ -49,6 +49,7 @@
 
 pub mod chaos;
 pub mod config;
+pub mod conformal;
 pub mod explorer;
 pub mod fuzz;
 pub mod http;
@@ -56,6 +57,7 @@ pub mod injection;
 pub mod instrumented_future;
 pub mod meta;
 pub mod network;
+pub mod opportunity;
 pub mod oracle;
 pub mod replay;
 pub mod runtime;
@@ -66,6 +68,10 @@ pub use crate::util::{
     disable_strict_entropy, enable_strict_entropy, strict_entropy_enabled, StrictEntropyGuard,
 };
 pub use config::LabConfig;
+pub use conformal::{
+    CalibrationReport, ConformalCalibrator, ConformalConfig, ConformityScore, CoverageTracker,
+    PredictionSet,
+};
 pub use explorer::{
     CoverageMetrics, DporCoverageMetrics, DporExplorer, ExplorationReport, ExplorerConfig,
     RunResult, ScheduleExplorer, TopologyExplorer, ViolationReport,
@@ -92,15 +98,14 @@ pub use network::{
 };
 pub use oracle::{
     assert_deterministic, assert_deterministic_multi, ActorLeakOracle, ActorLeakViolation,
-    BayesFactor, DetectionModel, DeterminismOracle, DeterminismViolation, EProcess,
-    EProcessConfig, EProcessMonitor, EValue, EvidenceEntry, EvidenceLedger, EvidenceLine,
-    EvidenceStrength, EvidenceSummary, FinalizerId, FinalizerOracle, FinalizerViolation,
-    LogLikelihoodContributions, LoserDrainOracle, LoserDrainViolation, MailboxOracle,
-    MailboxViolation, MailboxViolationKind, MonitorResult, ObligationLeakOracle,
-    ObligationLeakViolation, OracleEntryReport, OracleReport, OracleStats, OracleSuite,
-    OracleViolation, QuiescenceOracle, QuiescenceViolation, SupervisionOracle,
-    SupervisionViolation, SupervisionViolationKind, TaskLeakOracle, TaskLeakViolation,
-    TraceEventSummary,
+    BayesFactor, DetectionModel, DeterminismOracle, DeterminismViolation, EProcess, EProcessConfig,
+    EProcessMonitor, EValue, EvidenceEntry, EvidenceLedger, EvidenceLine, EvidenceStrength,
+    EvidenceSummary, FinalizerId, FinalizerOracle, FinalizerViolation, LogLikelihoodContributions,
+    LoserDrainOracle, LoserDrainViolation, MailboxOracle, MailboxViolation, MailboxViolationKind,
+    MonitorResult, ObligationLeakOracle, ObligationLeakViolation, OracleEntryReport, OracleReport,
+    OracleStats, OracleSuite, OracleViolation, QuiescenceOracle, QuiescenceViolation,
+    SupervisionOracle, SupervisionViolation, SupervisionViolationKind, TaskLeakOracle,
+    TaskLeakViolation, TraceEventSummary,
 };
 pub use replay::{
     compare_normalized, normalize_for_replay, normalize_for_replay_with_config, traces_equivalent,
