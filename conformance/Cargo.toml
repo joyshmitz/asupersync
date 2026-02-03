@@ -4,7 +4,7 @@ version = "0.1.0"
 edition = "2021"
 description = "Conformance test suite for async runtime specifications"
 license = "MIT"
-publish = false
+repository = "https://github.com/Dicklesworthstone/asupersync"
 
 [dependencies]
 serde = { version = "1", features = ["derive"] }

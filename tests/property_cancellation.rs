@@ -48,6 +48,20 @@ const ALL_CANCEL_PHASES: [CancelPhase; 4] = [
     CancelPhase::Completed,
 ];
 
+/// All CancelKind variants.
+const ALL_CANCEL_KINDS: [CancelKind; 10] = [
+    CancelKind::User,
+    CancelKind::Timeout,
+    CancelKind::Deadline,
+    CancelKind::PollQuota,
+    CancelKind::CostBudget,
+    CancelKind::FailFast,
+    CancelKind::RaceLost,
+    CancelKind::ParentCancelled,
+    CancelKind::ResourceUnavailable,
+    CancelKind::Shutdown,
+];
+
 fn arb_cancel_kind() -> impl Strategy<Value = CancelKind> {
     (0usize..ALL_CANCEL_KINDS.len()).prop_map(|idx| ALL_CANCEL_KINDS[idx])
 }
