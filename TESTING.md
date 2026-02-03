@@ -448,6 +448,68 @@ env.write_metadata_artifact();
 - Teardown is idempotent (safe to call multiple times).
 - `EnvironmentMetadata` excludes nondeterministic fields (no wall-clock timestamps).
 
+### NDJSON Event Schema (bd-1t58q)
+
+Structured NDJSON (newline-delimited JSON) logging enables CI log parsing,
+failure triage, and cross-test aggregation. Each test event is one JSON line.
+
+**Enable:** Set `ASUPERSYNC_TEST_NDJSON=1` to stream events to stderr, or use
+`NdjsonLogger::enabled()` programmatically.
+
+**Schema v1 fields:**
+
+| Field        | Type       | Description                                |
+|-------------|-----------|---------------------------------------------|
+| `v`         | `u32`     | Schema version (currently 1)                |
+| `ts_us`     | `u64`     | Microseconds since test start               |
+| `level`     | `string`  | ERROR, WARN, INFO, DEBUG, or TRACE          |
+| `category`  | `string`  | reactor, io, waker, task, timer, region, obligation, custom |
+| `event`     | `string`  | Specific type (TaskSpawn, IoRead, etc.)     |
+| `test_id`   | `string?` | Test identifier from TestContext            |
+| `seed`      | `u64?`    | Root seed for deterministic replay          |
+| `subsystem` | `string?` | Subsystem tag                               |
+| `invariant` | `string?` | Invariant under verification                |
+| `thread_id` | `u64`     | OS thread ID                                |
+| `message`   | `string`  | Human-readable description                  |
+| `data`      | `object`  | Event-specific key-value pairs              |
+
+**Trace file naming conventions:**
+
+```
+{subsystem}_{scenario}_{seed:016x}.trace   — binary replay trace
+{subsystem}_{scenario}_{seed:016x}.ndjson  — structured event log
+```
+
+**Artifact bundle layout** (under `$ASUPERSYNC_TEST_ARTIFACTS_DIR/{test_id}/{seed:016x}/`):
+
+```
+manifest.json        — ReproManifest with seed, phases, env snapshot
+events.ndjson        — Structured event log (NDJSON schema v1)
+summary.json         — TestSummary from harness
+environment.json     — EnvironmentMetadata snapshot
+*.trace              — Binary trace files (if recording enabled)
+failed_assertions.json — Assertion details (on failure)
+```
+
+**Usage:**
+
+```rust
+use asupersync::test_ndjson::{NdjsonLogger, write_artifact_bundle};
+use asupersync::test_logging::{TestLogLevel, TestEvent, TestContext, ReproManifest};
+
+let ctx = TestContext::new("my_test", 0xDEAD_BEEF).with_subsystem("scheduler");
+let logger = NdjsonLogger::enabled(TestLogLevel::Info, Some(ctx.clone()));
+
+logger.log(TestEvent::TaskSpawn { task_id: 1, name: Some("worker".into()) });
+
+// On completion, write artifact bundle
+let manifest = ReproManifest::from_context(&ctx, true).with_env_snapshot();
+write_artifact_bundle(&manifest, Some(&logger), None).unwrap();
+```
+
+The module lives in `src/test_ndjson.rs` and re-exports are available via
+`asupersync::test_ndjson`.
+
 ## Fuzzing
 
 Fuzzing targets live under `fuzz/` and are documented in `fuzz/README.md`.

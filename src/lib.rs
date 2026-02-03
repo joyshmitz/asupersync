@@ -110,6 +110,8 @@ pub mod sync;
 #[cfg(any(test, feature = "test-internals"))]
 pub mod test_logging;
 #[cfg(any(test, feature = "test-internals"))]
+pub mod test_ndjson;
+#[cfg(any(test, feature = "test-internals"))]
 pub mod test_utils;
 pub mod time;
 #[cfg(feature = "tls")]

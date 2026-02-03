@@ -64,6 +64,22 @@ This section provides copy-paste commands for CPU, allocation, and syscall
 profiling. Use deterministic inputs and fixed seeds where the benchmark/test
 supports them, and record the command + baseline in the isomorphism template.
 
+### Baseline Storage Layout
+
+All profiling artifacts should live under `baselines/` with deterministic
+names and a `baseline_latest.json` symlink-style copy for CI.
+
+Recommended layout:
+
+```
+baselines/
+  criterion/              # Criterion summary baselines
+  hyperfine/              # CLI micro-bench baselines
+  alloc_census/           # heaptrack/valgrind reports
+  syscalls/               # strace summaries
+  smoke/                  # end-to-end smoke reports
+```
+
 ### CPU Profiling (flamegraph)
 
 Requires `cargo-flamegraph` and `perf` on Linux.
@@ -88,6 +104,25 @@ cargo flamegraph --bench tracing_overhead -- --bench
 Notes:
 - Keep the workload deterministic (fixed seeds) to make deltas meaningful.
 - Always capture the exact command and git SHA in your perf notes.
+
+### Hyperfine Baselines (CLI micro-bench)
+
+Use hyperfine to baseline CLI-style workflows with JSON export.
+
+```bash
+# Install once
+cargo install hyperfine
+
+# Baseline scheduler benchmark
+hyperfine \
+  --warmup 2 \
+  --export-json baselines/hyperfine/scheduler_benchmark.json \
+  'cargo bench --bench scheduler_benchmark'
+```
+
+Notes:
+- Always export JSON for reproducibility.
+- Record `git rev-parse HEAD` alongside the baseline file.
 
 ### Allocation Profiling (heap/alloc)
 
@@ -133,6 +168,40 @@ cat /tmp/asupersync_syscalls.txt
 Notes:
 - `-f` follows child threads.
 - Keep the same benchmark configuration when comparing deltas.
+
+### Criterion Baseline Capture + Smoke Test
+
+Use `scripts/capture_baseline.sh` to consolidate Criterion output and (optionally)
+run a smoke capture end-to-end with structured metadata.
+
+```bash
+# Run bench + capture baseline into baselines/criterion
+./scripts/capture_baseline.sh --run --save baselines/criterion
+
+# End-to-end smoke run with structured report
+./scripts/capture_baseline.sh --smoke --seed 3735928559 --save baselines/criterion
+```
+
+The smoke report is stored as `baselines/criterion/smoke_report_<timestamp>.json` and
+captures env, command, seed, and git SHA.
+
+### Sample Baseline Report (Criterion)
+
+```json
+{
+  "generated_at": "2026-02-03T19:00:00Z",
+  "benchmarks": [
+    {
+      "name": "scheduler/priority_lane_ordering_100",
+      "mean_ns": 1234.5,
+      "median_ns": 1200.0,
+      "p95_ns": 1500.0,
+      "p99_ns": 1700.0,
+      "std_dev_ns": 45.0
+    }
+  ]
+}
+```
 
 ### Perf Notes Checklist
 

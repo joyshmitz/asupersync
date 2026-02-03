@@ -11,6 +11,7 @@ use std::time::Instant;
 
 use asupersync::runtime::scheduler::{GlobalQueue, LocalQueue, Parker, Scheduler};
 use asupersync::types::{TaskId, Time};
+use serde::Deserialize;
 
 fn task(id: u32) -> TaskId {
     TaskId::new_for_test(id, 0)
@@ -130,4 +131,64 @@ fn regression_mixed_lane_10k() {
         "mixed-lane regression: 10K tasks took {}ms (threshold: 100ms)",
         elapsed.as_millis()
     );
+}
+
+#[derive(Debug, Deserialize)]
+struct BaselineReport {
+    generated_at: String,
+    benchmarks: Vec<BaselineEntry>,
+}
+
+#[derive(Debug, Deserialize)]
+struct BaselineEntry {
+    name: String,
+    mean_ns: f64,
+    median_ns: f64,
+    p95_ns: Option<f64>,
+    p99_ns: Option<f64>,
+    std_dev_ns: Option<f64>,
+}
+
+#[test]
+fn baseline_report_format_parses() {
+    let sample = r#"{
+        "generated_at": "2026-02-03T19:00:00Z",
+        "benchmarks": [
+            {
+                "name": "scheduler/priority_lane_ordering_100",
+                "mean_ns": 1234.5,
+                "median_ns": 1200.0,
+                "p95_ns": 1500.0,
+                "p99_ns": 1700.0,
+                "std_dev_ns": 45.0
+            }
+        ]
+    }"#;
+
+    let report: BaselineReport = serde_json::from_str(sample).expect("parse baseline report");
+    assert!(!report.generated_at.is_empty());
+    assert_eq!(report.benchmarks.len(), 1);
+    assert!(report.benchmarks[0].mean_ns > 0.0);
+    assert!(report.benchmarks[0].median_ns > 0.0);
+
+    let sample_nullable = r#"{
+        "generated_at": "2026-02-03T19:00:00Z",
+        "benchmarks": [
+            {
+                "name": "scheduler/priority_lane_ordering_100",
+                "mean_ns": 1234.5,
+                "median_ns": 1200.0,
+                "p95_ns": null,
+                "p99_ns": null,
+                "std_dev_ns": null
+            }
+        ]
+    }"#;
+
+    let report: BaselineReport =
+        serde_json::from_str(sample_nullable).expect("parse baseline report with nulls");
+    assert_eq!(report.benchmarks.len(), 1);
+    assert_eq!(report.benchmarks[0].p95_ns, None);
+    assert_eq!(report.benchmarks[0].p99_ns, None);
+    assert_eq!(report.benchmarks[0].std_dev_ns, None);
 }
