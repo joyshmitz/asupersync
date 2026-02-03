@@ -303,6 +303,16 @@ pub enum EncodingError {
     EmptyData,
     /// No source symbols available.
     NoSourceSymbols,
+    /// Error from the underlying encoding pipeline.
+    Pipeline(String),
+}
+
+impl EncodingError {
+    /// Convert a pipeline encoding error into this error type.
+    #[must_use]
+    pub fn from_pipeline(err: PipelineEncodingError) -> Self {
+        Self::Pipeline(err.to_string())
+    }
 }
 
 impl std::fmt::Display for EncodingError {
@@ -310,6 +320,7 @@ impl std::fmt::Display for EncodingError {
         match self {
             Self::EmptyData => write!(f, "snapshot serialized to empty data"),
             Self::NoSourceSymbols => write!(f, "no source symbols available"),
+            Self::Pipeline(msg) => write!(f, "pipeline encoding error: {msg}"),
         }
     }
 }

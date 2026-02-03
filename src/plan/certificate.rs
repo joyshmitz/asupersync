@@ -270,8 +270,276 @@ fn verify_single_step(
     dag: &PlanDag,
 ) -> Result<(), StepVerifyError> {
     match step.rule {
+        RewriteRule::JoinAssoc => verify_join_assoc_result(idx, step, policy, dag),
+        RewriteRule::RaceAssoc => verify_race_assoc_result(idx, step, policy, dag),
+        RewriteRule::JoinCommute => verify_join_commute_result(idx, step, policy, dag),
+        RewriteRule::RaceCommute => verify_race_commute_result(idx, step, policy, dag),
+        RewriteRule::TimeoutMin => verify_timeout_min_result(idx, step, policy, dag),
         RewriteRule::DedupRaceJoin => verify_dedup_race_join_result(idx, step, policy, dag),
     }
+}
+
+fn verify_side_conditions(
+    idx: usize,
+    step: &CertifiedStep,
+    policy: RewritePolicy,
+    dag: &PlanDag,
+) -> Result<(), StepVerifyError> {
+    let checker = SideConditionChecker::new(dag);
+    if let Err(condition) = check_side_conditions(
+        step.rule,
+        policy,
+        &checker,
+        dag,
+        step.before,
+        step.after,
+    ) {
+        return Err(StepVerifyError::SideConditionViolated { step: idx, condition });
+    }
+    Ok(())
+}
+
+fn verify_join_assoc_result(
+    idx: usize,
+    step: &CertifiedStep,
+    policy: RewritePolicy,
+    dag: &PlanDag,
+) -> Result<(), StepVerifyError> {
+    let before = dag.node(step.before).ok_or(StepVerifyError::MissingBeforeNode {
+        step: idx,
+        node: step.before,
+    })?;
+    let PlanNode::Join { children } = before else {
+        return Err(StepVerifyError::InvalidBeforeShape {
+            step: idx,
+            expected: "Join with at least one nested Join child",
+        });
+    };
+    let mut expected = Vec::new();
+    let mut changed = false;
+    for child in children {
+        match dag.node(*child) {
+            Some(PlanNode::Join { children }) => {
+                expected.extend(children.iter().copied());
+                changed = true;
+            }
+            Some(_) => expected.push(*child),
+            None => {
+                return Err(StepVerifyError::InvalidBeforeShape {
+                    step: idx,
+                    expected: "Join children must exist",
+                })
+            }
+        }
+    }
+    if !changed {
+        return Err(StepVerifyError::InvalidBeforeShape {
+            step: idx,
+            expected: "Join with at least one nested Join child",
+        });
+    }
+
+    let after = dag.node(step.after).ok_or(StepVerifyError::MissingAfterNode {
+        step: idx,
+        node: step.after,
+    })?;
+    let PlanNode::Join {
+        children: after_children,
+    } = after
+    else {
+        return Err(StepVerifyError::InvalidAfterShape {
+            step: idx,
+            expected: "Join after JoinAssoc",
+        });
+    };
+    if *after_children != expected {
+        return Err(StepVerifyError::InvalidAfterShape {
+            step: idx,
+            expected: "Flattened Join children",
+        });
+    }
+
+    verify_side_conditions(idx, step, policy, dag)
+}
+
+fn verify_race_assoc_result(
+    idx: usize,
+    step: &CertifiedStep,
+    policy: RewritePolicy,
+    dag: &PlanDag,
+) -> Result<(), StepVerifyError> {
+    let before = dag.node(step.before).ok_or(StepVerifyError::MissingBeforeNode {
+        step: idx,
+        node: step.before,
+    })?;
+    let PlanNode::Race { children } = before else {
+        return Err(StepVerifyError::InvalidBeforeShape {
+            step: idx,
+            expected: "Race with at least one nested Race child",
+        });
+    };
+    let mut expected = Vec::new();
+    let mut changed = false;
+    for child in children {
+        match dag.node(*child) {
+            Some(PlanNode::Race { children }) => {
+                expected.extend(children.iter().copied());
+                changed = true;
+            }
+            Some(_) => expected.push(*child),
+            None => {
+                return Err(StepVerifyError::InvalidBeforeShape {
+                    step: idx,
+                    expected: "Race children must exist",
+                })
+            }
+        }
+    }
+    if !changed {
+        return Err(StepVerifyError::InvalidBeforeShape {
+            step: idx,
+            expected: "Race with at least one nested Race child",
+        });
+    }
+
+    let after = dag.node(step.after).ok_or(StepVerifyError::MissingAfterNode {
+        step: idx,
+        node: step.after,
+    })?;
+    let PlanNode::Race {
+        children: after_children,
+    } = after
+    else {
+        return Err(StepVerifyError::InvalidAfterShape {
+            step: idx,
+            expected: "Race after RaceAssoc",
+        });
+    };
+    if *after_children != expected {
+        return Err(StepVerifyError::InvalidAfterShape {
+            step: idx,
+            expected: "Flattened Race children",
+        });
+    }
+
+    verify_side_conditions(idx, step, policy, dag)
+}
+
+fn verify_join_commute_result(
+    idx: usize,
+    step: &CertifiedStep,
+    policy: RewritePolicy,
+    dag: &PlanDag,
+) -> Result<(), StepVerifyError> {
+    let before = dag.node(step.before).ok_or(StepVerifyError::MissingBeforeNode {
+        step: idx,
+        node: step.before,
+    })?;
+    if !matches!(before, PlanNode::Join { .. }) {
+        return Err(StepVerifyError::InvalidBeforeShape {
+            step: idx,
+            expected: "Join before JoinCommute",
+        });
+    }
+    let after = dag.node(step.after).ok_or(StepVerifyError::MissingAfterNode {
+        step: idx,
+        node: step.after,
+    })?;
+    if !matches!(after, PlanNode::Join { .. }) {
+        return Err(StepVerifyError::InvalidAfterShape {
+            step: idx,
+            expected: "Join after JoinCommute",
+        });
+    }
+    verify_side_conditions(idx, step, policy, dag)
+}
+
+fn verify_race_commute_result(
+    idx: usize,
+    step: &CertifiedStep,
+    policy: RewritePolicy,
+    dag: &PlanDag,
+) -> Result<(), StepVerifyError> {
+    let before = dag.node(step.before).ok_or(StepVerifyError::MissingBeforeNode {
+        step: idx,
+        node: step.before,
+    })?;
+    if !matches!(before, PlanNode::Race { .. }) {
+        return Err(StepVerifyError::InvalidBeforeShape {
+            step: idx,
+            expected: "Race before RaceCommute",
+        });
+    }
+    let after = dag.node(step.after).ok_or(StepVerifyError::MissingAfterNode {
+        step: idx,
+        node: step.after,
+    })?;
+    if !matches!(after, PlanNode::Race { .. }) {
+        return Err(StepVerifyError::InvalidAfterShape {
+            step: idx,
+            expected: "Race after RaceCommute",
+        });
+    }
+    verify_side_conditions(idx, step, policy, dag)
+}
+
+fn verify_timeout_min_result(
+    idx: usize,
+    step: &CertifiedStep,
+    policy: RewritePolicy,
+    dag: &PlanDag,
+) -> Result<(), StepVerifyError> {
+    let before = dag.node(step.before).ok_or(StepVerifyError::MissingBeforeNode {
+        step: idx,
+        node: step.before,
+    })?;
+    let PlanNode::Timeout { child, duration } = before else {
+        return Err(StepVerifyError::InvalidBeforeShape {
+            step: idx,
+            expected: "Timeout wrapping a Timeout child",
+        });
+    };
+    let PlanNode::Timeout {
+        child: inner_child,
+        duration: inner_duration,
+    } = dag.node(*child).ok_or(StepVerifyError::InvalidBeforeShape {
+        step: idx,
+        expected: "Timeout wrapping a Timeout child",
+    })?
+    else {
+        return Err(StepVerifyError::InvalidBeforeShape {
+            step: idx,
+            expected: "Timeout wrapping a Timeout child",
+        });
+    };
+    let expected_duration = if *duration <= inner_duration {
+        *duration
+    } else {
+        inner_duration
+    };
+
+    let after = dag.node(step.after).ok_or(StepVerifyError::MissingAfterNode {
+        step: idx,
+        node: step.after,
+    })?;
+    let PlanNode::Timeout {
+        child: after_child,
+        duration: after_duration,
+    } = after
+    else {
+        return Err(StepVerifyError::InvalidAfterShape {
+            step: idx,
+            expected: "Timeout after TimeoutMin",
+        });
+    };
+    if *after_child != inner_child || *after_duration != expected_duration {
+        return Err(StepVerifyError::InvalidAfterShape {
+            step: idx,
+            expected: "Timeout with min(d1,d2) over inner child",
+        });
+    }
+
+    verify_side_conditions(idx, step, policy, dag)
 }
 
 /// Verify that a `DedupRaceJoin` step produced valid structure:
@@ -279,9 +547,84 @@ fn verify_single_step(
 fn verify_dedup_race_join_result(
     idx: usize,
     step: &CertifiedStep,
-    _policy: RewritePolicy,
+    policy: RewritePolicy,
     dag: &PlanDag,
 ) -> Result<(), StepVerifyError> {
+    let before_node = dag
+        .node(step.before)
+        .ok_or(StepVerifyError::MissingBeforeNode {
+            step: idx,
+            node: step.before,
+        })?;
+    let PlanNode::Race { children } = before_node else {
+        return Err(StepVerifyError::InvalidBeforeShape {
+            step: idx,
+            expected: "Race of Join children before DedupRaceJoin",
+        });
+    };
+    if children.len() < 2 {
+        return Err(StepVerifyError::InvalidBeforeShape {
+            step: idx,
+            expected: "Race with >= 2 Join children before DedupRaceJoin",
+        });
+    }
+
+    let requires_binary_joins = matches!(policy, RewritePolicy::Conservative);
+    let allows_shared_non_leaf = matches!(policy, RewritePolicy::AssumeAssociativeComm);
+
+    if requires_binary_joins && children.len() != 2 {
+        return Err(StepVerifyError::InvalidBeforeShape {
+            step: idx,
+            expected: "Binary race required by Conservative policy",
+        });
+    }
+
+    let mut join_children = Vec::with_capacity(children.len());
+    for child in children {
+        match dag.node(*child) {
+            Some(PlanNode::Join { children }) => {
+                if requires_binary_joins && children.len() != 2 {
+                    return Err(StepVerifyError::InvalidBeforeShape {
+                        step: idx,
+                        expected: "Binary joins required by Conservative policy",
+                    });
+                }
+                join_children.push(children.clone());
+            }
+            _ => {
+                return Err(StepVerifyError::InvalidBeforeShape {
+                    step: idx,
+                    expected: "Race children must be Join nodes",
+                });
+            }
+        }
+    }
+
+    let mut intersection: std::collections::HashSet<PlanId> =
+        join_children[0].iter().copied().collect();
+    for join_nodes in join_children.iter().skip(1) {
+        let set: std::collections::HashSet<PlanId> = join_nodes.iter().copied().collect();
+        intersection.retain(|id| set.contains(id));
+    }
+    if intersection.len() != 1 {
+        return Err(StepVerifyError::InvalidBeforeShape {
+            step: idx,
+            expected: "Race joins must share exactly one child",
+        });
+    }
+    let shared = *intersection.iter().next().expect("shared");
+    if !allows_shared_non_leaf {
+        match dag.node(shared) {
+            Some(PlanNode::Leaf { .. }) => {}
+            _ => {
+                return Err(StepVerifyError::InvalidBeforeShape {
+                    step: idx,
+                    expected: "Shared child must be a Leaf under Conservative policy",
+                })
+            }
+        }
+    }
+
     let after_node = dag
         .node(step.after)
         .ok_or(StepVerifyError::MissingAfterNode {
@@ -317,7 +660,7 @@ fn verify_dedup_race_join_result(
         });
     }
 
-    Ok(())
+    verify_side_conditions(idx, step, policy, dag)
 }
 
 /// Verify that a certificate's `after_hash` matches the given (post-rewrite) DAG.
