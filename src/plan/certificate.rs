@@ -4,7 +4,8 @@
 //! from one state to another. The hash function is deterministic and stable
 //! across Rust versions (FNV-1a, not `DefaultHasher`).
 
-use super::rewrite::{RewritePolicy, RewriteReport, RewriteRule, RewriteStep};
+use super::analysis::SideConditionChecker;
+use super::rewrite::{check_side_conditions, RewritePolicy, RewriteReport, RewriteRule, RewriteStep};
 use super::{PlanDag, PlanId, PlanNode};
 
 // ---------------------------------------------------------------------------
