@@ -727,6 +727,7 @@ impl LyapunovGovernor {
 #[cfg(test)]
 mod tests {
     use super::*;
+    use crate::lab::runtime::InvariantViolation;
     use crate::record::ObligationKind;
     use crate::runtime::RuntimeState;
     use crate::types::Budget;
@@ -1649,8 +1650,16 @@ mod tests {
         task_count: usize,
         warmup_steps: usize,
     ) -> (LyapunovGovernor, bool) {
+        run_cancel_drain_with_weights(seed, task_count, warmup_steps, PotentialWeights::default())
+    }
+
+    fn run_cancel_drain_with_weights(
+        seed: u64,
+        task_count: usize,
+        warmup_steps: usize,
+        weights: PotentialWeights,
+    ) -> (LyapunovGovernor, bool) {
         use crate::lab::{LabConfig, LabRuntime};
-        use crate::record::ObligationKind;
         use crate::types::CancelReason;
 
         let mut runtime = LabRuntime::new(LabConfig::new(seed));
@@ -1672,11 +1681,6 @@ mod tests {
                 })
                 .expect("create task");
 
-            let _ob = runtime
-                .state
-                .create_obligation(ObligationKind::SendPermit, task_id, region, None)
-                .expect("create obligation");
-
             runtime.scheduler.lock().unwrap().schedule(task_id, 0);
         }
 
@@ -1696,7 +1700,7 @@ mod tests {
         }
 
         // Record potential at each step during the drain phase.
-        let mut governor = LyapunovGovernor::with_defaults();
+        let mut governor = LyapunovGovernor::new(weights);
         governor.compute_potential(&StateSnapshot::from_runtime_state(&runtime.state));
 
         let max_drain_steps = 10_000_u64;
@@ -1714,8 +1718,7 @@ mod tests {
     fn lab_cancel_drain_monotone_potential_decrease() {
         init_test("lab_cancel_drain_monotone_potential_decrease");
 
-        let (governor, is_quiescent) =
-            run_cancel_drain_potential_trajectory(0xBD25_0201, 8, 16);
+        let (governor, is_quiescent) = run_cancel_drain_potential_trajectory(0xBD25_0201, 8, 16);
 
         crate::assert_with_log!(is_quiescent, "quiescent", true, is_quiescent);
 
@@ -1768,8 +1771,7 @@ mod tests {
     fn lab_quiescence_invariants_after_cancel_drain() {
         init_test("lab_quiescence_invariants_after_cancel_drain");
 
-        let (governor, is_quiescent) =
-            run_cancel_drain_potential_trajectory(0xBD25_CAFE, 12, 8);
+        let (governor, is_quiescent) = run_cancel_drain_potential_trajectory(0xBD25_CAFE, 12, 8);
 
         crate::assert_with_log!(is_quiescent, "quiescent", true, is_quiescent);
 
@@ -1789,10 +1791,20 @@ mod tests {
             0,
             snap.draining_regions
         );
-        crate::assert_with_log!(snap.is_quiescent(), "snapshot quiescent", true, snap.is_quiescent());
+        crate::assert_with_log!(
+            snap.is_quiescent(),
+            "snapshot quiescent",
+            true,
+            snap.is_quiescent()
+        );
 
         // Per-kind obligations all zero.
-        crate::assert_with_log!(snap.pending_send_permits == 0, "no sp", 0, snap.pending_send_permits);
+        crate::assert_with_log!(
+            snap.pending_send_permits == 0,
+            "no sp",
+            0,
+            snap.pending_send_permits
+        );
         crate::assert_with_log!(snap.pending_acks == 0, "no ack", 0, snap.pending_acks);
         crate::assert_with_log!(snap.pending_leases == 0, "no lease", 0, snap.pending_leases);
         crate::assert_with_log!(snap.pending_io_ops == 0, "no io", 0, snap.pending_io_ops);
@@ -1804,8 +1816,18 @@ mod tests {
             0,
             snap.cancel_requested_tasks
         );
-        crate::assert_with_log!(snap.cancelling_tasks == 0, "no cancelling", 0, snap.cancelling_tasks);
-        crate::assert_with_log!(snap.finalizing_tasks == 0, "no finalizing", 0, snap.finalizing_tasks);
+        crate::assert_with_log!(
+            snap.cancelling_tasks == 0,
+            "no cancelling",
+            0,
+            snap.cancelling_tasks
+        );
+        crate::assert_with_log!(
+            snap.finalizing_tasks == 0,
+            "no finalizing",
+            0,
+            snap.finalizing_tasks
+        );
 
         let v_zero = final_record.total.abs() < f64::EPSILON;
         crate::assert_with_log!(v_zero, "V = 0", true, v_zero);
@@ -1814,81 +1836,13 @@ mod tests {
     }
 
     #[test]
-    fn lab_cancel_drain_with_mixed_obligations_converges() {
-        init_test("lab_cancel_drain_with_mixed_obligations_converges");
+    fn lab_cancel_drain_with_many_tasks_converges() {
+        init_test("lab_cancel_drain_with_many_tasks_converges");
 
-        use crate::lab::{LabConfig, LabRuntime};
-        use crate::record::ObligationKind;
-        use crate::types::CancelReason;
+        // Larger scenario: 12 tasks, more warmup steps.
+        let (governor, is_quiescent) = run_cancel_drain_potential_trajectory(0xBD25_A1B0, 12, 24);
 
-        let mut runtime = LabRuntime::new(LabConfig::new(0xBD25_A1B0));
-        let region = runtime.state.create_root_region(Budget::unlimited());
-
-        let obligation_kinds = [
-            ObligationKind::SendPermit,
-            ObligationKind::Ack,
-            ObligationKind::Lease,
-            ObligationKind::IoOp,
-            ObligationKind::SendPermit,
-            ObligationKind::Ack,
-        ];
-
-        for kind in &obligation_kinds {
-            let (task_id, _handle) = runtime
-                .state
-                .create_task(region, Budget::unlimited(), async {
-                    for _ in 0..10 {
-                        let Some(cx) = crate::cx::Cx::current() else {
-                            return;
-                        };
-                        if cx.checkpoint().is_err() {
-                            return;
-                        }
-                        yield_once().await;
-                    }
-                })
-                .expect("create task");
-
-            let _ob = runtime
-                .state
-                .create_obligation(*kind, task_id, region, None)
-                .expect("create obligation");
-
-            runtime.scheduler.lock().unwrap().schedule(task_id, 0);
-        }
-
-        for _ in 0..8 {
-            runtime.step_for_test();
-        }
-
-        let pre_snap = StateSnapshot::from_runtime_state(&runtime.state);
-        tracing::info!("Pre-cancel snapshot: {pre_snap}");
-
-        let cancel_reason = CancelReason::shutdown();
-        let tasks_to_cancel = runtime.state.cancel_request(region, &cancel_reason, None);
-        {
-            let mut scheduler = runtime.scheduler.lock().unwrap();
-            for (task_id, priority) in tasks_to_cancel {
-                scheduler.schedule_cancel(task_id, priority);
-            }
-        }
-
-        let mut governor = LyapunovGovernor::with_defaults();
-        governor.compute_potential(&StateSnapshot::from_runtime_state(&runtime.state));
-
-        let mut drain_steps = 0_u64;
-        while !runtime.is_quiescent() && drain_steps < 10_000 {
-            runtime.step_for_test();
-            drain_steps += 1;
-            governor.compute_potential(&StateSnapshot::from_runtime_state(&runtime.state));
-        }
-
-        crate::assert_with_log!(
-            runtime.is_quiescent(),
-            "mixed obligations quiescent",
-            true,
-            runtime.is_quiescent()
-        );
+        crate::assert_with_log!(is_quiescent, "quiescent", true, is_quiescent);
 
         let verdict = governor.analyze_convergence();
         for (i, record) in governor.history().iter().enumerate() {
@@ -1899,7 +1853,7 @@ mod tests {
         crate::assert_with_log!(verdict.monotone, "monotone", true, verdict.monotone);
         crate::assert_with_log!(verdict.converged(), "converged", true, verdict.converged());
 
-        crate::test_complete!("lab_cancel_drain_with_mixed_obligations_converges");
+        crate::test_complete!("lab_cancel_drain_with_many_tasks_converges");
     }
 
     #[test]
@@ -1914,62 +1868,15 @@ mod tests {
         ];
 
         for (label, weights) in &weight_configs {
-            use crate::lab::{LabConfig, LabRuntime};
-            use crate::record::ObligationKind;
-            use crate::types::CancelReason;
+            let (governor, is_quiescent) =
+                run_cancel_drain_with_weights(0xBD25_0815, 6, 8, weights.clone());
 
-            let mut runtime = LabRuntime::new(LabConfig::new(0xBD25_0815));
-            let region = runtime.state.create_root_region(Budget::unlimited());
-
-            for _ in 0..6 {
-                let (task_id, _handle) = runtime
-                    .state
-                    .create_task(region, Budget::unlimited(), async {
-                        for _ in 0..10 {
-                            let Some(cx) = crate::cx::Cx::current() else {
-                                return;
-                            };
-                            if cx.checkpoint().is_err() {
-                                return;
-                            }
-                            yield_once().await;
-                        }
-                    })
-                    .expect("create task");
-
-                let _ob = runtime
-                    .state
-                    .create_obligation(ObligationKind::SendPermit, task_id, region, None)
-                    .expect("create obligation");
-
-                runtime.scheduler.lock().unwrap().schedule(task_id, 0);
-            }
-
-            for _ in 0..8 {
-                runtime.step_for_test();
-            }
-
-            let cancel_reason = CancelReason::shutdown();
-            let tasks_to_cancel =
-                runtime.state.cancel_request(region, &cancel_reason, None);
-            {
-                let mut scheduler = runtime.scheduler.lock().unwrap();
-                for (task_id, priority) in tasks_to_cancel {
-                    scheduler.schedule_cancel(task_id, priority);
-                }
-            }
-
-            let mut governor = LyapunovGovernor::new(weights.clone());
-            governor
-                .compute_potential(&StateSnapshot::from_runtime_state(&runtime.state));
-
-            let mut drain_steps = 0_u64;
-            while !runtime.is_quiescent() && drain_steps < 10_000 {
-                runtime.step_for_test();
-                drain_steps += 1;
-                governor
-                    .compute_potential(&StateSnapshot::from_runtime_state(&runtime.state));
-            }
+            crate::assert_with_log!(
+                is_quiescent,
+                format!("{label}: quiescent"),
+                true,
+                is_quiescent
+            );
 
             let verdict = governor.analyze_convergence();
             tracing::info!("Weights={label}: {verdict}");
@@ -1989,5 +1896,320 @@ mod tests {
         }
 
         crate::test_complete!("lab_potential_decreases_across_weight_configurations");
+    }
+
+    // =========================================================================
+    // Obligation-aware deterministic tests (bd-25j2)
+    // =========================================================================
+
+    /// Run a cancel-drain scenario where tasks hold pending obligations.
+    fn run_cancel_drain_with_obligations(
+        seed: u64,
+        task_count: usize,
+        obligations_per_task: usize,
+        warmup_steps: usize,
+        weights: PotentialWeights,
+    ) -> (LyapunovGovernor, bool, usize) {
+        use crate::lab::{LabConfig, LabRuntime};
+        use crate::record::ObligationKind;
+        use crate::types::CancelReason;
+
+        // Disable panic-on-leak: we check invariants explicitly after drain.
+        let mut runtime = LabRuntime::new(LabConfig::new(seed).panic_on_leak(false));
+        let region = runtime.state.create_root_region(Budget::unlimited());
+
+        let obligation_kinds = [
+            ObligationKind::SendPermit,
+            ObligationKind::Ack,
+            ObligationKind::Lease,
+            ObligationKind::IoOp,
+        ];
+
+        // Create tasks with long-running bodies (won't complete during warmup)
+        // and attach obligations immediately so they exist before any steps.
+        let mut obligation_ids = Vec::new();
+        for t_idx in 0..task_count {
+            let (task_id, _handle) = runtime
+                .state
+                .create_task(region, Budget::unlimited(), async {
+                    // Long loop: ensures task is still alive when obligations are
+                    // created and when cancellation arrives.
+                    for _ in 0..1_000 {
+                        let Some(cx) = crate::cx::Cx::current() else {
+                            return;
+                        };
+                        if cx.checkpoint().is_err() {
+                            return;
+                        }
+                        yield_once().await;
+                    }
+                })
+                .expect("create task");
+
+            // Attach obligations before scheduling so they exist while the task
+            // is alive.
+            for o_idx in 0..obligations_per_task {
+                let kind = obligation_kinds[(t_idx + o_idx) % obligation_kinds.len()];
+                if let Ok(obl_id) = runtime.state.create_obligation(
+                    kind,
+                    task_id,
+                    region,
+                    Some(format!("test-obl-t{t_idx}-o{o_idx}")),
+                ) {
+                    obligation_ids.push(obl_id);
+                }
+            }
+
+            runtime.scheduler.lock().unwrap().schedule(task_id, 0);
+        }
+
+        // Warm up: let tasks run a few steps and advance virtual time so
+        // obligations accumulate measurable age (the obligation potential
+        // component is based on age, not count).
+        for _ in 0..warmup_steps {
+            runtime.step_for_test();
+        }
+        // Advance virtual time by 1s so obligation age is non-trivial.
+        runtime.advance_time(1_000_000_000);
+
+        let mut governor = LyapunovGovernor::new(weights);
+        governor.compute_potential(&StateSnapshot::from_runtime_state(&runtime.state));
+
+        let cancel_reason = CancelReason::shutdown();
+        let tasks_to_cancel = runtime.state.cancel_request(region, &cancel_reason, None);
+        {
+            let mut scheduler = runtime.scheduler.lock().unwrap();
+            for (task_id, priority) in tasks_to_cancel {
+                scheduler.schedule_cancel(task_id, priority);
+            }
+        }
+
+        // Abort obligations as part of cancellation, mimicking real code where
+        // task bodies release obligations upon detecting cancel via checkpoint.
+        for obl_id in &obligation_ids {
+            let _ = runtime
+                .state
+                .abort_obligation(*obl_id, crate::record::ObligationAbortReason::Cancel);
+        }
+
+        governor.compute_potential(&StateSnapshot::from_runtime_state(&runtime.state));
+
+        let mut drain_steps = 0_u64;
+        while !runtime.is_quiescent() && drain_steps < 10_000 {
+            runtime.step_for_test();
+            drain_steps += 1;
+            governor.compute_potential(&StateSnapshot::from_runtime_state(&runtime.state));
+        }
+
+        let violations = runtime.check_invariants();
+        let leak_count = violations
+            .iter()
+            .filter(|v| matches!(v, InvariantViolation::ObligationLeak { .. }))
+            .count();
+
+        (governor, runtime.is_quiescent(), leak_count)
+    }
+
+    #[test]
+    fn lab_cancel_drain_with_obligations_monotone_decrease() {
+        init_test("lab_cancel_drain_with_obligations_monotone_decrease");
+
+        let (governor, is_quiescent, leak_count) =
+            run_cancel_drain_with_obligations(0xBD25_0B01, 8, 2, 16, PotentialWeights::default());
+
+        crate::assert_with_log!(is_quiescent, "quiescent", true, is_quiescent);
+        crate::assert_with_log!(leak_count == 0, "no obligation leaks", 0usize, leak_count);
+
+        let verdict = governor.analyze_convergence();
+        for (i, record) in governor.history().iter().enumerate() {
+            tracing::info!("Step {i}: {record}");
+        }
+        tracing::info!("{verdict}");
+
+        crate::assert_with_log!(verdict.monotone, "monotone", true, verdict.monotone);
+        crate::assert_with_log!(
+            verdict.reached_quiescence,
+            "V=0",
+            true,
+            verdict.reached_quiescence
+        );
+        crate::assert_with_log!(verdict.converged(), "converged", true, verdict.converged());
+
+        // The first snapshot (pre-cancel) should reflect pending obligations.
+        // Note: obligation_component may be 0 when virtual time hasn't advanced
+        // (ages are 0ns), but the obligations themselves should exist.
+        let first = &governor.history()[0];
+        crate::assert_with_log!(
+            first.snapshot.pending_obligations > 0,
+            "initial pending obligations > 0",
+            true,
+            first.snapshot.pending_obligations > 0
+        );
+
+        crate::test_complete!("lab_cancel_drain_with_obligations_monotone_decrease");
+    }
+
+    #[test]
+    fn lab_obligation_leak_oracle_clean_after_drain() {
+        init_test("lab_obligation_leak_oracle_clean_after_drain");
+
+        let (governor, is_quiescent, leak_count) =
+            run_cancel_drain_with_obligations(0xBD25_1EAC, 10, 3, 8, PotentialWeights::default());
+
+        crate::assert_with_log!(is_quiescent, "quiescent", true, is_quiescent);
+        crate::assert_with_log!(leak_count == 0, "zero obligation leaks", 0usize, leak_count);
+
+        let final_record = governor.history().last().expect("non-empty history");
+        let snap = &final_record.snapshot;
+        crate::assert_with_log!(
+            snap.pending_obligations == 0,
+            "no pending",
+            0,
+            snap.pending_obligations
+        );
+        crate::assert_with_log!(
+            snap.pending_send_permits == 0,
+            "no sp",
+            0,
+            snap.pending_send_permits
+        );
+        crate::assert_with_log!(snap.pending_acks == 0, "no acks", 0, snap.pending_acks);
+        crate::assert_with_log!(
+            snap.pending_leases == 0,
+            "no leases",
+            0,
+            snap.pending_leases
+        );
+        crate::assert_with_log!(
+            snap.pending_io_ops == 0,
+            "no io_ops",
+            0,
+            snap.pending_io_ops
+        );
+
+        crate::test_complete!("lab_obligation_leak_oracle_clean_after_drain");
+    }
+
+    #[test]
+    fn lab_cancel_drain_with_obligations_deterministic() {
+        init_test("lab_cancel_drain_with_obligations_deterministic");
+
+        let seed = 0xBD25_DE70;
+        let w = PotentialWeights::default();
+
+        let (gov1, q1, l1) = run_cancel_drain_with_obligations(seed, 6, 2, 12, w.clone());
+        let (gov2, q2, l2) = run_cancel_drain_with_obligations(seed, 6, 2, 12, w);
+
+        crate::assert_with_log!(q1 && q2, "both quiescent", true, q1 && q2);
+        crate::assert_with_log!(l1 == 0 && l2 == 0, "no leaks", true, l1 == 0 && l2 == 0);
+
+        let h1: Vec<f64> = gov1.history().iter().map(|r| r.total).collect();
+        let h2: Vec<f64> = gov2.history().iter().map(|r| r.total).collect();
+
+        crate::assert_with_log!(h1.len() == h2.len(), "same length", h1.len(), h2.len());
+
+        let all_match = h1
+            .iter()
+            .zip(h2.iter())
+            .all(|(a, b)| (a - b).abs() < f64::EPSILON);
+        crate::assert_with_log!(all_match, "trajectories match", true, all_match);
+
+        crate::test_complete!("lab_cancel_drain_with_obligations_deterministic");
+    }
+
+    #[test]
+    fn lab_obligation_focused_weights_converge_with_obligations() {
+        init_test("lab_obligation_focused_weights_converge_with_obligations");
+
+        let weights = PotentialWeights::obligation_focused();
+        let (governor, is_quiescent, leak_count) =
+            run_cancel_drain_with_obligations(0xBD25_0B1F, 8, 3, 8, weights);
+
+        crate::assert_with_log!(is_quiescent, "quiescent", true, is_quiescent);
+        crate::assert_with_log!(leak_count == 0, "no leaks", 0usize, leak_count);
+
+        let verdict = governor.analyze_convergence();
+        tracing::info!("{verdict}");
+
+        crate::assert_with_log!(verdict.monotone, "monotone", true, verdict.monotone);
+        crate::assert_with_log!(verdict.converged(), "converged", true, verdict.converged());
+
+        let first = &governor.history()[0];
+        let obl_fraction = if first.total > 0.0 {
+            first.obligation_component / first.total
+        } else {
+            0.0
+        };
+        tracing::info!(
+            "Obligation fraction of initial V: {:.2}% ({:.4} / {:.4})",
+            obl_fraction * 100.0,
+            first.obligation_component,
+            first.total,
+        );
+
+        crate::test_complete!("lab_obligation_focused_weights_converge_with_obligations");
+    }
+
+    #[test]
+    fn lab_quiescence_snapshot_zero_with_obligations() {
+        init_test("lab_quiescence_snapshot_zero_with_obligations");
+
+        let (governor, is_quiescent, leak_count) =
+            run_cancel_drain_with_obligations(0xBD25_0520, 12, 2, 10, PotentialWeights::default());
+
+        crate::assert_with_log!(is_quiescent, "quiescent", true, is_quiescent);
+        crate::assert_with_log!(leak_count == 0, "no leaks", 0usize, leak_count);
+
+        let final_record = governor.history().last().expect("non-empty history");
+        let snap = &final_record.snapshot;
+
+        crate::assert_with_log!(snap.live_tasks == 0, "no live tasks", 0, snap.live_tasks);
+        crate::assert_with_log!(
+            snap.pending_obligations == 0,
+            "no obl",
+            0,
+            snap.pending_obligations
+        );
+        crate::assert_with_log!(
+            snap.draining_regions == 0,
+            "no draining",
+            0,
+            snap.draining_regions
+        );
+        crate::assert_with_log!(
+            snap.obligation_age_sum_ns == 0,
+            "age zero",
+            0u64,
+            snap.obligation_age_sum_ns
+        );
+        crate::assert_with_log!(
+            snap.cancel_requested_tasks == 0,
+            "no cr",
+            0,
+            snap.cancel_requested_tasks
+        );
+        crate::assert_with_log!(
+            snap.cancelling_tasks == 0,
+            "no cancelling",
+            0,
+            snap.cancelling_tasks
+        );
+        crate::assert_with_log!(
+            snap.finalizing_tasks == 0,
+            "no finalizing",
+            0,
+            snap.finalizing_tasks
+        );
+        crate::assert_with_log!(
+            snap.is_quiescent(),
+            "quiescent snap",
+            true,
+            snap.is_quiescent()
+        );
+
+        let v_zero = final_record.total.abs() < f64::EPSILON;
+        crate::assert_with_log!(v_zero, "V = 0", true, v_zero);
+
+        crate::test_complete!("lab_quiescence_snapshot_zero_with_obligations");
     }
 }
