@@ -602,6 +602,13 @@ fn plan_blocks(
         return Ok(Vec::new());
     }
 
+    if symbol_size == 0 {
+        return Err(DecodingError::InconsistentMetadata {
+            sbn: 0,
+            details: "symbol_size must be > 0".to_string(),
+        });
+    }
+
     let max_blocks = u8::MAX as usize + 1;
     let max_total = max_block_size.saturating_mul(max_blocks);
     if object_size > max_total {

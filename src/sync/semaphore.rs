@@ -452,6 +452,9 @@ impl Future for OwnedAcquireFuture {
                         next.waker.wake_by_ref();
                     }
                 }
+                drop(state);
+                // Clear waiter_id so Drop doesn't try to remove again
+                self.waiter_id = None;
             }
             return Poll::Ready(Err(AcquireError::Cancelled));
         }
