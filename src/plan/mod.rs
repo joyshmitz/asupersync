@@ -260,10 +260,15 @@ pub enum ENode {
 }
 
 /// An equivalence class of e-nodes.
+///
+/// Nodes are stored in a shared arena (`EGraph::node_arena`) and referenced
+/// by index. This avoids per-class heap allocations for node storage and
+/// makes merge operations cheaper (moving `u32` indices instead of `ENode`s).
 #[derive(Debug, Clone)]
 pub struct EClass {
     id: EClassId,
-    nodes: Vec<ENode>,
+    /// Indices into `EGraph::node_arena`.
+    node_indices: Vec<u32>,
 }
 
 impl EClass {
@@ -271,12 +276,6 @@ impl EClass {
     #[must_use]
     pub const fn id(&self) -> EClassId {
         self.id
-    }
-
-    /// Returns the nodes in this class (in deterministic insertion order).
-    #[must_use]
-    pub fn nodes(&self) -> &[ENode] {
-        &self.nodes
     }
 }
 
@@ -286,8 +285,16 @@ impl EClass {
 /// - hashconsed node insertion (deduplication)
 /// - union-find for class merging
 /// - deterministic canonical ids (smallest id wins)
+/// - arena-backed node storage for cache-friendly iteration
+///
+/// All e-nodes are stored in a single contiguous `node_arena`. Each class
+/// holds `Vec<u32>` indices into this arena, making merge operations cheaper
+/// (moving 4-byte indices rather than full `ENode` values).
 #[derive(Debug, Default)]
 pub struct EGraph {
+    /// Flat arena for all e-nodes. Append-only; indices are stable.
+    node_arena: Vec<ENode>,
+    /// Per-class metadata with node arena indices.
     classes: Vec<EClass>,
     parent: Vec<EClassId>,
     hashcons: DetHashMap<ENode, EClassId>,
@@ -329,10 +336,13 @@ impl EGraph {
             return self.find(*existing);
         }
 
+        let arena_idx = self.node_arena.len() as u32;
+        self.node_arena.push(canonical.clone());
+
         let id = EClassId::new(self.classes.len());
         self.classes.push(EClass {
             id,
-            nodes: vec![canonical.clone()],
+            node_indices: vec![arena_idx],
         });
         self.parent.push(id);
         self.hashcons.insert(canonical, id);
@@ -348,6 +358,31 @@ impl EGraph {
     pub fn class(&mut self, id: EClassId) -> Option<&EClass> {
         let root = self.find(id);
         self.classes.get(root.index())
+    }
+
+    /// Returns cloned nodes for a class, resolved from the arena.
+    ///
+    /// This is the primary way to read class nodes. Nodes live in a shared
+    /// arena; this method collects them into an owned `Vec` for the caller.
+    pub fn class_nodes_cloned(&mut self, id: EClassId) -> Option<Vec<ENode>> {
+        let root = self.find(id);
+        let class = self.classes.get(root.index())?;
+        Some(
+            class
+                .node_indices
+                .iter()
+                .map(|&idx| self.node_arena[idx as usize].clone())
+                .collect(),
+        )
+    }
+
+    /// Finds the canonical root without path compression (immutable access).
+    fn find_immut(&self, id: EClassId) -> EClassId {
+        let mut root = id.index();
+        while self.parent[root].index() != root {
+            root = self.parent[root].index();
+        }
+        EClassId::new(root)
     }
 
     /// Merges two classes and returns the canonical representative.
@@ -374,8 +409,8 @@ impl EGraph {
 
         self.parent[loser.index()] = winner;
 
-        let mut moved = mem::take(&mut self.classes[loser.index()].nodes);
-        self.classes[winner.index()].nodes.append(&mut moved);
+        let mut moved = mem::take(&mut self.classes[loser.index()].node_indices);
+        self.classes[winner.index()].node_indices.append(&mut moved);
 
         (winner, true)
     }
@@ -429,14 +464,17 @@ impl EGraph {
                     continue;
                 }
 
-                let nodes = mem::take(&mut self.classes[idx].nodes);
+                let indices = mem::take(&mut self.classes[idx].node_indices);
                 let mut seen: DetHashSet<ENode> = DetHashSet::default();
-                let mut rebuilt = Vec::new();
+                let mut rebuilt_indices = Vec::new();
 
-                for node in nodes {
+                for &ni in &indices {
+                    let node = self.node_arena[ni as usize].clone();
                     let canonical = self.canonicalize_enode(node);
+                    // Update the arena slot in place (avoids arena growth).
+                    self.node_arena[ni as usize] = canonical.clone();
                     if seen.insert(canonical.clone()) {
-                        rebuilt.push(canonical.clone());
+                        rebuilt_indices.push(ni);
                     }
                     if let Some(existing) = self.hashcons.get(&canonical) {
                         let existing_root = self.find(*existing);
@@ -454,7 +492,7 @@ impl EGraph {
                     }
                 }
 
-                self.classes[idx].nodes = rebuilt;
+                self.classes[idx].node_indices = rebuilt_indices;
             }
 
             if merges.is_empty() {
@@ -484,7 +522,7 @@ pub use certificate::{
     CertificateVersion, PlanHash, RewriteCertificate, StepVerifyError, VerifyError,
 };
 pub use extractor::{ExtractionCertificate, ExtractionVerifyError, Extractor, PlanCost};
-pub use rewrite::{RewritePolicy, RewriteReport, RewriteRule, RewriteRuleSchema};
+pub use rewrite::{AlgebraicLaw, RewritePolicy, RewriteReport, RewriteRule, RewriteRuleSchema};
 
 #[cfg(test)]
 mod tests {

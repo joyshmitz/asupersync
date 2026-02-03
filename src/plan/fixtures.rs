@@ -41,6 +41,11 @@ pub fn all_fixtures() -> Vec<PlanFixture> {
         timeout_wrapping_dedup(),
         independent_subtrees(),
         race_of_leaves(),
+        // Cancel-aware fixtures (F13-F16)
+        race_cancel_with_timeout(),
+        nested_race_cancel_cascade(),
+        timeout_race_dedup_cancel(),
+        race_obligation_cancel(),
     ]
 }
 
@@ -278,6 +283,82 @@ fn race_of_leaves() -> PlanFixture {
     PlanFixture {
         name: "race_of_leaves",
         intent: "Race[a,b,c]: children aren't joins, no DedupRaceJoin",
+        dag,
+        expected_rules: vec![],
+        expected_step_count: 0,
+    }
+}
+
+/// F13: Race[fast, Timeout[slow]]: loser cancelled, timeout interacts with cancel.
+fn race_cancel_with_timeout() -> PlanFixture {
+    let mut dag = PlanDag::new();
+    let fast = dag.leaf("fast");
+    let slow = dag.leaf("slow");
+    let timed_slow = dag.timeout(slow, Duration::from_secs(3));
+    let race = dag.race(vec![fast, timed_slow]);
+    dag.set_root(race);
+    PlanFixture {
+        name: "race_cancel_with_timeout",
+        intent: "Race[fast, Timeout[slow]]: loser cancelled, timeout interacts with cancel",
+        dag,
+        expected_rules: vec![],
+        expected_step_count: 0,
+    }
+}
+
+/// F14: Race[Race[a,b], Race[c,d]]: cancel cascades through nested races.
+fn nested_race_cancel_cascade() -> PlanFixture {
+    let mut dag = PlanDag::new();
+    let a = dag.leaf("a");
+    let b = dag.leaf("b");
+    let c = dag.leaf("c");
+    let d = dag.leaf("d");
+    let inner_race1 = dag.race(vec![a, b]);
+    let inner_race2 = dag.race(vec![c, d]);
+    let outer_race = dag.race(vec![inner_race1, inner_race2]);
+    dag.set_root(outer_race);
+    PlanFixture {
+        name: "nested_race_cancel_cascade",
+        intent: "Race[Race[a,b], Race[c,d]]: cancel cascades through nested races",
+        dag,
+        expected_rules: vec![],
+        expected_step_count: 0,
+    }
+}
+
+/// F15: Race[Join[s,Timeout[a]], Join[s,Timeout[b]]]: dedup + cancel with timed leaves.
+fn timeout_race_dedup_cancel() -> PlanFixture {
+    let mut dag = PlanDag::new();
+    let shared = dag.leaf("shared");
+    let a = dag.leaf("a");
+    let b = dag.leaf("b");
+    let timed_a = dag.timeout(a, Duration::from_secs(2));
+    let timed_b = dag.timeout(b, Duration::from_secs(4));
+    let join_a = dag.join(vec![shared, timed_a]);
+    let join_b = dag.join(vec![shared, timed_b]);
+    let race = dag.race(vec![join_a, join_b]);
+    dag.set_root(race);
+    PlanFixture {
+        name: "timeout_race_dedup_cancel",
+        intent: "Race[Join[s,Timeout[a]], Join[s,Timeout[b]]]: dedup + cancel with timed leaves",
+        dag,
+        expected_rules: vec![RewriteRule::DedupRaceJoin],
+        expected_step_count: 1,
+    }
+}
+
+/// F16: Race[Join[obl:permit, compute], obl:lock]: cancel must not leak obligations.
+fn race_obligation_cancel() -> PlanFixture {
+    let mut dag = PlanDag::new();
+    let obl_permit = dag.leaf("obl:permit");
+    let obl_lock = dag.leaf("obl:lock");
+    let compute = dag.leaf("compute");
+    let join_permit = dag.join(vec![obl_permit, compute]);
+    let race = dag.race(vec![join_permit, obl_lock]);
+    dag.set_root(race);
+    PlanFixture {
+        name: "race_obligation_cancel",
+        intent: "Race[Join[obl:permit, compute], obl:lock]: cancel must not leak obligations",
         dag,
         expected_rules: vec![],
         expected_step_count: 0,
@@ -675,6 +756,172 @@ mod tests {
         let merged2 = eg2.merge(b2, a2);
         assert_eq!(merged1.index(), merged2.index());
         assert_eq!(merged1, a1); // a has smaller index
+    }
+
+    #[test]
+    fn cancel_fixtures_present_and_valid() {
+        init_test();
+        let fixtures = all_fixtures();
+        let cancel_names: Vec<&str> = fixtures
+            .iter()
+            .filter(|f| {
+                f.name.contains("cancel")
+                    || f.intent.contains("cancel")
+                    || f.intent.contains("Cancel")
+            })
+            .map(|f| f.name)
+            .collect();
+        assert!(
+            cancel_names.len() >= 4,
+            "need >= 4 cancel-aware fixtures, got {}: {:?}",
+            cancel_names.len(),
+            cancel_names
+        );
+        for fixture in &fixtures {
+            assert!(
+                fixture.dag.validate().is_ok(),
+                "cancel fixture {} failed validation",
+                fixture.name
+            );
+        }
+    }
+
+    #[test]
+    fn lab_equivalence_all_fixtures_all_rules() {
+        init_test();
+        let all_rules = [
+            RewriteRule::DedupRaceJoin,
+            RewriteRule::JoinAssoc,
+            RewriteRule::RaceAssoc,
+            RewriteRule::JoinCommute,
+            RewriteRule::RaceCommute,
+            RewriteRule::TimeoutMin,
+        ];
+        for fixture in all_fixtures() {
+            if fixture.name == "shared_non_leaf_associative" {
+                continue;
+            }
+            let report =
+                run_equivalence_harness(fixture, RewritePolicy::conservative(), &all_rules);
+            assert!(
+                report.outcomes_equivalent,
+                "outcomes not equivalent for fixture {}",
+                report.fixture_name
+            );
+        }
+    }
+
+    #[test]
+    fn extraction_pipeline_equivalence() {
+        use crate::plan::extractor::Extractor;
+        use crate::plan::PlanId;
+        use std::collections::HashMap;
+
+        init_test();
+        for fixture in all_fixtures() {
+            let original_outcomes = fixture
+                .dag
+                .root()
+                .map(|root| outcome_sets(&fixture.dag, root))
+                .unwrap_or_default();
+
+            // Build e-graph from fixture DAG using recursive traversal.
+            let mut eg = crate::plan::EGraph::new();
+            let mut cache: HashMap<PlanId, crate::plan::EClassId> = HashMap::new();
+
+            if let Some(root) = fixture.dag.root() {
+                let root_eclass = dag_to_egraph_rec(&fixture.dag, root, &mut eg, &mut cache);
+                let (extracted_dag, _cert) = Extractor::new(&mut eg).extract(root_eclass);
+                let extracted_outcomes = extracted_dag
+                    .root()
+                    .map(|r| outcome_sets(&extracted_dag, r))
+                    .unwrap_or_default();
+                assert_eq!(
+                    original_outcomes, extracted_outcomes,
+                    "extraction changed outcomes for fixture {}",
+                    fixture.name
+                );
+            }
+        }
+    }
+
+    /// Recursively insert a DAG node into an e-graph, processing children first.
+    fn dag_to_egraph_rec(
+        dag: &PlanDag,
+        id: PlanId,
+        eg: &mut crate::plan::EGraph,
+        cache: &mut HashMap<PlanId, crate::plan::EClassId>,
+    ) -> crate::plan::EClassId {
+        if let Some(&ec) = cache.get(&id) {
+            return ec;
+        }
+        let node = dag.node(id).expect("valid PlanId");
+        let eclass = match node.clone() {
+            PlanNode::Leaf { label } => eg.add_leaf(label),
+            PlanNode::Join { children } => {
+                let ec: Vec<_> = children
+                    .iter()
+                    .map(|c| dag_to_egraph_rec(dag, *c, eg, cache))
+                    .collect();
+                eg.add_join(ec)
+            }
+            PlanNode::Race { children } => {
+                let ec: Vec<_> = children
+                    .iter()
+                    .map(|c| dag_to_egraph_rec(dag, *c, eg, cache))
+                    .collect();
+                eg.add_race(ec)
+            }
+            PlanNode::Timeout { child, duration } => {
+                let child_ec = dag_to_egraph_rec(dag, child, eg, cache);
+                eg.add_timeout(child_ec, duration)
+            }
+        };
+        cache.insert(id, eclass);
+        eclass
+    }
+
+    #[test]
+    fn extraction_after_rewrite_equivalence() {
+        use crate::plan::extractor::Extractor;
+        use crate::plan::PlanId;
+        use std::collections::HashMap;
+
+        init_test();
+        let rules = [RewriteRule::DedupRaceJoin];
+        for mut fixture in all_fixtures() {
+            if fixture.name == "shared_non_leaf_associative" {
+                continue;
+            }
+            let original_outcomes = fixture
+                .dag
+                .root()
+                .map(|root| outcome_sets(&fixture.dag, root))
+                .unwrap_or_default();
+
+            // Apply rewrites.
+            let (_report, _cert) = fixture
+                .dag
+                .apply_rewrites_certified(RewritePolicy::conservative(), &rules);
+
+            // Build e-graph from rewritten DAG using recursive traversal.
+            let mut eg = crate::plan::EGraph::new();
+            let mut cache: HashMap<PlanId, crate::plan::EClassId> = HashMap::new();
+
+            if let Some(root) = fixture.dag.root() {
+                let root_eclass = dag_to_egraph_rec(&fixture.dag, root, &mut eg, &mut cache);
+                let (extracted_dag, _cert) = Extractor::new(&mut eg).extract(root_eclass);
+                let extracted_outcomes = extracted_dag
+                    .root()
+                    .map(|r| outcome_sets(&extracted_dag, r))
+                    .unwrap_or_default();
+                assert_eq!(
+                    original_outcomes, extracted_outcomes,
+                    "rewrite+extraction changed outcomes for fixture {}",
+                    fixture.name
+                );
+            }
+        }
     }
 
     #[test]

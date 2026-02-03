@@ -15,12 +15,15 @@ use super::{PlanDag, PlanId, PlanNode};
 /// # Example
 ///
 /// ```
-/// use asupersync::plan::RewritePolicy;
+/// use asupersync::plan::{RewritePolicy, RewriteRule};
 ///
-/// // Conservative: associativity only, no commutativity
+/// // Conservative: associativity + restricted distributivity + timeout simplification
 /// let conservative = RewritePolicy::conservative();
 /// assert!(conservative.associativity);
+/// assert!(conservative.distributivity);
+/// assert!(conservative.timeout_simplification);
 /// assert!(!conservative.commutativity);
+/// assert!(conservative.require_binary_joins); // restricts distributivity
 ///
 /// // Enable all algebraic laws
 /// let permissive = RewritePolicy::assume_all();
@@ -31,7 +34,12 @@ use super::{PlanDag, PlanId, PlanNode};
 /// let custom = RewritePolicy::new()
 ///     .with_associativity(true)
 ///     .with_commutativity(true)
-///     .with_distributivity(false);
+///     .with_distributivity(false)
+///     .with_timeout_simplification(true);
+///
+/// // Check if a rule is permitted by a policy
+/// assert!(conservative.permits(RewriteRule::JoinAssoc));
+/// assert!(!conservative.permits(RewriteRule::JoinCommute));
 /// ```
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 #[allow(clippy::struct_excessive_bools)]
@@ -55,6 +63,12 @@ pub struct RewritePolicy {
     ///
     /// When true, DedupRaceJoin only applies to binary joins with leaf shared children.
     pub require_binary_joins: bool,
+
+    /// Allow timeout simplification: `Timeout(d1, Timeout(d2, f)) -> Timeout(min(d1,d2), f)`.
+    ///
+    /// This is a pure simplification (tighter deadline never changes observable outcomes
+    /// when the inner deadline is stricter), so it's enabled in all standard policies.
+    pub timeout_simplification: bool,
 }
 
 impl Default for RewritePolicy {
@@ -73,24 +87,28 @@ impl RewritePolicy {
             commutativity: false,
             distributivity: false,
             require_binary_joins: true,
+            timeout_simplification: false,
         }
     }
 
-    /// Conservative policy: associativity allowed, but not commutativity.
+    /// Conservative policy: associativity, restricted distributivity, and
+    /// timeout simplification allowed, but not commutativity.
     ///
-    /// This is the safest default - only applies rewrites that do not
-    /// assume any algebraic properties beyond basic structure.
+    /// Distributivity is enabled but restricted via `require_binary_joins`:
+    /// `DedupRaceJoin` only fires on binary joins with leaf shared children.
     #[must_use]
     pub const fn conservative() -> Self {
         Self {
             associativity: true,
             commutativity: false,
-            distributivity: false,
+            distributivity: true,
             require_binary_joins: true,
+            timeout_simplification: true,
         }
     }
 
-    /// Assume all algebraic laws hold: associativity, commutativity, distributivity.
+    /// Assume all algebraic laws hold: associativity, commutativity, distributivity,
+    /// timeout simplification.
     ///
     /// Use when you know the combination operators are commutative/associative
     /// and children are independent.
@@ -101,6 +119,7 @@ impl RewritePolicy {
             commutativity: true,
             distributivity: true,
             require_binary_joins: false,
+            timeout_simplification: true,
         }
     }
 
@@ -132,6 +151,13 @@ impl RewritePolicy {
         self
     }
 
+    /// Builder: set timeout_simplification flag.
+    #[must_use]
+    pub const fn with_timeout_simplification(mut self, enabled: bool) -> Self {
+        self.timeout_simplification = enabled;
+        self
+    }
+
     /// Returns true if associativity rewrites are allowed.
     #[must_use]
     pub const fn allows_associative(self) -> bool {
@@ -155,6 +181,32 @@ impl RewritePolicy {
     pub const fn requires_binary_joins(self) -> bool {
         self.require_binary_joins
     }
+
+    /// Returns true if timeout simplification is allowed.
+    #[must_use]
+    pub const fn allows_timeout_simplification(self) -> bool {
+        self.timeout_simplification
+    }
+
+    /// Returns true if the policy allows a specific algebraic law.
+    #[must_use]
+    pub const fn allows_law(self, law: AlgebraicLaw) -> bool {
+        match law {
+            AlgebraicLaw::Associativity => self.associativity,
+            AlgebraicLaw::Commutativity => self.commutativity,
+            AlgebraicLaw::Distributivity => self.distributivity,
+            AlgebraicLaw::TimeoutSimplification => self.timeout_simplification,
+        }
+    }
+
+    /// Returns true if the policy permits a given rewrite rule.
+    ///
+    /// A rule is permitted when the policy enables **all** of its required
+    /// algebraic laws (as declared by [`RewriteRule::required_laws`]).
+    #[must_use]
+    pub fn permits(self, rule: RewriteRule) -> bool {
+        rule.required_laws().iter().all(|law| self.allows_law(*law))
+    }
 }
 
 // Backward compatibility: allow using the old enum-like names
@@ -168,6 +220,22 @@ impl RewritePolicy {
     #[deprecated(since = "0.1.0", note = "use RewritePolicy::assume_all() instead")]
     #[allow(non_upper_case_globals)]
     pub const AssumeAssociativeComm: Self = Self::assume_all();
+}
+
+/// Algebraic laws that a rewrite rule may require.
+///
+/// Each variant maps to a flag in [`RewritePolicy`]. A rule can only fire
+/// when the policy enables **all** of its required laws.
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Hash)]
+pub enum AlgebraicLaw {
+    /// Regrouping: `Op[Op[a,b], c] -> Op[a,b,c]`.
+    Associativity,
+    /// Reordering: `Op[a,b] -> Op[b,a]` (canonical order).
+    Commutativity,
+    /// Shared-child dedup: `Race[Join[s,a], Join[s,b]] -> Join[s, Race[a,b]]`.
+    Distributivity,
+    /// Nested timeout collapse: `Timeout(d1, Timeout(d2, f)) -> Timeout(min(d1,d2), f)`.
+    TimeoutSimplification,
 }
 
 /// Declarative schema for a rewrite rule.
@@ -293,6 +361,19 @@ impl RewriteRule {
     pub fn all() -> &'static [Self] {
         ALL_REWRITE_RULES
     }
+
+    /// Returns the algebraic laws required for this rule to fire.
+    ///
+    /// The policy must enable **all** returned laws for the rule to be permitted.
+    #[must_use]
+    pub fn required_laws(self) -> &'static [AlgebraicLaw] {
+        match self {
+            Self::JoinAssoc | Self::RaceAssoc => &[AlgebraicLaw::Associativity],
+            Self::JoinCommute | Self::RaceCommute => &[AlgebraicLaw::Commutativity],
+            Self::TimeoutMin => &[AlgebraicLaw::TimeoutSimplification],
+            Self::DedupRaceJoin => &[AlgebraicLaw::Distributivity],
+        }
+    }
 }
 
 /// A single rewrite step applied to the plan DAG.
@@ -378,6 +459,9 @@ impl PlanDag {
         policy: RewritePolicy,
         rule: RewriteRule,
     ) -> Option<RewriteStep> {
+        if !policy.permits(rule) {
+            return None;
+        }
         let mut scratch = (*self).clone();
         let step = scratch.apply_rule_unchecked(id, policy, rule)?;
         let checker = SideConditionChecker::new(&scratch);
@@ -534,7 +618,10 @@ impl PlanDag {
         })
     }
 
-    fn rewrite_timeout_min(&mut self, id: PlanId, _policy: RewritePolicy) -> Option<RewriteStep> {
+    fn rewrite_timeout_min(&mut self, id: PlanId, policy: RewritePolicy) -> Option<RewriteStep> {
+        if !policy.allows_timeout_simplification() {
+            return None;
+        }
         let PlanNode::Timeout { child, duration } = self.node(id)?.clone() else {
             return None;
         };
@@ -739,6 +826,31 @@ pub(crate) fn check_side_conditions(
         return Err("budget monotonicity violated".to_string());
     }
 
+    // --- Cancellation / obligation safety side conditions (bd-3a1g) ---
+
+    // No rewrite may introduce new obligation leak candidates.
+    if !checker.rewrite_no_new_obligation_leaks(before, after) {
+        return Err("rewrite introduces new obligation leak candidates".to_string());
+    }
+
+    // Race-affecting rewrites must preserve loser-drain semantics.
+    if matches!(
+        rule,
+        RewriteRule::RaceAssoc | RewriteRule::RaceCommute | RewriteRule::DedupRaceJoin
+    ) && !checker.rewrite_preserves_loser_drain(before, after)
+    {
+        return Err("rewrite violates loser-drain preservation".to_string());
+    }
+
+    // Join-affecting rewrites must preserve finalize ordering.
+    if matches!(
+        rule,
+        RewriteRule::JoinAssoc | RewriteRule::JoinCommute | RewriteRule::DedupRaceJoin
+    ) && !checker.rewrite_preserves_finalize_order(before, after)
+    {
+        return Err("rewrite violates finalize ordering preservation".to_string());
+    }
+
     match rule {
         RewriteRule::JoinAssoc | RewriteRule::RaceAssoc => {
             if !policy.allows_associative() {
@@ -802,6 +914,9 @@ pub(crate) fn check_side_conditions(
             }
         }
         RewriteRule::TimeoutMin => {
+            if !policy.allows_timeout_simplification() {
+                return Err("policy disallows timeout simplification".to_string());
+            }
             let PlanNode::Timeout { child, duration } = dag
                 .node(before)
                 .ok_or_else(|| "missing before timeout".to_string())?
@@ -1266,5 +1381,134 @@ mod tests {
             assert!(!schema.explanation.is_empty());
             assert!(!schema.side_conditions.is_empty());
         }
+    }
+
+    // -----------------------------------------------------------------------
+    // Algebraic law gating tests (bd-2m0t)
+    // -----------------------------------------------------------------------
+
+    #[test]
+    fn every_rule_declares_required_laws() {
+        init_test();
+        for rule in RewriteRule::all() {
+            let laws = rule.required_laws();
+            assert!(
+                !laws.is_empty(),
+                "{rule:?} must declare at least one required law"
+            );
+        }
+    }
+
+    #[test]
+    fn policy_new_disables_all_laws() {
+        init_test();
+        let policy = RewritePolicy::new();
+        for rule in RewriteRule::all() {
+            assert!(
+                !policy.permits(*rule),
+                "{rule:?} must be rejected by empty policy"
+            );
+        }
+    }
+
+    #[test]
+    fn policy_conservative_permits_expected_rules() {
+        init_test();
+        let policy = RewritePolicy::conservative();
+        assert!(policy.permits(RewriteRule::JoinAssoc));
+        assert!(policy.permits(RewriteRule::RaceAssoc));
+        assert!(policy.permits(RewriteRule::TimeoutMin));
+        assert!(policy.permits(RewriteRule::DedupRaceJoin));
+        // Conservative restricts distributivity (binary joins, leaf shared)
+        // but still permits the rule — fine-grained checks happen inside the rule.
+        assert!(!policy.permits(RewriteRule::JoinCommute));
+        assert!(!policy.permits(RewriteRule::RaceCommute));
+    }
+
+    #[test]
+    fn policy_assume_all_permits_everything() {
+        init_test();
+        let policy = RewritePolicy::assume_all();
+        for rule in RewriteRule::all() {
+            assert!(
+                policy.permits(*rule),
+                "{rule:?} must be permitted by assume_all"
+            );
+        }
+    }
+
+    #[test]
+    fn timeout_min_blocked_by_empty_policy() {
+        init_test();
+        let mut dag = PlanDag::new();
+        let a = dag.leaf("a");
+        let inner = dag.timeout(a, Duration::from_secs(10));
+        let outer = dag.timeout(inner, Duration::from_secs(5));
+        dag.set_root(outer);
+
+        // Empty policy disables timeout simplification.
+        let report = dag.apply_rewrites(RewritePolicy::new(), &[RewriteRule::TimeoutMin]);
+        assert!(
+            report.is_empty(),
+            "TimeoutMin must not fire when policy disables timeout_simplification"
+        );
+    }
+
+    #[test]
+    fn timeout_min_allowed_by_conservative_policy() {
+        init_test();
+        let mut dag = PlanDag::new();
+        let a = dag.leaf("a");
+        let inner = dag.timeout(a, Duration::from_secs(10));
+        let outer = dag.timeout(inner, Duration::from_secs(5));
+        dag.set_root(outer);
+
+        let report = dag.apply_rewrites(RewritePolicy::conservative(), &[RewriteRule::TimeoutMin]);
+        assert_eq!(report.steps().len(), 1);
+    }
+
+    #[test]
+    fn custom_policy_gates_individual_laws() {
+        init_test();
+        // Enable only commutativity.
+        let policy = RewritePolicy::new().with_commutativity(true);
+        assert!(policy.permits(RewriteRule::JoinCommute));
+        assert!(policy.permits(RewriteRule::RaceCommute));
+        assert!(!policy.permits(RewriteRule::JoinAssoc));
+        assert!(!policy.permits(RewriteRule::TimeoutMin));
+        assert!(!policy.permits(RewriteRule::DedupRaceJoin));
+
+        // Enable only distributivity (permits DedupRaceJoin).
+        let policy = RewritePolicy::new().with_distributivity(true);
+        assert!(policy.permits(RewriteRule::DedupRaceJoin));
+        assert!(!policy.permits(RewriteRule::JoinAssoc));
+        assert!(!policy.permits(RewriteRule::JoinCommute));
+
+        // Enable only timeout simplification.
+        let policy = RewritePolicy::new().with_timeout_simplification(true);
+        assert!(policy.permits(RewriteRule::TimeoutMin));
+        assert!(!policy.permits(RewriteRule::JoinAssoc));
+        assert!(!policy.permits(RewriteRule::DedupRaceJoin));
+    }
+
+    #[test]
+    fn permits_matches_apply_behavior() {
+        init_test();
+        // If policy doesn't permit a rule, apply_rewrites must produce no steps.
+        let mut dag = PlanDag::new();
+        let a = dag.leaf("a");
+        let b = dag.leaf("b");
+        let inner = dag.join(vec![a, b]);
+        let c = dag.leaf("c");
+        let outer = dag.join(vec![inner, c]);
+        dag.set_root(outer);
+
+        // JoinAssoc requires Associativity. Empty policy blocks it.
+        let report = dag.apply_rewrites(RewritePolicy::new(), &[RewriteRule::JoinAssoc]);
+        assert!(report.is_empty());
+
+        // Conservative enables associativity, so it applies.
+        let report = dag.apply_rewrites(RewritePolicy::conservative(), &[RewriteRule::JoinAssoc]);
+        assert_eq!(report.steps().len(), 1);
     }
 }

@@ -528,13 +528,16 @@ impl fmt::Display for ObligationFlow {
 }
 
 fn obligation_pressure(flow: &ObligationFlow) -> u64 {
-    flow.must_resolve
-        .len()
-        .saturating_add(flow.leak_on_cancel.len()) as u64
+    // Count distinct obligations across both lists to avoid double-counting
+    // obligations that appear in both must_resolve and leak_on_cancel.
+    let mut all = std::collections::BTreeSet::new();
+    all.extend(flow.must_resolve.iter());
+    all.extend(flow.leak_on_cancel.iter());
+    all.len() as u64
 }
 
 fn sum_costs(costs: impl Iterator<Item = u64>) -> u64 {
-    costs.fold(0u64, |acc, v| acc.saturating_add(v))
+    costs.fold(0u64, u64::saturating_add)
 }
 
 fn max_cost(costs: impl Iterator<Item = u64>) -> u64 {
@@ -1075,6 +1078,138 @@ impl<'a> SideConditionChecker<'a> {
         }
     }
 
+    // =========================================================================
+    // Cancellation / obligation safety side conditions (bd-3a1g)
+    // =========================================================================
+
+    /// Returns true when a rewrite preserves the loser-drain property.
+    ///
+    /// A rewrite is safe if it does not degrade cancel-safety (Safe → non-Safe)
+    /// and does not introduce new obligation leak candidates on the cancel path.
+    #[must_use]
+    pub fn rewrite_preserves_loser_drain(&self, before: PlanId, after: PlanId) -> bool {
+        let Some(before_a) = self.analysis.get(before) else {
+            return false;
+        };
+        let Some(after_a) = self.analysis.get(after) else {
+            return false;
+        };
+        // Degrading from Safe to non-Safe is forbidden.
+        if !after_a.cancel.is_safe() && before_a.cancel.is_safe() {
+            return false;
+        }
+        // The set of obligations that may leak on cancel must not grow.
+        let before_leaks: std::collections::BTreeSet<&str> = before_a
+            .obligation_flow
+            .leak_on_cancel
+            .iter()
+            .map(String::as_str)
+            .collect();
+        let after_leaks: std::collections::BTreeSet<&str> = after_a
+            .obligation_flow
+            .leak_on_cancel
+            .iter()
+            .map(String::as_str)
+            .collect();
+        after_leaks.is_subset(&before_leaks)
+    }
+
+    /// Returns true when a rewrite preserves the relative order of
+    /// obligation-bearing children inside a Join node.
+    ///
+    /// For Race/Timeout/Leaf rewrites this always returns true (no ordering
+    /// contract). Race → Join (e.g., `DedupRaceJoin`) is allowed because a
+    /// Race imposes no finalize ordering on its children; any ordering in the
+    /// resulting Join is valid.
+    #[must_use]
+    pub fn rewrite_preserves_finalize_order(&self, before: PlanId, after: PlanId) -> bool {
+        let Some(before_node) = self.dag.node(before) else {
+            return false;
+        };
+        let Some(after_node) = self.dag.node(after) else {
+            return false;
+        };
+        match (before_node, after_node) {
+            (
+                PlanNode::Join {
+                    children: before_ch,
+                },
+                PlanNode::Join { children: after_ch },
+            ) => {
+                let before_obl = self.obligation_bearing_children(before_ch);
+                let after_obl = self.obligation_bearing_children(after_ch);
+                before_obl == after_obl
+            }
+            // Race has no finalize ordering, so Race → Join is always valid
+            // (e.g., DedupRaceJoin: Race[Join[s,a], Join[s,b]] → Join[s, Race[a,b]])
+            (PlanNode::Race { .. }, PlanNode::Join { .. })
+            | (PlanNode::Race { .. }, PlanNode::Race { .. })
+            | (PlanNode::Timeout { .. }, PlanNode::Timeout { .. })
+            | (PlanNode::Leaf { .. }, PlanNode::Leaf { .. }) => true,
+            _ => false,
+        }
+    }
+
+    /// Returns true when a rewrite does not introduce new obligation leaks.
+    ///
+    /// This checks three properties:
+    /// 1. Obligation safety does not degrade (safe → unsafe).
+    /// 2. The `all_paths_resolve` flag does not become false.
+    /// 3. The set of `leak_on_cancel` obligations does not grow.
+    /// 4. Previously `must_resolve` obligations are not demoted to leak-or-reserve.
+    #[must_use]
+    pub fn rewrite_no_new_obligation_leaks(&self, before: PlanId, after: PlanId) -> bool {
+        let Some(before_a) = self.analysis.get(before) else {
+            return false;
+        };
+        let Some(after_a) = self.analysis.get(after) else {
+            return false;
+        };
+        // Safety must not degrade.
+        if before_a.obligation.is_safe() && !after_a.obligation.is_safe() {
+            return false;
+        }
+        let bf = &before_a.obligation_flow;
+        let af = &after_a.obligation_flow;
+        // all_paths_resolve must not degrade.
+        if bf.all_paths_resolve && !af.all_paths_resolve {
+            return false;
+        }
+        // leak_on_cancel set must not grow.
+        let before_leaks: std::collections::BTreeSet<&str> =
+            bf.leak_on_cancel.iter().map(String::as_str).collect();
+        let after_leaks: std::collections::BTreeSet<&str> =
+            af.leak_on_cancel.iter().map(String::as_str).collect();
+        if !after_leaks.is_subset(&before_leaks) {
+            return false;
+        }
+        // must_resolve obligations should not be demoted to leak-or-reserve.
+        let after_resolves: std::collections::BTreeSet<&str> =
+            af.must_resolve.iter().map(String::as_str).collect();
+        for obl in &bf.must_resolve {
+            if !after_resolves.contains(obl.as_str())
+                && (af.leak_on_cancel.contains(obl) || af.reserves.contains(obl))
+            {
+                return false;
+            }
+        }
+        true
+    }
+
+    /// Helper: returns the sub-sequence of children that bear obligations.
+    fn obligation_bearing_children(&self, children: &[PlanId]) -> Vec<PlanId> {
+        children
+            .iter()
+            .copied()
+            .filter(|id| {
+                self.analysis.get(*id).is_some_and(|a| {
+                    !a.obligation_flow.must_resolve.is_empty()
+                        || !a.obligation_flow.leak_on_cancel.is_empty()
+                })
+            })
+            .collect()
+    }
+
     /// Check whether all children are pairwise independent.
     #[must_use]
     pub fn children_pairwise_independent(&self, children: &[PlanId]) -> bool {
@@ -1090,13 +1225,19 @@ impl<'a> SideConditionChecker<'a> {
 
     /// Collect all node ids reachable from a given node.
     fn reachable(&self, id: PlanId) -> Vec<usize> {
+        let mut visited_set = std::collections::BTreeSet::new();
         let mut visited = Vec::new();
-        self.reachable_inner(id, &mut visited);
+        self.reachable_inner(id, &mut visited_set, &mut visited);
         visited
     }
 
-    fn reachable_inner(&self, id: PlanId, visited: &mut Vec<usize>) {
-        if visited.contains(&id.index()) {
+    fn reachable_inner(
+        &self,
+        id: PlanId,
+        visited_set: &mut std::collections::BTreeSet<usize>,
+        visited: &mut Vec<usize>,
+    ) {
+        if !visited_set.insert(id.index()) {
             return;
         }
         visited.push(id.index());
@@ -1107,11 +1248,11 @@ impl<'a> SideConditionChecker<'a> {
             PlanNode::Leaf { .. } => {}
             PlanNode::Join { children } | PlanNode::Race { children } => {
                 for child in children {
-                    self.reachable_inner(*child, visited);
+                    self.reachable_inner(*child, visited_set, visited);
                 }
             }
             PlanNode::Timeout { child, .. } => {
-                self.reachable_inner(*child, visited);
+                self.reachable_inner(*child, visited_set, visited);
             }
         }
     }
@@ -2353,5 +2494,121 @@ mod tests {
             groups: vec![vec![0, 1], vec![2]],
         };
         assert!(format!("{hint}").contains("2 groups"));
+    }
+
+    // =========================================================================
+    // bd-3a1g: Cancellation / obligation safety side-condition tests
+    // =========================================================================
+
+    #[test]
+    fn loser_drain_preserved_for_simple_race_reorder() {
+        let mut dag = PlanDag::new();
+        let a = dag.leaf("a");
+        let b = dag.leaf("b");
+        let r1 = dag.race(vec![a, b]);
+        let r2 = dag.race(vec![b, a]); // reordered children
+        let root = dag.join(vec![r1, r2]);
+        dag.set_root(root);
+        let checker = SideConditionChecker::new(&dag);
+        // Both races have the same cancel safety — reorder is fine.
+        assert!(checker.rewrite_preserves_loser_drain(r1, r2));
+    }
+
+    #[test]
+    fn loser_drain_rejects_new_obligation_leak() {
+        let mut dag = PlanDag::new();
+        let a = dag.leaf("a");
+        let b = dag.leaf("obl:x");
+        let r1 = dag.race(vec![a]);
+        let r2 = dag.race(vec![a, b]); // adds obligation-bearing child
+        let root = dag.join(vec![r1, r2]);
+        dag.set_root(root);
+        let checker = SideConditionChecker::new(&dag);
+        // r2 introduces leak_on_cancel that r1 doesn't have ⇒ reject
+        assert!(!checker.rewrite_preserves_loser_drain(r1, r2));
+    }
+
+    #[test]
+    fn finalize_order_preserved_for_join_with_same_obl_order() {
+        let mut dag = PlanDag::new();
+        let a = dag.leaf("obl:a");
+        let b = dag.leaf("b"); // no obligation
+        let c = dag.leaf("obl:c");
+        let j1 = dag.join(vec![a, b, c]);
+        let j2 = dag.join(vec![a, c]); // dropped non-obligation child, order intact
+        let root = dag.join(vec![j1, j2]);
+        dag.set_root(root);
+        let checker = SideConditionChecker::new(&dag);
+        // obligation-bearing order is [a, c] in both
+        assert!(checker.rewrite_preserves_finalize_order(j1, j2));
+    }
+
+    #[test]
+    fn finalize_order_rejects_swapped_obligations() {
+        let mut dag = PlanDag::new();
+        let a = dag.leaf("obl:a");
+        let c = dag.leaf("obl:c");
+        let j1 = dag.join(vec![a, c]);
+        let j2 = dag.join(vec![c, a]); // obligation order swapped
+        let root = dag.join(vec![j1, j2]);
+        dag.set_root(root);
+        let checker = SideConditionChecker::new(&dag);
+        assert!(!checker.rewrite_preserves_finalize_order(j1, j2));
+    }
+
+    #[test]
+    fn finalize_order_allows_race_child_reorder() {
+        let mut dag = PlanDag::new();
+        let a = dag.leaf("obl:a");
+        let b = dag.leaf("obl:b");
+        let r1 = dag.race(vec![a, b]);
+        let r2 = dag.race(vec![b, a]);
+        let root = dag.join(vec![r1, r2]);
+        dag.set_root(root);
+        let checker = SideConditionChecker::new(&dag);
+        // Race nodes have no finalize ordering contract.
+        assert!(checker.rewrite_preserves_finalize_order(r1, r2));
+    }
+
+    #[test]
+    fn no_new_obligation_leaks_for_safe_rewrite() {
+        let mut dag = PlanDag::new();
+        let a = dag.leaf("obl:a");
+        let b = dag.leaf("b");
+        let j1 = dag.join(vec![a, b]);
+        let j2 = dag.join(vec![a, b]);
+        let root = dag.join(vec![j1, j2]);
+        dag.set_root(root);
+        let checker = SideConditionChecker::new(&dag);
+        // Identical structure ⇒ no new leaks.
+        assert!(checker.rewrite_no_new_obligation_leaks(j1, j2));
+    }
+
+    #[test]
+    fn no_new_obligation_leaks_rejects_degraded_all_paths_resolve() {
+        let mut dag = PlanDag::new();
+        let a = dag.leaf("obl:a");
+        let b = dag.leaf("b");
+        let j1 = dag.join(vec![a, b]); // all_paths_resolve = true (join resolves all)
+        let r1 = dag.race(vec![a, b]); // all_paths_resolve = false (race may cancel loser)
+        let root = dag.join(vec![j1, r1]);
+        dag.set_root(root);
+        let checker = SideConditionChecker::new(&dag);
+        // Degrading from join (all resolve) to race (may not) ⇒ reject
+        assert!(!checker.rewrite_no_new_obligation_leaks(j1, r1));
+    }
+
+    #[test]
+    fn structural_type_change_rejects_finalize_order() {
+        let mut dag = PlanDag::new();
+        let a = dag.leaf("a");
+        let b = dag.leaf("b");
+        let j = dag.join(vec![a, b]);
+        let r = dag.race(vec![a, b]);
+        let root = dag.join(vec![j, r]);
+        dag.set_root(root);
+        let checker = SideConditionChecker::new(&dag);
+        // Join → Race structural change ⇒ reject
+        assert!(!checker.rewrite_preserves_finalize_order(j, r));
     }
 }
