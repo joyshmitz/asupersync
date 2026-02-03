@@ -58,6 +58,7 @@
 
 use crate::record::ObligationKind;
 use std::fmt;
+use std::marker::PhantomData;
 
 // ============================================================================
 // Resolution
@@ -491,6 +492,237 @@ pub mod toy_api {
 }
 
 // ============================================================================
+// Sealed trait pattern (prevents external impls of TokenKind)
+// ============================================================================
+
+mod sealed {
+    pub trait Sealed {}
+}
+
+// ============================================================================
+// TokenKind trait + kind marker enums
+// ============================================================================
+
+/// Trait mapping a zero-sized kind marker to its [`ObligationKind`] variant.
+///
+/// Sealed: cannot be implemented outside this crate.
+pub trait TokenKind: sealed::Sealed {
+    /// Returns the [`ObligationKind`] corresponding to this marker.
+    fn obligation_kind() -> ObligationKind;
+}
+
+/// Marker type for [`ObligationKind::SendPermit`].
+pub enum SendPermit {}
+impl sealed::Sealed for SendPermit {}
+impl TokenKind for SendPermit {
+    fn obligation_kind() -> ObligationKind {
+        ObligationKind::SendPermit
+    }
+}
+
+/// Marker type for [`ObligationKind::Ack`].
+pub enum AckKind {}
+impl sealed::Sealed for AckKind {}
+impl TokenKind for AckKind {
+    fn obligation_kind() -> ObligationKind {
+        ObligationKind::Ack
+    }
+}
+
+/// Marker type for [`ObligationKind::Lease`].
+pub enum LeaseKind {}
+impl sealed::Sealed for LeaseKind {}
+impl TokenKind for LeaseKind {
+    fn obligation_kind() -> ObligationKind {
+        ObligationKind::Lease
+    }
+}
+
+/// Marker type for [`ObligationKind::IoOp`].
+pub enum IoOpKind {}
+impl sealed::Sealed for IoOpKind {}
+impl TokenKind for IoOpKind {
+    fn obligation_kind() -> ObligationKind {
+        ObligationKind::IoOp
+    }
+}
+
+// ============================================================================
+// ObligationToken<K> — typestate linear token
+// ============================================================================
+
+/// A typestate-encoded obligation token that must be consumed via
+/// [`commit`](Self::commit) or [`abort`](Self::abort).
+///
+/// Dropping without consuming panics ("drop bomb"), approximating a linear
+/// type in Rust's affine type system.
+#[must_use = "obligation tokens must be consumed via commit() or abort()"]
+pub struct ObligationToken<K: TokenKind> {
+    description: String,
+    _kind: PhantomData<K>,
+}
+
+impl<K: TokenKind> ObligationToken<K> {
+    /// Reserve a new obligation token with the given description.
+    #[must_use]
+    pub fn reserve(description: impl Into<String>) -> Self {
+        Self {
+            description: description.into(),
+            _kind: PhantomData,
+        }
+    }
+
+    /// Commit the obligation, consuming the token and returning a
+    /// [`CommittedProof`].
+    #[must_use]
+    pub fn commit(self) -> CommittedProof<K> {
+        // Disarm the drop bomb by consuming self without running Drop.
+        std::mem::forget(self);
+        CommittedProof { _kind: PhantomData }
+    }
+
+    /// Abort the obligation, consuming the token and returning an
+    /// [`AbortedProof`].
+    #[must_use]
+    pub fn abort(self) -> AbortedProof<K> {
+        std::mem::forget(self);
+        AbortedProof { _kind: PhantomData }
+    }
+
+    /// Escape hatch: disarm the drop bomb and convert to a [`RawObligation`].
+    ///
+    /// Use only for FFI boundaries, test harnesses, or migration paths.
+    #[must_use]
+    pub fn into_raw(self) -> RawObligation {
+        let raw = RawObligation {
+            kind: K::obligation_kind(),
+            description: self.description.clone(),
+        };
+        std::mem::forget(self);
+        raw
+    }
+
+    /// Returns the description.
+    #[must_use]
+    pub fn description(&self) -> &str {
+        &self.description
+    }
+}
+
+impl<K: TokenKind> Drop for ObligationToken<K> {
+    fn drop(&mut self) {
+        panic!(
+            "OBLIGATION TOKEN LEAKED: {} token '{}' was dropped without being consumed. \
+             Call .commit() or .abort() before scope exit.",
+            K::obligation_kind(),
+            self.description,
+        );
+    }
+}
+
+impl<K: TokenKind> fmt::Debug for ObligationToken<K> {
+    fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
+        f.debug_struct("ObligationToken")
+            .field("kind", &K::obligation_kind())
+            .field("description", &self.description)
+            .finish()
+    }
+}
+
+// ============================================================================
+// CommittedProof<K> / AbortedProof<K> — ZST witnesses
+// ============================================================================
+
+/// Proof that an [`ObligationToken`] was committed.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct CommittedProof<K: TokenKind> {
+    _kind: PhantomData<K>,
+}
+
+impl<K: TokenKind> CommittedProof<K> {
+    /// Bridge to the existing [`ResolvedProof`] system.
+    #[must_use]
+    pub fn into_resolved_proof(self) -> ResolvedProof {
+        ResolvedProof {
+            kind: K::obligation_kind(),
+            resolution: Resolution::Commit,
+        }
+    }
+
+    /// Returns the obligation kind.
+    #[must_use]
+    pub fn kind(&self) -> ObligationKind {
+        K::obligation_kind()
+    }
+}
+
+/// Proof that an [`ObligationToken`] was aborted.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct AbortedProof<K: TokenKind> {
+    _kind: PhantomData<K>,
+}
+
+impl<K: TokenKind> AbortedProof<K> {
+    /// Bridge to the existing [`ResolvedProof`] system.
+    #[must_use]
+    pub fn into_resolved_proof(self) -> ResolvedProof {
+        ResolvedProof {
+            kind: K::obligation_kind(),
+            resolution: Resolution::Abort,
+        }
+    }
+
+    /// Returns the obligation kind.
+    #[must_use]
+    pub fn kind(&self) -> ObligationKind {
+        K::obligation_kind()
+    }
+}
+
+// ============================================================================
+// Type aliases (ergonomic names)
+// ============================================================================
+
+/// Token for a send-permit obligation.
+pub type SendPermitToken = ObligationToken<SendPermit>;
+/// Token for an acknowledgement obligation.
+pub type AckToken = ObligationToken<AckKind>;
+/// Token for a lease obligation.
+pub type LeaseToken = ObligationToken<LeaseKind>;
+/// Token for an I/O operation obligation.
+pub type IoOpToken = ObligationToken<IoOpKind>;
+
+// ============================================================================
+// GradedScope convenience methods for tokens
+// ============================================================================
+
+impl GradedScope {
+    /// Reserve a typed obligation token, recording it in this scope.
+    #[must_use]
+    pub fn reserve_token<K: TokenKind>(
+        &mut self,
+        description: impl Into<String>,
+    ) -> ObligationToken<K> {
+        self.on_reserve();
+        ObligationToken::reserve(description)
+    }
+
+    /// Commit a typed obligation token, recording the resolution in this scope.
+    #[must_use]
+    pub fn resolve_commit<K: TokenKind>(&mut self, token: ObligationToken<K>) -> CommittedProof<K> {
+        self.on_resolve();
+        token.commit()
+    }
+
+    /// Abort a typed obligation token, recording the resolution in this scope.
+    #[must_use]
+    pub fn resolve_abort<K: TokenKind>(&mut self, token: ObligationToken<K>) -> AbortedProof<K> {
+        self.on_resolve();
+        token.abort()
+    }
+}
+
+// ============================================================================
 // Tests
 // ============================================================================
 
@@ -847,5 +1079,224 @@ mod tests {
         let resolved = proof.total_resolved;
         crate::assert_with_log!(resolved == 3, "3 resolved", 3, resolved);
         crate::test_complete!("resource_semiring_additive");
+    }
+
+    // ---- ObligationToken typestate tests ------------------------------------
+
+    #[test]
+    fn token_commit_returns_proof() {
+        init_test("token_commit_returns_proof");
+        let token: SendPermitToken = ObligationToken::reserve("commit-test");
+        let proof = token.commit();
+        let kind = proof.kind();
+        crate::assert_with_log!(
+            kind == ObligationKind::SendPermit,
+            "proof kind",
+            ObligationKind::SendPermit,
+            kind
+        );
+        crate::test_complete!("token_commit_returns_proof");
+    }
+
+    #[test]
+    fn token_abort_returns_proof() {
+        init_test("token_abort_returns_proof");
+        let token: AckToken = ObligationToken::reserve("abort-test");
+        let proof = token.abort();
+        let kind = proof.kind();
+        crate::assert_with_log!(
+            kind == ObligationKind::Ack,
+            "proof kind",
+            ObligationKind::Ack,
+            kind
+        );
+        crate::test_complete!("token_abort_returns_proof");
+    }
+
+    #[test]
+    #[should_panic(expected = "OBLIGATION TOKEN LEAKED")]
+    fn token_drop_without_consume_panics() {
+        init_test("token_drop_without_consume_panics");
+        let _token: SendPermitToken = ObligationToken::reserve("leaked-token");
+        // Dropped without commit or abort — should panic.
+    }
+
+    #[test]
+    fn token_into_raw_disarms() {
+        init_test("token_into_raw_disarms");
+        let token: LeaseToken = ObligationToken::reserve("raw-escape");
+        let raw = token.into_raw();
+        let kind = raw.kind;
+        crate::assert_with_log!(
+            kind == ObligationKind::Lease,
+            "raw kind",
+            ObligationKind::Lease,
+            kind
+        );
+        drop(raw);
+        crate::test_complete!("token_into_raw_disarms");
+    }
+
+    #[test]
+    fn committed_proof_bridge() {
+        init_test("committed_proof_bridge");
+        let token: SendPermitToken = ObligationToken::reserve("bridge-commit");
+        let committed = token.commit();
+        let resolved = committed.into_resolved_proof();
+        let r = resolved.resolution;
+        crate::assert_with_log!(r == Resolution::Commit, "resolution", Resolution::Commit, r);
+        let kind = resolved.kind;
+        crate::assert_with_log!(
+            kind == ObligationKind::SendPermit,
+            "kind",
+            ObligationKind::SendPermit,
+            kind
+        );
+        crate::test_complete!("committed_proof_bridge");
+    }
+
+    #[test]
+    fn aborted_proof_bridge() {
+        init_test("aborted_proof_bridge");
+        let token: AckToken = ObligationToken::reserve("bridge-abort");
+        let aborted = token.abort();
+        let resolved = aborted.into_resolved_proof();
+        let r = resolved.resolution;
+        crate::assert_with_log!(r == Resolution::Abort, "resolution", Resolution::Abort, r);
+        let kind = resolved.kind;
+        crate::assert_with_log!(
+            kind == ObligationKind::Ack,
+            "kind",
+            ObligationKind::Ack,
+            kind
+        );
+        crate::test_complete!("aborted_proof_bridge");
+    }
+
+    #[test]
+    fn token_kind_mapping() {
+        init_test("token_kind_mapping");
+        let sp = SendPermit::obligation_kind();
+        crate::assert_with_log!(
+            sp == ObligationKind::SendPermit,
+            "SendPermit",
+            ObligationKind::SendPermit,
+            sp
+        );
+        let ack = AckKind::obligation_kind();
+        crate::assert_with_log!(
+            ack == ObligationKind::Ack,
+            "AckKind",
+            ObligationKind::Ack,
+            ack
+        );
+        let lease = LeaseKind::obligation_kind();
+        crate::assert_with_log!(
+            lease == ObligationKind::Lease,
+            "LeaseKind",
+            ObligationKind::Lease,
+            lease
+        );
+        let io = IoOpKind::obligation_kind();
+        crate::assert_with_log!(
+            io == ObligationKind::IoOp,
+            "IoOpKind",
+            ObligationKind::IoOp,
+            io
+        );
+        crate::test_complete!("token_kind_mapping");
+    }
+
+    #[test]
+    fn scope_reserve_and_commit_token() {
+        init_test("scope_reserve_and_commit_token");
+        let mut scope = GradedScope::open("token-scope-commit");
+        let token: SendPermitToken = scope.reserve_token("scoped-send");
+        let outstanding = scope.outstanding();
+        crate::assert_with_log!(outstanding == 1, "outstanding", 1, outstanding);
+
+        let proof = scope.resolve_commit(token);
+        let outstanding = scope.outstanding();
+        crate::assert_with_log!(outstanding == 0, "outstanding", 0, outstanding);
+
+        let kind = proof.kind();
+        crate::assert_with_log!(
+            kind == ObligationKind::SendPermit,
+            "kind",
+            ObligationKind::SendPermit,
+            kind
+        );
+
+        let scope_proof = scope.close().expect("scope should close cleanly");
+        let total = scope_proof.total_reserved;
+        crate::assert_with_log!(total == 1, "reserved", 1, total);
+        crate::test_complete!("scope_reserve_and_commit_token");
+    }
+
+    #[test]
+    fn scope_reserve_and_abort_token() {
+        init_test("scope_reserve_and_abort_token");
+        let mut scope = GradedScope::open("token-scope-abort");
+        let token: AckToken = scope.reserve_token("scoped-ack");
+        let outstanding = scope.outstanding();
+        crate::assert_with_log!(outstanding == 1, "outstanding", 1, outstanding);
+
+        let proof = scope.resolve_abort(token);
+        let outstanding = scope.outstanding();
+        crate::assert_with_log!(outstanding == 0, "outstanding", 0, outstanding);
+
+        let kind = proof.kind();
+        crate::assert_with_log!(
+            kind == ObligationKind::Ack,
+            "kind",
+            ObligationKind::Ack,
+            kind
+        );
+
+        let scope_proof = scope.close().expect("scope should close cleanly");
+        let total = scope_proof.total_reserved;
+        crate::assert_with_log!(total == 1, "reserved", 1, total);
+        crate::test_complete!("scope_reserve_and_abort_token");
+    }
+
+    #[test]
+    fn all_four_token_kinds() {
+        init_test("all_four_token_kinds");
+
+        // SendPermit
+        let t1: SendPermitToken = ObligationToken::reserve("sp");
+        let p1 = t1.commit();
+        let k1 = p1.kind();
+        crate::assert_with_log!(
+            k1 == ObligationKind::SendPermit,
+            "SendPermit",
+            ObligationKind::SendPermit,
+            k1
+        );
+
+        // Ack
+        let t2: AckToken = ObligationToken::reserve("ack");
+        let p2 = t2.abort();
+        let k2 = p2.kind();
+        crate::assert_with_log!(k2 == ObligationKind::Ack, "Ack", ObligationKind::Ack, k2);
+
+        // Lease
+        let t3: LeaseToken = ObligationToken::reserve("lease");
+        let p3 = t3.commit();
+        let k3 = p3.kind();
+        crate::assert_with_log!(
+            k3 == ObligationKind::Lease,
+            "Lease",
+            ObligationKind::Lease,
+            k3
+        );
+
+        // IoOp
+        let t4: IoOpToken = ObligationToken::reserve("io");
+        let p4 = t4.abort();
+        let k4 = p4.kind();
+        crate::assert_with_log!(k4 == ObligationKind::IoOp, "IoOp", ObligationKind::IoOp, k4);
+
+        crate::test_complete!("all_four_token_kinds");
     }
 }
