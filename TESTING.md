@@ -387,6 +387,56 @@ E2E tests are organized under `tests/e2e/` and cover protocol-level behavior
 with structured logging. Use `-- --nocapture` for logs and prefer deterministic
 lab runtime variants where available.
 
+### E2E Environment Orchestration (bd-76y5)
+
+Hermetic E2E tests use `TestEnvironment` from `asupersync::test_logging` to
+manage services, ports, and metadata deterministically.
+
+**Core types** (all in `asupersync::test_logging`, re-exported via `tests/common`):
+
+| Type | Purpose |
+|------|---------|
+| `TestEnvironment` | Ties together `TestContext` + ports + services + cleanup |
+| `PortAllocator` | OS-assigned ephemeral ports with labels; prevents conflicts |
+| `FixtureService` trait | `start()` / `stop()` / `is_healthy()` for any service |
+| `DockerFixtureService` | Docker container lifecycle with health checks |
+| `TempDirFixture` | Per-test temp directory (auto-cleaned on drop) |
+| `InProcessService<S>` | Closure-backed in-process service (echo servers, etc.) |
+| `NoOpFixtureService` | For testing the orchestration itself |
+| `wait_until_healthy()` | Polls `is_healthy()` with exponential backoff |
+| `EnvironmentMetadata` | Structured OS/arch/port/service snapshot for artifacts |
+
+**Typical pattern:**
+
+```rust
+use asupersync::test_logging::*;
+
+let ctx = TestContext::new("my_e2e", 0xDEAD_BEEF);
+let mut env = TestEnvironment::new(ctx);
+
+// Allocate isolated ports
+let http_port = env.allocate_port("http")?;
+let ws_port = env.allocate_port("websocket")?;
+
+// Register and start services
+env.register_service(Box::new(TempDirFixture::new("workdir")));
+env.start_all_services()?;
+
+// Emit metadata to logs + artifact dir
+env.emit_metadata();
+
+// ... test body ...
+
+// Teardown is automatic on drop (or call env.teardown() explicitly)
+```
+
+**Key invariants:**
+- Ports are held by `TcpListener` until explicitly released, preventing reuse.
+- Services are stopped in reverse registration order.
+- Cleanup callbacks (`on_teardown`) run in reverse order.
+- Teardown is idempotent (safe to call multiple times).
+- `EnvironmentMetadata` excludes nondeterministic fields (no wall-clock timestamps).
+
 ## Fuzzing
 
 Fuzzing targets live under `fuzz/` and are documented in `fuzz/README.md`.

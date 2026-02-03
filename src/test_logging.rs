@@ -1303,6 +1303,15 @@ pub struct ReproManifest {
     /// Relative path to the failing input file.
     #[serde(skip_serializing_if = "Option::is_none")]
     pub input_file: Option<String>,
+    /// Captured environment variables relevant for reproducibility.
+    #[serde(default, skip_serializing_if = "Vec::is_empty")]
+    pub env_snapshot: Vec<(String, String)>,
+    /// Phases/steps executed before the failure.
+    #[serde(default, skip_serializing_if = "Vec::is_empty")]
+    pub phases_executed: Vec<String>,
+    /// Failure reason or assertion message.
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub failure_reason: Option<String>,
 }
 
 impl ReproManifest {
@@ -1323,6 +1332,9 @@ impl ReproManifest {
             invariant: None,
             trace_file: None,
             input_file: None,
+            env_snapshot: Vec::new(),
+            phases_executed: Vec::new(),
+            failure_reason: None,
         }
     }
 
@@ -1343,7 +1355,31 @@ impl ReproManifest {
             invariant: ctx.invariant.clone(),
             trace_file: None,
             input_file: None,
+            env_snapshot: Vec::new(),
+            phases_executed: Vec::new(),
+            failure_reason: None,
         }
+    }
+
+    /// Capture a snapshot of test-relevant environment variables.
+    #[must_use]
+    pub fn with_env_snapshot(mut self) -> Self {
+        self.env_snapshot = capture_test_env();
+        self
+    }
+
+    /// Set the phases executed during the test.
+    #[must_use]
+    pub fn with_phases(mut self, phases: Vec<String>) -> Self {
+        self.phases_executed = phases;
+        self
+    }
+
+    /// Set the failure reason.
+    #[must_use]
+    pub fn with_failure_reason(mut self, reason: &str) -> Self {
+        self.failure_reason = Some(reason.to_string());
+        self
     }
 
     /// Serialize to pretty-printed JSON.
@@ -1380,6 +1416,19 @@ pub fn load_repro_manifest(path: &std::path::Path) -> Result<ReproManifest, std:
     let content = std::fs::read_to_string(path)?;
     serde_json::from_str(&content)
         .map_err(|e| std::io::Error::new(std::io::ErrorKind::InvalidData, e))
+}
+
+/// Capture a snapshot of test-relevant environment variables.
+///
+/// Only includes `ASUPERSYNC_*` and `RUST_LOG` variables.
+/// Sorted by key for deterministic output.
+#[must_use]
+pub fn capture_test_env() -> Vec<(String, String)> {
+    let mut env: Vec<(String, String)> = std::env::vars()
+        .filter(|(k, _)| k.starts_with("ASUPERSYNC_") || k == "RUST_LOG")
+        .collect();
+    env.sort_by(|a, b| a.0.cmp(&b.0));
+    env
 }
 
 /// Create a [`TestContext`] from a [`ReproManifest`] for replay.
@@ -2465,6 +2514,36 @@ impl TestHarness {
         }
     }
 
+    /// Collect the phase names executed so far (flat list).
+    #[must_use]
+    pub fn phases_executed(&self) -> Vec<String> {
+        self.phases.iter().map(|p| p.name.clone()).collect()
+    }
+
+    /// Generate a [`ReproManifest`] from the current harness state.
+    #[must_use]
+    pub fn repro_manifest(&self, passed: bool) -> ReproManifest {
+        let mut manifest = self.context.as_ref().map_or_else(
+            || ReproManifest::new(0, &self.test_name, passed),
+            |ctx| ReproManifest::from_context(ctx, passed),
+        );
+
+        manifest = manifest
+            .with_env_snapshot()
+            .with_phases(self.phases_executed());
+
+        if !passed {
+            if let Some(first_failure) = self.assertions.iter().find(|a| !a.passed) {
+                manifest = manifest.with_failure_reason(&format!(
+                    "{}: expected={}, actual={}",
+                    first_failure.description, first_failure.expected, first_failure.actual,
+                ));
+            }
+        }
+
+        manifest
+    }
+
     /// Build the hierarchical phase tree from flat storage.
     ///
     /// Uses an index-path stack to avoid unsafe pointer aliasing.
@@ -2562,7 +2641,7 @@ impl TestHarness {
         let failed_count = total - passed_count;
         let overall_passed = failed_count == 0;
 
-        // Auto-collect event log on failure.
+        // Auto-collect event log and repro manifest on failure.
         if !overall_passed {
             self.collect_artifact("event_log.txt", &self.logger.report());
 
@@ -2575,6 +2654,11 @@ impl TestHarness {
             )
             .unwrap_or_default();
             self.collect_artifact("failed_assertions.json", &failed_json);
+
+            let manifest = self.repro_manifest(false);
+            if let Ok(manifest_json) = manifest.to_json() {
+                self.collect_artifact("repro_manifest.json", &manifest_json);
+            }
         }
 
         let phases = self.build_phase_tree();
@@ -3505,6 +3589,253 @@ mod tests {
     }
 
     // ----------------------------------------------------------------
+    // ----------------------------------------------------------------
+    // Failure Triage Pipeline tests (bd-1ex7)
+    // ----------------------------------------------------------------
+
+    #[test]
+    fn test_repro_manifest_env_snapshot() {
+        init_test("test_repro_manifest_env_snapshot");
+        let env = capture_test_env();
+        for (key, _) in &env {
+            crate::assert_with_log!(
+                key.starts_with("ASUPERSYNC_") || key == "RUST_LOG",
+                "env key filtered",
+                "ASUPERSYNC_* or RUST_LOG",
+                key
+            );
+        }
+        let keys: Vec<&str> = env.iter().map(|(k, _)| k.as_str()).collect();
+        let mut sorted = keys.clone();
+        sorted.sort_unstable();
+        crate::assert_with_log!(keys == sorted, "env keys sorted", true, keys == sorted);
+        crate::test_complete!("test_repro_manifest_env_snapshot");
+    }
+
+    #[test]
+    fn test_repro_manifest_with_phases_and_failure_reason() {
+        init_test("test_repro_manifest_with_phases_and_failure_reason");
+        let manifest = ReproManifest::new(0xBEEF, "phase_test", false)
+            .with_phases(vec![
+                "setup".to_string(),
+                "exercise".to_string(),
+                "verify".to_string(),
+            ])
+            .with_failure_reason("assertion failed: expected 5, got 3");
+
+        crate::assert_with_log!(
+            manifest.phases_executed.len() == 3,
+            "three phases",
+            3,
+            manifest.phases_executed.len()
+        );
+        crate::assert_with_log!(
+            manifest.failure_reason.is_some(),
+            "failure reason set",
+            true,
+            manifest.failure_reason.is_some()
+        );
+
+        let json = manifest.to_json().expect("serialize");
+        let parsed: ReproManifest = serde_json::from_str(&json).expect("deserialize");
+        crate::assert_with_log!(
+            parsed.phases_executed == manifest.phases_executed,
+            "phases roundtrip",
+            manifest.phases_executed.len(),
+            parsed.phases_executed.len()
+        );
+        crate::assert_with_log!(
+            parsed.failure_reason == manifest.failure_reason,
+            "failure_reason roundtrip",
+            manifest.failure_reason,
+            parsed.failure_reason
+        );
+        crate::test_complete!("test_repro_manifest_with_phases_and_failure_reason");
+    }
+
+    #[test]
+    fn test_repro_manifest_empty_new_fields_omitted() {
+        init_test("test_repro_manifest_empty_new_fields_omitted");
+        let manifest = ReproManifest::new(42, "minimal", true);
+        let json = manifest.to_json().expect("serialize");
+        crate::assert_with_log!(
+            !json.contains("phases_executed"),
+            "empty phases omitted",
+            true,
+            !json.contains("phases_executed")
+        );
+        crate::assert_with_log!(
+            !json.contains("env_snapshot"),
+            "empty env omitted",
+            true,
+            !json.contains("env_snapshot")
+        );
+        crate::assert_with_log!(
+            !json.contains("failure_reason"),
+            "null failure_reason omitted",
+            true,
+            !json.contains("failure_reason")
+        );
+        crate::test_complete!("test_repro_manifest_empty_new_fields_omitted");
+    }
+
+    #[test]
+    fn test_harness_repro_manifest_on_failure() {
+        init_test("test_harness_repro_manifest_on_failure");
+        let ctx = TestContext::new("harness_failure_test", 0xF00D)
+            .with_subsystem("scheduler")
+            .with_invariant("quiescence");
+        let mut harness = TestHarness::with_context("harness_failure_test", ctx);
+
+        harness.enter_phase("setup");
+        harness.assert_true("always passes", true);
+        harness.exit_phase();
+
+        harness.enter_phase("exercise");
+        harness.record_assertion("value check", false, "10", "5");
+        harness.exit_phase();
+
+        let manifest = harness.repro_manifest(false);
+        crate::assert_with_log!(
+            manifest.seed == 0xF00D,
+            "seed from context",
+            0xF00Du64,
+            manifest.seed
+        );
+        crate::assert_with_log!(
+            manifest.subsystem.as_deref() == Some("scheduler"),
+            "subsystem from context",
+            Some("scheduler"),
+            manifest.subsystem.as_deref()
+        );
+        crate::assert_with_log!(
+            manifest.phases_executed.len() == 2,
+            "two phases captured",
+            2,
+            manifest.phases_executed.len()
+        );
+        crate::assert_with_log!(
+            manifest.failure_reason.is_some(),
+            "failure reason populated",
+            true,
+            manifest.failure_reason.is_some()
+        );
+        crate::test_complete!("test_harness_repro_manifest_on_failure");
+    }
+
+    #[test]
+    fn test_harness_finish_auto_generates_manifest_on_failure() {
+        init_test("test_harness_finish_auto_generates_manifest_on_failure");
+        let tmp = std::env::temp_dir().join("asupersync_harness_manifest_test");
+        let _ = std::fs::remove_dir_all(&tmp);
+
+        std::env::set_var("ASUPERSYNC_TEST_ARTIFACTS_DIR", tmp.display().to_string());
+        let ctx = TestContext::new("auto_manifest", 0xCAFE).with_subsystem("time");
+        let mut harness = TestHarness::with_context("auto_manifest", ctx);
+
+        harness.enter_phase("setup");
+        harness.exit_phase();
+        harness.enter_phase("verify");
+        harness.record_assertion("fail_check", false, "true", "false");
+        harness.exit_phase();
+
+        let summary = harness.finish();
+
+        let has_manifest = summary
+            .failure_artifacts
+            .iter()
+            .any(|a| a.contains("repro_manifest.json"));
+        crate::assert_with_log!(
+            has_manifest,
+            "repro_manifest.json in artifacts",
+            true,
+            has_manifest
+        );
+
+        if let Some(manifest_path) = summary
+            .failure_artifacts
+            .iter()
+            .find(|a| a.contains("repro_manifest.json"))
+        {
+            let loaded = load_repro_manifest(std::path::Path::new(manifest_path))
+                .expect("load auto-generated manifest");
+            crate::assert_with_log!(
+                loaded.seed == 0xCAFE,
+                "manifest seed correct",
+                0xCAFEu64,
+                loaded.seed
+            );
+            crate::assert_with_log!(
+                !loaded.passed,
+                "manifest shows failure",
+                false,
+                loaded.passed
+            );
+            crate::assert_with_log!(
+                loaded.phases_executed.len() == 2,
+                "phases captured in manifest",
+                2,
+                loaded.phases_executed.len()
+            );
+        }
+
+        std::env::remove_var("ASUPERSYNC_TEST_ARTIFACTS_DIR");
+        let _ = std::fs::remove_dir_all(&tmp);
+        crate::test_complete!("test_harness_finish_auto_generates_manifest_on_failure");
+    }
+
+    #[test]
+    fn test_capture_replay_manifest_roundtrip() {
+        init_test("test_capture_replay_manifest_roundtrip");
+        let ctx = TestContext::new("cancel_drain", 0xDEAD_CAFE)
+            .with_subsystem("obligation")
+            .with_invariant("no_leaks");
+        let mut harness = TestHarness::with_context("cancel_drain", ctx);
+
+        harness.enter_phase("setup_regions");
+        harness.assert_true("region created", true);
+        harness.exit_phase();
+        harness.enter_phase("cancel_and_drain");
+        harness.record_assertion("leak check", false, "0 leaks", "2 leaks");
+        harness.exit_phase();
+
+        let manifest = harness.repro_manifest(false);
+
+        let tmp = std::env::temp_dir().join("asupersync_replay_roundtrip");
+        let path = manifest.write_to_dir(&tmp).expect("write manifest");
+
+        let loaded = load_repro_manifest(&path).expect("load manifest");
+        let replay_ctx = replay_context_from_manifest(&loaded);
+
+        crate::assert_with_log!(
+            replay_ctx.seed == 0xDEAD_CAFE,
+            "replay seed matches",
+            0xDEAD_CAFEu64,
+            replay_ctx.seed
+        );
+        crate::assert_with_log!(
+            replay_ctx.test_id == "cancel_drain",
+            "replay test_id matches",
+            "cancel_drain",
+            replay_ctx.test_id
+        );
+        crate::assert_with_log!(
+            loaded.phases_executed.len() == 2,
+            "phases preserved on disk",
+            2,
+            loaded.phases_executed.len()
+        );
+        crate::assert_with_log!(
+            loaded.failure_reason.is_some(),
+            "failure reason preserved on disk",
+            true,
+            loaded.failure_reason.is_some()
+        );
+
+        let _ = std::fs::remove_dir_all(tmp.join("cancel_drain"));
+        crate::test_complete!("test_capture_replay_manifest_roundtrip");
+    }
+
     // E2E Environment Orchestration tests
     // ----------------------------------------------------------------
 

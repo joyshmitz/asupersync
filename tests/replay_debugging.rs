@@ -4,6 +4,7 @@
 mod common;
 
 use asupersync::lab::{LabConfig, LabRuntime};
+use asupersync::test_logging::{load_repro_manifest, replay_context_from_manifest};
 use asupersync::trace::{
     Breakpoint, CompactTaskId, ReplayError, ReplayEvent, ReplayMode, ReplayTrace, TraceMetadata,
     TraceReader, TraceReplayer, TraceWriter,
@@ -376,4 +377,310 @@ fn loaded_trace_verifies_against_itself() {
     );
 
     test_complete!("loaded_trace_verifies_against_itself");
+}
+
+// =========================================================================
+// Failure Triage Pipeline: capture → manifest → replay (bd-1ex7)
+// =========================================================================
+
+/// End-to-end test: record a trace, save a ReproManifest, reload it, and
+/// verify the replay produces the same events.
+#[test]
+fn failure_triage_capture_manifest_replay_roundtrip() {
+    init_test("failure_triage_capture_manifest_replay_roundtrip");
+
+    // Phase 1: Record a trace with a known seed.
+    test_section!("capture");
+    let seed = 0xDEAD_BEEF_u64;
+    let config = LabConfig::new(seed).with_default_replay_recording();
+    let mut runtime = LabRuntime::new(config);
+    let region = runtime.state.create_root_region(Budget::INFINITE);
+
+    let (task_a, _) = runtime
+        .state
+        .create_task(region, Budget::INFINITE, async {})
+        .expect("create task a");
+    let (task_b, _) = runtime
+        .state
+        .create_task(region, Budget::INFINITE, async {})
+        .expect("create task b");
+
+    runtime.scheduler.lock().unwrap().schedule(task_a, 0);
+    runtime.scheduler.lock().unwrap().schedule(task_b, 0);
+    runtime.run_until_quiescent();
+
+    let trace = runtime.finish_replay_trace().expect("capture trace");
+    let event_count = trace.events.len();
+    assert_with_log!(event_count > 0, "captured events", true, event_count > 0);
+
+    // Phase 2: Create and persist a ReproManifest.
+    test_section!("manifest");
+    let ctx = TestContext::new("cancel_drain_scenario", seed)
+        .with_subsystem("scheduler")
+        .with_invariant("quiescence");
+    let mut manifest = ReproManifest::from_context(&ctx, false);
+    manifest.trace_fingerprint = Some(format!("{event_count}_events"));
+
+    let tmp = tempfile::tempdir().expect("tempdir");
+    let manifest_path = manifest.write_to_dir(tmp.path()).expect("write manifest");
+
+    // Phase 3: Load manifest and recreate context.
+    test_section!("reload");
+    let loaded = load_repro_manifest(&manifest_path).expect("load manifest");
+    assert_with_log!(
+        loaded.seed == seed,
+        "manifest seed preserved",
+        seed,
+        loaded.seed
+    );
+    assert_with_log!(
+        loaded.scenario_id == "cancel_drain_scenario",
+        "scenario_id preserved",
+        "cancel_drain_scenario",
+        loaded.scenario_id
+    );
+    assert_with_log!(
+        loaded.subsystem.as_deref() == Some("scheduler"),
+        "subsystem preserved",
+        Some("scheduler"),
+        loaded.subsystem.as_deref()
+    );
+
+    let replay_ctx = replay_context_from_manifest(&loaded);
+    assert_with_log!(
+        replay_ctx.seed == seed,
+        "replay context seed",
+        seed,
+        replay_ctx.seed
+    );
+
+    // Phase 4: Replay - re-run with same seed and verify events match.
+    test_section!("replay");
+    let replay_config = LabConfig::new(replay_ctx.seed).with_default_replay_recording();
+    let mut replay_runtime = LabRuntime::new(replay_config);
+    let replay_region = replay_runtime.state.create_root_region(Budget::INFINITE);
+
+    let (replay_task_a, _) = replay_runtime
+        .state
+        .create_task(replay_region, Budget::INFINITE, async {})
+        .expect("replay task a");
+    let (replay_task_b, _) = replay_runtime
+        .state
+        .create_task(replay_region, Budget::INFINITE, async {})
+        .expect("replay task b");
+
+    replay_runtime
+        .scheduler
+        .lock()
+        .unwrap()
+        .schedule(replay_task_a, 0);
+    replay_runtime
+        .scheduler
+        .lock()
+        .unwrap()
+        .schedule(replay_task_b, 0);
+    replay_runtime.run_until_quiescent();
+
+    let replay_trace = replay_runtime.finish_replay_trace().expect("replay trace");
+
+    // Verify event counts match (deterministic replay).
+    assert_with_log!(
+        replay_trace.events.len() == event_count,
+        "replay event count matches",
+        event_count,
+        replay_trace.events.len()
+    );
+
+    // Verify events can be replayed against original.
+    let mut replayer = TraceReplayer::new(trace);
+    for event in &replay_trace.events {
+        replayer
+            .verify_and_advance(event)
+            .expect("events should match between runs with same seed");
+    }
+    assert_with_log!(
+        replayer.is_completed(),
+        "all events replayed",
+        true,
+        replayer.is_completed()
+    );
+
+    test_complete!("failure_triage_capture_manifest_replay_roundtrip");
+}
+
+/// Test that a ReproManifest roundtrips through write + load preserving all fields.
+#[test]
+fn manifest_write_load_preserves_all_fields() {
+    init_test("manifest_write_load_preserves_all_fields");
+    let mut manifest = ReproManifest::new(0xCAFE_BABE, "full_field_test", false);
+    manifest.entropy_seed = Some(0x1234);
+    manifest.config_hash = Some("cfg_abc".to_string());
+    manifest.trace_fingerprint = Some("fp_42".to_string());
+    manifest.input_digest = Some("sha256:deadbeef".to_string());
+    manifest.oracle_violations = vec!["leak_detected".to_string(), "timeout".to_string()];
+    manifest.subsystem = Some("obligation".to_string());
+    manifest.invariant = Some("no_leaks".to_string());
+    manifest.trace_file = Some("traces/run_42.bin".to_string());
+    manifest.input_file = Some("inputs/scenario_1.json".to_string());
+
+    let tmp = tempfile::tempdir().expect("tempdir");
+    let path = manifest.write_to_dir(tmp.path()).expect("write");
+
+    let loaded = load_repro_manifest(&path).expect("load");
+    assert_with_log!(
+        loaded.schema_version == ARTIFACT_SCHEMA_VERSION,
+        "schema version",
+        ARTIFACT_SCHEMA_VERSION,
+        loaded.schema_version
+    );
+    assert_with_log!(
+        loaded.seed == 0xCAFE_BABE,
+        "seed",
+        0xCAFE_BABEu64,
+        loaded.seed
+    );
+    assert_with_log!(
+        loaded.entropy_seed == Some(0x1234),
+        "entropy_seed",
+        Some(0x1234u64),
+        loaded.entropy_seed
+    );
+    assert_with_log!(
+        loaded.config_hash.as_deref() == Some("cfg_abc"),
+        "config_hash",
+        Some("cfg_abc"),
+        loaded.config_hash.as_deref()
+    );
+    assert_with_log!(
+        loaded.oracle_violations.len() == 2,
+        "oracle violations count",
+        2,
+        loaded.oracle_violations.len()
+    );
+    assert_with_log!(
+        loaded.trace_file.as_deref() == Some("traces/run_42.bin"),
+        "trace_file",
+        Some("traces/run_42.bin"),
+        loaded.trace_file.as_deref()
+    );
+    assert_with_log!(!loaded.passed, "failed status", false, loaded.passed);
+
+    test_complete!("manifest_write_load_preserves_all_fields");
+}
+
+/// Test that replay_context_from_manifest produces a valid context for re-execution.
+#[test]
+fn replay_context_reproduces_with_same_seed() {
+    init_test("replay_context_reproduces_with_same_seed");
+
+    // Run a lab with a specific seed and capture the trace.
+    let seed = 0x5EED_1234_u64;
+    let config = LabConfig::new(seed).with_default_replay_recording();
+    let mut runtime = LabRuntime::new(config);
+    let region = runtime.state.create_root_region(Budget::INFINITE);
+
+    let (task, _) = runtime
+        .state
+        .create_task(region, Budget::INFINITE, async {})
+        .expect("create task");
+    runtime.scheduler.lock().unwrap().schedule(task, 0);
+    runtime.run_until_quiescent();
+    let original_trace = runtime.finish_replay_trace().expect("trace");
+
+    // Create manifest and context.
+    let manifest = ReproManifest::new(seed, "repro_test", true);
+    let ctx = replay_context_from_manifest(&manifest);
+
+    // Verify derived seeds are deterministic.
+    let comp_seed_a = ctx.component_seed("scheduler");
+    let comp_seed_b = ctx.component_seed("scheduler");
+    assert_with_log!(
+        comp_seed_a == comp_seed_b,
+        "component seed deterministic",
+        comp_seed_a,
+        comp_seed_b
+    );
+
+    // Re-run with the same seed from the manifest context.
+    let replay_config = LabConfig::new(ctx.seed).with_default_replay_recording();
+    let mut replay_rt = LabRuntime::new(replay_config);
+    let replay_region = replay_rt.state.create_root_region(Budget::INFINITE);
+    let (replay_task, _) = replay_rt
+        .state
+        .create_task(replay_region, Budget::INFINITE, async {})
+        .expect("replay task");
+    replay_rt.scheduler.lock().unwrap().schedule(replay_task, 0);
+    replay_rt.run_until_quiescent();
+    let replay_trace = replay_rt.finish_replay_trace().expect("replay trace");
+
+    // Event counts should be identical (determinism from seed).
+    assert_with_log!(
+        original_trace.events.len() == replay_trace.events.len(),
+        "event count matches via seed replay",
+        original_trace.events.len(),
+        replay_trace.events.len()
+    );
+
+    test_complete!("replay_context_reproduces_with_same_seed");
+}
+
+/// Test the trace file persistence + replayer integration (write → read → verify).
+#[test]
+fn trace_file_persistence_and_replayer_verify() {
+    init_test("trace_file_persistence_and_replayer_verify");
+
+    test_section!("capture");
+    let trace = record_simple_trace();
+    let event_count = trace.events.len();
+
+    test_section!("persist");
+    let tmp = NamedTempFile::new().expect("tempfile");
+    let path = tmp.path();
+    let mut writer = TraceWriter::create(path).expect("create writer");
+    writer
+        .write_metadata(&trace.metadata)
+        .expect("write metadata");
+    for event in &trace.events {
+        writer.write_event(event).expect("write event");
+    }
+    writer.finish().expect("finish");
+
+    test_section!("load");
+    let reader = TraceReader::open(path).expect("open reader");
+    let loaded_meta = reader.metadata().clone();
+    let loaded_events: Vec<ReplayEvent> = reader.events().map(|e| e.expect("read event")).collect();
+
+    assert_with_log!(
+        loaded_meta.seed == trace.metadata.seed,
+        "metadata seed preserved through file",
+        trace.metadata.seed,
+        loaded_meta.seed
+    );
+    assert_with_log!(
+        loaded_events.len() == event_count,
+        "event count preserved through file",
+        event_count,
+        loaded_events.len()
+    );
+
+    test_section!("verify");
+    let loaded_trace = ReplayTrace {
+        metadata: loaded_meta,
+        events: loaded_events.clone(),
+        cursor: 0,
+    };
+    let mut replayer = TraceReplayer::new(loaded_trace);
+    for event in &loaded_events {
+        replayer
+            .verify_and_advance(event)
+            .expect("loaded events verify against themselves");
+    }
+    assert_with_log!(
+        replayer.is_completed(),
+        "replayer exhausted all events",
+        true,
+        replayer.is_completed()
+    );
+
+    test_complete!("trace_file_persistence_and_replayer_verify");
 }

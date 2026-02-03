@@ -87,6 +87,8 @@ impl Worker {
         const SPIN_LIMIT: u32 = 64;
         const YIELD_LIMIT: u32 = 16;
 
+        let _queue_guard = LocalQueue::set_current(self.local.clone());
+
         while !self.shutdown.load(Ordering::Relaxed) {
             // 1. Try local queue (LIFO)
             if let Some(task) = self.local.pop() {

@@ -598,6 +598,7 @@ impl ThreeLaneWorker {
     /// Runs a single scheduling step.
     ///
     /// Returns `true` if a task was executed.
+    #[cfg_attr(feature = "test-internals", visibility::make(pub))]
     pub(crate) fn run_once(&mut self) -> bool {
         if self.shutdown.load(Ordering::Acquire) {
             return false;
@@ -952,7 +953,7 @@ impl ThreeLaneWorker {
                             }
                         }
                     }
-                    
+
                     if is_local {
                         // Schedule to local queue
                         {
@@ -964,7 +965,6 @@ impl ThreeLaneWorker {
                                 local.schedule(task_id, priority);
                             }
                         }
-                        self.parker.unpark();
                     } else {
                         // Schedule to global injector
                         if schedule_cancel {
@@ -972,8 +972,8 @@ impl ThreeLaneWorker {
                         } else {
                             self.global.inject_ready(task_id, priority);
                         }
-                        self.parker.unpark();
                     }
+                    self.parker.unpark();
                 }
             }
         }
@@ -1123,61 +1123,10 @@ impl ThreeLaneLocalCancelWaker {
         self.wake_state.notify();
 
         // Schedule locally to cancel lane
-        let mut local = self.local.lock().expect("local scheduler lock poisoned");
-        local.schedule_cancel(self.task_id, priority);
-        self.parker.unpark();
-    }
-}
-
-impl Wake for ThreeLaneLocalCancelWaker {
-    fn wake(self: Arc<Self>) {
-        self.schedule();
-    }
-
-    fn wake_by_ref(self: &Arc<Self>) {
-        self.schedule();
-    }
-}
-
-struct ThreeLaneLocalCancelWaker {
-    task_id: TaskId,
-    default_priority: u8,
-    wake_state: Arc<crate::record::task::TaskWakeState>,
-    local: Arc<Mutex<PriorityScheduler>>,
-    parker: Parker,
-    cx_inner: Weak<RwLock<CxInner>>,
-}
-
-impl ThreeLaneLocalCancelWaker {
-    fn schedule(&self) {
-        let Some(inner) = self.cx_inner.upgrade() else {
-            return;
-        };
-        let (cancel_requested, priority) = match inner.read() {
-            Ok(guard) => {
-                let priority = guard
-                    .cancel_reason
-                    .as_ref()
-                    .map_or(self.default_priority, |reason| {
-                        reason.cleanup_budget().priority
-                    });
-                (guard.cancel_requested, priority)
-            }
-            Err(_) => return,
-        };
-
-        if !cancel_requested {
-            return;
-        }
-
-        // Always notify
-        self.wake_state.notify();
-
-        // Inject to local cancel lane
-        {
-            let mut local = self.local.lock().expect("local scheduler lock poisoned");
-            local.schedule_cancel(self.task_id, priority);
-        }
+        self.local
+            .lock()
+            .expect("local scheduler lock poisoned")
+            .schedule_cancel(self.task_id, priority);
         self.parker.unpark();
     }
 }

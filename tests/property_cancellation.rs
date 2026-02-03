@@ -40,20 +40,6 @@ use proptest::prelude::*;
 // Arbitrary Generators
 // ============================================================================
 
-/// All CancelKind variants in severity order.
-const ALL_CANCEL_KINDS: [CancelKind; 10] = [
-    CancelKind::User,
-    CancelKind::Timeout,
-    CancelKind::Deadline,
-    CancelKind::PollQuota,
-    CancelKind::CostBudget,
-    CancelKind::FailFast,
-    CancelKind::RaceLost,
-    CancelKind::ParentCancelled,
-    CancelKind::ResourceUnavailable,
-    CancelKind::Shutdown,
-];
-
 /// All CancelPhase variants in rank order.
 const ALL_CANCEL_PHASES: [CancelPhase; 4] = [
     CancelPhase::Requested,
@@ -193,7 +179,7 @@ proptest! {
     fn strengthen_monotone(a in arb_cancel_reason(), b in arb_cancel_reason()) {
         init_test_logging();
         let original_severity = a.kind().severity();
-        let mut strengthened = a.clone();
+        let mut strengthened = a;
         strengthened.strengthen(&b);
         prop_assert!(
             strengthened.kind().severity() >= original_severity,
@@ -206,13 +192,17 @@ proptest! {
     #[test]
     fn strengthen_yields_max(a in arb_cancel_reason(), b in arb_cancel_reason()) {
         init_test_logging();
-        let max_sev = a.kind().severity().max(b.kind().severity());
-        let mut result = a.clone();
+        let a_sev = a.kind().severity();
+        let b_sev = b.kind().severity();
+        let max_sev = a_sev.max(b_sev);
+        let mut result = a;
         result.strengthen(&b);
         prop_assert!(
             result.kind().severity() >= max_sev,
             "strengthen should yield severity >= max({}, {}) = {max_sev}, got {}",
-            a.kind().severity(), b.kind().severity(), result.kind().severity()
+            a_sev,
+            b_sev,
+            result.kind().severity()
         );
     }
 
@@ -234,7 +224,7 @@ proptest! {
     fn strengthen_shutdown_dominates(a in arb_cancel_reason()) {
         init_test_logging();
         let shutdown = CancelReason::new(CancelKind::Shutdown);
-        let mut result = a.clone();
+        let mut result = a;
         result.strengthen(&shutdown);
         prop_assert_eq!(
             result.kind(), CancelKind::Shutdown,
@@ -308,8 +298,8 @@ proptest! {
         epoch in 0u64..=1000,
     ) {
         init_test_logging();
-        // Only test when kind severity is also monotone
-        prop_assume!(kind2.severity() >= kind1.severity());
+        // Witness validation uses Ord on CancelKind (discriminant order), not severity()
+        prop_assume!(kind2 >= kind1);
 
         let task = TaskId::new_for_test(0, 0);
         let region = RegionId::new_for_test(0, 0);
@@ -357,8 +347,8 @@ proptest! {
         epoch in 0u64..=1000,
     ) {
         init_test_logging();
-        // Only test when strong actually has higher severity
-        prop_assume!(strong.severity() > weak.severity());
+        // Witness validation uses Ord on CancelKind (discriminant), not severity()
+        prop_assume!(strong > weak);
 
         let task = TaskId::new_for_test(0, 0);
         let region = RegionId::new_for_test(0, 0);

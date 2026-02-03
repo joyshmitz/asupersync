@@ -11,14 +11,19 @@ use crate::runtime::RuntimeState;
 use crate::types::TaskId;
 #[cfg(any(test, feature = "test-internals"))]
 use crate::types::{Budget, RegionId};
+use std::cell::RefCell;
 use std::sync::{Arc, Mutex};
+
+thread_local! {
+    static CURRENT_QUEUE: RefCell<Option<LocalQueue>> = const { RefCell::new(None) };
+}
 
 /// A local task queue for a worker.
 ///
 /// This queue is single-producer, multi-consumer. The worker owning this
 /// queue pushes and pops from one end (LIFO), while other workers steal
 /// from the other end (FIFO).
-#[derive(Debug)]
+#[derive(Debug, Clone)]
 pub struct LocalQueue {
     state: Arc<Mutex<RuntimeState>>,
     inner: Arc<Mutex<IntrusiveStack>>,
@@ -32,6 +37,31 @@ impl LocalQueue {
             state,
             inner: Arc::new(Mutex::new(IntrusiveStack::new(QUEUE_TAG_READY))),
         }
+    }
+
+    /// Sets the current thread-local queue and returns a guard to restore the previous one.
+    pub(crate) fn set_current(queue: Self) -> CurrentQueueGuard {
+        let prev = CURRENT_QUEUE.with(|slot| slot.replace(Some(queue)));
+        CurrentQueueGuard { prev }
+    }
+
+    /// Clears the current thread-local queue.
+    pub(crate) fn clear_current() {
+        CURRENT_QUEUE.with(|slot| {
+            slot.borrow_mut().take();
+        });
+    }
+
+    /// Schedules a task on the current thread-local queue.
+    ///
+    /// Returns `true` if a local queue was available.
+    pub(crate) fn schedule_local(task: TaskId) -> bool {
+        CURRENT_QUEUE.with(|slot| {
+            slot.borrow().as_ref().is_some_and(|queue| {
+                queue.push(task);
+                true
+            })
+        })
     }
 
     /// Creates a runtime state with preallocated task records for tests.
@@ -84,6 +114,20 @@ impl LocalQueue {
             state: Arc::clone(&self.state),
             inner: Arc::clone(&self.inner),
         }
+    }
+}
+
+/// Guard that restores the previous local queue on drop.
+pub(crate) struct CurrentQueueGuard {
+    prev: Option<LocalQueue>,
+}
+
+impl Drop for CurrentQueueGuard {
+    fn drop(&mut self) {
+        let prev = self.prev.take();
+        CURRENT_QUEUE.with(|slot| {
+            *slot.borrow_mut() = prev;
+        });
     }
 }
 
