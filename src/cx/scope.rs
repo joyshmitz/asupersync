@@ -628,6 +628,13 @@ impl<P: Policy> Scope<'_, P> {
         // Store in thread-local storage
         crate::runtime::local::store_local_task(task_id, stored);
 
+        // Mark the task record as local so that safety guards in the scheduler
+        // (inject_ready panic, try_steal debug_assert) can detect accidental
+        // cross-thread migration of !Send futures.
+        if let Some(record) = state.tasks.get_mut(task_id.arena_index()) {
+            record.mark_local();
+        }
+
         // Schedule the task on the current worker's NON-STEALABLE local scheduler.
         // spawn_local tasks MUST NOT be stealable.
         let scheduled = crate::runtime::scheduler::three_lane::schedule_local_task(task_id);

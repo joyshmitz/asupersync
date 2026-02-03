@@ -50,7 +50,9 @@ impl EvidenceStrength {
     /// Classifies a log₁₀ Bayes factor into a strength category.
     #[must_use]
     pub fn from_log10_bf(log10_bf: f64) -> Self {
-        if log10_bf < 0.0 {
+        if log10_bf.is_nan() {
+            Self::Negligible
+        } else if log10_bf < 0.0 {
             Self::Against
         } else if log10_bf < 0.5 {
             Self::Negligible

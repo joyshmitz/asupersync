@@ -420,8 +420,9 @@ fn classify_divergence(expected: &ReplayEvent, actual: &ReplayEvent) -> Divergen
 // =============================================================================
 
 fn build_context_before(events: &[ReplayEvent], idx: usize, count: usize) -> Vec<EventSummary> {
-    let start = idx.saturating_sub(count);
-    events[start..idx]
+    let clamped_idx = idx.min(events.len());
+    let start = clamped_idx.saturating_sub(count);
+    events[start..clamped_idx]
         .iter()
         .enumerate()
         .map(|(i, ev)| EventSummary::from_event(start + i, ev))
@@ -905,6 +906,7 @@ fn event_type_name(event: &ReplayEvent) -> &'static str {
 mod tests {
     use super::*;
     use crate::trace::replay::TraceMetadata;
+    use crate::trace::{CompactRegionId, CompactTaskId};
 
     fn make_trace(seed: u64, events: Vec<ReplayEvent>) -> ReplayTrace {
         ReplayTrace {
