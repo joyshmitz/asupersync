@@ -22,7 +22,9 @@
 //! ```
 
 pub mod builder;
+pub mod decoder;
 pub mod gf256;
+pub mod linalg;
 pub mod pipeline;
 pub mod systematic;
 

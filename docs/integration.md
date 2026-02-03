@@ -64,11 +64,12 @@ For fully read-only handlers, use `ctx.cx_readonly()` to remove all gated APIs.
 
 ```ignore
 use asupersync::cx::cap::CapSet;
-use asupersync::grpc::CallContextWithCx;
+use asupersync::grpc::{CallContext, CallContextWithCx};
 
 type GrpcCaps = CapSet<true, true, false, false, false>;
 
-fn handle(ctx: &CallContextWithCx<'_>) {
+fn handle(call: &CallContext, cx: &asupersync::Cx) {
+    let ctx = call.with_cx(cx);
     let cx = ctx.cx_narrow::<GrpcCaps>();
     cx.trace("handling request");
 }

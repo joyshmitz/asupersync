@@ -704,8 +704,8 @@ mod tests {
         let mut dag = PlanDag::new();
         let a = dag.leaf("a");
         let b = dag.leaf("b");
-        let join = dag.join(vec![a, b]);
-        dag.set_root(join);
+        let join_node = dag.join(vec![a, b]);
+        dag.set_root(join_node);
 
         let checker = SideConditionChecker::new(&dag);
         assert!(checker.rewrite_preserves_obligations(a, b));

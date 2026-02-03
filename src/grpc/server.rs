@@ -279,12 +279,30 @@ impl Default for CallContext {
 ///
 /// This wrapper is intended for framework integrations that need to thread
 /// `Cx` through gRPC handlers while retaining the base call metadata.
+///
+/// ```ignore
+/// use asupersync::cx::cap::CapSet;
+/// use asupersync::grpc::CallContext;
+///
+/// type GrpcCaps = CapSet<true, true, false, false, false>;
+///
+/// fn handle(ctx: &CallContext, cx: &asupersync::Cx) {
+///     let ctx = ctx.with_cx(cx);
+///     let limited = ctx.cx_narrow::<GrpcCaps>();
+///     limited.checkpoint().ok();
+/// }
+/// ```
 pub struct CallContextWithCx<'a> {
     call: &'a CallContext,
     cx: &'a Cx,
 }
 
 impl CallContextWithCx<'_> {
+    /// Returns the underlying call context.
+    #[must_use]
+    pub fn call(&self) -> &CallContext {
+        self.call
+    }
     /// Returns the underlying call metadata.
     #[must_use]
     pub fn metadata(&self) -> &Metadata {
