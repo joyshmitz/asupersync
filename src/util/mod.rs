@@ -4,12 +4,14 @@
 //! determinism in the lab runtime.
 
 pub mod arena;
+pub mod cache;
 pub mod det_hash;
 pub mod det_rng;
 pub mod entropy;
 pub mod resource;
 
 pub use arena::{Arena, ArenaIndex};
+pub use cache::{CachePadded, CACHE_LINE_SIZE};
 pub use det_hash::{DetBuildHasher, DetHashMap, DetHashSet, DetHasher};
 pub use det_rng::DetRng;
 pub use entropy::{

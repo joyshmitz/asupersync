@@ -247,6 +247,16 @@ pub struct TaskRecord {
     /// Queue membership tag: 0 = not in any queue, 1+ = queue identifier.
     /// Used to prevent double-enqueue and enable O(1) membership check.
     pub queue_tag: u8,
+    // ── Intrusive heap fields (cache-aware priority scheduling) ────────
+    /// Position in the intrusive priority heap (`None` if not in any heap).
+    /// Enables O(1) lookup and O(log n) removal by task ID.
+    pub heap_index: Option<u32>,
+    /// Cached scheduling priority for intrusive heap comparison.
+    /// Set when the task is inserted into an `IntrusivePriorityHeap`.
+    pub sched_priority: u8,
+    /// FIFO generation counter for tie-breaking within equal priorities.
+    /// Lower generation = earlier insertion = higher scheduling priority.
+    pub sched_generation: u64,
 }
 
 impl TaskRecord {
@@ -281,6 +291,9 @@ impl TaskRecord {
             next_in_queue: None,
             prev_in_queue: None,
             queue_tag: 0,
+            heap_index: None,
+            sched_priority: 0,
+            sched_generation: 0,
         }
     }
 
