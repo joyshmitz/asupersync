@@ -18,6 +18,10 @@ fn wall_clock_now() -> Time {
     CLOCK.get_or_init(WallClock::new).now()
 }
 
+fn duration_to_nanos(duration: Duration) -> u64 {
+    duration.as_nanos().min(u128::from(u64::MAX)) as u64
+}
+
 /// A layer that applies a timeout to requests.
 ///
 /// # Example
@@ -181,7 +185,7 @@ where
 
     fn call(&mut self, req: Request) -> Self::Future {
         let now = (self.time_getter)();
-        let deadline = now.saturating_add_nanos(self.duration.as_nanos() as u64);
+        let deadline = now.saturating_add_nanos(duration_to_nanos(self.duration));
         TimeoutFuture::with_time_getter(self.inner.call(req), deadline, self.time_getter)
     }
 }

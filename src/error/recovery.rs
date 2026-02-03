@@ -72,9 +72,10 @@ impl RecoveryStrategy for ExponentialBackoff {
         let factor = self.multiplier.powi(attempt as i32);
         let mut base_ms = (self.initial.as_millis() as f64 * factor) as u64;
 
-        // Apply max clamp
-        if base_ms > self.max.as_millis() as u64 {
-            base_ms = self.max.as_millis() as u64;
+        // Clamp to the configured max while avoiding u128 -> u64 truncation.
+        let max_ms = self.max.as_millis().min(u128::from(u64::MAX)) as u64;
+        if base_ms > max_ms {
+            base_ms = max_ms;
         }
 
         // Apply simple pseudo-random jitter (deterministic for lab if we pass rng,
@@ -87,7 +88,8 @@ impl RecoveryStrategy for ExponentialBackoff {
             base_ms
         } else {
             // Simple deterministic variation
-            let variation = u64::from(attempt).wrapping_mul(31) % (jitter_amount * 2);
+            let jitter_range = jitter_amount.saturating_mul(2).max(1);
+            let variation = u64::from(attempt).wrapping_mul(31) % jitter_range;
             base_ms
                 .saturating_sub(jitter_amount)
                 .saturating_add(variation)
@@ -146,7 +148,10 @@ impl CircuitBreaker {
             CircuitState::Closed | CircuitState::HalfOpen => true,
             CircuitState::Open => {
                 let last = Time::from_nanos(self.last_failure_time.load(Ordering::Relaxed));
-                let timeout_nanos = self.recovery_timeout.as_nanos() as u64;
+                let timeout_nanos = self
+                    .recovery_timeout
+                    .as_nanos()
+                    .min(u128::from(u64::MAX)) as u64;
                 if now >= last.saturating_add_nanos(timeout_nanos) {
                     // Try to transition to HalfOpen
                     if self.transition(CircuitState::Open, CircuitState::HalfOpen) {

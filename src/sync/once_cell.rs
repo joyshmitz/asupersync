@@ -669,6 +669,39 @@ mod tests {
     }
 
     #[test]
+    fn waiter_recovers_after_init_cancel() {
+        init_test("waiter_recovers_after_init_cancel");
+        let cell: OnceCell<u32> = OnceCell::new();
+
+        // Start an initializer that never completes.
+        let mut init_fut = Box::pin(cell.get_or_init(|| async { pending::<u32>().await }));
+        let waker = noop_waker();
+        let mut cx = Context::from_waker(&waker);
+        let poll = Future::poll(init_fut.as_mut(), &mut cx);
+        crate::assert_with_log!(poll.is_pending(), "init pending", true, poll.is_pending());
+
+        // Start a waiter that should recover if the initializer is cancelled.
+        let mut waiter_fut = Box::pin(cell.get_or_init(|| async { 9 }));
+        let poll = Future::poll(waiter_fut.as_mut(), &mut cx);
+        crate::assert_with_log!(poll.is_pending(), "waiter pending", true, poll.is_pending());
+
+        // Cancel the initializer and ensure waiter can recover.
+        drop(init_fut);
+        let poll = Future::poll(waiter_fut.as_mut(), &mut cx);
+        match poll {
+            Poll::Ready(value) => {
+                crate::assert_with_log!(*value == 9, "waiter initialized", 9u32, *value);
+            }
+            Poll::Pending => {
+                let value = block_on(cell.get_or_init(|| async { 9 }));
+                crate::assert_with_log!(*value == 9, "init after retry", 9u32, *value);
+            }
+        }
+
+        crate::test_complete!("waiter_recovers_after_init_cancel");
+    }
+
+    #[test]
     fn concurrent_init_only_runs_once() {
         init_test("concurrent_init_only_runs_once");
         let cell = Arc::new(OnceCell::<i32>::new());

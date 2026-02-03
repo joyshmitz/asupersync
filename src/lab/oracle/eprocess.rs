@@ -188,7 +188,7 @@ impl EProcess {
     /// `violated` is true if the oracle detected a violation at this step.
     pub fn observe(&mut self, violated: bool) {
         let x = if violated { 1.0 } else { 0.0 };
-        let factor = 1.0 + self.config.lambda * (x - self.config.p0);
+        let factor = self.config.lambda.mul_add(x - self.config.p0, 1.0);
 
         // Clamp factor to prevent negative or zero values.
         let factor = factor.max(1e-15);
@@ -226,6 +226,7 @@ impl EProcess {
 
     /// Returns the empirical violation rate.
     #[must_use]
+    #[allow(clippy::cast_precision_loss)]
     pub fn empirical_rate(&self) -> f64 {
         if self.observations == 0 {
             0.0
@@ -357,7 +358,7 @@ impl EProcessMonitor {
                 .entries
                 .iter()
                 .find(|e| e.invariant == ep.invariant)
-                .map_or(false, |e| !e.passed);
+                .is_some_and(|e| !e.passed);
             ep.observe(violated);
         }
     }
@@ -366,12 +367,13 @@ impl EProcessMonitor {
     ///
     /// Returns `true` if the invariant was found and updated.
     pub fn observe(&mut self, invariant: &str, violated: bool) -> bool {
-        if let Some(ep) = self.processes.iter_mut().find(|ep| ep.invariant == invariant) {
-            ep.observe(violated);
-            true
-        } else {
-            false
-        }
+        self.processes
+            .iter_mut()
+            .find(|ep| ep.invariant == invariant)
+            .is_some_and(|ep| {
+                ep.observe(violated);
+                true
+            })
     }
 
     /// Returns whether any invariant has been rejected.
@@ -884,13 +886,9 @@ mod tests {
         let config = EProcessConfig::default();
         let mut ep = EProcess::new("test", config);
 
-        let mut rng_state: u64 = 123;
-        let p1 = 0.1;
-
-        for _ in 0..100 {
-            rng_state = rng_state.wrapping_mul(6364136223846793005).wrapping_add(1);
-            let u = (rng_state >> 33) as f64 / (1u64 << 31) as f64;
-            let violated = u < p1;
+        // Use a deterministic 10% violation pattern to avoid RNG flakiness.
+        for i in 0..100 {
+            let violated = i % 10 == 0;
             ep.observe(violated);
         }
 

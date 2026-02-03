@@ -22,6 +22,10 @@ use std::time::{Duration, Instant};
 
 static START_TIME: OnceLock<Instant> = OnceLock::new();
 
+fn duration_to_nanos(duration: Duration) -> u64 {
+    duration.as_nanos().min(u128::from(u64::MAX)) as u64
+}
+
 /// Returns the current wall clock time.
 ///
 /// This function returns the elapsed time since the first call to any
@@ -37,7 +41,7 @@ pub fn wall_now() -> Time {
         Time::ZERO
     } else {
         let elapsed = now.duration_since(*start);
-        Time::from_nanos(elapsed.as_nanos() as u64)
+        Time::from_nanos(duration_to_nanos(elapsed))
     }
 }
 
@@ -150,7 +154,7 @@ impl Sleep {
     /// ```
     #[must_use]
     pub fn after(now: Time, duration: Duration) -> Self {
-        let deadline = now.saturating_add_nanos(duration.as_nanos() as u64);
+        let deadline = now.saturating_add_nanos(duration_to_nanos(duration));
         Self::new(deadline)
     }
 
@@ -239,7 +243,7 @@ impl Sleep {
     ///
     /// Any registered timer is cancelled and will be re-registered on next poll.
     pub fn reset_after(&mut self, now: Time, duration: Duration) {
-        self.deadline = now.saturating_add_nanos(duration.as_nanos() as u64);
+        self.deadline = now.saturating_add_nanos(duration_to_nanos(duration));
         self.polled.set(false);
         let (handle, driver) = {
             let mut state = self.state.lock().expect("sleep state lock poisoned");

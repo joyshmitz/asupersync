@@ -4,6 +4,10 @@ use crate::cx::Scope;
 use crate::types::{Policy, Time};
 use std::time::Duration;
 
+fn duration_to_nanos(duration: Duration) -> u64 {
+    duration.as_nanos().min(u128::from(u64::MAX)) as u64
+}
+
 /// Updates a scope with a new deadline.
 ///
 /// If the scope already has a tighter deadline, it is preserved.
@@ -27,7 +31,7 @@ pub fn with_timeout<'a, P: Policy>(
     duration: Duration,
     now: Time,
 ) -> Scope<'a, P> {
-    let deadline = now.saturating_add_nanos(duration.as_nanos() as u64);
+    let deadline = now.saturating_add_nanos(duration_to_nanos(duration));
     with_deadline(scope, deadline)
 }
 
