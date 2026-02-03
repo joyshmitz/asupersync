@@ -411,22 +411,19 @@ fn bench_end_to_end(c: &mut Criterion) {
     for &n in &[4u32, 8, 16] {
         let n_usize = n as usize;
 
-        group.bench_function(
-            &format!("full_pipeline/{n}x{n}"),
-            |b| {
-                b.iter_batched(
-                    || HashSet::<ClassId>::new(),
-                    |mut seen| {
-                        let d = build_combined_filtration(n_usize);
-                        let reduced = d.reduce();
-                        let pairs = reduced.persistence_pairs();
-                        let fp = seed_fingerprint(42);
-                        black_box(score_persistence(&pairs, &mut seen, fp))
-                    },
-                    BatchSize::SmallInput,
-                )
-            },
-        );
+        group.bench_function(&format!("full_pipeline/{n}x{n}"), |b| {
+            b.iter_batched(
+                || HashSet::<ClassId>::new(),
+                |mut seen| {
+                    let d = build_combined_filtration(n_usize);
+                    let reduced = d.reduce();
+                    let pairs = reduced.persistence_pairs();
+                    let fp = seed_fingerprint(42);
+                    black_box(score_persistence(&pairs, &mut seen, fp))
+                },
+                BatchSize::SmallInput,
+            )
+        });
     }
 
     // Diamond chains: complex + boundary + reduce

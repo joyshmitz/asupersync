@@ -2104,7 +2104,10 @@ mod tests {
         let mut scheduler = ThreeLaneScheduler::new_with_options(4, &state, 16, true, 1);
         let mut workers = scheduler.take_workers();
 
-        let suggestions: Vec<_> = workers.iter_mut().map(super::ThreeLaneWorker::governor_suggest).collect();
+        let suggestions: Vec<_> = workers
+            .iter_mut()
+            .map(super::ThreeLaneWorker::governor_suggest)
+            .collect();
 
         for s in &suggestions {
             assert_eq!(

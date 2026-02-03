@@ -954,4 +954,486 @@ mod tests {
         let brute = brute_force_min_switches(&poset);
         assert_eq!(result.switch_count, brute);
     }
+
+    // ================================================================
+    // bd-28sb acceptance criteria tests
+    // ================================================================
+
+    fn foata_flatten_switch_cost(events: &[TraceEvent]) -> usize {
+        use crate::trace::canonicalize::canonicalize;
+        use crate::trace::event_structure::OwnerKey;
+        let foata = canonicalize(events);
+        let flat = foata.flatten();
+        if flat.len() < 2 {
+            return 0;
+        }
+        flat.windows(2)
+            .filter(|w| OwnerKey::for_event(&w[0]) != OwnerKey::for_event(&w[1]))
+            .count()
+    }
+
+    fn verify_exact_acceptance(events: &[TraceEvent], label: &str) {
+        let poset = make_poset(events);
+        let n = poset.len();
+        if n == 0 {
+            return;
+        }
+        let config = GeodesicConfig {
+            exact_threshold: 64,
+            beam_threshold: 0,
+            beam_width: 1,
+            step_budget: 500_000,
+        };
+        let result = normalize(&poset, &config);
+        assert!(
+            is_valid_linear_extension(&poset, &result.schedule),
+            "{label}: not a valid linear extension"
+        );
+        let foata_cost = foata_flatten_switch_cost(events);
+        assert!(
+            result.switch_count <= foata_cost,
+            "{label}: exact ({}) > foata ({foata_cost})",
+            result.switch_count,
+        );
+        if n <= 10 {
+            let brute = brute_force_min_switches(&poset);
+            assert_eq!(
+                result.switch_count, brute,
+                "{label}: exact ({}) != brute ({brute})",
+                result.switch_count,
+            );
+        }
+    }
+
+    #[test]
+    fn exact_cost_leq_foata_two_parallel_chains() {
+        let r = rid(1);
+        let events = vec![
+            TraceEvent::spawn(1, Time::ZERO, tid(1), r),
+            TraceEvent::spawn(2, Time::ZERO, tid(2), r),
+            TraceEvent::complete(3, Time::ZERO, tid(1), r),
+            TraceEvent::complete(4, Time::ZERO, tid(2), r),
+        ];
+        verify_exact_acceptance(&events, "two_parallel_chains");
+    }
+
+    #[test]
+    fn exact_cost_leq_foata_three_tasks() {
+        let r = rid(1);
+        let events = vec![
+            TraceEvent::spawn(1, Time::ZERO, tid(1), r),
+            TraceEvent::spawn(2, Time::ZERO, tid(2), r),
+            TraceEvent::spawn(3, Time::ZERO, tid(3), r),
+            TraceEvent::poll(4, Time::ZERO, tid(1), r),
+            TraceEvent::poll(5, Time::ZERO, tid(2), r),
+            TraceEvent::poll(6, Time::ZERO, tid(3), r),
+            TraceEvent::complete(7, Time::ZERO, tid(1), r),
+            TraceEvent::complete(8, Time::ZERO, tid(2), r),
+            TraceEvent::complete(9, Time::ZERO, tid(3), r),
+        ];
+        verify_exact_acceptance(&events, "three_tasks");
+    }
+
+    #[test]
+    fn exact_cost_leq_foata_diamond() {
+        let r = rid(1);
+        let events = vec![
+            TraceEvent::spawn(1, Time::ZERO, tid(1), r),
+            TraceEvent::spawn(2, Time::ZERO, tid(2), r),
+            TraceEvent::spawn(3, Time::ZERO, tid(3), r),
+            TraceEvent::complete(4, Time::ZERO, tid(2), r),
+            TraceEvent::complete(5, Time::ZERO, tid(3), r),
+            TraceEvent::complete(6, Time::ZERO, tid(1), r),
+        ];
+        verify_exact_acceptance(&events, "diamond");
+    }
+
+    #[test]
+    fn exact_cost_leq_foata_single_chain() {
+        let r = rid(1);
+        let t = tid(1);
+        let events = vec![
+            TraceEvent::spawn(1, Time::ZERO, t, r),
+            TraceEvent::schedule(2, Time::ZERO, t, r),
+            TraceEvent::poll(3, Time::ZERO, t, r),
+            TraceEvent::yield_task(4, Time::ZERO, t, r),
+            TraceEvent::complete(5, Time::ZERO, t, r),
+        ];
+        verify_exact_acceptance(&events, "single_chain");
+    }
+
+    #[test]
+    fn exact_cost_leq_foata_star() {
+        let r = rid(1);
+        let events = vec![
+            TraceEvent::spawn(1, Time::ZERO, tid(1), r),
+            TraceEvent::spawn(2, Time::ZERO, tid(2), r),
+            TraceEvent::spawn(3, Time::ZERO, tid(3), r),
+            TraceEvent::spawn(4, Time::ZERO, tid(4), r),
+            TraceEvent::spawn(5, Time::ZERO, tid(5), r),
+        ];
+        verify_exact_acceptance(&events, "star");
+    }
+
+    #[test]
+    fn exact_cost_leq_foata_asymmetric() {
+        let r = rid(1);
+        let events = vec![
+            TraceEvent::spawn(1, Time::ZERO, tid(1), r),
+            TraceEvent::spawn(2, Time::ZERO, tid(2), r),
+            TraceEvent::poll(3, Time::ZERO, tid(1), r),
+            TraceEvent::complete(4, Time::ZERO, tid(2), r),
+            TraceEvent::yield_task(5, Time::ZERO, tid(1), r),
+            TraceEvent::complete(6, Time::ZERO, tid(1), r),
+        ];
+        verify_exact_acceptance(&events, "asymmetric");
+    }
+
+    #[test]
+    fn exact_cost_leq_foata_four_tasks() {
+        let r = rid(1);
+        let events = vec![
+            TraceEvent::spawn(1, Time::ZERO, tid(1), r),
+            TraceEvent::spawn(2, Time::ZERO, tid(2), r),
+            TraceEvent::spawn(3, Time::ZERO, tid(3), r),
+            TraceEvent::spawn(4, Time::ZERO, tid(4), r),
+            TraceEvent::complete(5, Time::ZERO, tid(1), r),
+            TraceEvent::complete(6, Time::ZERO, tid(2), r),
+            TraceEvent::complete(7, Time::ZERO, tid(3), r),
+            TraceEvent::complete(8, Time::ZERO, tid(4), r),
+        ];
+        verify_exact_acceptance(&events, "four_tasks");
+    }
+
+    #[test]
+    fn exact_cost_leq_foata_mixed_regions() {
+        let events = vec![
+            TraceEvent::spawn(1, Time::ZERO, tid(1), rid(1)),
+            TraceEvent::spawn(2, Time::ZERO, tid(2), rid(2)),
+            TraceEvent::spawn(3, Time::ZERO, tid(3), rid(1)),
+            TraceEvent::complete(4, Time::ZERO, tid(1), rid(1)),
+            TraceEvent::complete(5, Time::ZERO, tid(2), rid(2)),
+            TraceEvent::complete(6, Time::ZERO, tid(3), rid(1)),
+        ];
+        verify_exact_acceptance(&events, "mixed_regions");
+    }
+
+    #[test]
+    fn exhaustive_bruteforce_n2_to_n8() {
+        let r = rid(1);
+        let shapes: Vec<(&str, Vec<TraceEvent>)> = vec![
+            (
+                "n2_ind",
+                vec![
+                    TraceEvent::spawn(1, Time::ZERO, tid(1), r),
+                    TraceEvent::spawn(2, Time::ZERO, tid(2), r),
+                ],
+            ),
+            (
+                "n2_same",
+                vec![
+                    TraceEvent::spawn(1, Time::ZERO, tid(1), r),
+                    TraceEvent::poll(2, Time::ZERO, tid(1), r),
+                ],
+            ),
+            (
+                "n3_ind",
+                vec![
+                    TraceEvent::spawn(1, Time::ZERO, tid(1), r),
+                    TraceEvent::spawn(2, Time::ZERO, tid(2), r),
+                    TraceEvent::spawn(3, Time::ZERO, tid(3), r),
+                ],
+            ),
+            (
+                "n4_chain",
+                vec![
+                    TraceEvent::spawn(1, Time::ZERO, tid(1), r),
+                    TraceEvent::schedule(2, Time::ZERO, tid(1), r),
+                    TraceEvent::poll(3, Time::ZERO, tid(1), r),
+                    TraceEvent::complete(4, Time::ZERO, tid(1), r),
+                ],
+            ),
+            (
+                "n6_2chains",
+                vec![
+                    TraceEvent::spawn(1, Time::ZERO, tid(1), r),
+                    TraceEvent::spawn(2, Time::ZERO, tid(2), r),
+                    TraceEvent::schedule(3, Time::ZERO, tid(1), r),
+                    TraceEvent::schedule(4, Time::ZERO, tid(2), r),
+                    TraceEvent::complete(5, Time::ZERO, tid(1), r),
+                    TraceEvent::complete(6, Time::ZERO, tid(2), r),
+                ],
+            ),
+            (
+                "n8_4chains",
+                vec![
+                    TraceEvent::spawn(1, Time::ZERO, tid(1), r),
+                    TraceEvent::spawn(2, Time::ZERO, tid(2), r),
+                    TraceEvent::spawn(3, Time::ZERO, tid(3), r),
+                    TraceEvent::spawn(4, Time::ZERO, tid(4), r),
+                    TraceEvent::complete(5, Time::ZERO, tid(1), r),
+                    TraceEvent::complete(6, Time::ZERO, tid(2), r),
+                    TraceEvent::complete(7, Time::ZERO, tid(3), r),
+                    TraceEvent::complete(8, Time::ZERO, tid(4), r),
+                ],
+            ),
+            (
+                "n7_asym",
+                vec![
+                    TraceEvent::spawn(1, Time::ZERO, tid(1), r),
+                    TraceEvent::spawn(2, Time::ZERO, tid(2), r),
+                    TraceEvent::schedule(3, Time::ZERO, tid(1), r),
+                    TraceEvent::poll(4, Time::ZERO, tid(1), r),
+                    TraceEvent::yield_task(5, Time::ZERO, tid(1), r),
+                    TraceEvent::complete(6, Time::ZERO, tid(1), r),
+                    TraceEvent::complete(7, Time::ZERO, tid(2), r),
+                ],
+            ),
+            (
+                "n5_ind_multiregion",
+                vec![
+                    TraceEvent::spawn(1, Time::ZERO, tid(1), rid(1)),
+                    TraceEvent::spawn(2, Time::ZERO, tid(2), rid(2)),
+                    TraceEvent::spawn(3, Time::ZERO, tid(3), rid(3)),
+                    TraceEvent::spawn(4, Time::ZERO, tid(4), rid(4)),
+                    TraceEvent::spawn(5, Time::ZERO, tid(5), rid(5)),
+                ],
+            ),
+        ];
+        for (label, events) in &shapes {
+            verify_exact_acceptance(events, label);
+        }
+    }
+
+    #[test]
+    fn exact_deterministic_across_runs() {
+        let r = rid(1);
+        let events = vec![
+            TraceEvent::spawn(1, Time::ZERO, tid(1), r),
+            TraceEvent::spawn(2, Time::ZERO, tid(2), r),
+            TraceEvent::spawn(3, Time::ZERO, tid(3), r),
+            TraceEvent::poll(4, Time::ZERO, tid(1), r),
+            TraceEvent::poll(5, Time::ZERO, tid(2), r),
+            TraceEvent::complete(6, Time::ZERO, tid(1), r),
+            TraceEvent::complete(7, Time::ZERO, tid(2), r),
+            TraceEvent::complete(8, Time::ZERO, tid(3), r),
+        ];
+        let poset = make_poset(&events);
+        let config = GeodesicConfig {
+            exact_threshold: 64,
+            beam_threshold: 0,
+            beam_width: 1,
+            step_budget: 500_000,
+        };
+        let first = normalize(&poset, &config);
+        for i in 1..10 {
+            let run = normalize(&poset, &config);
+            assert_eq!(first.schedule, run.schedule, "Run {i} differs");
+            assert_eq!(first.switch_count, run.switch_count, "Run {i} cost differs");
+        }
+    }
+
+    #[test]
+    fn heuristic_admissibility() {
+        let r = rid(1);
+        let events = vec![
+            TraceEvent::spawn(1, Time::ZERO, tid(1), r),
+            TraceEvent::spawn(2, Time::ZERO, tid(2), r),
+            TraceEvent::spawn(3, Time::ZERO, tid(3), r),
+            TraceEvent::complete(4, Time::ZERO, tid(1), r),
+            TraceEvent::complete(5, Time::ZERO, tid(2), r),
+            TraceEvent::complete(6, Time::ZERO, tid(3), r),
+        ];
+        let poset = make_poset(&events);
+        let brute_optimal = brute_force_min_switches(&poset);
+        let h_start = owner_switch_lower_bound(&poset, 0, None);
+        assert!(
+            h_start <= brute_optimal,
+            "h({h_start}) > optimal({brute_optimal}): inadmissible"
+        );
+    }
+
+    // ========================================================================
+    // bd-3dre: Property tests (soundness, equivalence, determinism)
+    // ========================================================================
+
+    use proptest::prelude::*;
+
+    /// Strategy: generate a small trace with n events across k owners.
+    /// Events with the same owner form dependency chains (same task id →
+    /// sequential via `from_trace`). Events with different owners are
+    /// independent.
+    fn arb_trace(max_n: usize, max_owners: u32) -> impl Strategy<Value = Vec<TraceEvent>> {
+        (1..=max_n).prop_flat_map(move |n| {
+            proptest::collection::vec(1..=max_owners, n).prop_map(move |owners| {
+                owners
+                    .into_iter()
+                    .enumerate()
+                    .map(|(i, owner)| {
+                        TraceEvent::spawn(
+                            (i + 1) as u64,
+                            Time::from_nanos(i as u64 * 1000),
+                            tid(owner),
+                            rid(owner),
+                        )
+                    })
+                    .collect::<Vec<_>>()
+            })
+        })
+    }
+
+    proptest! {
+        /// Soundness: exact solver always produces a valid linear extension.
+        #[test]
+        fn prop_soundness_exact(events in arb_trace(15, 4)) {
+            let poset = make_poset(&events);
+            let config = GeodesicConfig {
+                exact_threshold: 15,
+                beam_threshold: 0,
+                beam_width: 1,
+                step_budget: 200_000,
+            };
+            let result = normalize(&poset, &config);
+            prop_assert!(
+                is_valid_linear_extension(&poset, &result.schedule),
+                "Exact solver produced invalid linear extension for {} events",
+                events.len()
+            );
+            prop_assert_eq!(
+                count_switches(&poset, &result.schedule),
+                result.switch_count,
+            );
+        }
+
+        /// Soundness: greedy solver always produces a valid linear extension.
+        #[test]
+        fn prop_soundness_greedy(events in arb_trace(30, 5)) {
+            let poset = make_poset(&events);
+            let result = normalize(&poset, &GeodesicConfig::greedy_only());
+            prop_assert!(
+                is_valid_linear_extension(&poset, &result.schedule),
+                "Greedy produced invalid linear extension for {} events",
+                events.len()
+            );
+            prop_assert_eq!(
+                count_switches(&poset, &result.schedule),
+                result.switch_count,
+            );
+        }
+
+        /// Soundness: beam search always produces a valid linear extension.
+        #[test]
+        fn prop_soundness_beam(events in arb_trace(20, 4)) {
+            let poset = make_poset(&events);
+            let config = GeodesicConfig {
+                exact_threshold: 0,
+                beam_threshold: 100,
+                beam_width: 8,
+                step_budget: 100_000,
+            };
+            let result = normalize(&poset, &config);
+            prop_assert!(
+                is_valid_linear_extension(&poset, &result.schedule),
+                "Beam search produced invalid linear extension for {} events",
+                events.len()
+            );
+        }
+
+        /// Determinism: same input always produces identical output across
+        /// all algorithm tiers.
+        #[test]
+        fn prop_determinism(events in arb_trace(20, 4)) {
+            let poset = make_poset(&events);
+            for config in &[
+                GeodesicConfig::default(),
+                GeodesicConfig::greedy_only(),
+                GeodesicConfig::high_quality(),
+            ] {
+                let r1 = normalize(&poset, config);
+                let r2 = normalize(&poset, config);
+                prop_assert_eq!(&r1.schedule, &r2.schedule);
+                prop_assert_eq!(r1.switch_count, r2.switch_count);
+            }
+        }
+
+        /// Equivalence: all algorithms produce schedules that are valid
+        /// linear extensions of the same poset, and the exact solver
+        /// (optimal) never has higher cost than heuristics.
+        #[test]
+        fn prop_equivalence_across_algorithms(events in arb_trace(15, 3)) {
+            let poset = make_poset(&events);
+
+            let exact_cfg = GeodesicConfig {
+                exact_threshold: 15, beam_threshold: 0,
+                beam_width: 1, step_budget: 200_000,
+            };
+            let greedy_cfg = GeodesicConfig::greedy_only();
+            let beam_cfg = GeodesicConfig {
+                exact_threshold: 0, beam_threshold: 100,
+                beam_width: 8, step_budget: 100_000,
+            };
+
+            let r_exact = normalize(&poset, &exact_cfg);
+            let r_greedy = normalize(&poset, &greedy_cfg);
+            let r_beam = normalize(&poset, &beam_cfg);
+
+            // All must be valid linear extensions
+            prop_assert!(is_valid_linear_extension(&poset, &r_exact.schedule));
+            prop_assert!(is_valid_linear_extension(&poset, &r_greedy.schedule));
+            prop_assert!(is_valid_linear_extension(&poset, &r_beam.schedule));
+
+            // All must include every event exactly once
+            prop_assert_eq!(r_exact.schedule.len(), events.len());
+            prop_assert_eq!(r_greedy.schedule.len(), events.len());
+            prop_assert_eq!(r_beam.schedule.len(), events.len());
+
+            // Exact solver is optimal: cost <= all heuristics
+            prop_assert!(
+                r_exact.switch_count <= r_greedy.switch_count,
+                "exact {} > greedy {}", r_exact.switch_count, r_greedy.switch_count,
+            );
+            prop_assert!(
+                r_exact.switch_count <= r_beam.switch_count,
+                "exact {} > beam {}", r_exact.switch_count, r_beam.switch_count,
+            );
+        }
+
+        /// Optimality: for tiny traces, exact solver matches brute force.
+        #[test]
+        fn prop_optimality_small(events in arb_trace(8, 3)) {
+            let poset = make_poset(&events);
+            let config = GeodesicConfig {
+                exact_threshold: 10,
+                beam_threshold: 0,
+                beam_width: 1,
+                step_budget: 500_000,
+            };
+            let result = normalize(&poset, &config);
+            let brute = brute_force_min_switches(&poset);
+            prop_assert_eq!(
+                result.switch_count, brute,
+                "exact {} != brute {} for {} events",
+                result.switch_count, brute, events.len(),
+            );
+        }
+
+        /// Regression: geodesic cost is never worse than Foata-flatten cost.
+        #[test]
+        fn prop_geodesic_leq_foata(events in arb_trace(15, 4)) {
+            let poset = make_poset(&events);
+            let config = GeodesicConfig {
+                exact_threshold: 15,
+                beam_threshold: 0,
+                beam_width: 1,
+                step_budget: 200_000,
+            };
+            let result = normalize(&poset, &config);
+            let foata_cost = foata_flatten_switch_cost(&events);
+            prop_assert!(
+                result.switch_count <= foata_cost,
+                "geodesic {} > foata {} for {} events",
+                result.switch_count, foata_cost, events.len(),
+            );
+        }
+    }
 }

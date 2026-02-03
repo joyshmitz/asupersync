@@ -715,32 +715,39 @@ fn spawn_lab_race(
             return child_handles[0].join(&cx).await.unwrap_or_default();
         }
 
-        // Poll children until one completes.
+        // Race children using waker-based select: create JoinFutures that
+        // register the race driver's waker on each child's oneshot receiver.
+        // When any child completes, the oneshot wakes the race driver.
+        // This avoids busy-poll starvation where the deterministic scheduler
+        // might consistently pick the race driver over children.
         let winner_idx;
         let winner_result;
-        loop {
-            let mut found = None;
-            for (i, handle) in child_handles.iter().enumerate() {
-                if let Ok(Some(result)) = handle.try_join() {
-                    found = Some((i, result));
-                    break;
+        {
+            let mut join_futs: Vec<_> = child_handles
+                .iter()
+                .map(|h| Some(h.join_with_drop_reason(&cx, CancelReason::race_loser())))
+                .collect();
+
+            let (idx, result) = std::future::poll_fn(|task_cx| {
+                for (i, fut_opt) in join_futs.iter_mut().enumerate() {
+                    if let Some(fut) = fut_opt {
+                        if let std::task::Poll::Ready(result) =
+                            std::pin::Pin::new(fut).poll(task_cx)
+                        {
+                            *fut_opt = None;
+                            return std::task::Poll::Ready((i, result.unwrap_or_default()));
+                        }
+                    }
                 }
-            }
-            if let Some((idx, result)) = found {
-                winner_idx = idx;
-                winner_result = result;
-                break;
-            }
-            // Yield to let children make progress.
-            lab_yield_once().await;
+                std::task::Poll::Pending
+            })
+            .await;
+            winner_idx = idx;
+            winner_result = result;
+            // Dropping remaining JoinFutures aborts losers via drop handler.
         }
 
-        // Cancel and drain losers.
-        for (j, handle) in child_handles.iter().enumerate() {
-            if j != winner_idx {
-                handle.abort_with_reason(CancelReason::race_loser());
-            }
-        }
+        // Drain losers: wait for each non-winner to complete after cancel.
         for (j, handle) in child_handles.iter().enumerate() {
             if j != winner_idx {
                 let _ = handle.join(&cx).await;
@@ -1399,14 +1406,12 @@ mod tests {
                 r1.fixture_name
             );
             assert_eq!(
-                r1.original_trace_fingerprint,
-                r2.original_trace_fingerprint,
+                r1.original_trace_fingerprint, r2.original_trace_fingerprint,
                 "fixture {}: original trace fingerprint differs across runs",
                 r1.fixture_name
             );
             assert_eq!(
-                r1.optimized_trace_fingerprint,
-                r2.optimized_trace_fingerprint,
+                r1.optimized_trace_fingerprint, r2.optimized_trace_fingerprint,
                 "fixture {}: optimized trace fingerprint differs across runs",
                 r1.fixture_name
             );
@@ -1636,9 +1641,7 @@ mod tests {
 
         for seed in &ORACLE_SEEDS {
             let result = execute_plan_in_lab(*seed, &dag);
-            let is_join_winner = result.len() == 2
-                && result.contains("a")
-                && result.contains("b");
+            let is_join_winner = result.len() == 2 && result.contains("a") && result.contains("b");
             let is_leaf_winner = result.len() == 1 && result.contains("c");
             assert!(
                 is_join_winner || is_leaf_winner,
