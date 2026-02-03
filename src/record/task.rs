@@ -229,6 +229,14 @@ pub struct TaskRecord {
     pub cached_cancel_waker: Option<(Waker, u8)>,
     /// Cancellation epoch (increments on first cancel request).
     pub cancel_epoch: u64,
+    // ── Intrusive queue fields (cache-local queues) ──────────────────────
+    /// Next task in the intrusive queue (None if tail or not in queue).
+    pub next_in_queue: Option<TaskId>,
+    /// Previous task in the intrusive queue (None if head or not in queue).
+    pub prev_in_queue: Option<TaskId>,
+    /// Queue membership tag: 0 = not in any queue, 1+ = queue identifier.
+    /// Used to prevent double-enqueue and enable O(1) membership check.
+    pub queue_tag: u8,
 }
 
 impl TaskRecord {
@@ -258,6 +266,9 @@ impl TaskRecord {
             cached_waker: None,
             cached_cancel_waker: None,
             cancel_epoch: 0,
+            next_in_queue: None,
+            prev_in_queue: None,
+            queue_tag: 0,
         }
     }
 
@@ -714,6 +725,38 @@ impl TaskRecord {
             | TaskState::Finalizing { cleanup_budget, .. } => Some(*cleanup_budget),
             _ => None,
         }
+    }
+
+    // ── Intrusive queue helpers ──────────────────────────────────────────
+
+    /// Returns true if this task is currently in any intrusive queue.
+    #[must_use]
+    #[inline]
+    pub const fn is_in_queue(&self) -> bool {
+        self.queue_tag != 0
+    }
+
+    /// Returns true if this task is in the specified queue.
+    #[must_use]
+    #[inline]
+    pub const fn is_in_queue_tag(&self, tag: u8) -> bool {
+        self.queue_tag == tag
+    }
+
+    /// Sets the queue links and tag when inserting into a queue.
+    #[inline]
+    pub fn set_queue_links(&mut self, prev: Option<TaskId>, next: Option<TaskId>, tag: u8) {
+        self.prev_in_queue = prev;
+        self.next_in_queue = next;
+        self.queue_tag = tag;
+    }
+
+    /// Clears the queue links and tag when removing from a queue.
+    #[inline]
+    pub fn clear_queue_links(&mut self) {
+        self.prev_in_queue = None;
+        self.next_in_queue = None;
+        self.queue_tag = 0;
     }
 
     /// Decrements the mask depth, returning the new value.

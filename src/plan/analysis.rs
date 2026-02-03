@@ -265,16 +265,15 @@ impl ObligationFlow {
     pub fn race(mut self, other: Self) -> Self {
         // Both sets of obligations are started, but only winner completes.
         // Loser's obligations become leak candidates.
-        self.reserves.extend(other.reserves.iter().cloned());
-        self.must_resolve.extend(other.must_resolve.iter().cloned());
+        let other_all_paths_resolve = other.all_paths_resolve;
+        self.reserves.extend(other.reserves);
+        self.must_resolve.extend(other.must_resolve);
         // In a race, the loser's obligations may leak unless explicitly drained.
-        self.leak_on_cancel
-            .extend(other.leak_on_cancel.iter().cloned());
-        self.leak_on_cancel
-            .extend(self.must_resolve.iter().cloned());
+        self.leak_on_cancel.extend(other.leak_on_cancel);
+        self.leak_on_cancel.extend(self.must_resolve.iter().cloned());
         // Conservative: can't guarantee all paths resolve in a race unless
         // both children guarantee it and are properly drained.
-        self.all_paths_resolve = self.all_paths_resolve && other.all_paths_resolve;
+        self.all_paths_resolve = self.all_paths_resolve && other_all_paths_resolve;
         self.dedupe();
         self
     }
