@@ -103,6 +103,22 @@ User Future
 - No obligation leaks: permits/acks/leases must resolve.
 - No ambient authority: effects flow through `Cx` and explicit capabilities.
 
+### Obligation leak escalation policy
+
+Obligation leaks are **always** marked as leaked, traced, and counted in metrics.
+The escalation policy controls what happens after detection:
+
+- **Lab runtime (default):** `LabConfig::panic_on_leak(true)` maps to
+  `ObligationLeakResponse::Panic` — fail fast so tests surface leaks deterministically.
+- **Production runtime (default):** `RuntimeConfig.obligation_leak_response = Log` —
+  log the leak, emit trace + metrics, and continue (recovery by resolving the leak
+  record so regions can quiesce).
+- **Recovery-only mode:** `ObligationLeakResponse::Silent` — keep trace + metrics,
+  suppress error logs for noisy environments.
+
+Override via `RuntimeBuilder::obligation_leak_response(...)` or
+`LabConfig::panic_on_leak(false)` when you need to adjust strictness.
+
 ### Module map (Phase 0/1)
 
 - `cx/`: capability context and `Scope` API (entry point for effects)
