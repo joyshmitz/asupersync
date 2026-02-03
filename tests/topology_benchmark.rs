@@ -13,7 +13,7 @@
 mod common;
 use common::*;
 
-use asupersync::lab::explorer::{ExplorerConfig, ScheduleExplorer};
+use asupersync::lab::explorer::{ExplorerConfig, ScheduleExplorer, TopologyExplorer};
 use asupersync::lab::LabRuntime;
 use asupersync::types::Budget;
 use std::sync::atomic::{AtomicUsize, Ordering};
@@ -266,6 +266,221 @@ fn simple_concurrent_scenario(runtime: &mut LabRuntime) {
 }
 
 // ---------------------------------------------------------------------------
+// Bug Shape 4: Dining Philosophers (4 philosophers)
+// ---------------------------------------------------------------------------
+//
+// Four philosophers, four forks. Each philosopher tries to pick up left fork,
+// then right fork. Circular dependency creates deadlock potential.
+// More tasks = richer schedule space where topology-guided exploration excels.
+
+/// Fork for dining philosophers.
+struct Fork {
+    holder: AtomicUsize,
+}
+
+impl Fork {
+    fn new(_id: usize) -> Self {
+        Self {
+            holder: AtomicUsize::new(0),
+        }
+    }
+
+    fn try_pick_up(&self, philosopher_id: usize) -> bool {
+        self.holder
+            .compare_exchange(0, philosopher_id, Ordering::SeqCst, Ordering::SeqCst)
+            .is_ok()
+    }
+
+    fn put_down(&self, philosopher_id: usize) {
+        let _ = self
+            .holder
+            .compare_exchange(philosopher_id, 0, Ordering::SeqCst, Ordering::SeqCst);
+    }
+
+    fn is_held(&self) -> bool {
+        self.holder.load(Ordering::SeqCst) != 0
+    }
+}
+
+/// Run dining philosophers scenario with N philosophers.
+/// Returns the number of philosophers that deadlocked (couldn't get both forks).
+fn run_dining_philosophers(runtime: &mut LabRuntime, num_philosophers: usize) -> usize {
+    let forks: Vec<Arc<Fork>> = (0..num_philosophers)
+        .map(|i| Arc::new(Fork::new(i)))
+        .collect();
+    let deadlock_count = Arc::new(AtomicUsize::new(0));
+
+    let region = runtime.state.create_root_region(Budget::INFINITE);
+
+    for phil_id in 1..=num_philosophers {
+        let left_fork = forks[phil_id - 1].clone();
+        let right_fork = forks[phil_id % num_philosophers].clone();
+        let deadlocks = deadlock_count.clone();
+
+        let (task, _) = runtime
+            .state
+            .create_task(region, Budget::INFINITE, async move {
+                // Try to pick up left fork
+                let mut left_attempts = 0;
+                while !left_fork.try_pick_up(phil_id) {
+                    left_attempts += 1;
+                    if left_attempts > 50 {
+                        // Couldn't get left fork, give up
+                        return;
+                    }
+                }
+
+                // Have left fork, try right fork
+                let mut right_attempts = 0;
+                while !right_fork.try_pick_up(phil_id) {
+                    right_attempts += 1;
+                    if right_attempts > 50 {
+                        // Deadlock: have left but can't get right
+                        deadlocks.fetch_add(1, Ordering::SeqCst);
+                        // Put down left fork to allow progress
+                        left_fork.put_down(phil_id);
+                        return;
+                    }
+                }
+
+                // Success: have both forks, eat, then put them down
+                right_fork.put_down(phil_id);
+                left_fork.put_down(phil_id);
+            })
+            .expect("philosopher task");
+
+        runtime.scheduler.lock().unwrap().schedule(task, 0);
+    }
+
+    runtime.run_until_quiescent();
+
+    // Count forks still held as additional deadlock evidence
+    let forks_held: usize = forks.iter().filter(|f| f.is_held()).count();
+    deadlock_count.load(Ordering::SeqCst) + usize::from(forks_held > 0)
+}
+
+// ---------------------------------------------------------------------------
+// Bug Shape 5: Producer-Consumer with Multiple Workers
+// ---------------------------------------------------------------------------
+//
+// Multiple producers and consumers sharing a bounded buffer.
+// Race conditions can cause lost items or buffer overflows.
+
+struct BoundedBuffer {
+    items: AtomicUsize,
+    capacity: usize,
+    produced: AtomicUsize,
+    consumed: AtomicUsize,
+}
+
+impl BoundedBuffer {
+    fn new(capacity: usize) -> Self {
+        Self {
+            items: AtomicUsize::new(0),
+            capacity,
+            produced: AtomicUsize::new(0),
+            consumed: AtomicUsize::new(0),
+        }
+    }
+
+    fn try_produce(&self) -> bool {
+        let current = self.items.load(Ordering::SeqCst);
+        if current >= self.capacity {
+            return false;
+        }
+        // Non-atomic increment creates a race window
+        if self
+            .items
+            .compare_exchange(current, current + 1, Ordering::SeqCst, Ordering::SeqCst)
+            .is_ok()
+        {
+            self.produced.fetch_add(1, Ordering::SeqCst);
+            true
+        } else {
+            false
+        }
+    }
+
+    fn try_consume(&self) -> bool {
+        let current = self.items.load(Ordering::SeqCst);
+        if current == 0 {
+            return false;
+        }
+        if self
+            .items
+            .compare_exchange(current, current - 1, Ordering::SeqCst, Ordering::SeqCst)
+            .is_ok()
+        {
+            self.consumed.fetch_add(1, Ordering::SeqCst);
+            true
+        } else {
+            false
+        }
+    }
+}
+
+/// Run producer-consumer scenario.
+/// Returns true if a consistency violation was detected (produced != consumed + items).
+fn run_producer_consumer(
+    runtime: &mut LabRuntime,
+    num_producers: usize,
+    num_consumers: usize,
+    items_per_task: usize,
+) -> bool {
+    let buffer = Arc::new(BoundedBuffer::new(4));
+    let region = runtime.state.create_root_region(Budget::INFINITE);
+
+    // Spawn producers
+    for _ in 0..num_producers {
+        let buf = buffer.clone();
+        let (task, _) = runtime
+            .state
+            .create_task(region, Budget::INFINITE, async move {
+                for _ in 0..items_per_task {
+                    let mut attempts = 0;
+                    while !buf.try_produce() {
+                        attempts += 1;
+                        if attempts > 100 {
+                            break;
+                        }
+                    }
+                }
+            })
+            .expect("producer");
+        runtime.scheduler.lock().unwrap().schedule(task, 0);
+    }
+
+    // Spawn consumers
+    for _ in 0..num_consumers {
+        let buf = buffer.clone();
+        let (task, _) = runtime
+            .state
+            .create_task(region, Budget::INFINITE, async move {
+                for _ in 0..items_per_task {
+                    let mut attempts = 0;
+                    while !buf.try_consume() {
+                        attempts += 1;
+                        if attempts > 100 {
+                            break;
+                        }
+                    }
+                }
+            })
+            .expect("consumer");
+        runtime.scheduler.lock().unwrap().schedule(task, 0);
+    }
+
+    runtime.run_until_quiescent();
+
+    // Check consistency: produced should equal consumed + items
+    let produced = buffer.produced.load(Ordering::SeqCst);
+    let consumed = buffer.consumed.load(Ordering::SeqCst);
+    let items = buffer.items.load(Ordering::SeqCst);
+
+    produced != consumed + items
+}
+
+// ---------------------------------------------------------------------------
 // Benchmark: Deadlock Square - Topology vs Baseline
 // ---------------------------------------------------------------------------
 
@@ -303,10 +518,10 @@ fn benchmark_deadlock_square_topology_vs_baseline() {
     // --- Topology-prioritized exploration ---
     test_section!("topology exploration");
 
-    // TopologyExplorer uses the same config but prioritizes by H1 persistence
-    // For this benchmark, we measure equivalence class discovery rate
+    // TopologyExplorer uses H1 persistence to prioritize seeds that reveal
+    // novel topological structure in the schedule space
     let topo_config = ExplorerConfig::new(BASE_SEED, MAX_RUNS).worker_count(1);
-    let mut topo_explorer = ScheduleExplorer::new(topo_config); // Using ScheduleExplorer for now
+    let mut topo_explorer = TopologyExplorer::new(topo_config);
 
     let topo_report = topo_explorer.explore(|runtime| {
         run_deadlock_square(runtime);
@@ -382,7 +597,7 @@ fn benchmark_lost_wakeup_topology_vs_baseline() {
     // --- Topology-prioritized exploration ---
     test_section!("topology exploration");
     let topo_config = ExplorerConfig::new(BASE_SEED, MAX_RUNS).worker_count(1);
-    let mut topo_explorer = ScheduleExplorer::new(topo_config);
+    let mut topo_explorer = TopologyExplorer::new(topo_config);
 
     let topo_report = topo_explorer.explore(|runtime| {
         run_lost_wakeup_scenario(runtime);
@@ -500,5 +715,245 @@ fn compare_coverage_efficiency() {
         "compare_coverage_efficiency",
         baseline_efficiency = baseline_efficiency,
         topo_efficiency = topo_efficiency
+    );
+}
+
+// ---------------------------------------------------------------------------
+// Benchmark: Dining Philosophers (4 tasks) - Topology vs Baseline
+// ---------------------------------------------------------------------------
+//
+// This benchmark uses 4 philosophers creating a richer schedule space.
+// The topology-guided explorer should discover more equivalence classes
+// more efficiently due to the larger search space.
+
+#[test]
+fn benchmark_dining_philosophers_topology_vs_baseline() {
+    const MAX_RUNS: usize = 100;
+    const BASE_SEED: u64 = 5000;
+    const NUM_PHILOSOPHERS: usize = 4;
+
+    init_test_logging();
+    test_phase!("benchmark_dining_philosophers_topology_vs_baseline");
+
+    // --- Baseline exploration ---
+    test_section!("baseline exploration (4 philosophers)");
+    let baseline_config = ExplorerConfig::new(BASE_SEED, MAX_RUNS).worker_count(1);
+    let mut baseline_explorer = ScheduleExplorer::new(baseline_config);
+
+    let baseline_deadlocks = AtomicUsize::new(0);
+    let baseline_report = baseline_explorer.explore(|runtime| {
+        let deadlocks = run_dining_philosophers(runtime, NUM_PHILOSOPHERS);
+        if deadlocks > 0 {
+            baseline_deadlocks.fetch_add(1, Ordering::Relaxed);
+        }
+    });
+
+    let baseline_classes = baseline_report.unique_classes;
+    let baseline_deadlocks = baseline_deadlocks.load(Ordering::Relaxed);
+    tracing::info!(
+        classes = baseline_classes,
+        total_runs = baseline_report.total_runs,
+        deadlock_runs = baseline_deadlocks,
+        "baseline dining philosophers results"
+    );
+
+    // --- Topology-prioritized exploration ---
+    test_section!("topology exploration (4 philosophers)");
+    let topo_config = ExplorerConfig::new(BASE_SEED, MAX_RUNS).worker_count(1);
+    let mut topo_explorer = TopologyExplorer::new(topo_config);
+
+    let topo_deadlocks = AtomicUsize::new(0);
+    let topo_report = topo_explorer.explore(|runtime| {
+        let deadlocks = run_dining_philosophers(runtime, NUM_PHILOSOPHERS);
+        if deadlocks > 0 {
+            topo_deadlocks.fetch_add(1, Ordering::Relaxed);
+        }
+    });
+
+    let topo_classes = topo_report.unique_classes;
+    let topo_deadlocks = topo_deadlocks.load(Ordering::Relaxed);
+    tracing::info!(
+        classes = topo_classes,
+        total_runs = topo_report.total_runs,
+        deadlock_runs = topo_deadlocks,
+        "topology dining philosophers results"
+    );
+
+    // --- Compare ---
+    test_section!("comparison");
+
+    // With more tasks, topology-guided should discover more structure
+    tracing::info!(
+        baseline_classes = baseline_classes,
+        topo_classes = topo_classes,
+        baseline_deadlocks = baseline_deadlocks,
+        topo_deadlocks = topo_deadlocks,
+        "dining philosophers benchmark comparison"
+    );
+
+    // Both should find at least 1 equivalence class
+    assert!(
+        baseline_classes >= 1,
+        "baseline should find at least 1 equivalence class"
+    );
+    assert!(
+        topo_classes >= 1,
+        "topology should find at least 1 equivalence class"
+    );
+
+    test_complete!(
+        "benchmark_dining_philosophers_topology_vs_baseline",
+        baseline_classes = baseline_classes,
+        topo_classes = topo_classes
+    );
+}
+
+// ---------------------------------------------------------------------------
+// Benchmark: Producer-Consumer (6 tasks) - Topology vs Baseline
+// ---------------------------------------------------------------------------
+//
+// 3 producers + 3 consumers creates 6 concurrent tasks with complex
+// interleaving patterns around a shared bounded buffer.
+
+#[test]
+fn benchmark_producer_consumer_topology_vs_baseline() {
+    const MAX_RUNS: usize = 80;
+    const BASE_SEED: u64 = 8000;
+    const NUM_PRODUCERS: usize = 3;
+    const NUM_CONSUMERS: usize = 3;
+    const ITEMS_PER_TASK: usize = 5;
+
+    init_test_logging();
+    test_phase!("benchmark_producer_consumer_topology_vs_baseline");
+
+    // --- Baseline exploration ---
+    test_section!("baseline exploration (3 producers, 3 consumers)");
+    let baseline_config = ExplorerConfig::new(BASE_SEED, MAX_RUNS).worker_count(1);
+    let mut baseline_explorer = ScheduleExplorer::new(baseline_config);
+
+    let baseline_violations = AtomicUsize::new(0);
+    let baseline_report = baseline_explorer.explore(|runtime| {
+        if run_producer_consumer(runtime, NUM_PRODUCERS, NUM_CONSUMERS, ITEMS_PER_TASK) {
+            baseline_violations.fetch_add(1, Ordering::Relaxed);
+        }
+    });
+
+    let baseline_classes = baseline_report.unique_classes;
+    let baseline_violations = baseline_violations.load(Ordering::Relaxed);
+    tracing::info!(
+        classes = baseline_classes,
+        total_runs = baseline_report.total_runs,
+        consistency_violations = baseline_violations,
+        "baseline producer-consumer results"
+    );
+
+    // --- Topology-prioritized exploration ---
+    test_section!("topology exploration (3 producers, 3 consumers)");
+    let topo_config = ExplorerConfig::new(BASE_SEED, MAX_RUNS).worker_count(1);
+    let mut topo_explorer = TopologyExplorer::new(topo_config);
+
+    let topo_violations = AtomicUsize::new(0);
+    let topo_report = topo_explorer.explore(|runtime| {
+        if run_producer_consumer(runtime, NUM_PRODUCERS, NUM_CONSUMERS, ITEMS_PER_TASK) {
+            topo_violations.fetch_add(1, Ordering::Relaxed);
+        }
+    });
+
+    let topo_classes = topo_report.unique_classes;
+    let topo_violations = topo_violations.load(Ordering::Relaxed);
+    tracing::info!(
+        classes = topo_classes,
+        total_runs = topo_report.total_runs,
+        consistency_violations = topo_violations,
+        "topology producer-consumer results"
+    );
+
+    // --- Compare ---
+    test_section!("comparison");
+
+    tracing::info!(
+        baseline_classes = baseline_classes,
+        topo_classes = topo_classes,
+        baseline_violations = baseline_violations,
+        topo_violations = topo_violations,
+        "producer-consumer benchmark comparison"
+    );
+
+    // Both should find at least 1 equivalence class
+    assert!(
+        baseline_classes >= 1,
+        "baseline should find at least 1 equivalence class"
+    );
+    assert!(
+        topo_classes >= 1,
+        "topology should find at least 1 equivalence class"
+    );
+
+    test_complete!(
+        "benchmark_producer_consumer_topology_vs_baseline",
+        baseline_classes = baseline_classes,
+        topo_classes = topo_classes
+    );
+}
+
+// ---------------------------------------------------------------------------
+// Benchmark: Combined Metric - Equivalence Classes per Run
+// ---------------------------------------------------------------------------
+//
+// This test measures "discovery efficiency": how many unique equivalence
+// classes are found per exploration run. Topology-guided exploration should
+// achieve higher efficiency by prioritizing novel schedules.
+
+#[test]
+#[allow(clippy::cast_precision_loss)]
+fn benchmark_discovery_efficiency() {
+    const MAX_RUNS: usize = 50;
+    const BASE_SEED: u64 = 10000;
+
+    init_test_logging();
+    test_phase!("benchmark_discovery_efficiency");
+
+    // Use dining philosophers as the test scenario (complex interleaving)
+    let baseline_config = ExplorerConfig::new(BASE_SEED, MAX_RUNS).worker_count(1);
+    let mut baseline = ScheduleExplorer::new(baseline_config);
+    let baseline_report = baseline.explore(|runtime| {
+        run_dining_philosophers(runtime, 4);
+    });
+
+    let topo_config = ExplorerConfig::new(BASE_SEED, MAX_RUNS).worker_count(1);
+    let mut topo = TopologyExplorer::new(topo_config);
+    let topo_report = topo.explore(|runtime| {
+        run_dining_philosophers(runtime, 4);
+    });
+
+    // Discovery efficiency = unique classes / total runs
+    let baseline_efficiency =
+        baseline_report.unique_classes as f64 / baseline_report.total_runs.max(1) as f64;
+    let topo_efficiency = topo_report.unique_classes as f64 / topo_report.total_runs.max(1) as f64;
+
+    tracing::info!(
+        baseline_classes = baseline_report.unique_classes,
+        baseline_runs = baseline_report.total_runs,
+        baseline_efficiency = %format!("{:.2}%", baseline_efficiency * 100.0),
+        topo_classes = topo_report.unique_classes,
+        topo_runs = topo_report.total_runs,
+        topo_efficiency = %format!("{:.2}%", topo_efficiency * 100.0),
+        "discovery efficiency comparison"
+    );
+
+    // Both should find classes
+    assert!(
+        baseline_report.unique_classes >= 1,
+        "baseline should discover at least 1 class"
+    );
+    assert!(
+        topo_report.unique_classes >= 1,
+        "topology should discover at least 1 class"
+    );
+
+    test_complete!(
+        "benchmark_discovery_efficiency",
+        baseline_eff = format!("{:.2}%", baseline_efficiency * 100.0),
+        topo_eff = format!("{:.2}%", topo_efficiency * 100.0)
     );
 }
