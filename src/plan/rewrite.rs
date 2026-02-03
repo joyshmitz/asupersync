@@ -241,7 +241,7 @@ impl PlanDag {
         policy: RewritePolicy,
         rule: RewriteRule,
     ) -> Option<RewriteStep> {
-        let mut scratch = self.clone();
+        let mut scratch = (*self).clone();
         let step = scratch.apply_rule_unchecked(id, policy, rule)?;
         let checker = SideConditionChecker::new(&scratch);
         if check_side_conditions(rule, policy, &checker, &scratch, step.before, step.after).is_err()
