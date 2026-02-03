@@ -159,30 +159,41 @@ impl<T> OnceCell<T> {
             return self.value.get().expect("value should be set");
         }
 
-        // Try to become the initializer.
-        match self
-            .state
-            .compare_exchange(UNINIT, INITIALIZING, Ordering::AcqRel, Ordering::Acquire)
-        {
-            Ok(_) => {
-                // We are the initializer.
-                let value = f();
-                let _ = self.value.set(value);
-                self.state.store(INITIALIZED, Ordering::Release);
-                self.cvar.notify_all();
-                self.wake_all();
-                self.value.get().expect("just initialized")
+        // Wrap in Option so we can consume the FnOnce at most once inside a
+        // retry loop (needed when a prior initializer is cancelled).
+        let mut init_fn = Some(f);
+
+        loop {
+            match self
+                .state
+                .compare_exchange(UNINIT, INITIALIZING, Ordering::AcqRel, Ordering::Acquire)
+            {
+                Ok(_) => {
+                    // We are the initializer.
+                    let f = init_fn.take().expect("init closure available");
+                    let value = f();
+                    let _ = self.value.set(value);
+                    self.state.store(INITIALIZED, Ordering::Release);
+                    self.cvar.notify_all();
+                    self.wake_all();
+                    return self.value.get().expect("just initialized");
+                }
+                Err(INITIALIZED) => {
+                    return self.value.get().expect("already initialized");
+                }
+                Err(_) => {
+                    // Another thread is initializing. Wait for it.
+                    self.wait_for_init_blocking();
+                    if self.is_initialized() {
+                        return self
+                            .value
+                            .get()
+                            .expect("should be initialized after wait");
+                    }
+                    // The initializer was cancelled — state is back to UNINIT.
+                    // Loop to retry the CAS and potentially become the initializer.
+                }
             }
-            Err(INITIALIZING) => {
-                // Another thread is initializing. Wait for it.
-                self.wait_for_init_blocking();
-                self.value.get().expect("should be initialized after wait")
-            }
-            Err(INITIALIZED) => {
-                // Already initialized (race).
-                self.value.get().expect("already initialized")
-            }
-            Err(_) => unreachable!("invalid state"),
         }
     }
 
@@ -207,44 +218,53 @@ impl<T> OnceCell<T> {
             return self.value.get().expect("value should be set");
         }
 
-        // Try to become the initializer.
-        match self
-            .state
-            .compare_exchange(UNINIT, INITIALIZING, Ordering::AcqRel, Ordering::Acquire)
-        {
-            Ok(_) => {
-                // We are the initializer.
-                // Create a guard to reset state if we're cancelled.
-                let guard = InitGuard {
-                    state: &self.state,
-                    completed: false,
-                };
+        // Wrap in Option so we can consume the FnOnce at most once inside a
+        // retry loop (needed when a prior initializer is cancelled).
+        let mut init_fn = Some(f);
 
-                let value = f().await;
+        loop {
+            match self
+                .state
+                .compare_exchange(UNINIT, INITIALIZING, Ordering::AcqRel, Ordering::Acquire)
+            {
+                Ok(_) => {
+                    // We are the initializer.
+                    let f = init_fn.take().expect("init closure available");
+                    let guard = InitGuard {
+                        cell: self,
+                        completed: false,
+                    };
 
-                // Store value and mark complete.
-                let _ = self.value.set(value);
-                self.state.store(INITIALIZED, Ordering::Release);
-                std::mem::forget(guard); // Don't reset state.
+                    let value = f().await;
 
-                self.cvar.notify_all();
-                self.wake_all();
-                self.value.get().expect("just initialized")
-            }
-            Err(INITIALIZING) => {
-                // Another task is initializing. Wait for it.
-                WaitInit {
-                    cell: self,
-                    waiter: None,
+                    // Store value and mark complete.
+                    let _ = self.value.set(value);
+                    self.state.store(INITIALIZED, Ordering::Release);
+                    std::mem::forget(guard); // Don't reset state.
+
+                    self.cvar.notify_all();
+                    self.wake_all();
+                    return self.value.get().expect("just initialized");
                 }
-                .await;
-                self.value.get().expect("should be initialized after wait")
+                Err(INITIALIZED) => {
+                    return self.value.get().expect("already initialized");
+                }
+                Err(_) => {
+                    // Another task is initializing. Wait for it.
+                    WaitInit {
+                        cell: self,
+                        waiter: None,
+                    }
+                    .await;
+
+                    // Check whether initialization actually succeeded.
+                    if self.is_initialized() {
+                        return self.value.get().expect("should be initialized after wait");
+                    }
+                    // The initializer was cancelled — state is back to UNINIT.
+                    // Loop to retry the CAS and potentially become the initializer.
+                }
             }
-            Err(INITIALIZED) => {
-                // Already initialized (race).
-                self.value.get().expect("already initialized")
-            }
-            Err(_) => unreachable!("invalid state"),
         }
     }
 
@@ -277,7 +297,7 @@ impl<T> OnceCell<T> {
                 // We are the initializer.
                 // Create a guard to reset state if we're cancelled or fail.
                 let guard = InitGuard {
-                    state: &self.state,
+                    cell: self,
                     completed: false,
                 };
 
@@ -293,9 +313,8 @@ impl<T> OnceCell<T> {
                         Ok(self.value.get().expect("just initialized"))
                     }
                     Err(e) => {
-                        // Let guard reset state back to UNINIT.
+                        // Guard resets state to UNINIT and wakes waiters on drop.
                         drop(guard);
-                        self.wake_all(); // Wake waiters to retry.
                         Err(e)
                     }
                 }
@@ -454,17 +473,21 @@ impl<T> From<T> for OnceCell<T> {
     }
 }
 
-/// Guard that resets state to UNINIT if initialization is cancelled.
-struct InitGuard<'a> {
-    state: &'a AtomicU8,
+/// Guard that resets state to UNINIT and wakes waiters if initialization is
+/// cancelled (i.e. the initializing future is dropped before completion).
+struct InitGuard<'a, T> {
+    cell: &'a OnceCell<T>,
     completed: bool,
 }
 
-impl Drop for InitGuard<'_> {
+impl<T> Drop for InitGuard<'_, T> {
     fn drop(&mut self) {
         if !self.completed {
             // Reset state to allow another attempt.
-            self.state.store(UNINIT, Ordering::Release);
+            self.cell.state.store(UNINIT, Ordering::Release);
+            // Wake all waiters so they can retry instead of hanging forever.
+            self.cell.cvar.notify_all();
+            self.cell.wake_all();
         }
     }
 }
