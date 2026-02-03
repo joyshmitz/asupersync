@@ -56,6 +56,14 @@
 //!     obligation_age_sum_ns: 150,
 //!     draining_regions: 1,
 //!     deadline_pressure: 0.0,
+//!     pending_send_permits: 3,
+//!     pending_acks: 0,
+//!     pending_leases: 0,
+//!     pending_io_ops: 0,
+//!     cancel_requested_tasks: 0,
+//!     cancelling_tasks: 0,
+//!     finalizing_tasks: 0,
+//!     ready_queue_depth: 0,
 //! };
 //!
 //! let v = governor.compute_potential(&snapshot);
@@ -69,6 +77,14 @@
 //!     obligation_age_sum_ns: 50,
 //!     draining_regions: 0,
 //!     deadline_pressure: 0.0,
+//!     pending_send_permits: 1,
+//!     pending_acks: 0,
+//!     pending_leases: 0,
+//!     pending_io_ops: 0,
+//!     cancel_requested_tasks: 0,
+//!     cancelling_tasks: 0,
+//!     finalizing_tasks: 0,
+//!     ready_queue_depth: 0,
 //! };
 //!
 //! let v2 = governor.compute_potential(&snapshot2);
@@ -168,7 +184,7 @@ pub struct StateSnapshot {
     pub time: Time,
     /// Number of live (non-terminal) tasks.
     pub live_tasks: u32,
-    /// Number of pending (unresolved) obligations.
+    /// Number of pending (unresolved) obligations (total).
     pub pending_obligations: u32,
     /// Sum of ages (in nanoseconds) of all pending obligations.
     ///
@@ -181,6 +197,31 @@ pub struct StateSnapshot {
     /// Sum of `max(0, 1 - slack / D₀)` for each task with a deadline,
     /// where `slack = deadline - now` and `D₀` is a normalization constant.
     pub deadline_pressure: f64,
+
+    // -- Per-kind obligation breakdown (bd-3rih) --
+    /// Pending `SendPermit` obligations.
+    pub pending_send_permits: u32,
+    /// Pending `Ack` obligations.
+    pub pending_acks: u32,
+    /// Pending `Lease` obligations.
+    pub pending_leases: u32,
+    /// Pending `IoOp` obligations (in-flight I/O count).
+    pub pending_io_ops: u32,
+
+    // -- Cancellation phase counts (bd-3rih) --
+    /// Tasks in `CancelRequested` state (cancel signal sent, not yet acknowledged).
+    pub cancel_requested_tasks: u32,
+    /// Tasks in `Cancelling` state (running cleanup code).
+    pub cancelling_tasks: u32,
+    /// Tasks in `Finalizing` state (running finalizers).
+    pub finalizing_tasks: u32,
+
+    // -- Queue depth signals (bd-3rih) --
+    // These cannot be extracted from `RuntimeState` alone because the
+    // scheduler is a separate component. Callers set them after snapshot
+    // construction via `with_ready_queue_depth`, or leave them at zero.
+    /// Approximate number of tasks sitting in the ready queue.
+    pub ready_queue_depth: u32,
 }
 
 impl StateSnapshot {
@@ -192,6 +233,8 @@ impl StateSnapshot {
     /// - resilient: if a task's `CxInner` lock is poisoned, deadline contribution is skipped
     #[must_use]
     pub fn from_runtime_state(state: &crate::runtime::RuntimeState) -> Self {
+        use crate::record::obligation::ObligationKind;
+
         // Deadline pressure normalization constant D₀ (see module docs).
         // 1s is an intentionally "coarse" knob: pressure reflects tasks that are
         // within ~1s of their deadline (or overdue), not far-future deadlines.
@@ -199,7 +242,13 @@ impl StateSnapshot {
 
         let now = state.now;
 
+        // -- Task scan: one pass to collect live count, cancel-phase counts,
+        //    and deadline pressure. --
+
         let mut live_tasks: u32 = 0;
+        let mut cancel_requested_tasks: u32 = 0;
+        let mut cancelling_tasks: u32 = 0;
+        let mut finalizing_tasks: u32 = 0;
         let mut deadline_pressure = 0.0_f64;
 
         for (_, task) in state.tasks.iter() {
@@ -208,6 +257,21 @@ impl StateSnapshot {
             }
             live_tasks = live_tasks.saturating_add(1);
 
+            // Count cancellation phases.
+            match &task.state {
+                crate::record::task::TaskState::CancelRequested { .. } => {
+                    cancel_requested_tasks = cancel_requested_tasks.saturating_add(1);
+                }
+                crate::record::task::TaskState::Cancelling { .. } => {
+                    cancelling_tasks = cancelling_tasks.saturating_add(1);
+                }
+                crate::record::task::TaskState::Finalizing { .. } => {
+                    finalizing_tasks = finalizing_tasks.saturating_add(1);
+                }
+                _ => {}
+            }
+
+            // Deadline pressure contribution.
             let Some(cx_inner) = task.cx_inner.as_ref() else {
                 continue;
             };
@@ -230,8 +294,14 @@ impl StateSnapshot {
             }
         }
 
+        // -- Obligation scan: one pass to collect totals + per-kind breakdown. --
+
         let mut pending_obligations: u32 = 0;
         let mut obligation_age_sum_ns: u64 = 0;
+        let mut pending_send_permits: u32 = 0;
+        let mut pending_acks: u32 = 0;
+        let mut pending_leases: u32 = 0;
+        let mut pending_io_ops: u32 = 0;
 
         for (_, obligation) in state.obligations.iter() {
             if !obligation.is_pending() {
@@ -240,7 +310,24 @@ impl StateSnapshot {
             pending_obligations = pending_obligations.saturating_add(1);
             obligation_age_sum_ns =
                 obligation_age_sum_ns.saturating_add(now.duration_since(obligation.reserved_at));
+
+            match obligation.kind {
+                ObligationKind::SendPermit => {
+                    pending_send_permits = pending_send_permits.saturating_add(1);
+                }
+                ObligationKind::Ack => {
+                    pending_acks = pending_acks.saturating_add(1);
+                }
+                ObligationKind::Lease => {
+                    pending_leases = pending_leases.saturating_add(1);
+                }
+                ObligationKind::IoOp => {
+                    pending_io_ops = pending_io_ops.saturating_add(1);
+                }
+            }
         }
+
+        // -- Region scan: one pass for draining count. --
 
         let mut draining_regions: u32 = 0;
         for (_, region) in state.regions.iter() {
@@ -260,13 +347,44 @@ impl StateSnapshot {
             obligation_age_sum_ns,
             draining_regions,
             deadline_pressure,
+            pending_send_permits,
+            pending_acks,
+            pending_leases,
+            pending_io_ops,
+            cancel_requested_tasks,
+            cancelling_tasks,
+            finalizing_tasks,
+            ready_queue_depth: 0, // Set by caller via `with_ready_queue_depth`.
         }
     }
 
-    /// Returns true if the snapshot represents quiescent state.
+    /// Returns true if the snapshot represents quiescent state
+    /// (all activity metrics are zero, consistent with V(Σ) = 0).
     #[must_use]
     pub fn is_quiescent(&self) -> bool {
-        self.live_tasks == 0 && self.pending_obligations == 0 && self.draining_regions == 0
+        self.live_tasks == 0
+            && self.pending_obligations == 0
+            && self.draining_regions == 0
+            && self.deadline_pressure == 0.0
+    }
+
+    /// Sets the ready queue depth signal.
+    ///
+    /// This must be called separately because the scheduler is not accessible
+    /// from `RuntimeState` alone. Returns `self` for chaining.
+    #[must_use]
+    pub fn with_ready_queue_depth(mut self, depth: u32) -> Self {
+        self.ready_queue_depth = depth;
+        self
+    }
+
+    /// Total tasks in any cancellation phase
+    /// (`CancelRequested` + `Cancelling` + `Finalizing`).
+    #[must_use]
+    pub fn total_cancelling_tasks(&self) -> u32 {
+        self.cancel_requested_tasks
+            .saturating_add(self.cancelling_tasks)
+            .saturating_add(self.finalizing_tasks)
     }
 }
 
@@ -274,12 +392,21 @@ impl fmt::Display for StateSnapshot {
     fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
         write!(
             f,
-            "Σ(t={}, tasks={}, obligations={}, age_sum={}ns, draining={}, deadline_p={:.2})",
+            "Σ(t={}, tasks={}, obligations={}[sp={},ack={},lease={},io={}], \
+             age_sum={}ns, draining={}, cancel={}/{}/{}, queue={}, deadline_p={:.2})",
             self.time,
             self.live_tasks,
             self.pending_obligations,
+            self.pending_send_permits,
+            self.pending_acks,
+            self.pending_leases,
+            self.pending_io_ops,
             self.obligation_age_sum_ns,
             self.draining_regions,
+            self.cancel_requested_tasks,
+            self.cancelling_tasks,
+            self.finalizing_tasks,
+            self.ready_queue_depth,
             self.deadline_pressure,
         )
     }
@@ -617,6 +744,14 @@ mod tests {
             obligation_age_sum_ns: 0,
             draining_regions: 0,
             deadline_pressure: 0.0,
+            pending_send_permits: 0,
+            pending_acks: 0,
+            pending_leases: 0,
+            pending_io_ops: 0,
+            cancel_requested_tasks: 0,
+            cancelling_tasks: 0,
+            finalizing_tasks: 0,
+            ready_queue_depth: 0,
         }
     }
 
@@ -628,6 +763,14 @@ mod tests {
             obligation_age_sum_ns: age_ns,
             draining_regions: draining,
             deadline_pressure: 0.0,
+            pending_send_permits: obligations, // default: all send permits
+            pending_acks: 0,
+            pending_leases: 0,
+            pending_io_ops: 0,
+            cancel_requested_tasks: 0,
+            cancelling_tasks: 0,
+            finalizing_tasks: 0,
+            ready_queue_depth: 0,
         }
     }
 
@@ -673,6 +816,27 @@ mod tests {
             snap.draining_regions
         );
 
+        // Per-kind breakdown: the single obligation is a SendPermit.
+        crate::assert_with_log!(
+            snap.pending_send_permits == 1,
+            "pending_send_permits",
+            1,
+            snap.pending_send_permits
+        );
+        crate::assert_with_log!(snap.pending_acks == 0, "pending_acks", 0, snap.pending_acks);
+        crate::assert_with_log!(
+            snap.pending_leases == 0,
+            "pending_leases",
+            0,
+            snap.pending_leases
+        );
+        crate::assert_with_log!(
+            snap.pending_io_ops == 0,
+            "pending_io_ops",
+            0,
+            snap.pending_io_ops
+        );
+
         // Transition region into Draining and verify it contributes.
         {
             let region = state.region(root).expect("root region exists");
@@ -701,6 +865,12 @@ mod tests {
             "pending_obligations after commit",
             0,
             snap3.pending_obligations
+        );
+        crate::assert_with_log!(
+            snap3.pending_send_permits == 0,
+            "pending_send_permits after commit",
+            0,
+            snap3.pending_send_permits
         );
 
         crate::test_complete!("snapshot_from_runtime_counts_tasks_obligations_and_regions");
@@ -742,6 +912,82 @@ mod tests {
         );
 
         crate::test_complete!("snapshot_from_runtime_computes_deadline_pressure");
+    }
+
+    // ---- bd-3rih: extended snapshot fields -----------------------------------
+
+    #[test]
+    fn with_ready_queue_depth_sets_field() {
+        init_test("with_ready_queue_depth_sets_field");
+        let snap = quiescent_snapshot().with_ready_queue_depth(42);
+        crate::assert_with_log!(
+            snap.ready_queue_depth == 42,
+            "ready_queue_depth",
+            42,
+            snap.ready_queue_depth
+        );
+        crate::test_complete!("with_ready_queue_depth_sets_field");
+    }
+
+    #[test]
+    fn total_cancelling_tasks_sums_phases() {
+        init_test("total_cancelling_tasks_sums_phases");
+        let mut snap = quiescent_snapshot();
+        snap.cancel_requested_tasks = 3;
+        snap.cancelling_tasks = 2;
+        snap.finalizing_tasks = 1;
+        let total = snap.total_cancelling_tasks();
+        crate::assert_with_log!(total == 6, "total_cancelling", 6, total);
+        crate::test_complete!("total_cancelling_tasks_sums_phases");
+    }
+
+    #[test]
+    fn per_kind_obligation_breakdown_sums_to_total() {
+        init_test("per_kind_obligation_breakdown_sums_to_total");
+        let snap = StateSnapshot {
+            time: Time::ZERO,
+            live_tasks: 4,
+            pending_obligations: 7,
+            obligation_age_sum_ns: 0,
+            draining_regions: 0,
+            deadline_pressure: 0.0,
+            pending_send_permits: 2,
+            pending_acks: 1,
+            pending_leases: 3,
+            pending_io_ops: 1,
+            cancel_requested_tasks: 0,
+            cancelling_tasks: 0,
+            finalizing_tasks: 0,
+            ready_queue_depth: 0,
+        };
+        let sum = snap.pending_send_permits
+            + snap.pending_acks
+            + snap.pending_leases
+            + snap.pending_io_ops;
+        crate::assert_with_log!(
+            sum == snap.pending_obligations,
+            "per-kind sums to total",
+            snap.pending_obligations,
+            sum
+        );
+        crate::test_complete!("per_kind_obligation_breakdown_sums_to_total");
+    }
+
+    #[test]
+    fn display_includes_extended_fields() {
+        init_test("display_includes_extended_fields");
+        let mut snap = active_snapshot(3, 2, 100_000_000, 1);
+        snap.cancel_requested_tasks = 1;
+        snap.cancelling_tasks = 1;
+        snap.ready_queue_depth = 5;
+        let s = format!("{snap}");
+        let has_cancel = s.contains("cancel=1/1/0");
+        crate::assert_with_log!(has_cancel, "display shows cancel phases", true, has_cancel);
+        let has_queue = s.contains("queue=5");
+        crate::assert_with_log!(has_queue, "display shows queue depth", true, has_queue);
+        let has_kind = s.contains("sp=2");
+        crate::assert_with_log!(has_kind, "display shows per-kind", true, has_kind);
+        crate::test_complete!("display_includes_extended_fields");
     }
 
     // ---- Potential function properties --------------------------------------
@@ -838,6 +1084,14 @@ mod tests {
             obligation_age_sum_ns: 0,
             draining_regions: 0,
             deadline_pressure: 0.0,
+            pending_send_permits: 0,
+            pending_acks: 0,
+            pending_leases: 0,
+            pending_io_ops: 0,
+            cancel_requested_tasks: 0,
+            cancelling_tasks: 0,
+            finalizing_tasks: 0,
+            ready_queue_depth: 0,
         };
 
         let v1 = governor.compute_record(&snap_no_pressure);
@@ -965,6 +1219,14 @@ mod tests {
             obligation_age_sum_ns: 5_000_000_000, // 5 seconds total age.
             draining_regions: 0,
             deadline_pressure: 0.0,
+            pending_send_permits: 10,
+            pending_acks: 0,
+            pending_leases: 0,
+            pending_io_ops: 0,
+            cancel_requested_tasks: 0,
+            cancelling_tasks: 0,
+            finalizing_tasks: 0,
+            ready_queue_depth: 0,
         };
 
         let suggestion = governor.suggest(&snap);
@@ -990,6 +1252,14 @@ mod tests {
             obligation_age_sum_ns: 0,
             draining_regions: 10, // Many draining regions.
             deadline_pressure: 0.0,
+            pending_send_permits: 0,
+            pending_acks: 0,
+            pending_leases: 0,
+            pending_io_ops: 0,
+            cancel_requested_tasks: 0,
+            cancelling_tasks: 0,
+            finalizing_tasks: 0,
+            ready_queue_depth: 0,
         };
 
         let suggestion = governor.suggest(&snap);
@@ -1010,6 +1280,14 @@ mod tests {
             obligation_age_sum_ns: 0,
             draining_regions: 0,
             deadline_pressure: 10.0, // Heavy deadline pressure.
+            pending_send_permits: 0,
+            pending_acks: 0,
+            pending_leases: 0,
+            pending_io_ops: 0,
+            cancel_requested_tasks: 0,
+            cancelling_tasks: 0,
+            finalizing_tasks: 0,
+            ready_queue_depth: 0,
         };
 
         let suggestion = governor.suggest(&snap);
@@ -1113,6 +1391,7 @@ mod tests {
     // ---- Deterministic experiment: cancel drain ----------------------------
 
     #[test]
+    #[allow(clippy::too_many_lines)]
     fn experiment_cancel_drain_converges() {
         init_test("experiment_cancel_drain_converges");
         // Simulate a structured concurrency cancellation scenario:
@@ -1134,6 +1413,14 @@ mod tests {
             obligation_age_sum_ns: 500_000_000, // 100ms each.
             draining_regions: 1,
             deadline_pressure: 0.0,
+            pending_send_permits: 5,
+            pending_acks: 0,
+            pending_leases: 0,
+            pending_io_ops: 0,
+            cancel_requested_tasks: 5,
+            cancelling_tasks: 0,
+            finalizing_tasks: 0,
+            ready_queue_depth: 0,
         });
 
         // Step 1: Task 0 aborts obligation, completes.
@@ -1144,6 +1431,14 @@ mod tests {
             obligation_age_sum_ns: 480_000_000,
             draining_regions: 1,
             deadline_pressure: 0.0,
+            pending_send_permits: 4,
+            pending_acks: 0,
+            pending_leases: 0,
+            pending_io_ops: 0,
+            cancel_requested_tasks: 4,
+            cancelling_tasks: 0,
+            finalizing_tasks: 0,
+            ready_queue_depth: 0,
         });
 
         // Step 2: Task 1 aborts, completes.
@@ -1154,6 +1449,14 @@ mod tests {
             obligation_age_sum_ns: 360_000_000,
             draining_regions: 1,
             deadline_pressure: 0.0,
+            pending_send_permits: 3,
+            pending_acks: 0,
+            pending_leases: 0,
+            pending_io_ops: 0,
+            cancel_requested_tasks: 3,
+            cancelling_tasks: 0,
+            finalizing_tasks: 0,
+            ready_queue_depth: 0,
         });
 
         // Step 3: Task 2 aborts, completes.
@@ -1164,6 +1467,14 @@ mod tests {
             obligation_age_sum_ns: 220_000_000,
             draining_regions: 1,
             deadline_pressure: 0.0,
+            pending_send_permits: 2,
+            pending_acks: 0,
+            pending_leases: 0,
+            pending_io_ops: 0,
+            cancel_requested_tasks: 2,
+            cancelling_tasks: 0,
+            finalizing_tasks: 0,
+            ready_queue_depth: 0,
         });
 
         // Step 4: Task 3 aborts, completes.
@@ -1174,6 +1485,14 @@ mod tests {
             obligation_age_sum_ns: 80_000_000,
             draining_regions: 1,
             deadline_pressure: 0.0,
+            pending_send_permits: 1,
+            pending_acks: 0,
+            pending_leases: 0,
+            pending_io_ops: 0,
+            cancel_requested_tasks: 1,
+            cancelling_tasks: 0,
+            finalizing_tasks: 0,
+            ready_queue_depth: 0,
         });
 
         // Step 5: Last task aborts, region finishes draining.
@@ -1184,6 +1503,14 @@ mod tests {
             obligation_age_sum_ns: 0,
             draining_regions: 0,
             deadline_pressure: 0.0,
+            pending_send_permits: 0,
+            pending_acks: 0,
+            pending_leases: 0,
+            pending_io_ops: 0,
+            cancel_requested_tasks: 0,
+            cancelling_tasks: 0,
+            finalizing_tasks: 0,
+            ready_queue_depth: 0,
         });
 
         let verdict = governor.analyze_convergence();
@@ -1220,6 +1547,14 @@ mod tests {
             obligation_age_sum_ns: 200_000_000,
             draining_regions: 1,
             deadline_pressure: 8.5, // High pressure.
+            pending_send_permits: 2,
+            pending_acks: 0,
+            pending_leases: 0,
+            pending_io_ops: 0,
+            cancel_requested_tasks: 0,
+            cancelling_tasks: 0,
+            finalizing_tasks: 0,
+            ready_queue_depth: 0,
         };
 
         let suggestion = governor.suggest(&snap);
