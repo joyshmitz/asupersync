@@ -723,4 +723,199 @@ mod tests {
         replayer.next();
         assert_eq!(replayer.remaining_events().len(), 0);
     }
+
+    #[test]
+    fn breakpoint_at_task() {
+        let events = vec![
+            ReplayEvent::TaskScheduled {
+                task: CompactTaskId(1),
+                at_tick: 0,
+            },
+            ReplayEvent::TaskScheduled {
+                task: CompactTaskId(2),
+                at_tick: 1,
+            },
+            ReplayEvent::TaskScheduled {
+                task: CompactTaskId(3),
+                at_tick: 2,
+            },
+        ];
+
+        let mut replayer = TraceReplayer::new(make_trace(events));
+        replayer.set_mode(ReplayMode::RunTo(Breakpoint::Task(CompactTaskId(2))));
+
+        let count = replayer.run().unwrap();
+        assert_eq!(count, 2);
+        assert!(replayer.at_breakpoint());
+        assert!(!replayer.is_completed());
+    }
+
+    #[test]
+    fn seek_out_of_bounds_returns_error() {
+        let events = vec![ReplayEvent::RngSeed { seed: 42 }];
+        let mut replayer = TraceReplayer::new(make_trace(events));
+
+        let err = replayer.seek(5).unwrap_err();
+        assert!(matches!(err, ReplayError::UnexpectedEnd { index: 5 }));
+    }
+
+    #[test]
+    fn verify_past_end_of_trace() {
+        let events = vec![ReplayEvent::RngSeed { seed: 42 }];
+        let mut replayer = TraceReplayer::new(make_trace(events));
+
+        // Consume the only event
+        replayer.next();
+        assert!(replayer.is_completed());
+
+        // Verify past end should produce divergence
+        let actual = ReplayEvent::RngSeed { seed: 99 };
+        let err = replayer.verify(&actual).unwrap_err();
+        assert!(err.context.contains("Trace ended"));
+    }
+
+    #[test]
+    fn run_mode_completes_all_events() {
+        let events = vec![
+            ReplayEvent::RngSeed { seed: 1 },
+            ReplayEvent::RngSeed { seed: 2 },
+            ReplayEvent::RngSeed { seed: 3 },
+        ];
+
+        let mut replayer = TraceReplayer::new(make_trace(events));
+        replayer.set_mode(ReplayMode::Run);
+
+        let count = replayer.run().unwrap();
+        assert_eq!(count, 3);
+        assert!(replayer.is_completed());
+    }
+
+    #[test]
+    fn empty_trace_is_immediately_completed() {
+        let mut replayer = TraceReplayer::new(make_trace(vec![]));
+
+        assert_eq!(replayer.event_count(), 0);
+        assert!(replayer.remaining_events().is_empty());
+
+        let count = replayer.run().unwrap();
+        assert_eq!(count, 0);
+    }
+
+    #[test]
+    fn set_mode_clears_breakpoint_flag() {
+        let events = vec![
+            ReplayEvent::RngSeed { seed: 1 },
+            ReplayEvent::RngSeed { seed: 2 },
+        ];
+
+        let mut replayer = TraceReplayer::new(make_trace(events));
+        replayer.set_mode(ReplayMode::Step);
+
+        replayer.step().unwrap();
+        assert!(replayer.at_breakpoint());
+
+        // Changing mode clears the breakpoint flag
+        replayer.set_mode(ReplayMode::Run);
+        assert!(!replayer.at_breakpoint());
+    }
+
+    #[test]
+    fn into_trace_returns_original() {
+        let events = vec![ReplayEvent::RngSeed { seed: 42 }];
+        let trace = make_trace(events.clone());
+        let seed = trace.metadata.seed;
+
+        let replayer = TraceReplayer::new(trace);
+        let recovered = replayer.into_trace();
+
+        assert_eq!(recovered.metadata.seed, seed);
+        assert_eq!(recovered.events, events);
+    }
+
+    #[test]
+    fn metadata_accessible_from_replayer() {
+        let events = vec![ReplayEvent::RngSeed { seed: 99 }];
+        let trace = make_trace(events);
+        let replayer = TraceReplayer::new(trace);
+
+        assert_eq!(replayer.metadata().seed, 42);
+        assert_eq!(
+            replayer.metadata().version,
+            crate::trace::replay::REPLAY_SCHEMA_VERSION
+        );
+    }
+
+    #[test]
+    fn event_source_trait_cursor_advances() {
+        let events = vec![
+            ReplayEvent::RngSeed { seed: 1 },
+            ReplayEvent::RngSeed { seed: 2 },
+            ReplayEvent::RngSeed { seed: 3 },
+        ];
+        let mut trace = make_trace(events);
+
+        let e1 = trace.next_event().expect("event 1");
+        assert!(matches!(e1, ReplayEvent::RngSeed { seed: 1 }));
+
+        let e2 = trace.next_event().expect("event 2");
+        assert!(matches!(e2, ReplayEvent::RngSeed { seed: 2 }));
+
+        let e3 = trace.next_event().expect("event 3");
+        assert!(matches!(e3, ReplayEvent::RngSeed { seed: 3 }));
+
+        assert!(trace.next_event().is_none());
+    }
+
+    #[test]
+    fn divergence_context_time_advanced() {
+        let expected = ReplayEvent::TimeAdvanced {
+            from_nanos: 0,
+            to_nanos: 1000,
+        };
+        let actual = ReplayEvent::TimeAdvanced {
+            from_nanos: 0,
+            to_nanos: 2000,
+        };
+
+        let ctx = divergence_context(&expected, &actual);
+        assert!(ctx.contains("Time advanced differently"));
+    }
+
+    #[test]
+    fn divergence_context_task_completed_same_task() {
+        let expected = ReplayEvent::TaskCompleted {
+            task: CompactTaskId(1),
+            outcome: 0,
+        };
+        let actual = ReplayEvent::TaskCompleted {
+            task: CompactTaskId(1),
+            outcome: 2,
+        };
+
+        let ctx = divergence_context(&expected, &actual);
+        assert!(ctx.contains("Different outcome"));
+    }
+
+    #[test]
+    fn divergence_context_different_variant_types() {
+        let expected = ReplayEvent::RngSeed { seed: 1 };
+        let actual = ReplayEvent::RngValue { value: 2 };
+
+        // events_match checks discriminant first
+        assert!(!events_match(&expected, &actual));
+    }
+
+    #[test]
+    fn peek_does_not_advance() {
+        let events = vec![
+            ReplayEvent::RngSeed { seed: 42 },
+            ReplayEvent::RngSeed { seed: 99 },
+        ];
+        let replayer = TraceReplayer::new(make_trace(events));
+
+        let e1 = replayer.peek().cloned();
+        let e2 = replayer.peek().cloned();
+        assert_eq!(e1, e2);
+        assert_eq!(replayer.current_index(), 0);
+    }
 }

@@ -811,7 +811,7 @@ mod tests {
             outcome: 0,
         });
 
-        let bytes = trace.to_bytes().expect("serialize");
+        let _bytes = trace.to_bytes().expect("serialize");
         let loaded = ReplayTrace::from_bytes(&bytes).expect("deserialize");
 
         assert_eq!(loaded.metadata.seed, 42);
@@ -831,7 +831,7 @@ mod tests {
             });
         }
 
-        let bytes = trace.to_bytes().expect("serialize");
+        let _bytes = trace.to_bytes().expect("serialize");
         let avg_size = bytes.len() / 100;
 
         // Verify average event size is reasonable (should be well under 64 bytes)
@@ -1019,6 +1019,151 @@ mod tests {
             let size = event.estimated_size();
             assert!(size < 64, "Event {event:?} exceeds 64 bytes: {size} bytes");
         }
+    }
+
+    #[test]
+    fn empty_trace_serialization_roundtrip() {
+        let trace = ReplayTrace::new(TraceMetadata::new(0));
+        assert!(trace.is_empty());
+        assert_eq!(trace.len(), 0);
+
+        let bytes = trace.to_bytes().expect("serialize empty");
+        let loaded = ReplayTrace::from_bytes(&bytes).expect("deserialize empty");
+
+        assert_eq!(loaded.metadata.seed, 0);
+        assert!(loaded.is_empty());
+    }
+
+    #[test]
+    fn incompatible_version_rejected() {
+        let mut trace = ReplayTrace::new(TraceMetadata::new(42));
+        trace.push(ReplayEvent::RngSeed { seed: 42 });
+
+        let bytes = trace.to_bytes().expect("serialize");
+
+        // Manually tamper with the version in the serialized bytes
+        // TraceMetadata is serialized via msgpack, version is the first field
+        // Instead, create a trace with wrong version directly
+        let meta = TraceMetadata {
+            version: 999,
+            seed: 42,
+            recorded_at: 0,
+            config_hash: 0,
+            description: None,
+        };
+        let bad_trace = ReplayTrace {
+            metadata: meta,
+            events: vec![ReplayEvent::RngSeed { seed: 42 }],
+            cursor: 0,
+        };
+        let bad_bytes = bad_trace.to_bytes().expect("serialize bad version");
+        let err = ReplayTrace::from_bytes(&bad_bytes).unwrap_err();
+        assert!(matches!(
+            err,
+            ReplayTraceError::IncompatibleVersion {
+                expected: REPLAY_SCHEMA_VERSION,
+                found: 999
+            }
+        ));
+    }
+
+    #[test]
+    fn trace_with_capacity_preallocates() {
+        let trace = ReplayTrace::with_capacity(TraceMetadata::new(1), 100);
+        assert!(trace.is_empty());
+        assert_eq!(trace.len(), 0);
+    }
+
+    #[test]
+    fn estimated_size_increases_with_events() {
+        let mut trace = ReplayTrace::new(TraceMetadata::new(42));
+        let base_size = trace.estimated_size();
+
+        trace.push(ReplayEvent::RngSeed { seed: 42 });
+        let one_event_size = trace.estimated_size();
+        assert!(one_event_size > base_size);
+
+        trace.push(ReplayEvent::TaskScheduled {
+            task: CompactTaskId(1),
+            at_tick: 0,
+        });
+        let two_event_size = trace.estimated_size();
+        assert!(two_event_size > one_event_size);
+    }
+
+    #[test]
+    fn compact_region_id_roundtrip() {
+        let region = RegionId::new_for_test(456, 789);
+        let compact = CompactRegionId::from(region);
+        let (index, gen) = compact.unpack();
+        assert_eq!(index, 456);
+        assert_eq!(gen, 789);
+        assert_eq!(compact.to_region_id(), region);
+    }
+
+    #[test]
+    fn metadata_compatibility_flag() {
+        let meta = TraceMetadata::new(42);
+        assert!(meta.is_compatible());
+
+        let old_meta = TraceMetadata {
+            version: 0,
+            seed: 42,
+            recorded_at: 0,
+            config_hash: 0,
+            description: None,
+        };
+        assert!(!old_meta.is_compatible());
+    }
+
+    #[test]
+    fn io_error_roundtrip_all_known_kinds() {
+        use io::ErrorKind::*;
+        let all_known = [
+            NotFound,
+            PermissionDenied,
+            ConnectionRefused,
+            ConnectionReset,
+            ConnectionAborted,
+            NotConnected,
+            AddrInUse,
+            AddrNotAvailable,
+            BrokenPipe,
+            AlreadyExists,
+            WouldBlock,
+            InvalidInput,
+            InvalidData,
+            TimedOut,
+            WriteZero,
+            Interrupted,
+            UnexpectedEof,
+            OutOfMemory,
+        ];
+
+        for kind in all_known {
+            let encoded = error_kind_to_u8(kind);
+            let decoded = u8_to_error_kind(encoded);
+            assert_eq!(kind, decoded, "Roundtrip failed for {kind:?}");
+        }
+    }
+
+    #[test]
+    fn unknown_error_kind_maps_to_other() {
+        let decoded = u8_to_error_kind(255);
+        assert_eq!(decoded, io::ErrorKind::Other);
+        let decoded = u8_to_error_kind(200);
+        assert_eq!(decoded, io::ErrorKind::Other);
+    }
+
+    #[test]
+    fn trace_iter_yields_all_events() {
+        let mut trace = ReplayTrace::new(TraceMetadata::new(42));
+        trace.push(ReplayEvent::RngSeed { seed: 1 });
+        trace.push(ReplayEvent::RngSeed { seed: 2 });
+        trace.push(ReplayEvent::RngSeed { seed: 3 });
+
+        let collected: Vec<_> = trace.iter().collect();
+        assert_eq!(collected.len(), 3);
     }
 
     #[test]
