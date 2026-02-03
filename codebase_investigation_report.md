@@ -1,74 +1,39 @@
-# Asupersync Codebase Investigation Report
+# Codebase Investigation Report: Asupersync
 
 ## 1. Project Overview
-**Asupersync** is a spec-first, cancel-correct, capability-secure async runtime for Rust. It prioritizes structural correctness over convention, ensuring no orphan tasks, bounded cleanup during cancellation, and no resource leaks via obligation tracking.
+**Asupersync** is a spec-first, capability-secure async runtime for Rust, prioritizing correctness, structured concurrency, and deterministic testing. It distinguishes itself by enforcing "no orphan tasks" and "cancel-correctness" through a strict region-based ownership model and a multi-phase cancellation protocol.
 
-**Current Phase:** Phase 0 (Single-threaded deterministic kernel) is complete. Phase 1 (Multi-threaded scheduler) is in progress.
+## 2. Architecture & Key Concepts
+*   **Structured Concurrency**: Work is organized into a tree of **Regions**. Every task belongs to a region. A region cannot close until all children (tasks/sub-regions) are complete (quiescence).
+*   **Cancellation**: Implemented as a protocol (`Request` -> `Drain` -> `Finalize` -> `Complete`) rather than a silent drop. This ensures resources are cleaned up and no data is lost.
+*   **Cx (Capability Context)**: A context object passed to all tasks, providing capabilities (spawning, time, tracing) without ambient authority.
+*   **Obligations**: Linear resources (Permits, Acks, Leases) that must be explicitly resolved (committed/aborted) before a region can close, preventing leaks.
+*   **Phases**:
+    *   **Phase 0**: Single-threaded deterministic kernel (Marked as complete).
+    *   **Phase 1**: Parallel scheduler + region heap (In progress).
 
-## 2. Core Primitives & Architecture
+## 3. Implementation Status & Findings
 
-### 2.1 Capability Context (`Cx`)
-- **Location:** `src/cx/cx.rs`
-- **Purpose:** A token passed to every async operation. It grants access to capabilities (Time, IO, Spawn, Trace) and prevents ambient authority.
-- **Key Features:**
-  - `checkpoint()`: Explicitly checks for cancellation (cooperative).
-  - `trace()`: Emits events for deterministic replay.
-  - Carries `RegionId` and `TaskId` for identity.
+### Phase 0 vs Phase 1
+*   **Phase 0 (Single-threaded)**: The core runtime structure (`RuntimeState`, `TaskRecord`, `RegionRecord`) is in place.
+*   **Phase 1 (Parallel Scheduler)**: I found substantial implementation in `src/runtime/scheduler/three_lane.rs`, `global_injector.rs`, and `stealing.rs`. This indicates Phase 1 is well underway, implementing a "Multi-worker 3-lane scheduler with work stealing."
 
-### 2.2 Structured Concurrency (`Scope` & Regions)
-- **Location:** `src/cx/scope.rs`, `src/record/region.rs`
-- **Purpose:** Ensures every task belongs to a region. A region cannot close until all children (tasks and sub-regions) are complete.
-- **Lifecycle:** `Open` → `Closing` → `Draining` → `Finalizing` → `Closed`.
-- **Tiers:**
-  - **Fiber Tier (Phase 0):** `spawn_local` (borrow-friendly, pinned to thread).
-  - **Task Tier (Phase 1):** `spawn` (Send bounds, migratable).
+### Key Discrepancy: Missing Nested Regions
+The `README.md` and `asupersync_v4_api_skeleton.rs` describe a `Scope::region` method for creating nested regions (Tier 3):
 
-### 2.3 Runtime State (Σ)
-- **Location:** `src/runtime/state.rs`
-- **Purpose:** The "God Object" holding the global system state.
-- **Components:**
-  - `regions`: Arena of `RegionRecord`.
-  - `tasks`: Arena of `TaskRecord`.
-  - `obligations`: Arena of `ObligationRecord`.
-  - `stored_futures`: Map of `TaskId` → `StoredTask` (the actual futures).
-  - `io_driver` / `timer_driver`: Interfaces to the reactor.
+```rust
+// From README example
+scope.region(|sub| async { ... }).await;
+```
 
-### 2.4 Obligations
-- **Location:** `src/obligation/mod.rs`, `src/runtime/state.rs`
-- **Purpose:** Linear tracking of resources (locks, permits) to prevent leaks.
-- **Mechanism:**
-  - `create_obligation`: Registers a resource.
-  - `commit_obligation`: Marks successful use.
-  - `abort_obligation`: Marks cleanup on cancellation.
-  - **Leak Detection:** Runtime checks on task completion; static analysis tools available.
+However, my analysis of **`src/cx/scope.rs`** confirms this method is **missing**. The `Scope` struct implements `spawn`, `spawn_task`, `spawn_local`, and combinators like `join`/`race`, but lacks the API to create child regions. This is a significant gap in the "Structured Concurrency" promise for the current implementation.
 
-## 3. Scheduling & Execution
+### Testing Infrastructure
+*   **Lab Runtime**: Located in `src/lab`, providing deterministic testing capabilities (`seed`, `virtual_time`).
+*   **Environment Issue**: Attempting to run `cargo test` failed with **Signal 1 (SIGHUP)**. This matches your memory that the environment kills long-running shell commands. I must rely on static analysis and file operations, as running the test suite is currently not possible.
 
-### 3.1 Phase 0 Execution (Single-Threaded)
-- **Entry Point:** `Runtime::block_on` (`src/runtime/builder.rs`).
-- **Mechanism:**
-  - Uses `run_future_with_budget` to poll the main future on the current thread.
-  - **Cooperative Loop:** Polls → Checks Budget → Yields (`thread::yield_now`) → Parks if pending.
-  - Does *not* use the complex scheduler for the main blocking task, but spawned tasks are stored in `RuntimeState` and polled.
-
-### 3.2 Phase 1 Execution (Multi-Threaded)
-- **Scheduler:** `WorkStealingScheduler` wrapping `ThreeLaneScheduler` (`src/runtime/scheduler/`).
-- **Lanes:**
-  1. **Cancel Lane:** High priority (cleanup/shutdown).
-  2. **Timed Lane:** Earliest Deadline First (EDF).
-  3. **Ready Lane:** Standard FIFO/LIFO work.
-- **Status:**
-  - `RuntimeInner` initializes `ThreeLaneScheduler`.
-  - Worker threads are spawned if `worker_threads > 0`.
-  - Integration is visible in `RuntimeInner::new` but `block_on` remains simple.
-
-## 4. Key Invariants & Safety
-
-- **Quiescence:** `RuntimeState::is_quiescent` ensures no live tasks, pending obligations, or registered I/O before shutdown.
-- **Cancel-Correctness:** Cancellation is a protocol (Request → Drain → Finalize). Tasks must explicitly `checkpoint()` or handle cancellation signals.
-- **Determinism:** The "Lab Runtime" (`src/lab/`) wraps the core state to provide seed-based deterministic execution for testing.
-
-## 5. Next Steps for Phase 1
-- **Scheduler Integration:** Fully migrate `block_on` to use the `ThreeLaneScheduler` for all tasks, or clearly separate the "main thread" role from workers.
-- **Blocking Pool:** `src/runtime/blocking_pool.rs` is implemented but needs robust integration for Phase 1 I/O.
-- **Migration:** Ensure `spawn` (Task Tier) correctly pushes to the global injection queue or local worker queues.
+## 4. Next Steps Recommendation
+Since I cannot run tests to verify behavior, I recommend we focus on:
+1.  **Implementing the missing `Scope::region` method** in `src/cx/scope.rs` to fulfill the structured concurrency promise.
+2.  **Connecting the Phase 1 Scheduler** if it's not yet fully integrated.
+3.  **Using `ubs` (Ultimate Bug Scanner)** or manual analysis for verification, given the `cargo test` instability.
