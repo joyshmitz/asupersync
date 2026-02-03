@@ -58,6 +58,7 @@
 
 use crate::trace::event::{TraceData, TraceEvent, TraceEventKind};
 use crate::trace::independence::independent;
+use serde::{Deserialize, Serialize};
 use std::cmp::Ordering;
 use std::collections::hash_map::DefaultHasher;
 use std::hash::{Hash, Hasher};
@@ -67,6 +68,34 @@ use std::hash::{Hash, Hasher};
 pub struct FoataTrace {
     /// Layers of mutually independent events, sorted deterministically.
     layers: Vec<Vec<TraceEvent>>,
+}
+
+/// A stable, comparable key for a trace event.
+///
+/// This key mirrors the canonical intra-layer ordering used by Foata traces,
+/// making it suitable for golden fixture prefixes and diffing.
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Hash, Serialize, Deserialize)]
+pub struct TraceEventKey {
+    /// Discriminant for the event kind.
+    pub kind: u8,
+    /// Primary sort key.
+    pub primary: u64,
+    /// Secondary sort key.
+    pub secondary: u64,
+    /// Tertiary sort key.
+    pub tertiary: u64,
+}
+
+impl TraceEventKey {
+    #[must_use]
+    pub const fn new(kind: u8, primary: u64, secondary: u64, tertiary: u64) -> Self {
+        Self {
+            kind,
+            primary,
+            secondary,
+            tertiary,
+        }
+    }
 }
 
 impl FoataTrace {
@@ -498,6 +527,13 @@ fn event_sort_key(event: &TraceEvent) -> (u8, u64, u64, u64) {
         }
         TraceData::None => (k, 0, 0, 0),
     }
+}
+
+/// Returns the stable key used for deterministic ordering of a trace event.
+#[must_use]
+pub fn trace_event_key(event: &TraceEvent) -> TraceEventKey {
+    let (kind, primary, secondary, tertiary) = event_sort_key(event);
+    TraceEventKey::new(kind, primary, secondary, tertiary)
 }
 
 /// Deterministic comparison of two trace events.
