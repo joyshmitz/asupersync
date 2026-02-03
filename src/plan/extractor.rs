@@ -4,11 +4,9 @@
 //! cost model. The extraction algorithm is greedy and produces stable output
 //! given the same e-graph structure.
 
-use super::certificate::{CertificateVersion, PlanHash, RewriteCertificate};
-use super::rewrite::RewritePolicy;
-use super::{EClassId, EGraph, ENode, PlanDag, PlanId, PlanNode};
+use super::certificate::{CertificateVersion, PlanHash};
+use super::{EClassId, EGraph, ENode, PlanDag, PlanId};
 use std::collections::BTreeMap;
-use std::time::Duration;
 
 // ===========================================================================
 // Cost model
@@ -51,7 +49,9 @@ impl PlanCost {
     pub fn add(self, other: Self) -> Self {
         Self {
             allocations: self.allocations.saturating_add(other.allocations),
-            cancel_checkpoints: self.cancel_checkpoints.saturating_add(other.cancel_checkpoints),
+            cancel_checkpoints: self
+                .cancel_checkpoints
+                .saturating_add(other.cancel_checkpoints),
             obligation_pressure: self
                 .obligation_pressure
                 .saturating_add(other.obligation_pressure),
@@ -64,7 +64,9 @@ impl PlanCost {
     pub fn sequential(self, other: Self) -> Self {
         Self {
             allocations: self.allocations.saturating_add(other.allocations),
-            cancel_checkpoints: self.cancel_checkpoints.saturating_add(other.cancel_checkpoints),
+            cancel_checkpoints: self
+                .cancel_checkpoints
+                .saturating_add(other.cancel_checkpoints),
             obligation_pressure: self
                 .obligation_pressure
                 .saturating_add(other.obligation_pressure),
@@ -133,7 +135,11 @@ impl<'a> Extractor<'a> {
         let dag_root = self.build_plan_node(root, &mut dag, &mut id_map);
         dag.set_root(dag_root);
 
-        let cost = self.costs.get(&self.egraph.canonical_id(root)).copied().unwrap_or(PlanCost::ZERO);
+        let cost = self
+            .costs
+            .get(&self.egraph.canonical_id(root))
+            .copied()
+            .unwrap_or(PlanCost::ZERO);
 
         let cert = ExtractionCertificate {
             version: CertificateVersion::CURRENT,
@@ -177,7 +183,9 @@ impl<'a> Extractor<'a> {
 
         for node in nodes {
             let cost = self.node_cost(&node);
-            if cost.total() < best_cost.total() || (cost.total() == best_cost.total() && best.is_none()) {
+            if cost.total() < best_cost.total()
+                || (cost.total() == best_cost.total() && best.is_none())
+            {
                 best_cost = cost;
                 best = Some(node);
             }
