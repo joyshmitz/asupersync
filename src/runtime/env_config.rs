@@ -23,6 +23,8 @@
 //! | `ASUPERSYNC_ENABLE_PARKING` | `bool` | `enable_parking` |
 //! | `ASUPERSYNC_POLL_BUDGET` | `u32` | `poll_budget` |
 //! | `ASUPERSYNC_CANCEL_LANE_MAX_STREAK` | `usize` | `cancel_lane_max_streak` |
+//! | `ASUPERSYNC_ENABLE_GOVERNOR` | `bool` | `enable_governor` |
+//! | `ASUPERSYNC_GOVERNOR_INTERVAL` | `u32` | `governor_interval` |
 
 use crate::runtime::config::RuntimeConfig;
 use crate::types::builder::BuildError;
@@ -86,6 +88,12 @@ pub fn apply_env_overrides(config: &mut RuntimeConfig) -> Result<(), BuildError>
     }
     if let Some(val) = read_env(ENV_CANCEL_LANE_MAX_STREAK) {
         config.cancel_lane_max_streak = parse_usize(ENV_CANCEL_LANE_MAX_STREAK, &val)?;
+    }
+    if let Some(val) = read_env(ENV_ENABLE_GOVERNOR) {
+        config.enable_governor = parse_bool(ENV_ENABLE_GOVERNOR, &val)?;
+    }
+    if let Some(val) = read_env(ENV_GOVERNOR_INTERVAL) {
+        config.governor_interval = parse_u32(ENV_GOVERNOR_INTERVAL, &val)?;
     }
     Ok(())
 }

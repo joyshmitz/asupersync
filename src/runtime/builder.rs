@@ -272,6 +272,27 @@ impl RuntimeBuilder {
         self
     }
 
+    /// Enable the Lyapunov governor for scheduling suggestions.
+    ///
+    /// When enabled, the scheduler periodically snapshots runtime state and
+    /// consults the governor for lane-ordering hints that accelerate
+    /// cancellation convergence.
+    #[must_use]
+    pub fn enable_governor(mut self, enable: bool) -> Self {
+        self.config.enable_governor = enable;
+        self
+    }
+
+    /// Set the number of scheduling steps between governor snapshots.
+    ///
+    /// Lower values increase responsiveness but add snapshot overhead.
+    /// Default is 32. Only relevant when the governor is enabled.
+    #[must_use]
+    pub fn governor_interval(mut self, interval: u32) -> Self {
+        self.config.governor_interval = interval;
+        self
+    }
+
     /// Set admission limits for the root region.
     #[must_use]
     pub fn root_region_limits(mut self, limits: RegionLimits) -> Self {
