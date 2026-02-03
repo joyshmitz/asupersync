@@ -90,6 +90,12 @@ impl DenseRow {
         &mut self.data
     }
 
+    /// Resizes the row to the given length, filling new entries with `value`.
+    #[inline]
+    pub fn resize(&mut self, len: usize, value: u8) {
+        self.data.resize(len, value);
+    }
+
     /// Returns the element at the given index as a `Gf256`.
     ///
     /// # Panics
