@@ -786,7 +786,7 @@ fn plan_rewrite_equivalence_lab_runtime() {
     let original = build_race_join_plan();
     let mut rewritten = build_race_join_plan();
     let rules = [RewriteRule::DedupRaceJoin];
-    let report = rewritten.apply_rewrites(RewritePolicy::Conservative, &rules);
+    let report = rewritten.apply_rewrites(RewritePolicy::conservative(), &rules);
     assert_with_log!(
         report.steps().len() == 1,
         "rewrite applied",
@@ -822,7 +822,7 @@ fn plan_rewrite_equivalence_lab_runtime_nonbinary() {
     let original = build_race_join_plan_nonbinary();
     let mut rewritten = build_race_join_plan_nonbinary();
     let rules = [RewriteRule::DedupRaceJoin];
-    let report = rewritten.apply_rewrites(RewritePolicy::AssumeAssociativeComm, &rules);
+    let report = rewritten.apply_rewrites(RewritePolicy::assume_all(), &rules);
     assert_with_log!(
         report.steps().len() == 1,
         "rewrite applied",
@@ -858,7 +858,7 @@ fn plan_rewrite_equivalence_lab_runtime_shared_non_leaf() {
     let original = build_race_join_plan_shared_non_leaf();
     let mut rewritten = build_race_join_plan_shared_non_leaf();
     let rules = [RewriteRule::DedupRaceJoin];
-    let report = rewritten.apply_rewrites(RewritePolicy::AssumeAssociativeComm, &rules);
+    let report = rewritten.apply_rewrites(RewritePolicy::assume_all(), &rules);
     assert_with_log!(
         report.steps().len() == 1,
         "rewrite applied",

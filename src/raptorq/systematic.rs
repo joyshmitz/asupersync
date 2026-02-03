@@ -480,19 +480,106 @@ fn build_lt_rows(matrix: &mut ConstraintMatrix, params: &SystematicParams, _seed
 // Systematic encoder
 // ============================================================================
 
+// ============================================================================
+// Encoding statistics
+// ============================================================================
+
+/// Statistics from encoding, useful for tuning and debugging.
+#[derive(Debug, Clone, Default)]
+pub struct EncodingStats {
+    /// Number of source symbols (K).
+    pub source_symbol_count: usize,
+    /// Number of LDPC symbols (S).
+    pub ldpc_symbol_count: usize,
+    /// Number of HDPC symbols (H).
+    pub hdpc_symbol_count: usize,
+    /// Total intermediate symbols (L = K + S + H).
+    pub intermediate_symbol_count: usize,
+    /// Symbol size in bytes.
+    pub symbol_size: usize,
+    /// Number of repair symbols generated so far.
+    pub repair_symbols_generated: usize,
+    /// Seed used for deterministic encoding.
+    pub seed: u64,
+    /// Degree distribution sample stats (min, max, sum, count) for generated repairs.
+    pub degree_min: usize,
+    /// Maximum repair symbol degree observed.
+    pub degree_max: usize,
+    /// Sum of repair symbol degrees observed.
+    pub degree_sum: usize,
+    /// Number of repair symbols sampled for degree stats.
+    pub degree_count: usize,
+}
+
+impl EncodingStats {
+    /// Average degree of generated repair symbols, or 0.0 if none generated.
+    #[must_use]
+    pub fn average_degree(&self) -> f64 {
+        if self.degree_count == 0 {
+            0.0
+        } else {
+            self.degree_sum as f64 / self.degree_count as f64
+        }
+    }
+
+    /// Overhead ratio: L / K (how many intermediate symbols per source symbol).
+    #[must_use]
+    pub fn overhead_ratio(&self) -> f64 {
+        if self.source_symbol_count == 0 {
+            0.0
+        } else {
+            self.intermediate_symbol_count as f64 / self.source_symbol_count as f64
+        }
+    }
+}
+
+// ============================================================================
+// Emitted symbol (systematic + repair)
+// ============================================================================
+
+/// An emitted symbol from the encoder, with metadata.
+#[derive(Debug, Clone)]
+pub struct EmittedSymbol {
+    /// Encoding Symbol Index (ESI): 0..K for source, K.. for repair.
+    pub esi: u32,
+    /// The symbol data.
+    pub data: Vec<u8>,
+    /// Whether this is a source (systematic) or repair symbol.
+    pub is_source: bool,
+    /// Degree of the LT encoding (1 for source, variable for repair).
+    pub degree: usize,
+}
+
+// ============================================================================
+// Systematic encoder
+// ============================================================================
+
 /// A deterministic, systematic RaptorQ encoder for a single source block.
 ///
 /// Computes intermediate symbols from source data, then generates
 /// repair symbols on demand via LT encoding.
+///
+/// # Emission Order
+///
+/// Symbols are emitted in deterministic order:
+/// 1. Source symbols (ESI 0..K-1) in ascending order
+/// 2. Repair symbols (ESI K..) in ascending order
+///
+/// Use [`emit_systematic`] for source-only, [`emit_repair`] for repair-only,
+/// or [`emit_all`] for a combined stream.
 #[derive(Debug)]
 pub struct SystematicEncoder {
     params: SystematicParams,
     /// Intermediate symbols (L symbols, each `symbol_size` bytes).
     intermediate: Vec<Vec<u8>>,
+    /// Source symbols (preserved for systematic emission).
+    source_symbols: Vec<Vec<u8>>,
     /// Seed for deterministic repair generation.
     seed: u64,
     /// Robust soliton distribution for repair encoding.
     soliton: RobustSoliton,
+    /// Running statistics.
+    stats: EncodingStats,
 }
 
 impl SystematicEncoder {
@@ -528,11 +615,28 @@ impl SystematicEncoder {
 
         let soliton = RobustSoliton::new(params.l, 0.2, 0.05);
 
+        // Initialize stats
+        let stats = EncodingStats {
+            source_symbol_count: k,
+            ldpc_symbol_count: params.s,
+            hdpc_symbol_count: params.h,
+            intermediate_symbol_count: params.l,
+            symbol_size,
+            seed,
+            repair_symbols_generated: 0,
+            degree_min: usize::MAX,
+            degree_max: 0,
+            degree_sum: 0,
+            degree_count: 0,
+        };
+
         Some(Self {
             params,
             intermediate,
+            source_symbols: source_symbols.to_vec(),
             seed,
             soliton,
+            stats,
         })
     }
 
@@ -548,6 +652,92 @@ impl SystematicEncoder {
     /// produces the same repair symbol (deterministic).
     #[must_use]
     pub fn repair_symbol(&self, esi: u32) -> Vec<u8> {
+        self.repair_symbol_with_degree(esi).0
+    }
+
+    /// Returns a reference to intermediate symbol `i`.
+    ///
+    /// # Panics
+    ///
+    /// Panics if `i >= L`.
+    #[must_use]
+    pub fn intermediate_symbol(&self, i: usize) -> &[u8] {
+        &self.intermediate[i]
+    }
+
+    /// Returns the current encoding statistics.
+    #[must_use]
+    pub fn stats(&self) -> &EncodingStats {
+        &self.stats
+    }
+
+    /// Returns the seed used for encoding.
+    #[must_use]
+    pub const fn seed(&self) -> u64 {
+        self.seed
+    }
+
+    /// Emit all source (systematic) symbols in deterministic order (ESI 0..K-1).
+    ///
+    /// Source symbols are emitted unchanged from the input, in index order.
+    /// Each has degree=1 since it maps directly to one intermediate symbol.
+    pub fn emit_systematic(&self) -> impl Iterator<Item = EmittedSymbol> + '_ {
+        self.source_symbols
+            .iter()
+            .enumerate()
+            .map(|(i, data)| EmittedSymbol {
+                esi: i as u32,
+                data: data.clone(),
+                is_source: true,
+                degree: 1,
+            })
+    }
+
+    /// Emit repair symbols in deterministic order, starting from ESI = K.
+    ///
+    /// `count` specifies how many repair symbols to generate.
+    /// Symbols are emitted in ascending ESI order.
+    ///
+    /// Note: This method updates internal statistics. For read-only stats,
+    /// call `stats()` after emission.
+    pub fn emit_repair(&mut self, count: usize) -> Vec<EmittedSymbol> {
+        let k = self.params.k as u32;
+        let mut result = Vec::with_capacity(count);
+
+        for i in 0..count {
+            let esi = k + i as u32;
+            let (data, degree) = self.repair_symbol_with_degree(esi);
+
+            // Update stats
+            self.stats.repair_symbols_generated += 1;
+            self.stats.degree_min = self.stats.degree_min.min(degree);
+            self.stats.degree_max = self.stats.degree_max.max(degree);
+            self.stats.degree_sum += degree;
+            self.stats.degree_count += 1;
+
+            result.push(EmittedSymbol {
+                esi,
+                data,
+                is_source: false,
+                degree,
+            });
+        }
+
+        result
+    }
+
+    /// Emit all symbols (systematic + repair) in deterministic order.
+    ///
+    /// First emits K source symbols (ESI 0..K-1), then `repair_count` repair
+    /// symbols (ESI K..K+repair_count-1).
+    pub fn emit_all(&mut self, repair_count: usize) -> Vec<EmittedSymbol> {
+        let mut result: Vec<EmittedSymbol> = self.emit_systematic().collect();
+        result.extend(self.emit_repair(repair_count));
+        result
+    }
+
+    /// Generate a repair symbol and return both data and degree.
+    fn repair_symbol_with_degree(&self, esi: u32) -> (Vec<u8>, usize) {
         let symbol_size = self.params.symbol_size;
         let l = self.params.l;
         let mut result = vec![0u8; symbol_size];
@@ -569,17 +759,7 @@ impl SystematicEncoder {
             }
         }
 
-        result
-    }
-
-    /// Returns a reference to intermediate symbol `i`.
-    ///
-    /// # Panics
-    ///
-    /// Panics if `i >= L`.
-    #[must_use]
-    pub fn intermediate_symbol(&self, i: usize) -> &[u8] {
-        &self.intermediate[i]
+        (result, degree)
     }
 }
 
@@ -841,5 +1021,167 @@ mod tests {
         for esi in 0..20u32 {
             assert_eq!(enc.repair_symbol(esi).len(), symbol_size);
         }
+    }
+
+    // ========================================================================
+    // Emission order and stats tests
+    // ========================================================================
+
+    #[test]
+    fn emit_systematic_order() {
+        let k = 5;
+        let symbol_size = 16;
+        let source = make_source_symbols(k, symbol_size);
+        let enc = SystematicEncoder::new(&source, symbol_size, 42).unwrap();
+
+        let emitted: Vec<_> = enc.emit_systematic().collect();
+
+        assert_eq!(emitted.len(), k, "should emit exactly K source symbols");
+        for (i, sym) in emitted.iter().enumerate() {
+            assert_eq!(sym.esi, i as u32, "ESI should be in order");
+            assert!(sym.is_source, "should be marked as source");
+            assert_eq!(sym.degree, 1, "source symbols have degree 1");
+            assert_eq!(sym.data, source[i], "data should match input");
+        }
+    }
+
+    #[test]
+    fn emit_repair_order() {
+        let k = 4;
+        let symbol_size = 32;
+        let source = make_source_symbols(k, symbol_size);
+        let mut enc = SystematicEncoder::new(&source, symbol_size, 42).unwrap();
+
+        let repair_count = 10;
+        let emitted = enc.emit_repair(repair_count);
+
+        assert_eq!(emitted.len(), repair_count, "should emit requested count");
+        for (i, sym) in emitted.iter().enumerate() {
+            let expected_esi = k as u32 + i as u32;
+            assert_eq!(sym.esi, expected_esi, "ESI should start at K");
+            assert!(!sym.is_source, "should be marked as repair");
+            assert!(sym.degree >= 1, "degree should be at least 1");
+            assert_eq!(sym.data.len(), symbol_size, "correct symbol size");
+        }
+    }
+
+    #[test]
+    fn emit_all_order() {
+        let k = 3;
+        let symbol_size = 24;
+        let source = make_source_symbols(k, symbol_size);
+        let mut enc = SystematicEncoder::new(&source, symbol_size, 99).unwrap();
+
+        let repair_count = 5;
+        let emitted = enc.emit_all(repair_count);
+
+        assert_eq!(emitted.len(), k + repair_count, "total count");
+
+        // First K are source
+        for (i, sym) in emitted.iter().take(k).enumerate() {
+            assert_eq!(sym.esi, i as u32);
+            assert!(sym.is_source);
+        }
+
+        // Rest are repair
+        for (i, sym) in emitted.iter().skip(k).enumerate() {
+            assert_eq!(sym.esi, (k + i) as u32);
+            assert!(!sym.is_source);
+        }
+    }
+
+    #[test]
+    fn emit_repair_deterministic() {
+        let k = 6;
+        let symbol_size = 32;
+        let source = make_source_symbols(k, symbol_size);
+
+        let mut enc1 = SystematicEncoder::new(&source, symbol_size, 42).unwrap();
+        let mut enc2 = SystematicEncoder::new(&source, symbol_size, 42).unwrap();
+
+        let r1 = enc1.emit_repair(10);
+        let r2 = enc2.emit_repair(10);
+
+        for (s1, s2) in r1.iter().zip(r2.iter()) {
+            assert_eq!(s1.esi, s2.esi);
+            assert_eq!(s1.data, s2.data);
+            assert_eq!(s1.degree, s2.degree);
+        }
+    }
+
+    #[test]
+    fn stats_initialized() {
+        let k = 8;
+        let symbol_size = 64;
+        let seed = 12345u64;
+        let source = make_source_symbols(k, symbol_size);
+        let enc = SystematicEncoder::new(&source, symbol_size, seed).unwrap();
+
+        let stats = enc.stats();
+        assert_eq!(stats.source_symbol_count, k);
+        assert_eq!(stats.symbol_size, symbol_size);
+        assert_eq!(stats.seed, seed);
+        assert_eq!(stats.intermediate_symbol_count, enc.params().l);
+        assert_eq!(stats.ldpc_symbol_count, enc.params().s);
+        assert_eq!(stats.hdpc_symbol_count, enc.params().h);
+        assert_eq!(stats.repair_symbols_generated, 0);
+    }
+
+    #[test]
+    fn stats_updated_on_emit_repair() {
+        let k = 4;
+        let symbol_size = 16;
+        let source = make_source_symbols(k, symbol_size);
+        let mut enc = SystematicEncoder::new(&source, symbol_size, 42).unwrap();
+
+        assert_eq!(enc.stats().repair_symbols_generated, 0);
+        assert_eq!(enc.stats().degree_count, 0);
+
+        enc.emit_repair(5);
+
+        let stats = enc.stats();
+        assert_eq!(stats.repair_symbols_generated, 5);
+        assert_eq!(stats.degree_count, 5);
+        assert!(stats.degree_min >= 1);
+        assert!(stats.degree_max >= stats.degree_min);
+        assert!(stats.degree_sum >= 5); // at least 1 per symbol
+    }
+
+    #[test]
+    fn stats_average_degree() {
+        let k = 10;
+        let symbol_size = 32;
+        let source = make_source_symbols(k, symbol_size);
+        let mut enc = SystematicEncoder::new(&source, symbol_size, 42).unwrap();
+
+        // Before any repairs
+        assert_eq!(enc.stats().average_degree(), 0.0);
+
+        enc.emit_repair(100);
+
+        let avg = enc.stats().average_degree();
+        assert!(avg >= 1.0, "average degree should be at least 1");
+        assert!(avg <= enc.params().l as f64, "average should not exceed L");
+    }
+
+    #[test]
+    fn stats_overhead_ratio() {
+        let k = 20;
+        let symbol_size = 32;
+        let source = make_source_symbols(k, symbol_size);
+        let enc = SystematicEncoder::new(&source, symbol_size, 42).unwrap();
+
+        let ratio = enc.stats().overhead_ratio();
+        // L = K + S + H, so ratio > 1.0
+        assert!(ratio > 1.0, "overhead ratio should be > 1");
+        assert!(ratio < 2.0, "overhead ratio should be reasonable");
+    }
+
+    #[test]
+    fn seed_accessor() {
+        let seed = 0xDEAD_BEEF_u64;
+        let source = make_source_symbols(4, 16);
+        let enc = SystematicEncoder::new(&source, 16, seed).unwrap();
+        assert_eq!(enc.seed(), seed);
     }
 }

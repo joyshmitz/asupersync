@@ -276,7 +276,8 @@ impl NormalizationResult {
     /// Returns the reduction in switch count.
     #[must_use]
     pub fn switch_reduction(&self) -> usize {
-        self.original_switches.saturating_sub(self.normalized_switches)
+        self.original_switches
+            .saturating_sub(self.normalized_switches)
     }
 
     /// Returns the switch reduction as a percentage.
@@ -531,9 +532,24 @@ mod tests {
         init_test("normalization_single_owner_no_switches");
         // All events from owner 1 - should have 0 switches
         let events = vec![
-            TraceEvent::new(1, Time::from_nanos(0), TraceEventKind::Spawn, TraceData::None),
-            TraceEvent::new(2, Time::from_nanos(1), TraceEventKind::Poll, TraceData::None),
-            TraceEvent::new(3, Time::from_nanos(2), TraceEventKind::Complete, TraceData::None),
+            TraceEvent::new(
+                1,
+                Time::from_nanos(0),
+                TraceEventKind::Spawn,
+                TraceData::None,
+            ),
+            TraceEvent::new(
+                2,
+                Time::from_nanos(1),
+                TraceEventKind::Poll,
+                TraceData::None,
+            ),
+            TraceEvent::new(
+                3,
+                Time::from_nanos(2),
+                TraceEventKind::Complete,
+                TraceData::None,
+            ),
         ];
         // All have seq numbers, but owner extraction uses seq % some_value or similar
         // The trace module should handle this; we're testing the wrapper
@@ -581,8 +597,18 @@ mod tests {
     fn traces_equivalent_identical() {
         init_test("traces_equivalent_identical");
         let events = vec![
-            TraceEvent::new(1, Time::from_nanos(0), TraceEventKind::Spawn, TraceData::None),
-            TraceEvent::new(2, Time::from_nanos(1), TraceEventKind::Complete, TraceData::None),
+            TraceEvent::new(
+                1,
+                Time::from_nanos(0),
+                TraceEventKind::Spawn,
+                TraceData::None,
+            ),
+            TraceEvent::new(
+                2,
+                Time::from_nanos(1),
+                TraceEventKind::Complete,
+                TraceData::None,
+            ),
         ];
 
         let equivalent = traces_equivalent(&events, &events);
@@ -607,7 +633,12 @@ mod tests {
         )];
 
         let equivalent = traces_equivalent(&a, &b);
-        crate::assert_with_log!(!equivalent, "different kinds not equivalent", false, equivalent);
+        crate::assert_with_log!(
+            !equivalent,
+            "different kinds not equivalent",
+            false,
+            equivalent
+        );
         crate::test_complete!("traces_equivalent_different_kinds");
     }
 
@@ -639,8 +670,18 @@ mod tests {
 
         init_test("normalize_with_config_custom_beam");
         let events = vec![
-            TraceEvent::new(1, Time::from_nanos(0), TraceEventKind::Spawn, TraceData::None),
-            TraceEvent::new(2, Time::from_nanos(1), TraceEventKind::Poll, TraceData::None),
+            TraceEvent::new(
+                1,
+                Time::from_nanos(0),
+                TraceEventKind::Spawn,
+                TraceData::None,
+            ),
+            TraceEvent::new(
+                2,
+                Time::from_nanos(1),
+                TraceEventKind::Poll,
+                TraceData::None,
+            ),
         ];
 
         let config = GeodesicConfig {

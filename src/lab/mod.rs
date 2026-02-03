@@ -98,11 +98,11 @@ pub use oracle::{
     QuiescenceViolation, SupervisionOracle, SupervisionViolation, SupervisionViolationKind,
     TaskLeakOracle, TaskLeakViolation, TraceEventSummary,
 };
-pub use runtime::LabRuntime;
 pub use replay::{
-    compare_normalized, normalize_for_replay, normalize_for_replay_with_config,
-    traces_equivalent, NormalizationResult, ReplayValidation, TraceDivergence, TraceSummary,
+    compare_normalized, normalize_for_replay, normalize_for_replay_with_config, traces_equivalent,
+    NormalizationResult, ReplayValidation, TraceDivergence, TraceSummary,
 };
+pub use runtime::LabRuntime;
 pub use snapshot_restore::{
     RestorableSnapshot, RestoreError, SnapshotRestore, SnapshotStats, ValidationResult,
 };

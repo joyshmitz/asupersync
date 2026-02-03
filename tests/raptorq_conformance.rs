@@ -827,7 +827,9 @@ mod pipeline_e2e {
             return 0;
         }
         let max_drop = total - min_keep;
-        let desired = (total.saturating_mul(usize::from(drop_per_mille)) + 999) / 1000;
+        let desired = total
+            .saturating_mul(usize::from(drop_per_mille))
+            .div_ceil(1000);
         desired.min(max_drop)
     }
 
@@ -865,7 +867,8 @@ mod pipeline_e2e {
                 let kept: Vec<Symbol> = symbols
                     .iter()
                     .enumerate()
-                    .filter_map(|(idx, sym)| (!drop[idx]).then(|| sym.clone()))
+                    .filter(|(idx, _)| !drop[*idx])
+                    .map(|(_, sym)| sym.clone())
                     .collect();
                 (
                     kept,
@@ -893,7 +896,8 @@ mod pipeline_e2e {
                 let kept: Vec<Symbol> = symbols
                     .iter()
                     .enumerate()
-                    .filter_map(|(idx, sym)| (idx < start || idx >= end).then(|| sym.clone()))
+                    .filter(|(idx, _)| *idx < start || *idx >= end)
+                    .map(|(_, sym)| sym.clone())
                     .collect();
                 (
                     kept,
@@ -1030,6 +1034,7 @@ mod pipeline_e2e {
         }
     }
 
+    #[allow(clippy::too_many_lines)]
     fn run_scenario(
         scenario: Scenario,
         encoding: &EncodingConfig,
@@ -1059,7 +1064,7 @@ mod pipeline_e2e {
             1,
             u16::try_from(block_k).expect("k fits u16"),
         );
-        let mut decoder = DecodingPipeline::new(DecodingConfig {
+        let mut decoding_pipeline = DecodingPipeline::new(DecodingConfig {
             symbol_size: encoding.symbol_size,
             max_block_size: encoding.max_block_size,
             repair_overhead: encoding.repair_overhead,
@@ -1068,12 +1073,12 @@ mod pipeline_e2e {
             block_timeout: std::time::Duration::from_secs(30),
             verify_auth: false,
         });
-        decoder.set_object_params(params).expect("params");
+        decoding_pipeline.set_object_params(params).expect("params");
 
         let mut last_reject = None;
         for symbol in &received_symbols {
             let auth = AuthenticatedSymbol::from_parts(symbol.clone(), AuthenticationTag::zero());
-            let result = decoder.feed(auth).expect("feed");
+            let result = decoding_pipeline.feed(auth).expect("feed");
             match result {
                 SymbolAcceptResult::Rejected(reason) => last_reject = Some(reason),
                 SymbolAcceptResult::BlockComplete { .. } => break,
@@ -1081,8 +1086,8 @@ mod pipeline_e2e {
             }
         }
 
-        let decoded = decoder.into_data();
-        let (success, decoded_bytes) = match decoded {
+        let data_result = decoding_pipeline.into_data();
+        let (success, decoded_bytes) = match data_result {
             Ok(decoded_data) => {
                 assert_eq!(decoded_data, data, "roundtrip mismatch");
                 (true, decoded_data.len())
@@ -1111,9 +1116,7 @@ mod pipeline_e2e {
                 result.proof
             }
             Err((err, proof)) => {
-                if scenario.expect_success {
-                    panic!("unexpected proof failure {err:?}");
-                }
+                assert!(!scenario.expect_success, "unexpected proof failure {err:?}");
                 match err {
                     DecodeError::InsufficientSymbols { .. } => {}
                     DecodeError::SingularMatrix { .. } | DecodeError::SymbolSizeMismatch { .. } => {
@@ -1215,7 +1218,7 @@ mod pipeline_e2e {
         ];
 
         for scenario in scenarios {
-            let (report_a, symbols_a, proof_a, success_a) = run_scenario(
+            let (report_first, symbol_hash_first, proof_hash_first, success_first) = run_scenario(
                 scenario,
                 &encoding,
                 decoding_min_overhead,
@@ -1223,19 +1226,23 @@ mod pipeline_e2e {
                 data_seed,
                 object_id,
             );
-            let (report_b, symbols_b, proof_b, success_b) = run_scenario(
-                scenario,
-                &encoding,
-                decoding_min_overhead,
-                data_len,
-                data_seed,
-                object_id,
-            );
+            let (report_second, symbol_hash_second, proof_hash_second, success_second) =
+                run_scenario(
+                    scenario,
+                    &encoding,
+                    decoding_min_overhead,
+                    data_len,
+                    data_seed,
+                    object_id,
+                );
 
-            assert_eq!(symbols_a, symbols_b, "symbol stream hash mismatch");
-            assert_eq!(proof_a, proof_b, "proof hash mismatch");
-            assert_eq!(report_a, report_b, "report JSON mismatch");
-            assert_eq!(success_a, success_b, "success mismatch");
+            assert_eq!(
+                symbol_hash_first, symbol_hash_second,
+                "symbol stream hash mismatch"
+            );
+            assert_eq!(proof_hash_first, proof_hash_second, "proof hash mismatch");
+            assert_eq!(report_first, report_second, "report JSON mismatch");
+            assert_eq!(success_first, success_second, "success mismatch");
         }
     }
 }

@@ -843,12 +843,12 @@ mod tests {
         dag.set_root(race);
 
         let (report, cert) = dag
-            .apply_rewrites_certified(RewritePolicy::Conservative, &[RewriteRule::DedupRaceJoin]);
+            .apply_rewrites_certified(RewritePolicy::conservative(), &[RewriteRule::DedupRaceJoin]);
 
         assert_eq!(report.steps().len(), 1);
         assert_eq!(cert.steps.len(), 1);
         assert_eq!(cert.version, CertificateVersion::CURRENT);
-        assert_eq!(cert.policy, RewritePolicy::Conservative);
+        assert_eq!(cert.policy, RewritePolicy::conservative());
         assert_ne!(cert.before_hash, cert.after_hash);
         assert!(!cert.is_identity());
 
@@ -866,7 +866,7 @@ mod tests {
         dag.set_root(join);
 
         let (_report, cert) = dag
-            .apply_rewrites_certified(RewritePolicy::Conservative, &[RewriteRule::DedupRaceJoin]);
+            .apply_rewrites_certified(RewritePolicy::conservative(), &[RewriteRule::DedupRaceJoin]);
 
         assert!(cert.is_identity());
         assert!(verify(&cert, &dag).is_ok());
@@ -885,7 +885,7 @@ mod tests {
         dag.set_root(race);
 
         let (_report, cert) = dag
-            .apply_rewrites_certified(RewritePolicy::Conservative, &[RewriteRule::DedupRaceJoin]);
+            .apply_rewrites_certified(RewritePolicy::conservative(), &[RewriteRule::DedupRaceJoin]);
 
         // Mutate the DAG after certification.
         dag.leaf("extra");
@@ -908,7 +908,7 @@ mod tests {
         dag.set_root(race);
 
         let (_, cert) = dag
-            .apply_rewrites_certified(RewritePolicy::Conservative, &[RewriteRule::DedupRaceJoin]);
+            .apply_rewrites_certified(RewritePolicy::conservative(), &[RewriteRule::DedupRaceJoin]);
 
         let fp1 = cert.fingerprint();
         let fp2 = cert.fingerprint();
@@ -924,7 +924,7 @@ mod tests {
         dag.set_root(a);
 
         let (_, mut cert) = dag
-            .apply_rewrites_certified(RewritePolicy::Conservative, &[RewriteRule::DedupRaceJoin]);
+            .apply_rewrites_certified(RewritePolicy::conservative(), &[RewriteRule::DedupRaceJoin]);
         cert.version = CertificateVersion(99);
 
         let result = verify(&cert, &dag);
@@ -944,7 +944,7 @@ mod tests {
         dag.set_root(race);
 
         let (_, cert) = dag
-            .apply_rewrites_certified(RewritePolicy::Conservative, &[RewriteRule::DedupRaceJoin]);
+            .apply_rewrites_certified(RewritePolicy::conservative(), &[RewriteRule::DedupRaceJoin]);
 
         assert!(verify_steps(&cert, &dag).is_ok());
     }
@@ -958,7 +958,7 @@ mod tests {
 
         let cert = RewriteCertificate {
             version: CertificateVersion::CURRENT,
-            policy: RewritePolicy::Conservative,
+            policy: RewritePolicy::conservative(),
             before_hash: PlanHash::of(&dag),
             after_hash: PlanHash::of(&dag),
             before_node_count: 1,
@@ -987,7 +987,7 @@ mod tests {
 
         let cert = RewriteCertificate {
             version: CertificateVersion::CURRENT,
-            policy: RewritePolicy::Conservative,
+            policy: RewritePolicy::conservative(),
             before_hash: PlanHash::of(&dag),
             after_hash: PlanHash::of(&dag),
             before_node_count: 1,
@@ -1017,7 +1017,7 @@ mod tests {
         dag.set_root(join);
 
         let (_, cert) = dag
-            .apply_rewrites_certified(RewritePolicy::Conservative, &[RewriteRule::DedupRaceJoin]);
+            .apply_rewrites_certified(RewritePolicy::conservative(), &[RewriteRule::DedupRaceJoin]);
 
         assert!(cert.is_identity());
         assert!(verify_steps(&cert, &dag).is_ok());

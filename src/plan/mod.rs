@@ -568,7 +568,7 @@ mod tests {
         dag.set_root(race);
 
         let rules = [RewriteRule::DedupRaceJoin];
-        let report = dag.apply_rewrites(RewritePolicy::Conservative, &rules);
+        let report = dag.apply_rewrites(RewritePolicy::conservative(), &rules);
         crate::assert_with_log!(
             report.steps().len() == 1,
             "rewrite count",
@@ -648,7 +648,7 @@ mod tests {
         dag.set_root(race);
 
         let rules = [RewriteRule::DedupRaceJoin];
-        let report = dag.apply_rewrites(RewritePolicy::Conservative, &rules);
+        let report = dag.apply_rewrites(RewritePolicy::conservative(), &rules);
         crate::assert_with_log!(report.is_empty(), "no rewrite", true, report.is_empty());
         crate::assert_with_log!(
             dag.root() == Some(race),
@@ -684,7 +684,7 @@ mod tests {
         );
 
         let rules = [RewriteRule::DedupRaceJoin];
-        let report = dag.apply_rewrites(RewritePolicy::Conservative, &rules);
+        let report = dag.apply_rewrites(RewritePolicy::conservative(), &rules);
         crate::assert_with_log!(
             report.steps().len() == 1,
             "rewrite count",

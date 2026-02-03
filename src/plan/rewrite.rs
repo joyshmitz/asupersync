@@ -6,33 +6,167 @@ use std::fmt::Write;
 use super::analysis::SideConditionChecker;
 use super::{PlanDag, PlanId, PlanNode};
 
-/// Policy controlling which rewrites are allowed.
-#[derive(Debug, Clone, Copy, PartialEq, Eq, Default)]
-pub enum RewritePolicy {
-    /// Conservative: only apply rewrites that do not assume commutativity.
-    #[default]
-    Conservative,
-    /// Assume associativity/commutativity and independence of children.
-    AssumeAssociativeComm,
+/// Policy controlling which algebraic rewrites are allowed.
+///
+/// Each flag explicitly gates a category of algebraic laws.
+/// Policies are explicit: no hidden assumptions about commutativity,
+/// associativity, or other algebraic properties.
+///
+/// # Example
+///
+/// ```
+/// use asupersync::plan::RewritePolicy;
+///
+/// // Conservative: associativity only, no commutativity
+/// let conservative = RewritePolicy::conservative();
+/// assert!(conservative.associativity);
+/// assert!(!conservative.commutativity);
+///
+/// // Enable all algebraic laws
+/// let permissive = RewritePolicy::assume_all();
+/// assert!(permissive.commutativity);
+/// assert!(permissive.distributivity);
+///
+/// // Custom policy: only specific laws
+/// let custom = RewritePolicy::new()
+///     .with_associativity(true)
+///     .with_commutativity(true)
+///     .with_distributivity(false);
+/// ```
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub struct RewritePolicy {
+    /// Allow associativity rewrites: `Join[Join[a,b], c] -> Join[a,b,c]`.
+    ///
+    /// Regrouping of joins and races without changing outcomes.
+    pub associativity: bool,
+
+    /// Allow commutativity rewrites: reorder children to canonical order.
+    ///
+    /// Only safe when children are pairwise independent.
+    pub commutativity: bool,
+
+    /// Allow distributivity rewrites: `Race[Join[s,a], Join[s,b]] -> Join[s, Race[a,b]]`.
+    ///
+    /// Deduplication of shared work across race branches.
+    pub distributivity: bool,
+
+    /// Require binary joins in distributivity rewrites (conservative mode).
+    ///
+    /// When true, DedupRaceJoin only applies to binary joins with leaf shared children.
+    pub require_binary_joins: bool,
+}
+
+impl Default for RewritePolicy {
+    /// Default is conservative: associativity allowed, but not commutativity or distributivity.
+    fn default() -> Self {
+        Self::conservative()
+    }
 }
 
 impl RewritePolicy {
-    #[allow(clippy::unused_self)]
-    fn allows_associative(self) -> bool {
-        true
+    /// Create a new policy with all laws disabled.
+    #[must_use]
+    pub const fn new() -> Self {
+        Self {
+            associativity: false,
+            commutativity: false,
+            distributivity: false,
+            require_binary_joins: true,
+        }
     }
 
-    fn allows_commutative(self) -> bool {
-        matches!(self, Self::AssumeAssociativeComm)
+    /// Conservative policy: associativity allowed, but not commutativity.
+    ///
+    /// This is the safest default - only applies rewrites that do not
+    /// assume any algebraic properties beyond basic structure.
+    #[must_use]
+    pub const fn conservative() -> Self {
+        Self {
+            associativity: true,
+            commutativity: false,
+            distributivity: false,
+            require_binary_joins: true,
+        }
     }
 
-    fn allows_shared_non_leaf(self) -> bool {
-        matches!(self, Self::AssumeAssociativeComm)
+    /// Assume all algebraic laws hold: associativity, commutativity, distributivity.
+    ///
+    /// Use when you know the combination operators are commutative/associative
+    /// and children are independent.
+    #[must_use]
+    pub const fn assume_all() -> Self {
+        Self {
+            associativity: true,
+            commutativity: true,
+            distributivity: true,
+            require_binary_joins: false,
+        }
     }
 
-    fn requires_binary_joins(self) -> bool {
-        matches!(self, Self::Conservative)
+    /// Builder: set associativity flag.
+    #[must_use]
+    pub const fn with_associativity(mut self, enabled: bool) -> Self {
+        self.associativity = enabled;
+        self
     }
+
+    /// Builder: set commutativity flag.
+    #[must_use]
+    pub const fn with_commutativity(mut self, enabled: bool) -> Self {
+        self.commutativity = enabled;
+        self
+    }
+
+    /// Builder: set distributivity flag.
+    #[must_use]
+    pub const fn with_distributivity(mut self, enabled: bool) -> Self {
+        self.distributivity = enabled;
+        self
+    }
+
+    /// Builder: set require_binary_joins flag.
+    #[must_use]
+    pub const fn with_require_binary_joins(mut self, enabled: bool) -> Self {
+        self.require_binary_joins = enabled;
+        self
+    }
+
+    /// Returns true if associativity rewrites are allowed.
+    #[must_use]
+    pub const fn allows_associative(self) -> bool {
+        self.associativity
+    }
+
+    /// Returns true if commutativity rewrites are allowed.
+    #[must_use]
+    pub const fn allows_commutative(self) -> bool {
+        self.commutativity
+    }
+
+    /// Returns true if shared non-leaf children are allowed in distributivity rewrites.
+    #[must_use]
+    pub const fn allows_shared_non_leaf(self) -> bool {
+        self.distributivity && !self.require_binary_joins
+    }
+
+    /// Returns true if distributivity rewrites require binary joins.
+    #[must_use]
+    pub const fn requires_binary_joins(self) -> bool {
+        self.require_binary_joins
+    }
+}
+
+// Backward compatibility: allow using the old enum-like names
+impl RewritePolicy {
+    /// Backward-compatible alias for `conservative()`.
+    #[deprecated(since = "0.1.0", note = "use RewritePolicy::conservative() instead")]
+    #[allow(non_upper_case_globals)]
+    pub const Conservative: Self = Self::conservative();
+
+    /// Backward-compatible alias for `assume_all()`.
+    #[deprecated(since = "0.1.0", note = "use RewritePolicy::assume_all() instead")]
+    #[allow(non_upper_case_globals)]
+    pub const AssumeAssociativeComm: Self = Self::assume_all();
 }
 
 /// Declarative schema for a rewrite rule.
@@ -860,7 +994,8 @@ mod tests {
     fn test_apply_rewrites_empty_dag_no_steps() {
         init_test();
         let mut dag = PlanDag::new();
-        let report = dag.apply_rewrites(RewritePolicy::Conservative, &[RewriteRule::DedupRaceJoin]);
+        let report =
+            dag.apply_rewrites(RewritePolicy::conservative(), &[RewriteRule::DedupRaceJoin]);
         assert!(report.is_empty());
     }
 
@@ -868,7 +1003,8 @@ mod tests {
     fn test_dedup_race_join_conservative_applies() {
         init_test();
         let (mut dag, shared, left, right) = shared_leaf_race_plan();
-        let report = dag.apply_rewrites(RewritePolicy::Conservative, &[RewriteRule::DedupRaceJoin]);
+        let report =
+            dag.apply_rewrites(RewritePolicy::conservative(), &[RewriteRule::DedupRaceJoin]);
         assert_eq!(report.steps().len(), 1);
         let root = dag.root().expect("root set");
         let PlanNode::Join { children } = dag.node(root).expect("root exists") else {
@@ -901,13 +1037,11 @@ mod tests {
         let race = dag.race(vec![join_a, join_b]);
         dag.set_root(race);
 
-        let report = dag.apply_rewrites(RewritePolicy::Conservative, &[RewriteRule::DedupRaceJoin]);
+        let report =
+            dag.apply_rewrites(RewritePolicy::conservative(), &[RewriteRule::DedupRaceJoin]);
         assert!(report.is_empty());
 
-        let report = dag.apply_rewrites(
-            RewritePolicy::AssumeAssociativeComm,
-            &[RewriteRule::DedupRaceJoin],
-        );
+        let report = dag.apply_rewrites(RewritePolicy::assume_all(), &[RewriteRule::DedupRaceJoin]);
         assert_eq!(report.steps().len(), 1);
     }
 
@@ -925,13 +1059,11 @@ mod tests {
         let race = dag.race(vec![join_a, join_b]);
         dag.set_root(race);
 
-        let report = dag.apply_rewrites(RewritePolicy::Conservative, &[RewriteRule::DedupRaceJoin]);
+        let report =
+            dag.apply_rewrites(RewritePolicy::conservative(), &[RewriteRule::DedupRaceJoin]);
         assert!(report.is_empty());
 
-        let report = dag.apply_rewrites(
-            RewritePolicy::AssumeAssociativeComm,
-            &[RewriteRule::DedupRaceJoin],
-        );
+        let report = dag.apply_rewrites(RewritePolicy::assume_all(), &[RewriteRule::DedupRaceJoin]);
         assert_eq!(report.steps().len(), 1);
     }
 
@@ -946,7 +1078,8 @@ mod tests {
         let join = dag.join(vec![shared, race]);
         dag.set_root(join);
 
-        let report = dag.apply_rewrites(RewritePolicy::Conservative, &[RewriteRule::DedupRaceJoin]);
+        let report =
+            dag.apply_rewrites(RewritePolicy::conservative(), &[RewriteRule::DedupRaceJoin]);
         assert!(report.is_empty());
     }
 
@@ -960,7 +1093,8 @@ mod tests {
         let race = dag.race(vec![join, leaf]);
         dag.set_root(race);
 
-        let report = dag.apply_rewrites(RewritePolicy::Conservative, &[RewriteRule::DedupRaceJoin]);
+        let report =
+            dag.apply_rewrites(RewritePolicy::conservative(), &[RewriteRule::DedupRaceJoin]);
         assert!(report.is_empty());
         assert_eq!(dag.root(), Some(race));
     }
@@ -978,7 +1112,8 @@ mod tests {
         let root = dag.join(vec![dag.root().expect("root"), race2]);
         dag.set_root(root);
 
-        let report = dag.apply_rewrites(RewritePolicy::Conservative, &[RewriteRule::DedupRaceJoin]);
+        let report =
+            dag.apply_rewrites(RewritePolicy::conservative(), &[RewriteRule::DedupRaceJoin]);
         assert_eq!(report.steps().len(), 2);
         assert!(report
             .steps()
@@ -999,7 +1134,8 @@ mod tests {
         let race = dag.race(vec![leaf]);
         dag.set_root(race);
 
-        let report = dag.apply_rewrites(RewritePolicy::Conservative, &[RewriteRule::DedupRaceJoin]);
+        let report =
+            dag.apply_rewrites(RewritePolicy::conservative(), &[RewriteRule::DedupRaceJoin]);
         assert!(report.is_empty());
         assert_eq!(dag.root(), Some(race));
     }
@@ -1015,7 +1151,7 @@ mod tests {
         let outer = dag.join(vec![inner, c]);
         dag.set_root(outer);
 
-        let report = dag.apply_rewrites(RewritePolicy::Conservative, &[RewriteRule::JoinAssoc]);
+        let report = dag.apply_rewrites(RewritePolicy::conservative(), &[RewriteRule::JoinAssoc]);
         assert_eq!(report.steps().len(), 1);
         let root = dag.root().expect("root");
         let PlanNode::Join { children } = dag.node(root).expect("join") else {
@@ -1035,7 +1171,7 @@ mod tests {
         let outer = dag.race(vec![inner, c]);
         dag.set_root(outer);
 
-        let report = dag.apply_rewrites(RewritePolicy::Conservative, &[RewriteRule::RaceAssoc]);
+        let report = dag.apply_rewrites(RewritePolicy::conservative(), &[RewriteRule::RaceAssoc]);
         assert_eq!(report.steps().len(), 1);
         let root = dag.root().expect("root");
         let PlanNode::Race { children } = dag.node(root).expect("race") else {
@@ -1054,10 +1190,7 @@ mod tests {
         let join = dag.join(vec![c, b, a]);
         dag.set_root(join);
 
-        let report = dag.apply_rewrites(
-            RewritePolicy::AssumeAssociativeComm,
-            &[RewriteRule::JoinCommute],
-        );
+        let report = dag.apply_rewrites(RewritePolicy::assume_all(), &[RewriteRule::JoinCommute]);
         assert_eq!(report.steps().len(), 1);
         let root = dag.root().expect("root");
         let PlanNode::Join { children } = dag.node(root).expect("join") else {
@@ -1079,10 +1212,7 @@ mod tests {
         let join = dag.join(vec![j1, j2]);
         dag.set_root(join);
 
-        let report = dag.apply_rewrites(
-            RewritePolicy::AssumeAssociativeComm,
-            &[RewriteRule::JoinCommute],
-        );
+        let report = dag.apply_rewrites(RewritePolicy::assume_all(), &[RewriteRule::JoinCommute]);
         assert!(report.is_empty());
     }
 
@@ -1096,10 +1226,7 @@ mod tests {
         let race = dag.race(vec![c, b, a]);
         dag.set_root(race);
 
-        let report = dag.apply_rewrites(
-            RewritePolicy::AssumeAssociativeComm,
-            &[RewriteRule::RaceCommute],
-        );
+        let report = dag.apply_rewrites(RewritePolicy::assume_all(), &[RewriteRule::RaceCommute]);
         assert_eq!(report.steps().len(), 1);
         let root = dag.root().expect("root");
         let PlanNode::Race { children } = dag.node(root).expect("race") else {
@@ -1118,7 +1245,7 @@ mod tests {
         let outer = dag.timeout(inner, Duration::from_secs(5));
         dag.set_root(outer);
 
-        let report = dag.apply_rewrites(RewritePolicy::Conservative, &[RewriteRule::TimeoutMin]);
+        let report = dag.apply_rewrites(RewritePolicy::conservative(), &[RewriteRule::TimeoutMin]);
         assert_eq!(report.steps().len(), 1);
         let root = dag.root().expect("root");
         let PlanNode::Timeout { duration, child } = dag.node(root).expect("timeout") else {

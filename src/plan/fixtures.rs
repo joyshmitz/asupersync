@@ -504,7 +504,7 @@ mod tests {
             }
             let (report, cert) = fixture
                 .dag
-                .apply_rewrites_certified(RewritePolicy::Conservative, &rules);
+                .apply_rewrites_certified(RewritePolicy::conservative(), &rules);
             assert_eq!(
                 report.steps().len(),
                 fixture.expected_step_count,
@@ -547,8 +547,7 @@ mod tests {
         let race = dag.race(vec![j1, j2]);
         dag.set_root(race);
 
-        let (report, cert) =
-            dag.apply_rewrites_certified(RewritePolicy::AssumeAssociativeComm, &rules);
+        let (report, cert) = dag.apply_rewrites_certified(RewritePolicy::assume_all(), &rules);
         assert_eq!(report.steps().len(), fixture.expected_step_count);
         assert!(verify(&cert, &dag).is_ok());
     }
@@ -561,7 +560,7 @@ mod tests {
             if fixture.name == "shared_non_leaf_associative" {
                 continue;
             }
-            let report = run_equivalence_harness(fixture, RewritePolicy::Conservative, &rules);
+            let report = run_equivalence_harness(fixture, RewritePolicy::conservative(), &rules);
             if let Some(diff) = report.diff_summary() {
                 panic!("equivalence failure:\n{diff}");
             }
@@ -581,7 +580,7 @@ mod tests {
         let mut f1 = simple_join_race_dedup();
         let (_, cert1) = f1
             .dag
-            .apply_rewrites_certified(RewritePolicy::Conservative, &rules);
+            .apply_rewrites_certified(RewritePolicy::conservative(), &rules);
         assert_eq!(cert1.steps.len(), 1, "F1 must have exactly 1 rewrite step");
         assert!(verify(&cert1, &f1.dag).is_ok(), "F1 cert must verify");
         assert!(
@@ -598,7 +597,7 @@ mod tests {
         let mut f3 = nested_timeout_join_race();
         let (_, cert3) = f3
             .dag
-            .apply_rewrites_certified(RewritePolicy::Conservative, &rules);
+            .apply_rewrites_certified(RewritePolicy::conservative(), &rules);
         assert_eq!(cert3.steps.len(), 1);
         assert!(verify(&cert3, &f3.dag).is_ok());
         assert!(verify_steps(&cert3, &f3.dag).is_ok());
@@ -612,7 +611,7 @@ mod tests {
         let mut fixture_timeout = timeout_wrapping_dedup();
         let (_, cert_timeout) = fixture_timeout
             .dag
-            .apply_rewrites_certified(RewritePolicy::Conservative, &rules);
+            .apply_rewrites_certified(RewritePolicy::conservative(), &rules);
         assert_eq!(cert_timeout.steps.len(), 1);
         assert!(verify(&cert_timeout, &fixture_timeout.dag).is_ok());
         assert!(verify_steps(&cert_timeout, &fixture_timeout.dag).is_ok());
@@ -625,12 +624,12 @@ mod tests {
         let mut fixture_no_shared_a = no_shared_child();
         let (_, cert_no_shared_a) = fixture_no_shared_a
             .dag
-            .apply_rewrites_certified(RewritePolicy::Conservative, &rules);
+            .apply_rewrites_certified(RewritePolicy::conservative(), &rules);
         assert!(cert_no_shared_a.is_identity());
         let mut fixture_no_shared_b = no_shared_child();
         let (_, cert_no_shared_b) = fixture_no_shared_b
             .dag
-            .apply_rewrites_certified(RewritePolicy::Conservative, &rules);
+            .apply_rewrites_certified(RewritePolicy::conservative(), &rules);
         assert_eq!(
             cert_no_shared_a.fingerprint(),
             cert_no_shared_b.fingerprint()
@@ -686,12 +685,12 @@ mod tests {
         let reports1: Vec<_> = all_fixtures()
             .into_iter()
             .filter(|f| f.name != "shared_non_leaf_associative")
-            .map(|f| run_equivalence_harness(f, RewritePolicy::Conservative, &rules))
+            .map(|f| run_equivalence_harness(f, RewritePolicy::conservative(), &rules))
             .collect();
         let reports2: Vec<_> = all_fixtures()
             .into_iter()
             .filter(|f| f.name != "shared_non_leaf_associative")
-            .map(|f| run_equivalence_harness(f, RewritePolicy::Conservative, &rules))
+            .map(|f| run_equivalence_harness(f, RewritePolicy::conservative(), &rules))
             .collect();
 
         assert_eq!(reports1.len(), reports2.len());
