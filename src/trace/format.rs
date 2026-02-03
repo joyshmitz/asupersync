@@ -94,7 +94,7 @@ pub struct GoldenTraceDiff {
 }
 
 impl GoldenTraceDiff {
-    /// Returns true when no mismatches were recorded.
+    /// Returns true if no mismatches were recorded.
     #[must_use]
     pub fn is_empty(&self) -> bool {
         self.mismatches.is_empty()
