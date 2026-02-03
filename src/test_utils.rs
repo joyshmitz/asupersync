@@ -29,6 +29,10 @@ pub use crate::test_logging::{
     NoOpFixtureService, PortAllocator, ReproManifest, TempDirFixture, TestContext, TestEnvironment,
     ARTIFACT_SCHEMA_VERSION,
 };
+pub use crate::test_ndjson::{
+    artifact_base_dir, artifact_bundle_dir, ndjson_file_name, trace_file_name,
+    write_artifact_bundle, NdjsonEvent, NdjsonLogger, NDJSON_SCHEMA_VERSION,
+};
 use crate::time::timeout;
 use crate::types::Time;
 use std::future::Future;

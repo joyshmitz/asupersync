@@ -175,6 +175,7 @@ fn event_type_name(event: &TestEvent) -> String {
 /// Populate event-specific data fields into a JSON map.
 ///
 /// Uses `..` patterns to be resilient to field additions in [`TestEvent`].
+#[allow(clippy::too_many_lines)]
 fn populate_event_data(event: &TestEvent, data: &mut serde_json::Map<String, serde_json::Value>) {
     use serde_json::Value;
     match event {
@@ -193,7 +194,9 @@ fn populate_event_data(event: &TestEvent, data: &mut serde_json::Map<String, ser
             data.insert("readable".into(), Value::from(interest.readable));
             data.insert("writable".into(), Value::from(interest.writable));
         }
-        TestEvent::ReactorDeregister { token, .. } => {
+        TestEvent::ReactorDeregister { token, .. }
+        | TestEvent::WakerClone { token, .. }
+        | TestEvent::WakerDrop { token, .. } => {
             data.insert("token".into(), Value::from(*token));
         }
         TestEvent::IoRead {
@@ -220,11 +223,10 @@ fn populate_event_data(event: &TestEvent, data: &mut serde_json::Map<String, ser
             data.insert("local".into(), Value::from(local.as_str()));
             data.insert("peer".into(), Value::from(peer.as_str()));
         }
-        TestEvent::WakerWake { task_id, .. } => {
+        TestEvent::WakerWake { task_id, .. }
+        | TestEvent::TimerScheduled { task_id, .. }
+        | TestEvent::TimerFired { task_id, .. } => {
             data.insert("task_id".into(), Value::from(*task_id));
-        }
-        TestEvent::WakerClone { token, .. } | TestEvent::WakerDrop { token, .. } => {
-            data.insert("token".into(), Value::from(*token));
         }
         TestEvent::TaskPoll {
             task_id, result, ..
@@ -243,12 +245,6 @@ fn populate_event_data(event: &TestEvent, data: &mut serde_json::Map<String, ser
         } => {
             data.insert("task_id".into(), Value::from(*task_id));
             data.insert("outcome".into(), Value::from(*outcome));
-        }
-        TestEvent::TimerScheduled { task_id, .. } => {
-            data.insert("task_id".into(), Value::from(*task_id));
-        }
-        TestEvent::TimerFired { task_id, .. } => {
-            data.insert("task_id".into(), Value::from(*task_id));
         }
         TestEvent::RegionCreate {
             region_id,
@@ -451,9 +447,10 @@ pub fn artifact_bundle_dir(
 /// Checks `ASUPERSYNC_TEST_ARTIFACTS_DIR`, falling back to `target/test-artifacts`.
 #[must_use]
 pub fn artifact_base_dir() -> std::path::PathBuf {
-    std::env::var("ASUPERSYNC_TEST_ARTIFACTS_DIR")
-        .map(std::path::PathBuf::from)
-        .unwrap_or_else(|_| std::path::PathBuf::from("target/test-artifacts"))
+    std::env::var("ASUPERSYNC_TEST_ARTIFACTS_DIR").map_or_else(
+        |_| std::path::PathBuf::from("target/test-artifacts"),
+        std::path::PathBuf::from,
+    )
 }
 
 /// Write a complete artifact bundle for a test execution.
@@ -474,8 +471,7 @@ pub fn write_artifact_bundle(
     std::fs::create_dir_all(&bundle_dir)?;
 
     // Write manifest
-    let manifest_json = serde_json::to_string_pretty(manifest)
-        .map_err(|e| std::io::Error::new(std::io::ErrorKind::Other, e))?;
+    let manifest_json = serde_json::to_string_pretty(manifest).map_err(std::io::Error::other)?;
     std::fs::write(bundle_dir.join("manifest.json"), manifest_json)?;
 
     // Write NDJSON event log
@@ -485,8 +481,7 @@ pub fn write_artifact_bundle(
 
     // Write test summary
     if let Some(s) = summary {
-        let summary_json = serde_json::to_string_pretty(s)
-            .map_err(|e| std::io::Error::new(std::io::ErrorKind::Other, e))?;
+        let summary_json = serde_json::to_string_pretty(s).map_err(std::io::Error::other)?;
         std::fs::write(bundle_dir.join("summary.json"), summary_json)?;
     }
 

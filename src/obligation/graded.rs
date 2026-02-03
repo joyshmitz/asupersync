@@ -564,6 +564,7 @@ pub struct ObligationToken<K: TokenKind> {
 
 impl<K: TokenKind> ObligationToken<K> {
     /// Reserve a new obligation token with the given description.
+    #[allow(clippy::double_must_use)]
     #[must_use]
     pub fn reserve(description: impl Into<String>) -> Self {
         Self {
@@ -698,6 +699,7 @@ pub type IoOpToken = ObligationToken<IoOpKind>;
 
 impl GradedScope {
     /// Reserve a typed obligation token, recording it in this scope.
+    #[allow(clippy::double_must_use)]
     #[must_use]
     pub fn reserve_token<K: TokenKind>(
         &mut self,
