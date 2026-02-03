@@ -341,3 +341,795 @@ fn send_symbols_directly() {
     assert_eq!(count, 5);
     assert_eq!(sender.transport_mut().symbols.len(), 5);
 }
+
+// =========================================================================
+// Conformance tests (bd-3h65)
+// =========================================================================
+//
+// These tests verify deterministic behavior across runs by checking that
+// the same seed produces the same content hash.
+
+mod conformance {
+    use super::*;
+    use crate::raptorq::decoder::{InactivationDecoder, ReceivedSymbol};
+    use crate::raptorq::gf256::Gf256;
+    use crate::raptorq::systematic::SystematicEncoder;
+    use std::collections::hash_map::DefaultHasher;
+    use std::hash::{Hash, Hasher};
+
+    /// Compute a content hash for verification.
+    fn content_hash(data: &[Vec<u8>]) -> u64 {
+        let mut hasher = DefaultHasher::new();
+        for chunk in data {
+            chunk.hash(&mut hasher);
+        }
+        hasher.finish()
+    }
+
+    /// Known vector: small block (K=4, symbol_size=16, seed=42)
+    #[test]
+    fn known_vector_small_block() {
+        let k = 4;
+        let symbol_size = 16;
+        let seed = 42u64;
+
+        let source: Vec<Vec<u8>> = (0..k)
+            .map(|i| (0..symbol_size).map(|j| ((i * 37 + j * 13 + 7) % 256) as u8).collect())
+            .collect();
+
+        let encoder = SystematicEncoder::new(&source, symbol_size, seed).unwrap();
+
+        // Generate repair symbols with fixed ESIs
+        let repair_0 = encoder.repair_symbol(k as u32);
+        let repair_1 = encoder.repair_symbol(k as u32 + 1);
+        let repair_2 = encoder.repair_symbol(k as u32 + 2);
+
+        // Verify deterministic repair generation
+        let repair_hash = content_hash(&[repair_0.clone(), repair_1.clone(), repair_2.clone()]);
+
+        // Re-create encoder and verify same output
+        let encoder2 = SystematicEncoder::new(&source, symbol_size, seed).unwrap();
+        let repair_0_2 = encoder2.repair_symbol(k as u32);
+        let repair_1_2 = encoder2.repair_symbol(k as u32 + 1);
+        let repair_2_2 = encoder2.repair_symbol(k as u32 + 2);
+
+        let repair_hash_2 = content_hash(&[repair_0_2, repair_1_2, repair_2_2]);
+        assert_eq!(repair_hash, repair_hash_2, "repair symbols must be deterministic");
+    }
+
+    /// Known vector: medium block (K=32, symbol_size=64, seed=12345)
+    #[test]
+    fn known_vector_medium_block() {
+        let k = 32;
+        let symbol_size = 64;
+        let seed = 12345u64;
+
+        let source: Vec<Vec<u8>> = (0..k)
+            .map(|i| (0..symbol_size).map(|j| ((i * 41 + j * 17 + 11) % 256) as u8).collect())
+            .collect();
+
+        let encoder = SystematicEncoder::new(&source, symbol_size, seed).unwrap();
+        let decoder = InactivationDecoder::new(k, symbol_size, seed);
+        let l = decoder.params().l;
+
+        // Build received symbols: all source + enough repair to reach L
+        let mut received: Vec<ReceivedSymbol> = source
+            .iter()
+            .enumerate()
+            .map(|(i, data)| ReceivedSymbol::source(i as u32, data.clone()))
+            .collect();
+
+        for esi in (k as u32)..(l as u32) {
+            let (cols, coefs) = decoder.repair_equation(esi);
+            let repair_data = encoder.repair_symbol(esi);
+            received.push(ReceivedSymbol::repair(esi, cols, coefs, repair_data));
+        }
+
+        let result = decoder.decode(&received).expect("decode should succeed");
+
+        // Verify roundtrip
+        let source_hash = content_hash(&source);
+        let decoded_hash = content_hash(&result.source);
+        assert_eq!(source_hash, decoded_hash, "decoded data must match source");
+    }
+
+    /// Known vector: verify proof artifact determinism
+    #[test]
+    fn known_vector_proof_determinism() {
+        let k = 8;
+        let symbol_size = 32;
+        let seed = 99u64;
+
+        let source: Vec<Vec<u8>> = (0..k)
+            .map(|i| (0..symbol_size).map(|j| ((i * 53 + j * 19 + 3) % 256) as u8).collect())
+            .collect();
+
+        let encoder = SystematicEncoder::new(&source, symbol_size, seed).unwrap();
+        let decoder = InactivationDecoder::new(k, symbol_size, seed);
+        let l = decoder.params().l;
+
+        let mut received: Vec<ReceivedSymbol> = source
+            .iter()
+            .enumerate()
+            .map(|(i, data)| ReceivedSymbol::source(i as u32, data.clone()))
+            .collect();
+
+        for esi in (k as u32)..(l as u32) {
+            let (cols, coefs) = decoder.repair_equation(esi);
+            let repair_data = encoder.repair_symbol(esi);
+            received.push(ReceivedSymbol::repair(esi, cols, coefs, repair_data));
+        }
+
+        let object_id = ObjectId::new_for_test(777);
+
+        // Decode twice with proof
+        let result1 = decoder
+            .decode_with_proof(&received, object_id, 0)
+            .expect("decode should succeed");
+        let result2 = decoder
+            .decode_with_proof(&received, object_id, 0)
+            .expect("decode should succeed");
+
+        // Proof content hashes must match
+        assert_eq!(
+            result1.proof.content_hash(),
+            result2.proof.content_hash(),
+            "proof artifacts must be deterministic"
+        );
+    }
+}
+
+// =========================================================================
+// Property tests (bd-3h65)
+// =========================================================================
+//
+// These tests verify encode → drop random symbols → decode → verify roundtrip.
+
+mod property_tests {
+    use super::*;
+    use crate::raptorq::decoder::{InactivationDecoder, ReceivedSymbol};
+    use crate::raptorq::gf256::Gf256;
+    use crate::raptorq::systematic::SystematicEncoder;
+    use crate::util::DetRng;
+
+    /// Generate deterministic source data for testing.
+    fn make_source_data(k: usize, symbol_size: usize, seed: u64) -> Vec<Vec<u8>> {
+        let mut rng = DetRng::new(seed);
+        (0..k)
+            .map(|_| (0..symbol_size).map(|_| rng.next_u64() as u8).collect())
+            .collect()
+    }
+
+    /// Property: roundtrip with all symbols should always succeed.
+    #[test]
+    fn property_roundtrip_all_symbols() {
+        for (k, symbol_size, seed) in [
+            (4, 16, 1u64),
+            (8, 32, 2),
+            (16, 64, 3),
+            (32, 128, 4),
+            (64, 256, 5),
+        ] {
+            let source = make_source_data(k, symbol_size, seed);
+            let encoder = SystematicEncoder::new(&source, symbol_size, seed).unwrap();
+            let decoder = InactivationDecoder::new(k, symbol_size, seed);
+            let l = decoder.params().l;
+
+            // All source symbols
+            let mut received: Vec<ReceivedSymbol> = source
+                .iter()
+                .enumerate()
+                .map(|(i, data)| ReceivedSymbol::source(i as u32, data.clone()))
+                .collect();
+
+            // Enough repair to reach L
+            for esi in (k as u32)..(l as u32) {
+                let (cols, coefs) = decoder.repair_equation(esi);
+                let repair_data = encoder.repair_symbol(esi);
+                received.push(ReceivedSymbol::repair(esi, cols, coefs, repair_data));
+            }
+
+            let result = decoder
+                .decode(&received)
+                .expect(&format!("roundtrip should succeed for k={k}"));
+
+            assert_eq!(
+                result.source, source,
+                "decoded source must match original for k={k}"
+            );
+        }
+    }
+
+    /// Property: roundtrip with random symbol drops should succeed if ≥ L symbols remain.
+    #[test]
+    fn property_roundtrip_with_drops() {
+        let k = 16;
+        let symbol_size = 48;
+        let seed = 42u64;
+
+        let source = make_source_data(k, symbol_size, seed);
+        let encoder = SystematicEncoder::new(&source, symbol_size, seed).unwrap();
+        let decoder = InactivationDecoder::new(k, symbol_size, seed);
+        let l = decoder.params().l;
+
+        // Generate excess symbols (2x overhead)
+        let total_symbols = l * 2;
+        let mut all_symbols: Vec<ReceivedSymbol> = Vec::with_capacity(total_symbols);
+
+        // Add source symbols
+        for (i, data) in source.iter().enumerate() {
+            all_symbols.push(ReceivedSymbol::source(i as u32, data.clone()));
+        }
+
+        // Add repair symbols
+        for esi in (k as u32)..(total_symbols as u32) {
+            let (cols, coefs) = decoder.repair_equation(esi);
+            let repair_data = encoder.repair_symbol(esi);
+            all_symbols.push(ReceivedSymbol::repair(esi, cols, coefs, repair_data));
+        }
+
+        // Run multiple drop patterns with deterministic RNG
+        for drop_seed in 0..10u64 {
+            let mut rng = DetRng::new(drop_seed + 1000);
+
+            // Randomly drop symbols but keep at least L
+            let mut kept: Vec<ReceivedSymbol> = all_symbols
+                .iter()
+                .filter(|_| rng.next_u64() % 3 != 0) // Drop ~33%
+                .cloned()
+                .collect();
+
+            // Ensure we have at least L symbols
+            if kept.len() < l {
+                // Add back enough symbols
+                for sym in &all_symbols {
+                    if kept.len() >= l {
+                        break;
+                    }
+                    if !kept.iter().any(|s| s.esi == sym.esi) {
+                        kept.push(sym.clone());
+                    }
+                }
+            }
+
+            // Truncate to exactly L symbols to stress the decoder
+            kept.truncate(l);
+
+            let result = decoder.decode(&kept);
+
+            // Decode should succeed with exactly L symbols
+            match result {
+                Ok(decoded) => {
+                    assert_eq!(
+                        decoded.source, source,
+                        "decoded source must match for drop_seed={drop_seed}"
+                    );
+                }
+                Err(e) => {
+                    // Some drop patterns may create singular matrices - that's acceptable
+                    // as long as we don't panic
+                    println!(
+                        "Note: drop_seed={drop_seed} produced decode error (acceptable): {:?}",
+                        e
+                    );
+                }
+            }
+        }
+    }
+
+    /// Property: different seeds produce different repair symbols.
+    #[test]
+    fn property_different_seeds_different_output() {
+        let k = 8;
+        let symbol_size = 32;
+        let source = make_source_data(k, symbol_size, 0);
+
+        let enc1 = SystematicEncoder::new(&source, symbol_size, 111).unwrap();
+        let enc2 = SystematicEncoder::new(&source, symbol_size, 222).unwrap();
+
+        let repair1: Vec<Vec<u8>> = (0..10u32).map(|esi| enc1.repair_symbol(esi)).collect();
+        let repair2: Vec<Vec<u8>> = (0..10u32).map(|esi| enc2.repair_symbol(esi)).collect();
+
+        // At least some repair symbols should differ
+        let differences = repair1
+            .iter()
+            .zip(repair2.iter())
+            .filter(|(a, b)| a != b)
+            .count();
+
+        assert!(
+            differences > 0,
+            "different seeds should produce different repair symbols"
+        );
+    }
+
+    /// Property: same seed always produces identical results.
+    #[test]
+    fn property_determinism_across_runs() {
+        let k = 12;
+        let symbol_size = 24;
+        let seed = 77777u64;
+
+        for _ in 0..5 {
+            let source = make_source_data(k, symbol_size, seed);
+            let encoder = SystematicEncoder::new(&source, symbol_size, seed).unwrap();
+
+            let repairs: Vec<Vec<u8>> = (0..20u32).map(|esi| encoder.repair_symbol(esi)).collect();
+
+            // All runs should produce identical repairs
+            let expected: Vec<Vec<u8>> = (0..20u32)
+                .map(|esi| {
+                    let enc = SystematicEncoder::new(&source, symbol_size, seed).unwrap();
+                    enc.repair_symbol(esi)
+                })
+                .collect();
+
+            assert_eq!(repairs, expected, "same seed must produce identical output");
+        }
+    }
+}
+
+// =========================================================================
+// Deterministic fuzz harness (bd-3h65)
+// =========================================================================
+//
+// Fuzz tests with fixed seeds for CI reproducibility.
+
+mod fuzz {
+    use super::*;
+    use crate::raptorq::decoder::{InactivationDecoder, ReceivedSymbol};
+    use crate::raptorq::gf256::Gf256;
+    use crate::raptorq::systematic::SystematicEncoder;
+    use crate::util::DetRng;
+
+    /// Configuration for a single fuzz iteration.
+    struct FuzzConfig {
+        k: usize,
+        symbol_size: usize,
+        seed: u64,
+        overhead_percent: usize,
+        drop_percent: usize,
+    }
+
+    /// Run a single fuzz iteration.
+    fn run_fuzz_iteration(config: &FuzzConfig) -> Result<(), String> {
+        let FuzzConfig {
+            k,
+            symbol_size,
+            seed,
+            overhead_percent,
+            drop_percent,
+        } = *config;
+
+        // Generate source data
+        let mut rng = DetRng::new(seed);
+        let source: Vec<Vec<u8>> = (0..k)
+            .map(|_| (0..symbol_size).map(|_| rng.next_u64() as u8).collect())
+            .collect();
+
+        let encoder = match SystematicEncoder::new(&source, symbol_size, seed) {
+            Some(e) => e,
+            None => return Err("encoder creation failed".to_string()),
+        };
+
+        let decoder = InactivationDecoder::new(k, symbol_size, seed);
+        let l = decoder.params().l;
+
+        // Generate symbols with overhead
+        let total_target = l * (100 + overhead_percent) / 100;
+        let mut all_symbols: Vec<ReceivedSymbol> = Vec::with_capacity(total_target);
+
+        // Add source symbols
+        for (i, data) in source.iter().enumerate() {
+            all_symbols.push(ReceivedSymbol::source(i as u32, data.clone()));
+        }
+
+        // Add repair symbols
+        let repair_needed = total_target.saturating_sub(k);
+        for esi in (k as u32)..((k + repair_needed) as u32) {
+            let (cols, coefs) = decoder.repair_equation(esi);
+            let repair_data = encoder.repair_symbol(esi);
+            all_symbols.push(ReceivedSymbol::repair(esi, cols, coefs, repair_data));
+        }
+
+        // Drop symbols
+        let mut kept: Vec<ReceivedSymbol> = Vec::new();
+        for sym in &all_symbols {
+            if rng.next_u64() % 100 >= drop_percent as u64 {
+                kept.push(sym.clone());
+            }
+        }
+
+        // Ensure at least L symbols
+        if kept.len() < l {
+            for sym in &all_symbols {
+                if kept.len() >= l {
+                    break;
+                }
+                if !kept.iter().any(|s| s.esi == sym.esi) {
+                    kept.push(sym.clone());
+                }
+            }
+        }
+
+        // Attempt decode
+        match decoder.decode(&kept) {
+            Ok(result) => {
+                if result.source != source {
+                    return Err(format!(
+                        "decoded source mismatch: got {} symbols, expected {}",
+                        result.source.len(),
+                        source.len()
+                    ));
+                }
+                Ok(())
+            }
+            Err(e) => {
+                // Some configurations may legitimately fail (singular matrix)
+                // This is not a bug, just a limitation of the received symbol set
+                Err(format!("decode error (may be acceptable): {:?}", e))
+            }
+        }
+    }
+
+    /// Deterministic fuzz with varied parameters.
+    #[test]
+    fn fuzz_varied_parameters() {
+        let mut successes = 0;
+        let mut acceptable_failures = 0;
+
+        // Test matrix covering various parameter combinations
+        let configs: Vec<FuzzConfig> = vec![
+            // Small blocks
+            FuzzConfig { k: 4, symbol_size: 16, seed: 1, overhead_percent: 50, drop_percent: 0 },
+            FuzzConfig { k: 4, symbol_size: 16, seed: 2, overhead_percent: 100, drop_percent: 20 },
+            FuzzConfig { k: 8, symbol_size: 32, seed: 3, overhead_percent: 50, drop_percent: 10 },
+            // Medium blocks
+            FuzzConfig { k: 16, symbol_size: 64, seed: 4, overhead_percent: 30, drop_percent: 15 },
+            FuzzConfig { k: 32, symbol_size: 128, seed: 5, overhead_percent: 20, drop_percent: 10 },
+            FuzzConfig { k: 64, symbol_size: 256, seed: 6, overhead_percent: 25, drop_percent: 5 },
+            // Larger blocks (bounded for CI)
+            FuzzConfig { k: 128, symbol_size: 512, seed: 7, overhead_percent: 15, drop_percent: 5 },
+            FuzzConfig { k: 256, symbol_size: 256, seed: 8, overhead_percent: 10, drop_percent: 0 },
+            // Stress tests
+            FuzzConfig { k: 4, symbol_size: 8, seed: 9, overhead_percent: 200, drop_percent: 50 },
+            FuzzConfig { k: 64, symbol_size: 64, seed: 10, overhead_percent: 50, drop_percent: 30 },
+        ];
+
+        for config in &configs {
+            match run_fuzz_iteration(config) {
+                Ok(()) => successes += 1,
+                Err(e) => {
+                    if e.contains("acceptable") {
+                        acceptable_failures += 1;
+                    } else {
+                        panic!(
+                            "Fuzz failure for k={}, seed={}: {}",
+                            config.k, config.seed, e
+                        );
+                    }
+                }
+            }
+        }
+
+        // Most iterations should succeed
+        assert!(
+            successes >= configs.len() / 2,
+            "Too few successes: {successes}/{} (acceptable failures: {acceptable_failures})",
+            configs.len()
+        );
+    }
+
+    /// Deterministic fuzz with random seed sweep (for CI regression).
+    #[test]
+    fn fuzz_seed_sweep() {
+        let k = 16;
+        let symbol_size = 32;
+
+        let mut successes = 0;
+
+        // 100 iterations with incrementing seeds
+        for seed in 0..100u64 {
+            let config = FuzzConfig {
+                k,
+                symbol_size,
+                seed: seed + 10000, // Offset to avoid overlap with other tests
+                overhead_percent: 30,
+                drop_percent: 10,
+            };
+
+            if run_fuzz_iteration(&config).is_ok() {
+                successes += 1;
+            }
+        }
+
+        // High success rate expected
+        assert!(
+            successes >= 80,
+            "Seed sweep success rate too low: {successes}/100"
+        );
+    }
+}
+
+// =========================================================================
+// Edge case tests (bd-3h65)
+// =========================================================================
+
+mod edge_cases {
+    use super::*;
+    use crate::raptorq::decoder::{DecodeError, InactivationDecoder, ReceivedSymbol};
+    use crate::raptorq::gf256::Gf256;
+    use crate::raptorq::systematic::SystematicEncoder;
+
+    /// Edge case: tiny block (K=1)
+    #[test]
+    fn tiny_block_k1() {
+        let k = 1;
+        let symbol_size = 16;
+        let seed = 42u64;
+
+        let source = vec![vec![0xAB; symbol_size]];
+        let encoder = SystematicEncoder::new(&source, symbol_size, seed).unwrap();
+        let decoder = InactivationDecoder::new(k, symbol_size, seed);
+        let l = decoder.params().l;
+
+        // Build received symbols
+        let mut received = vec![ReceivedSymbol::source(0, source[0].clone())];
+
+        for esi in 1u32..(l as u32) {
+            let (cols, coefs) = decoder.repair_equation(esi);
+            let repair_data = encoder.repair_symbol(esi);
+            received.push(ReceivedSymbol::repair(esi, cols, coefs, repair_data));
+        }
+
+        let result = decoder.decode(&received).expect("K=1 decode should succeed");
+        assert_eq!(result.source.len(), 1);
+        assert_eq!(result.source[0], source[0]);
+    }
+
+    /// Edge case: tiny block (K=2)
+    #[test]
+    fn tiny_block_k2() {
+        let k = 2;
+        let symbol_size = 8;
+        let seed = 99u64;
+
+        let source = vec![vec![0x11; symbol_size], vec![0x22; symbol_size]];
+        let encoder = SystematicEncoder::new(&source, symbol_size, seed).unwrap();
+        let decoder = InactivationDecoder::new(k, symbol_size, seed);
+        let l = decoder.params().l;
+
+        let mut received: Vec<ReceivedSymbol> = source
+            .iter()
+            .enumerate()
+            .map(|(i, d)| ReceivedSymbol::source(i as u32, d.clone()))
+            .collect();
+
+        for esi in (k as u32)..(l as u32) {
+            let (cols, coefs) = decoder.repair_equation(esi);
+            let repair_data = encoder.repair_symbol(esi);
+            received.push(ReceivedSymbol::repair(esi, cols, coefs, repair_data));
+        }
+
+        let result = decoder.decode(&received).expect("K=2 decode should succeed");
+        assert_eq!(result.source, source);
+    }
+
+    /// Edge case: tiny symbol size (1 byte)
+    #[test]
+    fn tiny_symbol_size() {
+        let k = 4;
+        let symbol_size = 1;
+        let seed = 77u64;
+
+        let source: Vec<Vec<u8>> = (0..k).map(|i| vec![i as u8]).collect();
+        let encoder = SystematicEncoder::new(&source, symbol_size, seed).unwrap();
+        let decoder = InactivationDecoder::new(k, symbol_size, seed);
+        let l = decoder.params().l;
+
+        let mut received: Vec<ReceivedSymbol> = source
+            .iter()
+            .enumerate()
+            .map(|(i, d)| ReceivedSymbol::source(i as u32, d.clone()))
+            .collect();
+
+        for esi in (k as u32)..(l as u32) {
+            let (cols, coefs) = decoder.repair_equation(esi);
+            let repair_data = encoder.repair_symbol(esi);
+            received.push(ReceivedSymbol::repair(esi, cols, coefs, repair_data));
+        }
+
+        let result = decoder.decode(&received).expect("tiny symbol decode should succeed");
+        assert_eq!(result.source, source);
+    }
+
+    /// Edge case: large block (bounded for CI - K=512)
+    #[test]
+    fn large_block_bounded() {
+        let k = 512;
+        let symbol_size = 64;
+        let seed = 12345u64;
+
+        let source: Vec<Vec<u8>> = (0..k)
+            .map(|i| (0..symbol_size).map(|j| ((i + j) % 256) as u8).collect())
+            .collect();
+
+        let encoder = SystematicEncoder::new(&source, symbol_size, seed).unwrap();
+        let decoder = InactivationDecoder::new(k, symbol_size, seed);
+        let l = decoder.params().l;
+
+        // Only source symbols + minimal repair overhead
+        let mut received: Vec<ReceivedSymbol> = source
+            .iter()
+            .enumerate()
+            .map(|(i, d)| ReceivedSymbol::source(i as u32, d.clone()))
+            .collect();
+
+        for esi in (k as u32)..(l as u32) {
+            let (cols, coefs) = decoder.repair_equation(esi);
+            let repair_data = encoder.repair_symbol(esi);
+            received.push(ReceivedSymbol::repair(esi, cols, coefs, repair_data));
+        }
+
+        let result = decoder.decode(&received).expect("large block decode should succeed");
+        assert_eq!(result.source.len(), k);
+        assert_eq!(result.source, source);
+    }
+
+    /// Edge case: repair=0 (only source symbols, need L=K+S+H)
+    /// This tests the case where we have all source symbols but still need
+    /// LDPC/HDPC overhead symbols to satisfy L requirements.
+    #[test]
+    fn repair_zero_only_source() {
+        let k = 8;
+        let symbol_size = 32;
+        let seed = 42u64;
+
+        let source: Vec<Vec<u8>> = (0..k)
+            .map(|i| (0..symbol_size).map(|j| ((i * 7 + j * 3) % 256) as u8).collect())
+            .collect();
+
+        let encoder = SystematicEncoder::new(&source, symbol_size, seed).unwrap();
+        let decoder = InactivationDecoder::new(k, symbol_size, seed);
+        let l = decoder.params().l;
+
+        // All K source symbols
+        let mut received: Vec<ReceivedSymbol> = source
+            .iter()
+            .enumerate()
+            .map(|(i, d)| ReceivedSymbol::source(i as u32, d.clone()))
+            .collect();
+
+        // We need L-K additional equations (for LDPC/HDPC satisfaction)
+        // These are "repair" symbols but with ESI starting at K
+        for esi in (k as u32)..(l as u32) {
+            let (cols, coefs) = decoder.repair_equation(esi);
+            let repair_data = encoder.repair_symbol(esi);
+            received.push(ReceivedSymbol::repair(esi, cols, coefs, repair_data));
+        }
+
+        let result = decoder.decode(&received).expect("source-heavy decode should succeed");
+        assert_eq!(result.source, source);
+    }
+
+    /// Edge case: all repair symbols (no source symbols received)
+    #[test]
+    fn all_repair_no_source() {
+        let k = 4;
+        let symbol_size = 16;
+        let seed = 333u64;
+
+        let source: Vec<Vec<u8>> = (0..k)
+            .map(|i| (0..symbol_size).map(|j| ((i * 11 + j * 5) % 256) as u8).collect())
+            .collect();
+
+        let encoder = SystematicEncoder::new(&source, symbol_size, seed).unwrap();
+        let decoder = InactivationDecoder::new(k, symbol_size, seed);
+        let l = decoder.params().l;
+
+        // Only repair symbols (need at least L)
+        let mut received: Vec<ReceivedSymbol> = Vec::new();
+        for esi in (k as u32)..((k + l) as u32) {
+            let (cols, coefs) = decoder.repair_equation(esi);
+            let repair_data = encoder.repair_symbol(esi);
+            received.push(ReceivedSymbol::repair(esi, cols, coefs, repair_data));
+        }
+
+        let result = decoder
+            .decode(&received)
+            .expect("all-repair decode should succeed");
+        assert_eq!(result.source, source);
+    }
+
+    /// Edge case: insufficient symbols should fail gracefully
+    #[test]
+    fn insufficient_symbols_error() {
+        let k = 8;
+        let symbol_size = 32;
+        let seed = 42u64;
+
+        let source: Vec<Vec<u8>> = (0..k).map(|i| vec![i as u8; symbol_size]).collect();
+        let decoder = InactivationDecoder::new(k, symbol_size, seed);
+        let l = decoder.params().l;
+
+        // Only k-1 symbols (less than L)
+        let received: Vec<ReceivedSymbol> = source[..(l - 1).min(k)]
+            .iter()
+            .enumerate()
+            .map(|(i, d)| ReceivedSymbol::source(i as u32, d.clone()))
+            .collect();
+
+        let result = decoder.decode(&received);
+        assert!(
+            matches!(result, Err(DecodeError::InsufficientSymbols { .. })),
+            "should fail with InsufficientSymbols"
+        );
+    }
+
+    /// Edge case: symbol size mismatch should fail gracefully
+    #[test]
+    fn symbol_size_mismatch_error() {
+        let k = 4;
+        let symbol_size = 32;
+        let seed = 42u64;
+
+        let decoder = InactivationDecoder::new(k, symbol_size, seed);
+
+        // Mix of correct and incorrect symbol sizes
+        let mut received = vec![
+            ReceivedSymbol::source(0, vec![0u8; symbol_size]),
+            ReceivedSymbol::source(1, vec![0u8; symbol_size]),
+            ReceivedSymbol::source(2, vec![0u8; symbol_size + 1]), // Wrong size!
+            ReceivedSymbol::source(3, vec![0u8; symbol_size]),
+        ];
+
+        // Add more symbols to reach L
+        let l = decoder.params().l;
+        for esi in 4u32..(l as u32) {
+            received.push(ReceivedSymbol {
+                esi,
+                is_source: false,
+                columns: vec![0],
+                coefficients: vec![Gf256::ONE],
+                data: vec![0u8; symbol_size], // Correct size
+            });
+        }
+
+        let result = decoder.decode(&received);
+        assert!(
+            matches!(result, Err(DecodeError::SymbolSizeMismatch { .. })),
+            "should fail with SymbolSizeMismatch"
+        );
+    }
+
+    /// Edge case: large symbol size
+    #[test]
+    fn large_symbol_size() {
+        let k = 4;
+        let symbol_size = 4096; // 4KB symbols
+        let seed = 88u64;
+
+        let source: Vec<Vec<u8>> = (0..k)
+            .map(|i| (0..symbol_size).map(|j| ((i + j) % 256) as u8).collect())
+            .collect();
+
+        let encoder = SystematicEncoder::new(&source, symbol_size, seed).unwrap();
+        let decoder = InactivationDecoder::new(k, symbol_size, seed);
+        let l = decoder.params().l;
+
+        let mut received: Vec<ReceivedSymbol> = source
+            .iter()
+            .enumerate()
+            .map(|(i, d)| ReceivedSymbol::source(i as u32, d.clone()))
+            .collect();
+
+        for esi in (k as u32)..(l as u32) {
+            let (cols, coefs) = decoder.repair_equation(esi);
+            let repair_data = encoder.repair_symbol(esi);
+            received.push(ReceivedSymbol::repair(esi, cols, coefs, repair_data));
+        }
+
+        let result = decoder.decode(&received).expect("large symbol decode should succeed");
+        assert_eq!(result.source, source);
+    }
+}

@@ -254,25 +254,17 @@ pub enum FailureReason {
 impl From<&DecodeError> for FailureReason {
     fn from(err: &DecodeError) -> Self {
         match err {
-            DecodeError::InsufficientSymbols { received, required } => {
-                FailureReason::InsufficientSymbols {
-                    received: *received,
-                    required: *required,
-                }
-            }
-            DecodeError::SingularMatrix { row } => FailureReason::SingularMatrix {
+            DecodeError::InsufficientSymbols { received, required } => Self::InsufficientSymbols {
+                received: *received,
+                required: *required,
+            },
+            DecodeError::SingularMatrix { row } => Self::SingularMatrix {
                 row: *row,
                 attempted_cols: Vec::new(), // Filled in by caller if available
             },
-            DecodeError::SymbolSizeMismatch { expected, actual } => {
-                FailureReason::SymbolSizeMismatch {
-                    expected: *expected,
-                    actual: *actual,
-                }
-            }
-            _ => FailureReason::InsufficientSymbols {
-                received: 0,
-                required: 0,
+            DecodeError::SymbolSizeMismatch { expected, actual } => Self::SymbolSizeMismatch {
+                expected: *expected,
+                actual: *actual,
             },
         }
     }

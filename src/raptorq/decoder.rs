@@ -12,7 +12,11 @@
 //! - Same received symbols in same order produce identical decode results
 
 use crate::raptorq::gf256::{gf256_addmul_slice, Gf256};
+use crate::raptorq::proof::{
+    DecodeConfig, DecodeProof, EliminationTrace, FailureReason, PeelingTrace, ReceivedSummary,
+};
 use crate::raptorq::systematic::{RobustSoliton, SystematicParams};
+use crate::types::ObjectId;
 use crate::util::DetRng;
 
 use std::collections::BTreeSet;
@@ -84,6 +88,15 @@ pub struct DecodeResult {
     pub source: Vec<Vec<u8>>,
     /// Decode statistics.
     pub stats: DecodeStats,
+}
+
+/// Result of decoding with proof artifact.
+#[derive(Debug)]
+pub struct DecodeResultWithProof {
+    /// The decode result (success case).
+    pub result: DecodeResult,
+    /// Proof artifact explaining the decode process.
+    pub proof: DecodeProof,
 }
 
 // ============================================================================
@@ -285,6 +298,101 @@ impl InactivationDecoder {
         })
     }
 
+    /// Decode from received symbols with proof artifact capture.
+    ///
+    /// Like `decode`, but also captures a proof artifact that explains
+    /// the decode process for debugging and verification.
+    ///
+    /// # Arguments
+    ///
+    /// * `symbols` - Received symbols (at least L required)
+    /// * `object_id` - Object ID for the proof artifact
+    /// * `sbn` - Source block number for the proof artifact
+    #[allow(clippy::result_large_err)]
+    pub fn decode_with_proof(
+        &self,
+        symbols: &[ReceivedSymbol],
+        object_id: ObjectId,
+        sbn: u8,
+    ) -> Result<DecodeResultWithProof, (DecodeError, DecodeProof)> {
+        let l = self.params.l;
+        let k = self.params.k;
+        let symbol_size = self.params.symbol_size;
+
+        // Build proof configuration
+        let config = DecodeConfig {
+            object_id,
+            sbn,
+            k,
+            s: self.params.s,
+            h: self.params.h,
+            l,
+            symbol_size,
+            seed: self.seed,
+        };
+        let mut proof_builder = DecodeProof::builder(config);
+
+        // Capture received symbols summary
+        let received = ReceivedSummary::from_received(
+            symbols.iter().map(|s| (s.esi, s.is_source)),
+        );
+        proof_builder.set_received(received);
+
+        // Validate input
+        if symbols.len() < l {
+            let err = DecodeError::InsufficientSymbols {
+                received: symbols.len(),
+                required: l,
+            };
+            proof_builder.set_failure(FailureReason::from(&err));
+            return Err((err, proof_builder.build()));
+        }
+
+        for sym in symbols {
+            if sym.data.len() != symbol_size {
+                let err = DecodeError::SymbolSizeMismatch {
+                    expected: symbol_size,
+                    actual: sym.data.len(),
+                };
+                proof_builder.set_failure(FailureReason::from(&err));
+                return Err((err, proof_builder.build()));
+            }
+        }
+
+        // Build decoder state
+        let mut state = self.build_state(symbols);
+
+        // Phase 1: Peeling with proof capture
+        Self::peel_with_proof(&mut state, proof_builder.peeling_mut());
+
+        // Phase 2: Inactivation + Gaussian elimination with proof capture
+        if let Err(err) = self.inactivate_and_solve_with_proof(&mut state, proof_builder.elimination_mut()) {
+            proof_builder.set_failure(FailureReason::from(&err));
+            return Err((err, proof_builder.build()));
+        }
+
+        // Extract results
+        let intermediate: Vec<Vec<u8>> = state
+            .solved
+            .into_iter()
+            .map(|opt| opt.unwrap_or_else(|| vec![0u8; symbol_size]))
+            .collect();
+
+        let source: Vec<Vec<u8>> = intermediate[..k].to_vec();
+
+        // Mark success
+        proof_builder.set_success(k);
+
+        Ok(DecodeResultWithProof {
+            result: DecodeResult {
+                intermediate,
+                source,
+                stats: state.stats,
+            },
+            proof: proof_builder.build(),
+        })
+    }
+
     /// Build initial decoder state from received symbols.
     fn build_state(&self, symbols: &[ReceivedSymbol]) -> DecoderState {
         let l = self.params.l;
@@ -348,6 +456,63 @@ impl InactivationDecoder {
             state.solved[col] = Some(solution.clone());
             state.active_cols.remove(&col);
             state.stats.peeled += 1;
+
+            // Propagate to other equations: subtract col's contribution
+            for (i, eq) in state.equations.iter_mut().enumerate() {
+                if eq.used {
+                    continue;
+                }
+                let eq_coef = eq.coef(col);
+                if eq_coef.is_zero() {
+                    continue;
+                }
+                // rhs[i] -= eq_coef * solution
+                gf256_addmul_slice(&mut state.rhs[i], &solution, eq_coef);
+                // Remove the term from the equation
+                eq.terms.retain(|(c, _)| *c != col);
+            }
+        }
+    }
+
+    /// Phase 1: Peeling with proof trace capture.
+    ///
+    /// Like `peel`, but also records solved symbols to the proof trace.
+    fn peel_with_proof(state: &mut DecoderState, trace: &mut PeelingTrace) {
+        loop {
+            // Find an unused degree-1 equation with an active column
+            let deg1_idx = state.equations.iter().enumerate().find_map(|(idx, eq)| {
+                if eq.used || eq.degree() != 1 {
+                    return None;
+                }
+                let col = eq.terms[0].0;
+                if state.active_cols.contains(&col) && state.solved[col].is_none() {
+                    Some(idx)
+                } else {
+                    None
+                }
+            });
+
+            let Some(eq_idx) = deg1_idx else {
+                break;
+            };
+
+            // Solve this equation
+            let (col, coef) = state.equations[eq_idx].terms[0];
+            state.equations[eq_idx].used = true;
+
+            // Compute the solution: intermediate[col] = rhs[eq_idx] / coef
+            let mut solution = state.rhs[eq_idx].clone();
+            if coef != Gf256::ONE {
+                let inv = coef.inv();
+                crate::raptorq::gf256::gf256_mul_slice(&mut solution, inv);
+            }
+
+            state.solved[col] = Some(solution.clone());
+            state.active_cols.remove(&col);
+            state.stats.peeled += 1;
+
+            // Record in proof trace
+            trace.record_solved(col);
 
             // Propagate to other equations: subtract col's contribution
             for (i, eq) in state.equations.iter_mut().enumerate() {
@@ -466,6 +631,135 @@ impl InactivationDecoder {
                 }
                 gf256_addmul_slice(&mut b[row], &pivot_rhs, factor);
                 state.stats.gauss_ops += 1;
+            }
+        }
+
+        // Extract solutions
+        for (dense_col, &col) in unsolved.iter().enumerate() {
+            let prow = pivot_row[dense_col];
+            if prow < n_rows {
+                state.solved[col] = Some(b[prow].clone());
+            } else {
+                state.solved[col] = Some(vec![0u8; symbol_size]);
+            }
+        }
+
+        Ok(())
+    }
+
+    /// Phase 2: Inactivation + Gaussian elimination with proof trace capture.
+    ///
+    /// Like `inactivate_and_solve`, but also records inactivations, pivots,
+    /// and row operations to the proof trace.
+    fn inactivate_and_solve_with_proof(
+        &self,
+        state: &mut DecoderState,
+        trace: &mut EliminationTrace,
+    ) -> Result<(), DecodeError> {
+        let symbol_size = self.params.symbol_size;
+
+        // Collect remaining unsolved columns
+        let unsolved: Vec<usize> = state
+            .active_cols
+            .iter()
+            .filter(|&&col| state.solved[col].is_none())
+            .copied()
+            .collect();
+
+        if unsolved.is_empty() {
+            return Ok(());
+        }
+
+        // Collect unused equations
+        let unused_eqs: Vec<usize> = state
+            .equations
+            .iter()
+            .enumerate()
+            .filter_map(|(i, eq)| if eq.used { None } else { Some(i) })
+            .collect();
+
+        // Mark all remaining unsolved columns as inactive
+        for &col in &unsolved {
+            state.inactive_cols.insert(col);
+            state.active_cols.remove(&col);
+            state.stats.inactivated += 1;
+            // Record inactivation in proof trace
+            trace.record_inactivation(col);
+        }
+
+        // Build dense submatrix for Gaussian elimination
+        // Rows = unused equations, Columns = unsolved columns
+        let n_rows = unused_eqs.len();
+        let n_cols = unsolved.len();
+
+        if n_rows < n_cols {
+            return Err(DecodeError::InsufficientSymbols {
+                received: n_rows,
+                required: n_cols,
+            });
+        }
+
+        // Column index mapping: unsolved column -> dense index
+        let col_to_dense: std::collections::HashMap<usize, usize> =
+            unsolved.iter().enumerate().map(|(i, &c)| (c, i)).collect();
+
+        // Build dense matrix A and RHS vector b
+        let mut a = vec![vec![Gf256::ZERO; n_cols]; n_rows];
+        let mut b: Vec<Vec<u8>> = Vec::with_capacity(n_rows);
+
+        for (row, &eq_idx) in unused_eqs.iter().enumerate() {
+            for &(col, coef) in &state.equations[eq_idx].terms {
+                if let Some(&dense_col) = col_to_dense.get(&col) {
+                    a[row][dense_col] = coef;
+                }
+            }
+            b.push(state.rhs[eq_idx].clone());
+        }
+
+        // Gaussian elimination with partial pivoting
+        let mut pivot_row = vec![usize::MAX; n_cols];
+
+        for col in 0..n_cols {
+            // Find pivot: first nonzero in column `col` among unassigned rows
+            let pivot = (0..n_rows)
+                .find(|&row| pivot_row.iter().all(|&pr| pr != row) && !a[row][col].is_zero());
+
+            let Some(prow) = pivot else {
+                return Err(DecodeError::SingularMatrix { row: col });
+            };
+
+            pivot_row[col] = prow;
+            state.stats.pivots_selected += 1;
+            // Record pivot in proof trace (use original column index)
+            trace.record_pivot(unsolved[col], prow);
+
+            // Scale pivot row so a[prow][col] = 1
+            let pivot_coef = a[prow][col];
+            let inv = pivot_coef.inv();
+            for value in &mut a[prow] {
+                *value *= inv;
+            }
+            crate::raptorq::gf256::gf256_mul_slice(&mut b[prow], inv);
+
+            // Eliminate column in all other rows
+            // Clone pivot row to avoid borrow conflict
+            let pivot_row_data: Vec<Gf256> = a[prow].clone();
+            let pivot_rhs = b[prow].clone();
+            for row in 0..n_rows {
+                if row == prow {
+                    continue;
+                }
+                let factor = a[row][col];
+                if factor.is_zero() {
+                    continue;
+                }
+                for c in 0..n_cols {
+                    a[row][c] += factor * pivot_row_data[c];
+                }
+                gf256_addmul_slice(&mut b[row], &pivot_rhs, factor);
+                state.stats.gauss_ops += 1;
+                // Record row operation in proof trace
+                trace.record_row_op();
             }
         }
 
