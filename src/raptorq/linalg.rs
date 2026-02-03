@@ -384,6 +384,62 @@ impl SparseRow {
         }
         self.add(&other.scale(c))
     }
+
+    /// In-place scale-add: `self += c * other`.
+    ///
+    /// Merges `other` (scaled by `c`) into `self` without allocating an
+    /// intermediate scaled copy. The resulting entries are kept sorted by
+    /// index with zero entries removed.
+    pub fn scale_add_assign(&mut self, other: &Self, c: Gf256) {
+        assert_eq!(self.len, other.len, "row length mismatch");
+        if c.is_zero() {
+            return;
+        }
+
+        // Merge self.entries and scaled other.entries in-place.
+        // We build the result in a temporary vec to avoid index invalidation,
+        // then swap it in.
+        let mut merged = Vec::with_capacity(self.entries.len() + other.entries.len());
+        let mut i = 0;
+        let mut j = 0;
+
+        while i < self.entries.len() && j < other.entries.len() {
+            let (idx_a, val_a) = self.entries[i];
+            let (idx_b, val_b) = other.entries[j];
+
+            match idx_a.cmp(&idx_b) {
+                std::cmp::Ordering::Less => {
+                    merged.push((idx_a, val_a));
+                    i += 1;
+                }
+                std::cmp::Ordering::Greater => {
+                    let scaled = val_b * c;
+                    if !scaled.is_zero() {
+                        merged.push((idx_b, scaled));
+                    }
+                    j += 1;
+                }
+                std::cmp::Ordering::Equal => {
+                    let sum = val_a + val_b * c;
+                    if !sum.is_zero() {
+                        merged.push((idx_a, sum));
+                    }
+                    i += 1;
+                    j += 1;
+                }
+            }
+        }
+
+        merged.extend_from_slice(&self.entries[i..]);
+        for &(idx, val) in &other.entries[j..] {
+            let scaled = val * c;
+            if !scaled.is_zero() {
+                merged.push((idx, scaled));
+            }
+        }
+
+        self.entries = merged;
+    }
 }
 
 // ============================================================================

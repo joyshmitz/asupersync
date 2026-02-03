@@ -502,7 +502,7 @@ impl InactivationDecoder {
             state.equations[eq_idx].used = true;
 
             // Compute the solution: intermediate[col] = rhs[eq_idx] / coef
-            let mut solution = state.rhs[eq_idx].clone();
+            let mut solution = std::mem::take(&mut state.rhs[eq_idx]);
             if coef != Gf256::ONE {
                 let inv = coef.inv();
                 crate::raptorq::gf256::gf256_mul_slice(&mut solution, inv);
@@ -558,7 +558,7 @@ impl InactivationDecoder {
             state.equations[eq_idx].used = true;
 
             // Compute the solution: intermediate[col] = rhs[eq_idx] / coef
-            let mut solution = state.rhs[eq_idx].clone();
+            let mut solution = std::mem::take(&mut state.rhs[eq_idx]);
             if coef != Gf256::ONE {
                 let inv = coef.inv();
                 crate::raptorq::gf256::gf256_mul_slice(&mut solution, inv);
@@ -637,26 +637,32 @@ impl InactivationDecoder {
         let col_to_dense: std::collections::HashMap<usize, usize> =
             unsolved.iter().enumerate().map(|(i, &c)| (c, i)).collect();
 
-        // Build dense matrix A and RHS vector b
-        let mut a = vec![vec![Gf256::ZERO; n_cols]; n_rows];
+        // Build flat row-major dense matrix A and RHS vector b.
+        // Flat layout avoids per-row heap allocation and improves cache locality.
+        let mut a = vec![Gf256::ZERO; n_rows * n_cols];
         let mut b: Vec<Vec<u8>> = Vec::with_capacity(n_rows);
 
         for (row, &eq_idx) in unused_eqs.iter().enumerate() {
+            let row_off = row * n_cols;
             for &(col, coef) in &state.equations[eq_idx].terms {
                 if let Some(&dense_col) = col_to_dense.get(&col) {
-                    a[row][dense_col] = coef;
+                    a[row_off + dense_col] = coef;
                 }
             }
             b.push(state.rhs[eq_idx].clone());
         }
 
-        // Gaussian elimination with partial pivoting
+        // Gaussian elimination with partial pivoting.
+        // Pre-allocate a single pivot buffer to avoid per-column clones.
         let mut pivot_row = vec![usize::MAX; n_cols];
+        let mut pivot_buf = vec![Gf256::ZERO; n_cols];
+        let mut pivot_rhs = vec![0u8; symbol_size];
 
         for col in 0..n_cols {
             // Find pivot: first nonzero in column `col` among unassigned rows
-            let pivot = (0..n_rows)
-                .find(|&row| pivot_row.iter().all(|&pr| pr != row) && !a[row][col].is_zero());
+            let pivot = (0..n_rows).find(|&row| {
+                pivot_row.iter().all(|&pr| pr != row) && !a[row * n_cols + col].is_zero()
+            });
 
             let Some(prow) = pivot else {
                 return Err(DecodeError::SingularMatrix { row: col });
@@ -666,38 +672,41 @@ impl InactivationDecoder {
             state.stats.pivots_selected += 1;
 
             // Scale pivot row so a[prow][col] = 1
-            let pivot_coef = a[prow][col];
+            let prow_off = prow * n_cols;
+            let pivot_coef = a[prow_off + col];
             let inv = pivot_coef.inv();
-            for value in &mut a[prow] {
+            for value in &mut a[prow_off..prow_off + n_cols] {
                 *value *= inv;
             }
             crate::raptorq::gf256::gf256_mul_slice(&mut b[prow], inv);
 
-            // Eliminate column in all other rows
-            // Clone pivot row to avoid borrow conflict
-            let pivot_row_data: Vec<Gf256> = a[prow].clone();
-            let pivot_rhs = b[prow].clone();
-            for row in 0..n_rows {
+            // Copy pivot row into reusable buffers (no heap allocation)
+            pivot_buf[..n_cols].copy_from_slice(&a[prow_off..prow_off + n_cols]);
+            pivot_rhs[..symbol_size].copy_from_slice(&b[prow]);
+
+            // Eliminate column in all other rows.
+            for (row, rhs) in b.iter_mut().enumerate().take(n_rows) {
                 if row == prow {
                     continue;
                 }
-                let factor = a[row][col];
+                let row_off = row * n_cols;
+                let factor = a[row_off + col];
                 if factor.is_zero() {
                     continue;
                 }
                 for c in 0..n_cols {
-                    a[row][c] += factor * pivot_row_data[c];
+                    a[row_off + c] += factor * pivot_buf[c];
                 }
-                gf256_addmul_slice(&mut b[row], &pivot_rhs, factor);
+                gf256_addmul_slice(rhs, &pivot_rhs[..symbol_size], factor);
                 state.stats.gauss_ops += 1;
             }
         }
 
-        // Extract solutions
+        // Extract solutions: move RHS vectors instead of cloning
         for (dense_col, &col) in unsolved.iter().enumerate() {
             let prow = pivot_row[dense_col];
             if prow < n_rows {
-                state.solved[col] = Some(b[prow].clone());
+                state.solved[col] = Some(std::mem::take(&mut b[prow]));
             } else {
                 state.solved[col] = Some(vec![0u8; symbol_size]);
             }
@@ -762,26 +771,30 @@ impl InactivationDecoder {
         let col_to_dense: std::collections::HashMap<usize, usize> =
             unsolved.iter().enumerate().map(|(i, &c)| (c, i)).collect();
 
-        // Build dense matrix A and RHS vector b
-        let mut a = vec![vec![Gf256::ZERO; n_cols]; n_rows];
+        // Build flat row-major dense matrix A and RHS vector b.
+        let mut a = vec![Gf256::ZERO; n_rows * n_cols];
         let mut b: Vec<Vec<u8>> = Vec::with_capacity(n_rows);
 
         for (row, &eq_idx) in unused_eqs.iter().enumerate() {
+            let row_off = row * n_cols;
             for &(col, coef) in &state.equations[eq_idx].terms {
                 if let Some(&dense_col) = col_to_dense.get(&col) {
-                    a[row][dense_col] = coef;
+                    a[row_off + dense_col] = coef;
                 }
             }
             b.push(state.rhs[eq_idx].clone());
         }
 
-        // Gaussian elimination with partial pivoting
+        // Gaussian elimination with partial pivoting.
         let mut pivot_row = vec![usize::MAX; n_cols];
+        let mut pivot_buf = vec![Gf256::ZERO; n_cols];
+        let mut pivot_rhs = vec![0u8; symbol_size];
 
         for col in 0..n_cols {
             // Find pivot: first nonzero in column `col` among unassigned rows
-            let pivot = (0..n_rows)
-                .find(|&row| pivot_row.iter().all(|&pr| pr != row) && !a[row][col].is_zero());
+            let pivot = (0..n_rows).find(|&row| {
+                pivot_row.iter().all(|&pr| pr != row) && !a[row * n_cols + col].is_zero()
+            });
 
             let Some(prow) = pivot else {
                 return Err(DecodeError::SingularMatrix { row: col });
@@ -793,40 +806,43 @@ impl InactivationDecoder {
             trace.record_pivot(unsolved[col], prow);
 
             // Scale pivot row so a[prow][col] = 1
-            let pivot_coef = a[prow][col];
+            let prow_off = prow * n_cols;
+            let pivot_coef = a[prow_off + col];
             let inv = pivot_coef.inv();
-            for value in &mut a[prow] {
+            for value in &mut a[prow_off..prow_off + n_cols] {
                 *value *= inv;
             }
             crate::raptorq::gf256::gf256_mul_slice(&mut b[prow], inv);
 
-            // Eliminate column in all other rows
-            // Clone pivot row to avoid borrow conflict
-            let pivot_row_data: Vec<Gf256> = a[prow].clone();
-            let pivot_rhs = b[prow].clone();
-            for row in 0..n_rows {
+            // Copy pivot row into reusable buffers
+            pivot_buf[..n_cols].copy_from_slice(&a[prow_off..prow_off + n_cols]);
+            pivot_rhs[..symbol_size].copy_from_slice(&b[prow]);
+
+            // Eliminate column in all other rows.
+            for (row, rhs) in b.iter_mut().enumerate().take(n_rows) {
                 if row == prow {
                     continue;
                 }
-                let factor = a[row][col];
+                let row_off = row * n_cols;
+                let factor = a[row_off + col];
                 if factor.is_zero() {
                     continue;
                 }
                 for c in 0..n_cols {
-                    a[row][c] += factor * pivot_row_data[c];
+                    a[row_off + c] += factor * pivot_buf[c];
                 }
-                gf256_addmul_slice(&mut b[row], &pivot_rhs, factor);
+                gf256_addmul_slice(rhs, &pivot_rhs[..symbol_size], factor);
                 state.stats.gauss_ops += 1;
                 // Record row operation in proof trace
                 trace.record_row_op();
             }
         }
 
-        // Extract solutions
+        // Extract solutions: move RHS vectors instead of cloning
         for (dense_col, &col) in unsolved.iter().enumerate() {
             let prow = pivot_row[dense_col];
             if prow < n_rows {
-                state.solved[col] = Some(b[prow].clone());
+                state.solved[col] = Some(std::mem::take(&mut b[prow]));
             } else {
                 state.solved[col] = Some(vec![0u8; symbol_size]);
             }

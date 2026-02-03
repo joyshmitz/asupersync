@@ -351,8 +351,13 @@ impl EncodingIterator<'_> {
         let mut buffer = self.pipeline.allocate_buffer(self.symbol_size)?;
         let start = block.start + (esi as usize * self.symbol_size);
         let end = min(start + self.symbol_size, block.end());
+        let copy_len = end.saturating_sub(start);
 
-        if start < end {
+        if copy_len < buffer.len() {
+            buffer.fill(0);
+        }
+
+        if copy_len > 0 {
             let slice = &self.data[start..end];
             buffer[..slice.len()].copy_from_slice(slice);
         }
@@ -622,6 +627,27 @@ mod tests {
         let _ = iter.next().unwrap().unwrap();
         let err = iter.next().unwrap().unwrap_err();
         assert!(matches!(err, EncodingError::PoolExhausted));
+    }
+
+    #[test]
+    fn test_source_symbol_zero_pads_with_pool() {
+        let symbol_size = 4u16;
+        let mut pool = pool_for(symbol_size, 1);
+        let mut buffer = pool.allocate().unwrap();
+        buffer.as_mut_slice().fill(0xAA);
+        pool.deallocate(buffer);
+
+        let mut pipeline = EncodingPipeline::new(test_config(symbol_size, 16, 1.0), pool);
+        let data = [0x11u8];
+        let symbols: Vec<_> = pipeline
+            .encode(ObjectId::new_for_test(11), &data)
+            .collect::<Result<Vec<_>, _>>()
+            .unwrap();
+
+        assert_eq!(symbols.len(), 1);
+        let bytes = symbols[0].symbol().data();
+        assert_eq!(bytes[0], 0x11);
+        assert!(bytes[1..].iter().all(|byte| *byte == 0));
     }
 
     #[test]

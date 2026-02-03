@@ -432,8 +432,10 @@ impl ConstraintMatrix {
                     a[other * cols + c] += factor * val;
                 }
                 // b[other] += factor * b[row]
-                let row_copy = b[row].clone();
-                gf256_addmul_slice(&mut b[other], &row_copy, factor);
+                // Use take/restore to avoid cloning the row RHS.
+                let row_rhs = std::mem::take(&mut b[row]);
+                gf256_addmul_slice(&mut b[other], &row_rhs, factor);
+                b[row] = row_rhs;
             }
         }
 
@@ -867,6 +869,25 @@ impl SystematicEncoder {
         self.repair_symbol_with_degree(esi).0
     }
 
+    /// Generate a repair symbol into a caller-provided buffer.
+    ///
+    /// Writes the repair symbol data into `buf[..symbol_size]`, avoiding
+    /// heap allocation for the result. `buf` must be at least `symbol_size` bytes.
+    ///
+    /// # Panics
+    ///
+    /// Panics if `buf.len() < symbol_size`.
+    pub fn repair_symbol_into(&self, esi: u32, buf: &mut [u8]) {
+        assert!(
+            buf.len() >= self.params.symbol_size,
+            "buf too small: {} < {}",
+            buf.len(),
+            self.params.symbol_size
+        );
+        let mut seen = Vec::new();
+        self.repair_symbol_into_with_degree(esi, buf, &mut seen);
+    }
+
     /// Returns a reference to intermediate symbol `i`.
     ///
     /// # Panics
@@ -932,11 +953,17 @@ impl SystematicEncoder {
     /// Multiple calls emit non-overlapping, monotonically increasing ESI sequences.
     pub fn emit_repair(&mut self, count: usize) -> Vec<EmittedSymbol> {
         let start_esi = self.next_repair_esi;
+        let symbol_size = self.params.symbol_size;
         let mut result = Vec::with_capacity(count);
+
+        // Reuse buffer and bitset across iterations to avoid per-symbol allocation.
+        let mut buf = vec![0u8; symbol_size];
+        let mut seen = Vec::new();
 
         for i in 0..count {
             let esi = start_esi + i as u32;
-            let (data, degree) = self.repair_symbol_with_degree(esi);
+            let degree = self.repair_symbol_into_with_degree(esi, &mut buf, &mut seen);
+            let data = buf[..symbol_size].to_vec();
 
             // Update stats
             self.stats.repair_symbols_generated += 1;
@@ -1004,11 +1031,24 @@ impl SystematicEncoder {
         self.systematic_emitted
     }
 
-    /// Generate a repair symbol and return both data and degree.
-    fn repair_symbol_with_degree(&self, esi: u32) -> (Vec<u8>, usize) {
+    /// Generate a repair symbol into `buf` and return the degree.
+    ///
+    /// `buf` must be at least `symbol_size` bytes; it is zeroed then filled.
+    /// Uses a `Vec<bool>` bitset (size L, typically 20-50) instead of
+    /// `Vec::contains` for O(1) duplicate checking during index sampling.
+    fn repair_symbol_into_with_degree(
+        &self,
+        esi: u32,
+        buf: &mut [u8],
+        seen: &mut Vec<bool>,
+    ) -> usize {
         let symbol_size = self.params.symbol_size;
         let l = self.params.l;
-        let mut result = vec![0u8; symbol_size];
+        buf[..symbol_size].fill(0);
+
+        // Reset bitset (reuse allocation across calls)
+        seen.clear();
+        seen.resize(l, false);
 
         // Seed per-symbol RNG from block seed + ESI
         let sym_seed = self
@@ -1022,19 +1062,29 @@ impl SystematicEncoder {
         // Sample distinct intermediate symbol indices (without replacement)
         // to avoid XOR cancellation of duplicate entries.
         let capped_degree = degree.min(l);
-        let mut chosen = Vec::with_capacity(capped_degree);
         for _ in 0..capped_degree {
             let mut idx = rng.next_usize(l);
-            // Rejection-sample to avoid duplicates.
-            while chosen.contains(&idx) {
+            // Rejection-sample to avoid duplicates (O(1) via bitset).
+            while seen[idx] {
                 idx = rng.next_usize(l);
             }
-            chosen.push(idx);
-            for (r, &s) in result.iter_mut().zip(self.intermediate[idx].iter()) {
+            seen[idx] = true;
+            for (r, &s) in buf[..symbol_size]
+                .iter_mut()
+                .zip(self.intermediate[idx].iter())
+            {
                 *r ^= s;
             }
         }
 
+        degree
+    }
+
+    /// Generate a repair symbol and return both data and degree.
+    fn repair_symbol_with_degree(&self, esi: u32) -> (Vec<u8>, usize) {
+        let mut result = vec![0u8; self.params.symbol_size];
+        let mut seen = Vec::new();
+        let degree = self.repair_symbol_into_with_degree(esi, &mut result, &mut seen);
         (result, degree)
     }
 }

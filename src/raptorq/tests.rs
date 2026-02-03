@@ -880,7 +880,7 @@ mod fuzz {
         }
 
         // Include constraint symbols and decode
-        let mut with_constraints = constraints.clone();
+        let mut with_constraints = constraints;
         with_constraints.extend(kept);
 
         match decoder.decode(&with_constraints) {

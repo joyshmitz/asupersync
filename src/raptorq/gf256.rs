@@ -637,7 +637,7 @@ mod tests {
         let original: Vec<u8> = (0..LEN).map(|i| (i.wrapping_mul(37)) as u8).collect();
         let c = Gf256(13);
         let expected: Vec<u8> = original.iter().map(|&s| (Gf256(s) * c).0).collect();
-        let mut data = original.clone();
+        let mut data = original;
         gf256_mul_slice(&mut data, c);
         assert_eq!(data, expected);
     }
