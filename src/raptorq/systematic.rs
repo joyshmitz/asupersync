@@ -457,28 +457,22 @@ fn build_hdpc_rows(matrix: &mut ConstraintMatrix, params: &SystematicParams, see
 /// Build LT constraint rows for systematic symbols (rows S+H..S+H+K).
 ///
 /// For the systematic encoding, source symbol i corresponds to
-/// intermediate symbol i. Thus, LT row i has a 1 in column i and
-/// the LDPC/HDPC contribution from the constraint structure.
-fn build_lt_rows(matrix: &mut ConstraintMatrix, params: &SystematicParams, seed: u64) {
+/// intermediate symbol i. Each LT row i has exactly a 1 in column i,
+/// ensuring that C[i] = source[i] after solving the constraint matrix.
+///
+/// Note: Redundancy comes from the LDPC and HDPC constraints, not from
+/// additional connections in the LT rows. Adding extra connections here
+/// would break the systematic property (intermediate[i] ≠ source[i]).
+fn build_lt_rows(matrix: &mut ConstraintMatrix, params: &SystematicParams, _seed: u64) {
     let s = params.s;
     let h = params.h;
     let k = params.k;
-    let l = params.l;
-
-    let soliton = RobustSoliton::new(l, 0.2, 0.05);
-    let mut rng = DetRng::new(seed.wrapping_add(0x1700_1700_0000));
 
     for i in 0..k {
         let row = s + h + i;
-        // Systematic: source symbol i maps to intermediate symbol i
+        // Systematic: source symbol i maps directly to intermediate symbol i
+        // C[i] = source[i], ensuring intermediate[0..K] = source_symbols
         matrix.set(row, i, Gf256::ONE);
-
-        // Additional LT connections for redundancy
-        let degree = soliton.sample(rng.next_u64() as u32);
-        for _ in 1..degree {
-            let col = rng.next_usize(l);
-            matrix.add_assign(row, col, Gf256::ONE);
-        }
     }
 }
 

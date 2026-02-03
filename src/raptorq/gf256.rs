@@ -289,9 +289,6 @@ pub fn gf256_mul_slice(dst: &mut [u8], c: Gf256) {
 ///
 /// Equivalent to `gf256_add_slice(dst, &(c * src))` but avoids allocation.
 ///
-/// This implementation uses branchless arithmetic to avoid branch mispredictions
-/// when processing data with mixed zero/nonzero values.
-///
 /// # Panics
 ///
 /// Panics if `src.len() != dst.len()`.
@@ -302,19 +299,10 @@ pub fn gf256_addmul_slice(dst: &mut [u8], src: &[u8], c: Gf256) {
         return;
     }
     let log_c = LOG[c.0 as usize] as usize;
-
-    // Branchless inner loop: compute result unconditionally, mask based on zero check.
-    // When s == 0, mask is 0x00; when s != 0, mask is 0xFF.
-    // This avoids branch misprediction for mixed data patterns.
     for (d, s) in dst.iter_mut().zip(src.iter()) {
-        let s_val = *s;
-        // Compute the GF(256) product using log/exp tables
-        // LOG[0] = 0 by construction, so this is safe even for s_val == 0
-        let log_s = LOG[s_val as usize] as usize;
-        let result = EXP[log_s + log_c];
-        // Branchless mask: 0xFF if s_val != 0, 0x00 if s_val == 0
-        let mask = 0u8.wrapping_sub(u8::from(s_val != 0));
-        *d ^= result & mask;
+        if *s != 0 {
+            *d ^= EXP[LOG[*s as usize] as usize + log_c];
+        }
     }
 }
 

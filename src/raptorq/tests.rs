@@ -405,7 +405,7 @@ mod conformance {
     /// because the decoder's Gaussian elimination phase has a known issue.
     /// When decoder is fixed, this test should pass.
     #[test]
-    #[ignore = "decoder Gaussian elimination needs fixing - see bd-xxxx"]
+    #[ignore = "decoder Gaussian elimination needs fixing - see bd-3cb2"]
     fn known_vector_medium_block() {
         let k = 32;
         let symbol_size = 64;
