@@ -22,7 +22,7 @@ use asupersync::trace::certificate::{CertificateVerifier, TraceCertificate};
 use asupersync::trace::compat::{
     check_schema_compatibility, CompatStats, CompatibilityResult, TraceMigrator,
 };
-use asupersync::trace::distributed::{CausalOrder, LamportClock, LogicalTime, VectorClock};
+use asupersync::trace::distributed::{LamportClock, LogicalTime, VectorClock};
 use asupersync::trace::event::{TraceData, TraceEvent, TraceEventKind};
 use asupersync::trace::geodesic::{
     count_switches, is_valid_linear_extension, normalize, GeodesicConfig,

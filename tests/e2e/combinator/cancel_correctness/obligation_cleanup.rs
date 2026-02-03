@@ -6,15 +6,15 @@
 use std::sync::atomic::{AtomicBool, AtomicU32, Ordering};
 use std::sync::{Arc, Mutex};
 
-/// Mock permit for testing obligation cleanup.
+/// Test permit for testing obligation cleanup.
 #[derive(Debug)]
-pub struct MockPermit {
+pub struct TestPermit {
     resolved: Arc<AtomicBool>,
     _id: u32,
 }
 
-impl MockPermit {
-    /// Create a new mock permit.
+impl TestPermit {
+    /// Create a new test permit.
     pub fn new(id: u32, resolved: Arc<AtomicBool>) -> Self {
         Self { resolved, _id: id }
     }
@@ -26,7 +26,7 @@ impl MockPermit {
     }
 }
 
-impl Drop for MockPermit {
+impl Drop for TestPermit {
     fn drop(&mut self) {
         // Permit being dropped without being used = obligation aborted
         // This is still valid - the obligation is resolved (aborted, not leaked)
@@ -76,7 +76,7 @@ fn test_loser_permit_resolved() {
     let permit_resolved = Arc::new(AtomicBool::new(false));
 
     {
-        let _permit = MockPermit::new(1, Arc::clone(&permit_resolved));
+        let _permit = TestPermit::new(1, Arc::clone(&permit_resolved));
         // Loser branch exits without using permit
     }
 
@@ -114,7 +114,7 @@ fn test_loser_multiple_permits_resolved() {
 #[test]
 fn test_winner_permit_committed() {
     let permit_resolved = Arc::new(AtomicBool::new(false));
-    let permit = MockPermit::new(1, Arc::clone(&permit_resolved));
+    let permit = TestPermit::new(1, Arc::clone(&permit_resolved));
 
     // Winner uses the permit
     permit.use_permit();
@@ -125,16 +125,16 @@ fn test_winner_permit_committed() {
     );
 }
 
-/// Mock lease for testing timed obligation cleanup.
+/// Test lease for testing timed obligation cleanup.
 #[derive(Debug)]
-pub struct MockLease {
+pub struct TestLease {
     released: Arc<AtomicBool>,
     #[allow(dead_code)]
     resource_id: u32,
 }
 
-impl MockLease {
-    /// Create a new mock lease.
+impl TestLease {
+    /// Create a new test lease.
     pub fn new(resource_id: u32, released: Arc<AtomicBool>) -> Self {
         Self {
             released,
@@ -143,7 +143,7 @@ impl MockLease {
     }
 }
 
-impl Drop for MockLease {
+impl Drop for TestLease {
     fn drop(&mut self) {
         self.released.store(true, Ordering::SeqCst);
     }
@@ -155,7 +155,7 @@ fn test_loser_lease_released() {
     let lease_released = Arc::new(AtomicBool::new(false));
 
     {
-        let _lease = MockLease::new(42, Arc::clone(&lease_released));
+        let _lease = TestLease::new(42, Arc::clone(&lease_released));
         // Loser branch cancelled
     }
 
@@ -200,9 +200,9 @@ fn test_nested_obligation_cleanup() {
     let inner_cleaned = Arc::new(AtomicBool::new(false));
 
     {
-        let _outer_lease = MockLease::new(1, Arc::clone(&outer_cleaned));
+        let _outer_lease = TestLease::new(1, Arc::clone(&outer_cleaned));
         {
-            let _inner_lease = MockLease::new(2, Arc::clone(&inner_cleaned));
+            let _inner_lease = TestLease::new(2, Arc::clone(&inner_cleaned));
         }
         // Inner should be cleaned before outer scope exits
         assert!(

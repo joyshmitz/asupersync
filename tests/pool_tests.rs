@@ -50,10 +50,10 @@ where
 /// Counter for generating unique connection IDs.
 static CONNECTION_COUNTER: AtomicUsize = AtomicUsize::new(0);
 
-/// Factory function type for creating mock connections.
+/// Factory function type for creating test connections.
 type FactoryFuture = Pin<
     Box<
-        dyn Future<Output = Result<MockConnection, Box<dyn std::error::Error + Send + Sync>>>
+        dyn Future<Output = Result<TestConnection, Box<dyn std::error::Error + Send + Sync>>>
             + Send,
     >,
 >;
@@ -62,20 +62,20 @@ type FactoryFuture = Pin<
 type FactoryFn = fn() -> FactoryFuture;
 
 /// Concrete pool type for tests using function pointer factory.
-type TestPool = GenericPool<MockConnection, FactoryFn>;
+type TestPool = GenericPool<TestConnection, FactoryFn>;
 
-/// Create a mock connection - function that returns a boxed future.
-fn create_mock_connection() -> FactoryFuture {
+/// Create a test connection - function that returns a boxed future.
+fn create_test_connection() -> FactoryFuture {
     Box::pin(async {
         let id = CONNECTION_COUNTER.fetch_add(1, Ordering::SeqCst);
-        tracing::debug!(id = %id, "Creating mock connection");
-        Ok(MockConnection::new(id))
+        tracing::debug!(id = %id, "Creating test connection");
+        Ok(TestConnection::new(id))
     })
 }
 
-/// Factory function pointer for mock connections.
-fn mock_factory() -> FactoryFn {
-    create_mock_connection
+/// Factory function pointer for test connections.
+fn test_factory() -> FactoryFn {
+    create_test_connection
 }
 
 /// Create a failing connection - function that returns a boxed future.
@@ -83,7 +83,7 @@ fn mock_factory() -> FactoryFn {
 fn create_failing_connection() -> FactoryFuture {
     Box::pin(async {
         tracing::debug!("Failing factory invoked");
-        Err(Box::new(MockError("factory failure".to_string()))
+        Err(Box::new(TestError("factory failure".to_string()))
             as Box<dyn std::error::Error + Send + Sync>)
     })
 }
@@ -110,7 +110,7 @@ fn pool_creates_with_default_config() {
 
     reset_connection_counter();
 
-    let pool = GenericPool::new(mock_factory(), PoolConfig::default());
+    let pool = GenericPool::new(test_factory(), PoolConfig::default());
 
     let stats = pool.stats();
     tracing::info!(
@@ -133,7 +133,7 @@ fn pool_respects_max_size() {
 
     reset_connection_counter();
 
-    let pool = GenericPool::new(mock_factory(), PoolConfig::with_max_size(3));
+    let pool = GenericPool::new(test_factory(), PoolConfig::with_max_size(3));
 
     let stats = pool.stats();
     assert_eq!(stats.max_size, 3, "Max size should be 3");
@@ -203,7 +203,7 @@ fn pooled_resource_returns_on_drop() {
 
     reset_connection_counter();
 
-    let pool = GenericPool::new(mock_factory(), PoolConfig::with_max_size(2));
+    let pool = GenericPool::new(test_factory(), PoolConfig::with_max_size(2));
 
     test_section!("Acquire and drop");
 
@@ -240,7 +240,7 @@ fn pooled_resource_explicit_return() {
 
     reset_connection_counter();
 
-    let pool = GenericPool::new(mock_factory(), PoolConfig::with_max_size(2));
+    let pool = GenericPool::new(test_factory(), PoolConfig::with_max_size(2));
 
     let r1 = acquire_resource(&pool);
     let id = r1.id();
@@ -271,7 +271,7 @@ fn pooled_resource_discard() {
 
     reset_connection_counter();
 
-    let pool = GenericPool::new(mock_factory(), PoolConfig::with_max_size(2));
+    let pool = GenericPool::new(test_factory(), PoolConfig::with_max_size(2));
 
     // Acquire first resource
     let r1 = acquire_resource(&pool);
@@ -306,12 +306,12 @@ fn pooled_resource_deref_access() {
 
     reset_connection_counter();
 
-    let pool = GenericPool::new(mock_factory(), PoolConfig::with_max_size(1));
+    let pool = GenericPool::new(test_factory(), PoolConfig::with_max_size(1));
 
     let r1 = acquire_resource(&pool);
 
     // Test Deref access
-    let id = r1.id(); // Using Deref to access MockConnection::id()
+    let id = r1.id(); // Using Deref to access TestConnection::id()
     tracing::info!(id = %id, "Accessed via Deref");
     assert!(id < 100, "ID should be valid");
 
@@ -329,7 +329,7 @@ fn pooled_resource_held_duration() {
 
     reset_connection_counter();
 
-    let pool = GenericPool::new(mock_factory(), PoolConfig::with_max_size(1));
+    let pool = GenericPool::new(test_factory(), PoolConfig::with_max_size(1));
 
     let r1 = acquire_resource(&pool);
 
@@ -358,7 +358,7 @@ fn pool_stats_track_acquisitions() {
 
     reset_connection_counter();
 
-    let pool = GenericPool::new(mock_factory(), PoolConfig::with_max_size(5));
+    let pool = GenericPool::new(test_factory(), PoolConfig::with_max_size(5));
 
     let stats_initial = pool.stats();
     assert_eq!(
@@ -400,7 +400,7 @@ fn pool_stats_track_idle_and_active() {
 
     reset_connection_counter();
 
-    let pool = GenericPool::new(mock_factory(), PoolConfig::with_max_size(3));
+    let pool = GenericPool::new(test_factory(), PoolConfig::with_max_size(3));
 
     // Initially empty
     let stats = pool.stats();
@@ -446,7 +446,7 @@ fn pool_close_rejects_new_acquisitions() {
 
     reset_connection_counter();
 
-    let pool = GenericPool::new(mock_factory(), PoolConfig::with_max_size(3));
+    let pool = GenericPool::new(test_factory(), PoolConfig::with_max_size(3));
 
     // Acquire a resource before close
     let cx: Cx = Cx::for_testing();
@@ -481,7 +481,7 @@ fn pool_concurrent_access_is_safe() {
     reset_connection_counter();
 
     let pool: Arc<TestPool> = Arc::new(GenericPool::new(
-        mock_factory(),
+        test_factory(),
         PoolConfig::with_max_size(10),
     ));
 
@@ -514,7 +514,7 @@ fn pool_concurrent_access_is_safe() {
                 use asupersync::sync::PooledResource;
                 for j in 0..10 {
                     if let Some(r) = pool.try_acquire() {
-                        let r: PooledResource<MockConnection> = r;
+                        let r: PooledResource<TestConnection> = r;
                         acquired.fetch_add(1, Ordering::SeqCst);
                         tracing::trace!(thread = %i, iteration = %j, "Acquired");
 
@@ -568,7 +568,7 @@ fn pool_error_display() {
     let closed = PoolError::Closed;
     let timeout = PoolError::Timeout;
     let cancelled = PoolError::Cancelled;
-    let create_failed = PoolError::CreateFailed(Box::new(MockError("test error".to_string())));
+    let create_failed = PoolError::CreateFailed(Box::new(TestError("test error".to_string())));
 
     tracing::info!(closed = %closed, "Closed error");
     tracing::info!(timeout = %timeout, "Timeout error");
@@ -595,7 +595,7 @@ fn e2e_pool_under_load() {
     reset_connection_counter();
 
     let pool: Arc<TestPool> = Arc::new(GenericPool::new(
-        mock_factory(),
+        test_factory(),
         PoolConfig::with_max_size(5)
             .min_size(2)
             .acquire_timeout(Duration::from_secs(5)),
@@ -630,7 +630,7 @@ fn e2e_pool_under_load() {
                 use asupersync::sync::PooledResource;
                 for j in 0..5 {
                     if let Some(conn) = pool.try_acquire() {
-                        let conn: PooledResource<MockConnection> = conn;
+                        let conn: PooledResource<TestConnection> = conn;
                         tracing::trace!(
                             worker = %i,
                             iteration = %j,
@@ -704,7 +704,7 @@ fn pool_cancel_during_acquire_wait_does_not_corrupt() {
     reset_connection_counter();
 
     let pool: Arc<TestPool> = Arc::new(GenericPool::new(
-        mock_factory(),
+        test_factory(),
         PoolConfig::with_max_size(1),
     ));
 
@@ -759,7 +759,7 @@ fn pool_cancel_while_holding_resource_returns_via_drop() {
     reset_connection_counter();
 
     let pool: Arc<TestPool> = Arc::new(GenericPool::new(
-        mock_factory(),
+        test_factory(),
         PoolConfig::with_max_size(2),
     ));
 
@@ -823,7 +823,7 @@ fn pool_min_size_configuration_respected() {
         "min_size must not exceed max_size"
     );
 
-    let pool = GenericPool::new(mock_factory(), config);
+    let pool = GenericPool::new(test_factory(), config);
 
     // Pre-populate the pool to min_size by acquiring and returning
     test_section!("Pre-populate to min_size");
@@ -864,7 +864,7 @@ fn pool_reuses_returned_resources() {
 
     reset_connection_counter();
 
-    let pool = GenericPool::new(mock_factory(), PoolConfig::with_max_size(1));
+    let pool = GenericPool::new(test_factory(), PoolConfig::with_max_size(1));
 
     test_section!("First acquisition");
 

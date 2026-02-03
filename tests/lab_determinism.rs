@@ -83,10 +83,10 @@ async fn yield_n(n: usize) {
 }
 
 #[cfg(unix)]
-struct MockSource;
+struct TestFdSource;
 
 #[cfg(unix)]
-impl std::os::fd::AsRawFd for MockSource {
+impl std::os::fd::AsRawFd for TestFdSource {
     fn as_raw_fd(&self) -> RawFd {
         0
     }
@@ -370,7 +370,7 @@ fn test_lab_virtual_time_determinism() {
 #[cfg(unix)]
 fn run_reactor_event_order(seed: u64) -> (Vec<usize>, Vec<usize>) {
     let reactor = LabReactor::new();
-    let source = MockSource;
+    let source = TestFdSource;
 
     let tokens: Vec<Token> = (0..5).map(Token::new).collect();
     for token in &tokens {
@@ -443,7 +443,7 @@ fn test_lab_reactor_event_ordering_determinism() {
 #[cfg(unix)]
 fn run_fault_stats(seed: u64) -> (u64, u64, u64) {
     let reactor = LabReactor::new();
-    let source = MockSource;
+    let source = TestFdSource;
     let token = Token::new((seed % 1024) as usize + 1);
 
     reactor
@@ -1163,7 +1163,7 @@ fn run_io_replay(seed: u64) -> Vec<ReplayEvent> {
 
     let driver = runtime.state.io_driver_handle().expect("io driver handle");
     let registration = driver
-        .register(&MockSource, Interest::READABLE, noop_waker())
+        .register(&TestFdSource, Interest::READABLE, noop_waker())
         .expect("register source");
     let token = registration.token();
 

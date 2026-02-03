@@ -21,11 +21,11 @@ type BoxFut<T> = std::pin::Pin<
     >,
 >;
 
-fn mock_factory() -> impl Fn() -> BoxFut<MockConnection> + Send + Sync + 'static {
+fn test_factory() -> impl Fn() -> BoxFut<TestConnection> + Send + Sync + 'static {
     let counter = Arc::new(AtomicUsize::new(0));
     move || {
         let id = counter.fetch_add(1, Ordering::SeqCst);
-        Box::pin(async move { Ok(MockConnection::new(id)) })
+        Box::pin(async move { Ok(TestConnection::new(id)) })
     }
 }
 
@@ -40,7 +40,7 @@ fn e2e_pool_basic_lifecycle() {
 
     run_test_with_cx(|cx| async move {
         let config = PoolConfig::with_max_size(5);
-        let pool = GenericPool::new(mock_factory(), config);
+        let pool = GenericPool::new(test_factory(), config);
 
         test_section!("Acquire first connection");
         let conn = pool.acquire(&cx).await.unwrap();
@@ -74,7 +74,7 @@ fn e2e_pool_concurrent_access() {
 
     run_test_with_cx(|cx| async move {
         let config = PoolConfig::with_max_size(3);
-        let pool = GenericPool::new(mock_factory(), config);
+        let pool = GenericPool::new(test_factory(), config);
 
         test_section!("Acquire 3 connections (max)");
         let c1 = pool.acquire(&cx).await.unwrap();
@@ -116,7 +116,7 @@ fn e2e_pool_stats() {
 
     run_test_with_cx(|cx| async move {
         let config = PoolConfig::with_max_size(5);
-        let pool = GenericPool::new(mock_factory(), config);
+        let pool = GenericPool::new(test_factory(), config);
 
         test_section!("Initial stats");
         let stats = pool.stats();
@@ -156,7 +156,7 @@ fn e2e_pool_close() {
 
     run_test_with_cx(|cx| async move {
         let config = PoolConfig::with_max_size(3);
-        let pool = GenericPool::new(mock_factory(), config);
+        let pool = GenericPool::new(test_factory(), config);
 
         test_section!("Acquire and return");
         let conn = pool.acquire(&cx).await.unwrap();
@@ -185,7 +185,7 @@ fn e2e_pool_discard() {
 
     run_test_with_cx(|cx| async move {
         let config = PoolConfig::with_max_size(5);
-        let pool = GenericPool::new(mock_factory(), config);
+        let pool = GenericPool::new(test_factory(), config);
 
         test_section!("Acquire connection");
         let conn = pool.acquire(&cx).await.unwrap();

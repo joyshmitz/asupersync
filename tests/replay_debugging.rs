@@ -254,3 +254,126 @@ fn e2e_debugging_workflow_record_save_load_step() {
 
     test_complete!("e2e_debugging_workflow_record_save_load_step");
 }
+
+/// Verifies the artifact → seed → run pipeline: record a trace, persist it,
+/// extract the seed from the artifact, and re-run with the same seed to get
+/// an identical trace.
+#[test]
+fn artifact_seed_extraction_and_deterministic_rerun() {
+    init_test("artifact_seed_extraction_and_deterministic_rerun");
+
+    // Phase 1: Record with a specific seed
+    test_section!("record-first");
+    let seed = 0xBEEF_CAFE;
+    let config = LabConfig::new(seed).with_default_replay_recording();
+    let mut runtime = LabRuntime::new(config);
+    let region = runtime.state.create_root_region(Budget::INFINITE);
+    let (task, _handle) = runtime
+        .state
+        .create_task(region, Budget::INFINITE, async {})
+        .expect("create task");
+    runtime.scheduler.lock().unwrap().schedule(task, 0);
+    runtime.run_until_quiescent();
+    let trace1 = runtime.finish_replay_trace().expect("first trace");
+
+    // Phase 2: Persist to file
+    test_section!("persist");
+    let temp = NamedTempFile::new().expect("tempfile");
+    let path = temp.path();
+    let mut writer = TraceWriter::create(path).expect("create writer");
+    writer
+        .write_metadata(&trace1.metadata)
+        .expect("write metadata");
+    for event in &trace1.events {
+        writer.write_event(event).expect("write event");
+    }
+    writer.finish().expect("finish");
+
+    // Phase 3: Extract seed from artifact
+    test_section!("extract-seed");
+    let reader = TraceReader::open(path).expect("open reader");
+    let extracted_seed = reader.metadata().seed;
+    assert_with_log!(
+        extracted_seed == seed,
+        "seed extracted from artifact",
+        seed,
+        extracted_seed
+    );
+
+    // Phase 4: Re-run with extracted seed
+    test_section!("rerun");
+    let config2 = LabConfig::new(extracted_seed).with_default_replay_recording();
+    let mut runtime2 = LabRuntime::new(config2);
+    let region2 = runtime2.state.create_root_region(Budget::INFINITE);
+    let (task2, _handle2) = runtime2
+        .state
+        .create_task(region2, Budget::INFINITE, async {})
+        .expect("create task");
+    runtime2.scheduler.lock().unwrap().schedule(task2, 0);
+    runtime2.run_until_quiescent();
+    let trace2 = runtime2.finish_replay_trace().expect("second trace");
+
+    // Phase 5: Verify traces are identical
+    test_section!("verify-determinism");
+    assert_with_log!(
+        trace1.events.len() == trace2.events.len(),
+        "event count matches",
+        trace1.events.len(),
+        trace2.events.len()
+    );
+    assert_with_log!(
+        trace1.events == trace2.events,
+        "events are identical",
+        trace1.events.len(),
+        trace2.events.len()
+    );
+
+    test_complete!("artifact_seed_extraction_and_deterministic_rerun");
+}
+
+/// Verifies that loading a trace from file and replaying it through the
+/// verifier produces no divergence — confirming the trace is self-consistent.
+#[test]
+fn loaded_trace_verifies_against_itself() {
+    init_test("loaded_trace_verifies_against_itself");
+
+    test_section!("record-and-persist");
+    let trace = record_simple_trace();
+    let temp = NamedTempFile::new().expect("tempfile");
+    let path = temp.path();
+    let mut writer = TraceWriter::create(path).expect("create writer");
+    writer
+        .write_metadata(&trace.metadata)
+        .expect("write metadata");
+    for event in &trace.events {
+        writer.write_event(event).expect("write event");
+    }
+    writer.finish().expect("finish");
+
+    test_section!("load-and-verify");
+    let reader = TraceReader::open(path).expect("open reader");
+    let metadata = reader.metadata().clone();
+    let loaded_events: Vec<_> = reader.events().map(|e| e.expect("read event")).collect();
+    let loaded_trace = ReplayTrace {
+        metadata,
+        events: loaded_events.clone(),
+        cursor: 0,
+    };
+
+    let mut replayer = TraceReplayer::new(loaded_trace);
+    for event in &loaded_events {
+        replayer
+            .verify_and_advance(event)
+            .expect("verify should not diverge on self-consistent trace");
+    }
+
+    test_section!("final-check");
+    assert_with_log!(
+        replayer.is_completed(),
+        "replayer completed",
+        true,
+        replayer.is_completed()
+    );
+
+    test_complete!("loaded_trace_verifies_against_itself");
+}
