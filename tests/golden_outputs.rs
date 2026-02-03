@@ -359,6 +359,12 @@ const GOLDEN_PLAN_TRACE_TIMEOUT_WRAPPING_DEDUP: &str = GOLDEN_TRACE_FIXTURE_LAB;
 const GOLDEN_PLAN_TRACE_INDEPENDENT_SUBTREES: &str = GOLDEN_TRACE_FIXTURE_LAB;
 const GOLDEN_PLAN_TRACE_RACE_OF_LEAVES: &str = GOLDEN_TRACE_FIXTURE_LAB;
 
+// Cancel-aware fixtures (F13-F16)
+const GOLDEN_PLAN_TRACE_RACE_CANCEL_WITH_TIMEOUT: &str = GOLDEN_TRACE_FIXTURE_LAB;
+const GOLDEN_PLAN_TRACE_NESTED_RACE_CANCEL_CASCADE: &str = GOLDEN_TRACE_FIXTURE_LAB;
+const GOLDEN_PLAN_TRACE_TIMEOUT_RACE_DEDUP_CANCEL: &str = GOLDEN_TRACE_FIXTURE_LAB;
+const GOLDEN_PLAN_TRACE_RACE_OBLIGATION_CANCEL: &str = GOLDEN_TRACE_FIXTURE_LAB;
+
 fn golden_plan_trace_fixture_json(name: &str) -> &'static str {
     match name {
         "simple_join_race_dedup" => GOLDEN_PLAN_TRACE_SIMPLE_JOIN_RACE_DEDUP,
@@ -373,6 +379,11 @@ fn golden_plan_trace_fixture_json(name: &str) -> &'static str {
         "timeout_wrapping_dedup" => GOLDEN_PLAN_TRACE_TIMEOUT_WRAPPING_DEDUP,
         "independent_subtrees" => GOLDEN_PLAN_TRACE_INDEPENDENT_SUBTREES,
         "race_of_leaves" => GOLDEN_PLAN_TRACE_RACE_OF_LEAVES,
+        // Cancel-aware fixtures
+        "race_cancel_with_timeout" => GOLDEN_PLAN_TRACE_RACE_CANCEL_WITH_TIMEOUT,
+        "nested_race_cancel_cascade" => GOLDEN_PLAN_TRACE_NESTED_RACE_CANCEL_CASCADE,
+        "timeout_race_dedup_cancel" => GOLDEN_PLAN_TRACE_TIMEOUT_RACE_DEDUP_CANCEL,
+        "race_obligation_cancel" => GOLDEN_PLAN_TRACE_RACE_OBLIGATION_CANCEL,
         _ => panic!("missing golden plan trace fixture for {name}"),
     }
 }

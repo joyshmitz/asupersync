@@ -603,6 +603,10 @@ pub struct EncodingStats {
     pub degree_sum: usize,
     /// Number of repair symbols sampled for degree stats.
     pub degree_count: usize,
+    /// Total bytes emitted as systematic (source) symbols.
+    pub systematic_bytes_emitted: usize,
+    /// Total bytes emitted as repair symbols.
+    pub repair_bytes_emitted: usize,
 }
 
 impl EncodingStats {
@@ -632,6 +636,67 @@ impl EncodingStats {
             let source = self.source_symbol_count as f64;
             intermediate / source
         }
+    }
+
+    /// Total bytes emitted across both systematic and repair symbols.
+    #[must_use]
+    pub const fn total_bytes_emitted(&self) -> usize {
+        self.systematic_bytes_emitted + self.repair_bytes_emitted
+    }
+
+    /// Encoding efficiency: systematic bytes / total emitted bytes.
+    ///
+    /// Returns 0.0 if nothing has been emitted. A value near 1.0 means most
+    /// bandwidth carries source data; lower values indicate more repair overhead.
+    #[must_use]
+    pub fn encoding_efficiency(&self) -> f64 {
+        let total = self.total_bytes_emitted();
+        if total == 0 {
+            0.0
+        } else {
+            #[allow(clippy::cast_precision_loss)]
+            let sys = self.systematic_bytes_emitted as f64;
+            #[allow(clippy::cast_precision_loss)]
+            let tot = total as f64;
+            sys / tot
+        }
+    }
+
+    /// Repair overhead ratio: repair bytes / systematic bytes.
+    ///
+    /// Returns 0.0 if no systematic bytes have been emitted. Useful for tuning
+    /// how many repair symbols to generate relative to source data.
+    #[must_use]
+    pub fn repair_overhead(&self) -> f64 {
+        if self.systematic_bytes_emitted == 0 {
+            0.0
+        } else {
+            #[allow(clippy::cast_precision_loss)]
+            let repair = self.repair_bytes_emitted as f64;
+            #[allow(clippy::cast_precision_loss)]
+            let sys = self.systematic_bytes_emitted as f64;
+            repair / sys
+        }
+    }
+}
+
+impl std::fmt::Display for EncodingStats {
+    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        write!(
+            f,
+            "EncodingStats(K={}, S={}, H={}, L={}, sym={}B, repairs={}, \
+             bytes={}sys+{}rep, avg_deg={:.1}, overhead={:.2})",
+            self.source_symbol_count,
+            self.ldpc_symbol_count,
+            self.hdpc_symbol_count,
+            self.intermediate_symbol_count,
+            self.symbol_size,
+            self.repair_symbols_generated,
+            self.systematic_bytes_emitted,
+            self.repair_bytes_emitted,
+            self.average_degree(),
+            self.overhead_ratio(),
+        )
     }
 }
 
@@ -682,6 +747,10 @@ pub struct SystematicEncoder {
     soliton: RobustSoliton,
     /// Running statistics.
     stats: EncodingStats,
+    /// Whether systematic symbols have been emitted via `emit_systematic()`.
+    systematic_emitted: bool,
+    /// Next repair ESI to emit (monotonic cursor, starts at K).
+    next_repair_esi: u32,
 }
 
 impl SystematicEncoder {
@@ -730,6 +799,8 @@ impl SystematicEncoder {
             degree_max: 0,
             degree_sum: 0,
             degree_count: 0,
+            systematic_bytes_emitted: 0,
+            repair_bytes_emitted: 0,
         };
 
         Some(Self {
@@ -739,6 +810,8 @@ impl SystematicEncoder {
             seed,
             soliton,
             stats,
+            systematic_emitted: false,
+            next_repair_esi: k as u32,
         })
     }
 
@@ -783,8 +856,11 @@ impl SystematicEncoder {
     ///
     /// Source symbols are emitted unchanged from the input, in index order.
     /// Each has degree=1 since it maps directly to one intermediate symbol.
-    pub fn emit_systematic(&self) -> impl Iterator<Item = EmittedSymbol> + '_ {
-        self.source_symbols
+    ///
+    /// Updates `systematic_bytes_emitted` in stats and sets the emission flag.
+    pub fn emit_systematic(&mut self) -> Vec<EmittedSymbol> {
+        let symbols: Vec<EmittedSymbol> = self
+            .source_symbols
             .iter()
             .enumerate()
             .map(|(i, data)| EmittedSymbol {
@@ -793,21 +869,39 @@ impl SystematicEncoder {
                 is_source: true,
                 degree: 1,
             })
+            .collect();
+
+        // Invariant: ESIs are strictly ascending 0..K
+        debug_assert!(
+            symbols
+                .iter()
+                .enumerate()
+                .all(|(i, s)| s.esi == i as u32),
+            "systematic emission ESIs must be 0..K in order"
+        );
+
+        // Track bytes emitted
+        let bytes: usize = symbols.iter().map(|s| s.data.len()).sum();
+        self.stats.systematic_bytes_emitted += bytes;
+        self.systematic_emitted = true;
+
+        symbols
     }
 
-    /// Emit repair symbols in deterministic order, starting from ESI = K.
+    /// Emit repair symbols in deterministic order from the current cursor position.
     ///
     /// `count` specifies how many repair symbols to generate.
-    /// Symbols are emitted in ascending ESI order.
+    /// Symbols are emitted in ascending ESI order, continuing from where
+    /// the previous call left off (starting at ESI = K for the first call).
     ///
-    /// Note: This method updates internal statistics. For read-only stats,
-    /// call `stats()` after emission.
+    /// This method updates internal statistics and advances the emission cursor.
+    /// Multiple calls emit non-overlapping, monotonically increasing ESI sequences.
     pub fn emit_repair(&mut self, count: usize) -> Vec<EmittedSymbol> {
-        let k = self.params.k as u32;
+        let start_esi = self.next_repair_esi;
         let mut result = Vec::with_capacity(count);
 
         for i in 0..count {
-            let esi = k + i as u32;
+            let esi = start_esi + i as u32;
             let (data, degree) = self.repair_symbol_with_degree(esi);
 
             // Update stats
@@ -816,6 +910,7 @@ impl SystematicEncoder {
             self.stats.degree_max = self.stats.degree_max.max(degree);
             self.stats.degree_sum += degree;
             self.stats.degree_count += 1;
+            self.stats.repair_bytes_emitted += data.len();
 
             result.push(EmittedSymbol {
                 esi,
@@ -825,6 +920,24 @@ impl SystematicEncoder {
             });
         }
 
+        // Advance cursor
+        self.next_repair_esi = start_esi + count as u32;
+
+        // Invariant: all emitted ESIs are strictly ascending and >= K
+        debug_assert!(
+            result
+                .iter()
+                .enumerate()
+                .all(|(i, s)| s.esi == start_esi + i as u32),
+            "repair emission ESIs must be monotonically ascending"
+        );
+        debug_assert!(
+            result
+                .iter()
+                .all(|s| s.esi >= self.params.k as u32),
+            "repair ESIs must be >= K"
+        );
+
         result
     }
 
@@ -833,9 +946,30 @@ impl SystematicEncoder {
     /// First emits K source symbols (ESI 0..K-1), then `repair_count` repair
     /// symbols (ESI K..K+repair_count-1).
     pub fn emit_all(&mut self, repair_count: usize) -> Vec<EmittedSymbol> {
-        let mut result: Vec<EmittedSymbol> = self.emit_systematic().collect();
+        let mut result: Vec<EmittedSymbol> = self.emit_systematic();
         result.extend(self.emit_repair(repair_count));
+
+        // Invariant: combined stream has source before repair, ESIs strictly ascending
+        debug_assert!(
+            result.windows(2).all(|w| w[0].esi < w[1].esi),
+            "combined emission must have strictly ascending ESIs"
+        );
+
         result
+    }
+
+    /// Returns the next repair ESI that will be emitted.
+    ///
+    /// Starts at K and advances with each `emit_repair()` call.
+    #[must_use]
+    pub const fn next_repair_esi(&self) -> u32 {
+        self.next_repair_esi
+    }
+
+    /// Returns whether systematic symbols have been emitted.
+    #[must_use]
+    pub const fn systematic_emitted(&self) -> bool {
+        self.systematic_emitted
     }
 
     /// Generate a repair symbol and return both data and degree.
@@ -889,6 +1023,34 @@ mod tests {
                     .collect()
             })
             .collect()
+    }
+
+    /// Try to create an encoder, returning None if the constraint matrix is
+    /// singular (known issue tracked by bd-uix9 for small K values).
+    fn try_encoder(k: usize, symbol_size: usize, seed: u64) -> Option<SystematicEncoder> {
+        let source = make_source_symbols(k, symbol_size);
+        SystematicEncoder::new(&source, symbol_size, seed)
+    }
+
+    /// Create an encoder with parameters known to produce a non-singular matrix,
+    /// or skip the test if no working configuration is found.
+    /// Tries the given (k, symbol_size, seed) first, then fallback values.
+    fn require_encoder(k: usize, symbol_size: usize, seed: u64) -> SystematicEncoder {
+        if let Some(enc) = try_encoder(k, symbol_size, seed) {
+            return enc;
+        }
+        // Fallback: try larger K values that have better rank coverage
+        for try_k in [k, 16, 32, 64, 128] {
+            for &try_seed in &[seed, 42, 99, 7777] {
+                if let Some(enc) = try_encoder(try_k, symbol_size, try_seed) {
+                    return enc;
+                }
+            }
+        }
+        panic!(
+            "could not create encoder for any tested (k, seed) combination; \
+             matrix singularity issue (bd-uix9)"
+        );
     }
 
     #[test]
@@ -1142,9 +1304,9 @@ mod tests {
         let k = 5;
         let symbol_size = 16;
         let source = make_source_symbols(k, symbol_size);
-        let enc = SystematicEncoder::new(&source, symbol_size, 42).unwrap();
+        let mut enc = SystematicEncoder::new(&source, symbol_size, 42).unwrap();
 
-        let emitted: Vec<_> = enc.emit_systematic().collect();
+        let emitted = enc.emit_systematic();
 
         assert_eq!(emitted.len(), k, "should emit exactly K source symbols");
         for (i, sym) in emitted.iter().enumerate() {
@@ -1296,5 +1458,208 @@ mod tests {
         let source = make_source_symbols(4, 16);
         let enc = SystematicEncoder::new(&source, 16, seed).unwrap();
         assert_eq!(enc.seed(), seed);
+    }
+
+    // ========================================================================
+    // Emission cursor and enhanced stats tests (bd-362e)
+    // ========================================================================
+
+    #[test]
+    fn repair_cursor_advances_across_calls() {
+        let symbol_size = 16;
+        let mut enc = require_encoder(16, symbol_size, 42);
+        let k = enc.params().k;
+
+        assert_eq!(enc.next_repair_esi(), k as u32, "cursor starts at K");
+
+        let batch1 = enc.emit_repair(3);
+        assert_eq!(enc.next_repair_esi(), k as u32 + 3);
+        assert_eq!(batch1[0].esi, k as u32);
+        assert_eq!(batch1[2].esi, k as u32 + 2);
+
+        let batch2 = enc.emit_repair(5);
+        assert_eq!(enc.next_repair_esi(), k as u32 + 8);
+        assert_eq!(batch2[0].esi, k as u32 + 3, "second batch continues from cursor");
+        assert_eq!(batch2[4].esi, k as u32 + 7);
+    }
+
+    #[test]
+    fn repair_cursor_no_overlap() {
+        let symbol_size = 32;
+        let mut enc = require_encoder(16, symbol_size, 99);
+
+        let a = enc.emit_repair(4);
+        let b = enc.emit_repair(4);
+
+        // ESI ranges must not overlap
+        let a_esis: Vec<u32> = a.iter().map(|s| s.esi).collect();
+        let b_esis: Vec<u32> = b.iter().map(|s| s.esi).collect();
+        for esi in &a_esis {
+            assert!(!b_esis.contains(esi), "ESI {esi} appears in both batches");
+        }
+    }
+
+    #[test]
+    fn systematic_emitted_flag() {
+        let symbol_size = 16;
+        let mut enc = require_encoder(16, symbol_size, 42);
+
+        assert!(!enc.systematic_emitted(), "not emitted initially");
+        enc.emit_systematic();
+        assert!(enc.systematic_emitted(), "flag set after emission");
+    }
+
+    #[test]
+    fn stats_bytes_tracking() {
+        let symbol_size = 32;
+        let mut enc = require_encoder(16, symbol_size, 42);
+        let k = enc.params().k;
+
+        assert_eq!(enc.stats().systematic_bytes_emitted, 0);
+        assert_eq!(enc.stats().repair_bytes_emitted, 0);
+        assert_eq!(enc.stats().total_bytes_emitted(), 0);
+
+        enc.emit_systematic();
+        assert_eq!(
+            enc.stats().systematic_bytes_emitted,
+            k * symbol_size,
+            "systematic bytes = K * symbol_size"
+        );
+        assert_eq!(enc.stats().repair_bytes_emitted, 0);
+
+        let repair_count = 6;
+        enc.emit_repair(repair_count);
+        assert_eq!(
+            enc.stats().repair_bytes_emitted,
+            repair_count * symbol_size,
+            "repair bytes = count * symbol_size"
+        );
+        assert_eq!(
+            enc.stats().total_bytes_emitted(),
+            (k + repair_count) * symbol_size
+        );
+    }
+
+    #[test]
+    fn stats_encoding_efficiency() {
+        let symbol_size = 64;
+        let mut enc = require_encoder(16, symbol_size, 42);
+        let k = enc.params().k;
+
+        // Before emission
+        assert!(enc.stats().encoding_efficiency().abs() < f64::EPSILON);
+
+        // Systematic only: efficiency = 1.0
+        enc.emit_systematic();
+        assert!(
+            (enc.stats().encoding_efficiency() - 1.0).abs() < f64::EPSILON,
+            "systematic-only emission has efficiency 1.0"
+        );
+
+        // After adding repairs: efficiency < 1.0
+        enc.emit_repair(k);
+        let eff = enc.stats().encoding_efficiency();
+        assert!(eff > 0.0 && eff < 1.0, "efficiency with repairs: {eff}");
+        // With equal source and repair counts, efficiency should be ~0.5
+        assert!(
+            (eff - 0.5).abs() < f64::EPSILON,
+            "equal source/repair count should give 0.5 efficiency"
+        );
+    }
+
+    #[test]
+    fn stats_repair_overhead() {
+        let symbol_size = 16;
+        let mut enc = require_encoder(16, symbol_size, 42);
+        let k = enc.params().k;
+
+        // Before emission
+        assert!(enc.stats().repair_overhead().abs() < f64::EPSILON);
+
+        enc.emit_systematic();
+        assert!(
+            enc.stats().repair_overhead().abs() < f64::EPSILON,
+            "no repairs yet, overhead is 0"
+        );
+
+        enc.emit_repair(k); // same count as source
+        let overhead = enc.stats().repair_overhead();
+        assert!(
+            (overhead - 1.0).abs() < f64::EPSILON,
+            "equal repair/source should give overhead 1.0, got {overhead}"
+        );
+    }
+
+    #[test]
+    fn stats_display_stable() {
+        let symbol_size = 16;
+        let mut enc = require_encoder(16, symbol_size, 42);
+        let k = enc.params().k;
+
+        enc.emit_systematic();
+        enc.emit_repair(3);
+
+        let display = format!("{}", enc.stats());
+
+        // Display should contain key structural info
+        assert!(
+            display.contains(&format!("K={k}")),
+            "should contain K value"
+        );
+        assert!(display.contains("sym=16B"), "should contain symbol size");
+        assert!(display.contains("repairs=3"), "should contain repair count");
+
+        // Same encoder state should produce identical display
+        let display2 = format!("{}", enc.stats());
+        assert_eq!(display, display2, "Display must be stable");
+    }
+
+    #[test]
+    fn stats_cumulative_across_batches() {
+        let symbol_size = 32;
+        let mut enc = require_encoder(16, symbol_size, 42);
+
+        enc.emit_repair(5);
+        let after_first = enc.stats().clone();
+
+        enc.emit_repair(3);
+        let after_second = enc.stats().clone();
+
+        assert_eq!(after_second.repair_symbols_generated, 8);
+        assert_eq!(after_second.degree_count, 8);
+        assert_eq!(after_second.repair_bytes_emitted, 8 * symbol_size);
+        assert!(after_second.degree_sum >= after_first.degree_sum);
+        assert!(after_second.degree_min <= after_first.degree_min);
+        assert!(after_second.degree_max >= after_first.degree_max);
+    }
+
+    #[test]
+    fn emit_all_esi_strictly_ascending() {
+        let symbol_size = 24;
+        let mut enc = require_encoder(16, symbol_size, 42);
+        let k = enc.params().k;
+
+        let all = enc.emit_all(10);
+
+        // Verify strict ascending ESI order across the entire stream
+        for w in all.windows(2) {
+            assert!(
+                w[0].esi < w[1].esi,
+                "ESIs must be strictly ascending: {} vs {}",
+                w[0].esi,
+                w[1].esi
+            );
+        }
+
+        // Source-before-repair invariant
+        let source_esis: Vec<u32> = all.iter().filter(|s| s.is_source).map(|s| s.esi).collect();
+        let repair_esis: Vec<u32> = all.iter().filter(|s| !s.is_source).map(|s| s.esi).collect();
+        assert_eq!(source_esis.len(), k, "should have K source symbols");
+        if let (Some(&max_src), Some(&min_rep)) = (source_esis.last(), repair_esis.first()) {
+            assert!(
+                max_src < min_rep,
+                "all source ESIs must precede repair ESIs"
+            );
+        }
     }
 }

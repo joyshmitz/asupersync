@@ -1335,6 +1335,155 @@ mod tests {
     }
 
     // -----------------------------------------------------------------------
+    // E2E pipeline tests (bd-3gqz)
+    // -----------------------------------------------------------------------
+
+    #[test]
+    fn e2e_pipeline_all_fixtures_pass() {
+        init_test();
+        let rules = [RewriteRule::DedupRaceJoin];
+        let reports = run_e2e_pipeline_all(RewritePolicy::conservative(), &rules);
+        assert!(
+            reports.len() >= 16,
+            "expected >= 16 E2E reports, got {}",
+            reports.len()
+        );
+        for report in &reports {
+            assert!(
+                report.all_ok(),
+                "E2E pipeline failed for fixture {}: cert_ok={}, steps_ok={}, outcomes_eq={}, \
+                 extract_eq={}, rewrite_extract_eq={}, dynamic_eq={}",
+                report.fixture_name,
+                report.certificate_verified,
+                report.steps_verified,
+                report.outcomes_equivalent,
+                report.extraction_equivalent,
+                report.rewrite_extraction_equivalent,
+                report.dynamic_outcomes_equivalent,
+            );
+        }
+    }
+
+    #[test]
+    fn e2e_pipeline_deterministic_across_runs() {
+        init_test();
+        let rules = [RewriteRule::DedupRaceJoin];
+        let reports1 = run_e2e_pipeline_all(RewritePolicy::conservative(), &rules);
+        let reports2 = run_e2e_pipeline_all(RewritePolicy::conservative(), &rules);
+        assert_eq!(reports1.len(), reports2.len());
+        for (r1, r2) in reports1.iter().zip(reports2.iter()) {
+            assert_eq!(
+                r1.golden_fingerprint(),
+                r2.golden_fingerprint(),
+                "fixture {}: E2E golden fingerprint differs across runs",
+                r1.fixture_name
+            );
+            assert_eq!(
+                r1.certificate_fingerprint, r2.certificate_fingerprint,
+                "fixture {}: certificate fingerprint differs across runs",
+                r1.fixture_name
+            );
+            assert_eq!(
+                r1.original_cost.total(),
+                r2.original_cost.total(),
+                "fixture {}: original cost differs across runs",
+                r1.fixture_name
+            );
+            assert_eq!(
+                r1.optimized_cost.total(),
+                r2.optimized_cost.total(),
+                "fixture {}: optimized cost differs across runs",
+                r1.fixture_name
+            );
+            assert_eq!(
+                r1.original_trace_fingerprint,
+                r2.original_trace_fingerprint,
+                "fixture {}: original trace fingerprint differs across runs",
+                r1.fixture_name
+            );
+            assert_eq!(
+                r1.optimized_trace_fingerprint,
+                r2.optimized_trace_fingerprint,
+                "fixture {}: optimized trace fingerprint differs across runs",
+                r1.fixture_name
+            );
+        }
+    }
+
+    #[test]
+    fn e2e_pipeline_cost_never_increases() {
+        init_test();
+        let rules = [RewriteRule::DedupRaceJoin];
+        let reports = run_e2e_pipeline_all(RewritePolicy::conservative(), &rules);
+        for report in &reports {
+            assert!(
+                report.optimized_cost <= report.original_cost,
+                "fixture {}: cost increased from {} to {} after rewrite",
+                report.fixture_name,
+                report.original_cost.total(),
+                report.optimized_cost.total(),
+            );
+        }
+    }
+
+    #[test]
+    fn e2e_pipeline_dynamic_labels_populated() {
+        init_test();
+        let rules = [RewriteRule::DedupRaceJoin];
+        let reports = run_e2e_pipeline_all(RewritePolicy::conservative(), &rules);
+        for report in &reports {
+            assert!(
+                !report.dynamic_original_labels.is_empty(),
+                "fixture {}: dynamic original labels empty",
+                report.fixture_name,
+            );
+            assert!(
+                !report.dynamic_optimized_labels.is_empty(),
+                "fixture {}: dynamic optimized labels empty",
+                report.fixture_name,
+            );
+        }
+    }
+
+    #[test]
+    fn e2e_pipeline_trace_fingerprints_nonzero() {
+        init_test();
+        let rules = [RewriteRule::DedupRaceJoin];
+        let reports = run_e2e_pipeline_all(RewritePolicy::conservative(), &rules);
+        for report in &reports {
+            assert_ne!(
+                report.original_trace_fingerprint, 0,
+                "fixture {}: original trace fingerprint is zero",
+                report.fixture_name,
+            );
+            assert_ne!(
+                report.optimized_trace_fingerprint, 0,
+                "fixture {}: optimized trace fingerprint is zero",
+                report.fixture_name,
+            );
+        }
+    }
+
+    #[test]
+    fn e2e_pipeline_cost_delta_sane() {
+        init_test();
+        let rules = [RewriteRule::DedupRaceJoin];
+        let reports = run_e2e_pipeline_all(RewritePolicy::conservative(), &rules);
+        for report in &reports {
+            let delta = report.cost_delta();
+            if report.rewrite_count > 0 {
+                // Rewrites that fired should not increase cost (already
+                // covered by cost_never_increases, but verify via delta).
+                assert!(
+                    delta > 0 || report.original_cost == report.optimized_cost,
+                    "fixture {}: rewrite fired but cost unchanged or increased",
+                    report.fixture_name,
+                );
+            }
+        }
+    }
+
+    // -----------------------------------------------------------------------
     // Dynamic lab equivalence oracle tests
     // -----------------------------------------------------------------------
 
