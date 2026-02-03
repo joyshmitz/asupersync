@@ -945,6 +945,132 @@ fn bench_intrusive_vs_binaryheap(c: &mut Criterion) {
 }
 
 // =============================================================================
+// CANCEL-LANE PREEMPTION BENCHMARKS (bd-17uu)
+// =============================================================================
+
+fn bench_cancel_preemption(c: &mut Criterion) {
+    use asupersync::runtime::scheduler::ThreeLaneScheduler;
+
+    let mut group = c.benchmark_group("scheduler/cancel_preemption");
+
+    // Cancel-only dispatch throughput: measures cancel dispatch latency
+    // when no ready/timed work competes.
+    for &count in &[100u64, 1000, 10000] {
+        group.throughput(Throughput::Elements(count));
+        group.bench_with_input(
+            BenchmarkId::new("cancel_only_dispatch", count),
+            &count,
+            |b, &count| {
+                b.iter_batched(
+                    || {
+                        let state = setup_runtime_state(count as u32);
+                        let sched = ThreeLaneScheduler::new_with_cancel_limit(1, &state, 8);
+                        for i in 0..count as u32 {
+                            sched.inject_cancel(task(i), 100);
+                        }
+                        sched
+                    },
+                    |mut sched| {
+                        let mut workers = sched.take_workers().into_iter();
+                        let mut worker = workers.next().unwrap();
+                        let mut dispatched = 0u64;
+                        while worker.next_task().is_some() {
+                            dispatched += 1;
+                        }
+                        black_box(dispatched)
+                    },
+                    BatchSize::SmallInput,
+                )
+            },
+        );
+    }
+
+    // Cancel + ready interleaved: measures fairness overhead when cancel
+    // and ready work compete (cancel_streak_limit forces yields).
+    for &limit in &[2usize, 4, 8, 16] {
+        let cancel_n = 100u32;
+        let ready_n = 100u32;
+        let total = u64::from(cancel_n + ready_n);
+        group.throughput(Throughput::Elements(total));
+        group.bench_with_input(
+            BenchmarkId::new("cancel_ready_mixed", limit),
+            &limit,
+            |b, &limit| {
+                b.iter_batched(
+                    || {
+                        let max_id = cancel_n + ready_n;
+                        let state = setup_runtime_state(max_id);
+                        let sched = ThreeLaneScheduler::new_with_cancel_limit(1, &state, limit);
+                        for i in 0..cancel_n {
+                            sched.inject_cancel(task(i), 100);
+                        }
+                        for i in cancel_n..cancel_n + ready_n {
+                            sched.inject_ready(task(i), 50);
+                        }
+                        sched
+                    },
+                    |mut sched| {
+                        let mut workers = sched.take_workers().into_iter();
+                        let mut worker = workers.next().unwrap();
+                        let mut dispatched = 0u64;
+                        for _ in 0..total {
+                            if worker.next_task().is_some() {
+                                dispatched += 1;
+                            }
+                        }
+                        black_box(dispatched)
+                    },
+                    BatchSize::SmallInput,
+                )
+            },
+        );
+    }
+
+    // Ready-lane stall under cancel flood: measures how quickly the first
+    // ready task gets dispatched when cancel work dominates.
+    for &limit in &[2usize, 4, 8] {
+        group.bench_with_input(
+            BenchmarkId::new("ready_stall_depth", limit),
+            &limit,
+            |b, &limit| {
+                b.iter_batched(
+                    || {
+                        let cancel_n = 50u32;
+                        let state = setup_runtime_state(cancel_n + 1);
+                        let sched = ThreeLaneScheduler::new_with_cancel_limit(1, &state, limit);
+                        for i in 0..cancel_n {
+                            sched.inject_cancel(task(i), 100);
+                        }
+                        sched.inject_ready(task(cancel_n), 50);
+                        sched
+                    },
+                    |mut sched| {
+                        let mut workers = sched.take_workers().into_iter();
+                        let mut worker = workers.next().unwrap();
+                        let ready_id = task(50);
+                        let mut steps = 0u64;
+                        loop {
+                            steps += 1;
+                            if let Some(dispatched) = worker.next_task() {
+                                if dispatched == ready_id {
+                                    break;
+                                }
+                            } else {
+                                break;
+                            }
+                        }
+                        black_box(steps)
+                    },
+                    BatchSize::SmallInput,
+                )
+            },
+        );
+    }
+
+    group.finish();
+}
+
+// =============================================================================
 // MAIN
 // =============================================================================
 
@@ -961,6 +1087,7 @@ criterion_group!(
     bench_intrusive_stack,
     bench_intrusive_vs_vecdeque,
     bench_intrusive_vs_binaryheap,
+    bench_cancel_preemption,
 );
 
 criterion_main!(benches);

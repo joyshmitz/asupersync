@@ -357,6 +357,7 @@ pub struct PreemptionMetrics {
 
 impl ThreeLaneWorker {
     /// Returns the preemption fairness metrics for this worker.
+    #[must_use]
     pub fn preemption_metrics(&self) -> &PreemptionMetrics {
         &self.preemption_metrics
     }
@@ -439,7 +440,10 @@ impl ThreeLaneWorker {
         }
     }
 
-    fn next_task(&mut self) -> Option<TaskId> {
+    /// Select the next task to dispatch, respecting lane priorities and fairness.
+    ///
+    /// Returns `None` when no work is available across any lane or steal target.
+    pub fn next_task(&mut self) -> Option<TaskId> {
         // PHASE 0: Process expired timers (fires wakers, which may inject tasks)
         if let Some(timer) = &self.timer_driver {
             let _ = timer.process_timers();
@@ -2272,7 +2276,10 @@ mod tests {
         let m = worker.preemption_metrics();
         assert_eq!(m.cancel_dispatches, 3);
         assert_eq!(m.ready_dispatches, 2);
-        assert_eq!(m.cancel_dispatches + m.ready_dispatches + m.timed_dispatches, 5);
+        assert_eq!(
+            m.cancel_dispatches + m.ready_dispatches + m.timed_dispatches,
+            5
+        );
     }
 
     #[test]
