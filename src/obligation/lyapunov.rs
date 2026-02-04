@@ -286,7 +286,9 @@ impl StateSnapshot {
                 continue;
             };
 
-            let slack_ns = deadline.duration_since(now);
+            let deadline_ns = deadline.as_nanos() as i128;
+            let now_ns = now.as_nanos() as i128;
+            let slack_ns = deadline_ns - now_ns;
             #[allow(clippy::cast_precision_loss)]
             let slack = slack_ns as f64;
             #[allow(clippy::cast_precision_loss)]
@@ -914,14 +916,15 @@ mod tests {
             snap.deadline_pressure
         );
 
-        // Past the deadline, slack saturates to 0 => contribution saturates to 1.0.
+        // Past the deadline, slack is negative => contribution exceeds 1.0.
         state.now = Time::from_nanos(600_000_000);
         let snap2 = StateSnapshot::from_runtime_state(&state);
-        let ok2 = (snap2.deadline_pressure - 1.0).abs() < 1e-9;
+        let expected_overdue = 1.1_f64;
+        let ok2 = (snap2.deadline_pressure - expected_overdue).abs() < 1e-9;
         crate::assert_with_log!(
             ok2,
             "deadline_pressure overdue",
-            1.0,
+            expected_overdue,
             snap2.deadline_pressure
         );
 
