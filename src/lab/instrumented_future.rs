@@ -122,6 +122,31 @@ pub enum InjectionStrategy {
     FirstN(usize),
     /// Each await point has probability p (0.0-1.0) of injection.
     Probabilistic(f64),
+
+    // --- Cancel-phase-aware strategies ---
+    /// Test a window of points around a center point.
+    ///
+    /// Selects all recorded points in `[center - radius, center + radius]`.
+    /// Useful for targeting a specific code region (e.g., around a known
+    /// cancel checkpoint) without testing every point in the entire run.
+    WindowAround {
+        /// The center await point sequence number.
+        center: u64,
+        /// Number of points on each side to include.
+        radius: u64,
+    },
+
+    /// Skip the first N points, test the rest.
+    ///
+    /// Useful for bypassing initialization and focusing on steady-state
+    /// or cleanup/finalization phases where cancellation handling matters most.
+    ExceptFirst(usize),
+
+    /// Test only the last N recorded await points.
+    ///
+    /// Targets the tail of execution — typically the finalization and
+    /// cleanup phases — where cancel-correctness bugs are most common.
+    LastN(usize),
 }
 
 impl InjectionStrategy {
@@ -216,6 +241,18 @@ impl InjectionStrategy {
                     }
                 }
                 selected
+            }
+            Self::WindowAround { center, radius } => recorded
+                .iter()
+                .filter(|&&seq| {
+                    seq >= center.saturating_sub(*radius) && seq <= center.saturating_add(*radius)
+                })
+                .copied()
+                .collect(),
+            Self::ExceptFirst(n) => recorded.iter().skip(*n).copied().collect(),
+            Self::LastN(n) => {
+                let skip = recorded.len().saturating_sub(*n);
+                recorded.iter().skip(skip).copied().collect()
             }
         }
     }
@@ -838,7 +875,10 @@ impl CancellationInjector {
             | InjectionStrategy::RandomSample(_)
             | InjectionStrategy::SpecificPoints(_)
             | InjectionStrategy::FirstN(_)
-            | InjectionStrategy::Probabilistic(_) => false,
+            | InjectionStrategy::Probabilistic(_)
+            | InjectionStrategy::WindowAround { .. }
+            | InjectionStrategy::ExceptFirst(_)
+            | InjectionStrategy::LastN(_) => false,
             InjectionStrategy::AtSequence(target) => {
                 if sequence == *target {
                     self.injection_count.fetch_add(1, Ordering::SeqCst);

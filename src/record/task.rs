@@ -107,9 +107,9 @@ impl TaskPhase {
             // CancelRequested → CancelRequested (strengthen) | Cancelling | Completed (err/panic before ack)
             | (2, 2 | 3 | 5)
             // Cancelling → Cancelling (strengthen) | Finalizing | Completed (err/panic during cleanup)
-            | (3, 3 | 4 | 5)
+            | (3, 3..=5)
             // Finalizing → Finalizing (strengthen) | Completed
-            | (4, 4 | 5)
+            | (4, 4..=5)
         )
     }
 }
@@ -154,10 +154,6 @@ impl TaskPhaseCell {
         #[cfg(debug_assertions)]
         {
             let current = self.load();
-            if current == phase {
-                self.inner.store(phase as u8, Ordering::Release);
-                return;
-            }
             debug_assert!(
                 current.is_valid_transition(phase),
                 "invalid TaskPhase transition: {current:?} -> {phase:?}"
@@ -1473,8 +1469,10 @@ mod tests {
             (CancelRequested, CancelRequested), // strengthen
             (CancelRequested, Cancelling),
             (CancelRequested, Completed), // err/panic before ack
+            (Cancelling, Cancelling),     // strengthen
             (Cancelling, Finalizing),
-            (Cancelling, Completed), // err/panic during cleanup
+            (Cancelling, Completed),  // err/panic during cleanup
+            (Finalizing, Finalizing), // strengthen
             (Finalizing, Completed),
         ];
 
@@ -1554,17 +1552,17 @@ mod tests {
                 }
             }
         }
-        // 6x6 = 36 total pairs; 11 valid (see valid_transitions_accepted)
+        // 6x6 = 36 total pairs; 13 valid (see valid_transitions_accepted)
         crate::assert_with_log!(
-            valid_count == 11,
+            valid_count == 13,
             "valid transitions count",
-            11,
+            13,
             valid_count
         );
         crate::assert_with_log!(
-            invalid_count == 25,
+            invalid_count == 23,
             "invalid transitions count",
-            25,
+            23,
             invalid_count
         );
         crate::test_complete!("transition_table_is_exhaustive");

@@ -94,6 +94,36 @@ pub enum CancellationProtocolViolation {
         /// The cancel kind after (should be >= before).
         after: CancelKind,
     },
+
+    /// Cancel was acknowledged while the task was in a masked section.
+    ///
+    /// The cancellation protocol requires that cancel acknowledgement is
+    /// deferred while `mask_depth > 0`. A task transitioning to `Cancelling`
+    /// while masked violates **INV-MASK-DEFER**.
+    CancelAckWhileMasked {
+        /// The task that acknowledged cancel while masked.
+        task: TaskId,
+        /// The mask depth at the time of acknowledgement.
+        mask_depth: u32,
+        /// When this occurred.
+        time: Time,
+    },
+
+    /// Mask depth exceeded the compile-time bound (`MAX_MASK_DEPTH`).
+    ///
+    /// Violates **INV-MASK-BOUNDED**: a task's mask depth must be finite
+    /// and bounded to guarantee that cancellation cannot be deferred
+    /// indefinitely.
+    MaskDepthExceeded {
+        /// The task that exceeded the mask depth bound.
+        task: TaskId,
+        /// The actual mask depth reached.
+        depth: u32,
+        /// The maximum allowed depth.
+        max: u32,
+        /// When this occurred.
+        time: Time,
+    },
 }
 
 impl fmt::Display for CancellationProtocolViolation {
@@ -150,6 +180,27 @@ impl fmt::Display for CancellationProtocolViolation {
                 write!(
                     f,
                     "Task {task} cancel reason got weaker: {before:?} -> {after:?}"
+                )
+            }
+            Self::CancelAckWhileMasked {
+                task,
+                mask_depth,
+                time,
+            } => {
+                write!(
+                    f,
+                    "Task {task} acknowledged cancel while masked (depth={mask_depth}) at {time}"
+                )
+            }
+            Self::MaskDepthExceeded {
+                task,
+                depth,
+                max,
+                time,
+            } => {
+                write!(
+                    f,
+                    "Task {task} mask depth {depth} exceeded maximum {max} at {time}"
                 )
             }
         }
@@ -244,6 +295,8 @@ struct TaskProtocolRecord {
     cancel_request: Option<CancelRequestRecord>,
     /// History of state transitions for debugging.
     transitions: Vec<(TaskStateKind, TaskStateKind, Time)>,
+    /// Current mask depth (0 = unmasked).
+    mask_depth: u32,
 }
 
 impl TaskProtocolRecord {
@@ -252,6 +305,7 @@ impl TaskProtocolRecord {
             current_state: TaskStateKind::Created,
             cancel_request: None,
             transitions: Vec::new(),
+            mask_depth: 0,
         }
     }
 }
@@ -351,6 +405,38 @@ impl CancellationProtocolOracle {
         }
     }
 
+    /// Records a mask section entry for a task.
+    ///
+    /// Tracks the current mask depth so the oracle can verify that cancel
+    /// acknowledgement is deferred while masked (**INV-MASK-DEFER**) and
+    /// that mask depth never exceeds the compile-time bound (**INV-MASK-BOUNDED**).
+    pub fn on_mask_enter(&mut self, task: TaskId, time: Time) {
+        let record = self
+            .tasks
+            .entry(task)
+            .or_insert_with(TaskProtocolRecord::new);
+        record.mask_depth += 1;
+
+        if record.mask_depth > crate::types::MAX_MASK_DEPTH {
+            self.violations
+                .push(CancellationProtocolViolation::MaskDepthExceeded {
+                    task,
+                    depth: record.mask_depth,
+                    max: crate::types::MAX_MASK_DEPTH,
+                    time,
+                });
+        }
+    }
+
+    /// Records a mask section exit for a task.
+    pub fn on_mask_exit(&mut self, task: TaskId, _time: Time) {
+        let record = self
+            .tasks
+            .entry(task)
+            .or_insert_with(TaskProtocolRecord::new);
+        record.mask_depth = record.mask_depth.saturating_sub(1);
+    }
+
     /// Records a task state transition.
     ///
     /// This validates that the transition follows the cancellation protocol.
@@ -371,8 +457,16 @@ impl CancellationProtocolOracle {
         record.transitions.push((from_kind, to_kind, time));
         record.current_state = to_kind;
 
-        // If transitioning to Cancelling, mark as acknowledged
+        // If transitioning to Cancelling, mark as acknowledged and check mask state
         if to_kind == TaskStateKind::Cancelling {
+            if record.mask_depth > 0 {
+                self.violations
+                    .push(CancellationProtocolViolation::CancelAckWhileMasked {
+                        task,
+                        mask_depth: record.mask_depth,
+                        time,
+                    });
+            }
             if let Some(ref mut cancel) = record.cancel_request {
                 cancel.acknowledged = true;
             }
@@ -385,6 +479,13 @@ impl CancellationProtocolOracle {
     pub fn on_region_cancel(&mut self, region: RegionId, reason: CancelReason, _time: Time) {
         self.cancelled_regions.insert(region, reason);
     }
+
+    /// Records a region close event.
+    ///
+    /// The cancellation protocol oracle does not currently enforce close
+    /// semantics directly; this hook exists for symmetry with other oracles
+    /// and for conformance tests that model region close events.
+    pub fn on_region_close(&mut self, _region: RegionId, _time: Time) {}
 
     /// Validates a single state transition (static version for borrow checker).
     fn validate_transition_static(
@@ -557,6 +658,12 @@ impl CancellationProtocolOracle {
     #[must_use]
     pub fn cancel_count(&self) -> usize {
         self.cancelled_regions.len()
+    }
+
+    /// Returns the current mask depth of a task, if tracked.
+    #[must_use]
+    pub fn task_mask_depth(&self, task: TaskId) -> Option<u32> {
+        self.tasks.get(&task).map(|r| r.mask_depth)
     }
 
     /// Resets the oracle to its initial state.
@@ -1123,5 +1230,213 @@ mod tests {
         let has_finalizing = display.contains("Finalizing");
         crate::assert_with_log!(has_finalizing, "contains Finalizing", true, has_finalizing);
         crate::test_complete!("violation_display");
+    }
+
+    #[test]
+    fn mask_depth_exceeded_detected() {
+        init_test("mask_depth_exceeded_detected");
+        let mut oracle = CancellationProtocolOracle::new();
+        let task = task_id(0);
+        let region = region_id(0);
+
+        oracle.on_region_create(region, None);
+        oracle.on_task_create(task, region);
+
+        // Push mask depth past MAX_MASK_DEPTH
+        for i in 0..=crate::types::MAX_MASK_DEPTH {
+            oracle.on_mask_enter(task, Time::from_nanos(u64::from(i)));
+        }
+
+        let result = oracle.check();
+        let err = result.is_err();
+        crate::assert_with_log!(err, "result err", true, err);
+        let violation = result.unwrap_err();
+        let exceeded = matches!(
+            violation,
+            CancellationProtocolViolation::MaskDepthExceeded { .. }
+        );
+        crate::assert_with_log!(exceeded, "mask depth exceeded", true, exceeded);
+        crate::test_complete!("mask_depth_exceeded_detected");
+    }
+
+    #[test]
+    fn mask_within_bounds_passes() {
+        init_test("mask_within_bounds_passes");
+        let mut oracle = CancellationProtocolOracle::new();
+        let task = task_id(0);
+        let region = region_id(0);
+
+        oracle.on_region_create(region, None);
+        oracle.on_task_create(task, region);
+
+        // Enter and exit mask 3 times (within bounds)
+        for i in 0..3 {
+            oracle.on_mask_enter(task, Time::from_nanos(i * 2));
+            oracle.on_mask_exit(task, Time::from_nanos(i * 2 + 1));
+        }
+
+        let ok = oracle.check().is_ok();
+        crate::assert_with_log!(ok, "oracle ok", true, ok);
+        crate::test_complete!("mask_within_bounds_passes");
+    }
+
+    #[test]
+    fn cancel_ack_while_masked_detected() {
+        init_test("cancel_ack_while_masked_detected");
+        let mut oracle = CancellationProtocolOracle::new();
+        let task = task_id(0);
+        let region = region_id(0);
+
+        oracle.on_region_create(region, None);
+        oracle.on_task_create(task, region);
+
+        let reason = CancelReason::timeout();
+        let cleanup_budget = Budget::INFINITE;
+
+        // Running
+        oracle.on_transition(task, &TaskState::Created, &TaskState::Running, Time::ZERO);
+
+        // Enter masked section
+        oracle.on_mask_enter(task, Time::from_nanos(50));
+
+        // Cancel while masked
+        oracle.on_cancel_request(task, reason.clone(), Time::from_nanos(100));
+        oracle.on_transition(
+            task,
+            &TaskState::Running,
+            &TaskState::CancelRequested {
+                reason: reason.clone(),
+                cleanup_budget,
+            },
+            Time::from_nanos(100),
+        );
+
+        // Acknowledge cancel while STILL masked (violation!)
+        oracle.on_transition(
+            task,
+            &TaskState::CancelRequested {
+                reason: reason.clone(),
+                cleanup_budget,
+            },
+            &TaskState::Cancelling {
+                reason,
+                cleanup_budget,
+            },
+            Time::from_nanos(150),
+        );
+
+        let result = oracle.check();
+        let err = result.is_err();
+        crate::assert_with_log!(err, "result err", true, err);
+        let violation = result.unwrap_err();
+        let ack_masked = matches!(
+            violation,
+            CancellationProtocolViolation::CancelAckWhileMasked { .. }
+        );
+        crate::assert_with_log!(ack_masked, "cancel ack while masked", true, ack_masked);
+        crate::test_complete!("cancel_ack_while_masked_detected");
+    }
+
+    #[test]
+    fn cancel_ack_after_unmask_passes() {
+        init_test("cancel_ack_after_unmask_passes");
+        let mut oracle = CancellationProtocolOracle::new();
+        let task = task_id(0);
+        let region = region_id(0);
+
+        oracle.on_region_create(region, None);
+        oracle.on_task_create(task, region);
+
+        let reason = CancelReason::timeout();
+        let cleanup_budget = Budget::INFINITE;
+
+        // Running
+        oracle.on_transition(task, &TaskState::Created, &TaskState::Running, Time::ZERO);
+
+        // Enter and exit masked section
+        oracle.on_mask_enter(task, Time::from_nanos(50));
+        oracle.on_mask_exit(task, Time::from_nanos(80));
+
+        // Cancel and ack while unmasked (valid)
+        oracle.on_cancel_request(task, reason.clone(), Time::from_nanos(100));
+        oracle.on_transition(
+            task,
+            &TaskState::Running,
+            &TaskState::CancelRequested {
+                reason: reason.clone(),
+                cleanup_budget,
+            },
+            Time::from_nanos(100),
+        );
+        oracle.on_transition(
+            task,
+            &TaskState::CancelRequested {
+                reason: reason.clone(),
+                cleanup_budget,
+            },
+            &TaskState::Cancelling {
+                reason: reason.clone(),
+                cleanup_budget,
+            },
+            Time::from_nanos(150),
+        );
+        oracle.on_transition(
+            task,
+            &TaskState::Cancelling {
+                reason: reason.clone(),
+                cleanup_budget,
+            },
+            &TaskState::Finalizing {
+                reason: reason.clone(),
+                cleanup_budget,
+            },
+            Time::from_nanos(200),
+        );
+        oracle.on_transition(
+            task,
+            &TaskState::Finalizing {
+                reason: reason.clone(),
+                cleanup_budget,
+            },
+            &TaskState::Completed(Outcome::Cancelled(reason)),
+            Time::from_nanos(300),
+        );
+
+        let ok = oracle.check().is_ok();
+        crate::assert_with_log!(ok, "oracle ok", true, ok);
+        crate::test_complete!("cancel_ack_after_unmask_passes");
+    }
+
+    #[test]
+    fn mask_depth_violation_display() {
+        init_test("mask_depth_violation_display");
+        let v = CancellationProtocolViolation::MaskDepthExceeded {
+            task: task_id(0),
+            depth: 65,
+            max: 64,
+            time: Time::from_nanos(100),
+        };
+        let display = format!("{v}");
+        let has_depth = display.contains("65");
+        crate::assert_with_log!(has_depth, "contains depth", true, has_depth);
+        let has_max = display.contains("64");
+        crate::assert_with_log!(has_max, "contains max", true, has_max);
+        crate::test_complete!("mask_depth_violation_display");
+    }
+
+    #[test]
+    fn cancel_ack_masked_violation_display() {
+        init_test("cancel_ack_masked_violation_display");
+        let v = CancellationProtocolViolation::CancelAckWhileMasked {
+            task: task_id(0),
+            mask_depth: 2,
+            time: Time::from_nanos(100),
+        };
+        let display = format!("{v}");
+        let has_masked = display.contains("masked");
+        crate::assert_with_log!(has_masked, "contains masked", true, has_masked);
+        let has_depth = display.contains("depth=2");
+        crate::assert_with_log!(has_depth, "contains depth", true, has_depth);
+        crate::test_complete!("cancel_ack_masked_violation_display");
     }
 }

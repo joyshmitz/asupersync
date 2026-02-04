@@ -173,6 +173,43 @@ impl LabInjectionReport {
         self.results.iter().filter(|r| !r.is_success()).collect()
     }
 
+    /// Returns a config that reproduces a specific failure from this report.
+    ///
+    /// Given an injection point from a failed result, returns a `LabInjectionConfig`
+    /// with the same seed and a targeted strategy (`AtSequence`) that re-runs
+    /// only that injection point with full oracle checking enabled.
+    ///
+    /// # Example
+    ///
+    /// ```ignore
+    /// let report = runner.run_with_lab(test_fn);
+    /// if !report.all_passed() {
+    ///     let failure = &report.failures()[0];
+    ///     let repro_config = report.reproduce_config(failure.injection.injection_point);
+    ///     let mut repro_runner = LabInjectionRunner::new(repro_config);
+    ///     let repro_report = repro_runner.run_with_lab(test_fn);
+    ///     // repro_report should show the same failure
+    /// }
+    /// ```
+    #[must_use]
+    pub fn reproduce_config(&self, injection_point: u64) -> LabInjectionConfig {
+        LabInjectionConfig::new(self.seed)
+            .with_strategy(InjectionStrategy::AtSequence(injection_point))
+            .with_all_oracles()
+    }
+
+    /// Returns reproduction configs for all failures in this report.
+    #[must_use]
+    pub fn reproduce_all_failures(&self) -> Vec<(u64, LabInjectionConfig)> {
+        self.failures()
+            .iter()
+            .map(|f| {
+                let point = f.injection.injection_point;
+                (point, self.reproduce_config(point))
+            })
+            .collect()
+    }
+
     /// Returns failures grouped by type: injection failures vs oracle failures.
     #[must_use]
     pub fn categorize_failures(&self) -> (Vec<&LabInjectionResult>, Vec<&LabInjectionResult>) {
@@ -990,5 +1027,155 @@ mod tests {
         assert!(code.contains("LabInjectionConfig::new(12345)"));
         assert!(code.contains("InjectionStrategy::AtSequence(42)"));
         assert!(code.contains("InstrumentedFuture::new"));
+    }
+
+    #[test]
+    fn lab_injection_window_around_strategy() {
+        let config = LabInjectionConfig::new(42).with_strategy(InjectionStrategy::WindowAround {
+            center: 3,
+            radius: 1,
+        });
+        let mut runner = LabInjectionRunner::new(config);
+
+        let report = runner.run_simple(|injector| {
+            let future = YieldingFuture::new(5, 42);
+            InstrumentedFuture::new(future, injector)
+        });
+
+        // Points are 1..=6, window [2,4] = 3 points
+        assert_eq!(report.tests_run, 3);
+        assert!(report.all_passed());
+    }
+
+    #[test]
+    fn lab_injection_except_first_strategy() {
+        let config = LabInjectionConfig::new(42).with_strategy(InjectionStrategy::ExceptFirst(3));
+        let mut runner = LabInjectionRunner::new(config);
+
+        let report = runner.run_simple(|injector| {
+            let future = YieldingFuture::new(5, 42);
+            InstrumentedFuture::new(future, injector)
+        });
+
+        // 6 total points, skip first 3 = 3 remaining
+        assert_eq!(report.tests_run, 3);
+        assert!(report.all_passed());
+    }
+
+    #[test]
+    fn lab_injection_last_n_strategy() {
+        let config = LabInjectionConfig::new(42).with_strategy(InjectionStrategy::LastN(2));
+        let mut runner = LabInjectionRunner::new(config);
+
+        let report = runner.run_simple(|injector| {
+            let future = YieldingFuture::new(5, 42);
+            InstrumentedFuture::new(future, injector)
+        });
+
+        // 6 total points, last 2 = 2 tested
+        assert_eq!(report.tests_run, 2);
+        assert!(report.all_passed());
+    }
+
+    #[test]
+    fn lab_injection_reproduce_config() {
+        let results = vec![
+            LabInjectionResult {
+                injection: InjectionResult::success(1, 0),
+                oracle_violations: vec![],
+            },
+            LabInjectionResult {
+                injection: InjectionResult::panic(3, "test panic".to_string(), 2),
+                oracle_violations: vec![],
+            },
+        ];
+
+        let report = LabInjectionReport::from_results(results, 5, "AllPoints", 42);
+
+        // reproduce_config should target the specific injection point
+        let repro = report.reproduce_config(3);
+        assert_eq!(repro.seed(), 42);
+        assert!(matches!(repro.strategy(), InjectionStrategy::AtSequence(3)));
+        assert!(repro.use_all_oracles);
+    }
+
+    #[test]
+    fn lab_injection_reproduce_all_failures() {
+        let results = vec![
+            LabInjectionResult {
+                injection: InjectionResult::success(1, 0),
+                oracle_violations: vec![],
+            },
+            LabInjectionResult {
+                injection: InjectionResult::panic(3, "panic a".to_string(), 2),
+                oracle_violations: vec![],
+            },
+            LabInjectionResult {
+                injection: InjectionResult::panic(5, "panic b".to_string(), 4),
+                oracle_violations: vec![],
+            },
+        ];
+
+        let report = LabInjectionReport::from_results(results, 10, "AllPoints", 99);
+        let repros = report.reproduce_all_failures();
+
+        assert_eq!(repros.len(), 2);
+        assert_eq!(repros[0].0, 3);
+        assert_eq!(repros[1].0, 5);
+        assert_eq!(repros[0].1.seed(), 99);
+        assert_eq!(repros[1].1.seed(), 99);
+    }
+
+    #[test]
+    fn lab_injection_window_around_edge_cases() {
+        // Window with center at 1, radius 0 (single point)
+        let strategy = InjectionStrategy::WindowAround {
+            center: 1,
+            radius: 0,
+        };
+        let points = strategy.select_points(&[1, 2, 3, 4, 5], 0);
+        assert_eq!(points, vec![1]);
+
+        // Window at the start (saturating subtraction handles underflow)
+        let strategy = InjectionStrategy::WindowAround {
+            center: 1,
+            radius: 5,
+        };
+        let points = strategy.select_points(&[1, 2, 3, 4, 5], 0);
+        assert_eq!(points, vec![1, 2, 3, 4, 5]);
+
+        // Window with no matching points
+        let strategy = InjectionStrategy::WindowAround {
+            center: 100,
+            radius: 2,
+        };
+        let points = strategy.select_points(&[1, 2, 3], 0);
+        assert!(points.is_empty());
+    }
+
+    #[test]
+    fn lab_injection_except_first_edge_cases() {
+        // Skip more than available
+        let strategy = InjectionStrategy::ExceptFirst(100);
+        let points = strategy.select_points(&[1, 2, 3], 0);
+        assert!(points.is_empty());
+
+        // Skip zero
+        let strategy = InjectionStrategy::ExceptFirst(0);
+        let points = strategy.select_points(&[1, 2, 3], 0);
+        assert_eq!(points, vec![1, 2, 3]);
+    }
+
+    #[test]
+    fn lab_injection_last_n_edge_cases() {
+        // Request more than available
+        let strategy = InjectionStrategy::LastN(100);
+        let points = strategy.select_points(&[1, 2, 3], 0);
+        assert_eq!(points, vec![1, 2, 3]);
+
+        // Request zero
+        let strategy = InjectionStrategy::LastN(0);
+        let points = strategy.select_points(&[1, 2, 3], 0);
+        assert!(points.is_empty());
     }
 }
