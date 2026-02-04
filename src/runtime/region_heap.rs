@@ -555,25 +555,25 @@ mod tests {
         fn run_pattern() -> Vec<(u32, u32)> {
             let mut heap = RegionHeap::new();
 
-            let a = heap.alloc(1u32);
-            let b = heap.alloc(2u32);
-            let c = heap.alloc(3u32);
+            let first = heap.alloc(1u32);
+            let second = heap.alloc(2u32);
+            let third = heap.alloc(3u32);
 
-            assert!(heap.dealloc(b));
-            let d = heap.alloc(4u32); // should reuse b's slot
+            assert!(heap.dealloc(second));
+            let reuse_second = heap.alloc(4u32); // should reuse second's slot
 
-            assert!(heap.dealloc(a));
-            assert!(heap.dealloc(c));
-            let e = heap.alloc(5u32); // reuse c's slot (last freed)
-            let f = heap.alloc(6u32); // reuse a's slot
+            assert!(heap.dealloc(first));
+            assert!(heap.dealloc(third));
+            let reuse_third = heap.alloc(5u32); // reuse third's slot (last freed)
+            let reuse_first = heap.alloc(6u32); // reuse first's slot
 
             vec![
-                (a.index(), a.generation()),
-                (b.index(), b.generation()),
-                (c.index(), c.generation()),
-                (d.index(), d.generation()),
-                (e.index(), e.generation()),
-                (f.index(), f.generation()),
+                (first.index(), first.generation()),
+                (second.index(), second.generation()),
+                (third.index(), third.generation()),
+                (reuse_second.index(), reuse_second.generation()),
+                (reuse_third.index(), reuse_third.generation()),
+                (reuse_first.index(), reuse_first.generation()),
             ]
         }
 
