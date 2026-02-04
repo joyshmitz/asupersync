@@ -5,7 +5,7 @@
 //! - JSON serialization roundtrip
 //! - Deterministic report output across identical lab runs
 //! - New mutations (actor_leak, supervision, mailbox) work end-to-end
-//! - MetaRunner produces correct coverage with all 12 mutations
+//! - MetaRunner produces correct coverage with all 13 mutations
 
 mod common;
 use common::*;
@@ -14,7 +14,7 @@ use asupersync::lab::meta::{builtin_mutations, MetaRunner};
 use asupersync::lab::oracle::eprocess::{EProcessConfig, EProcessMonitor};
 use asupersync::lab::oracle::evidence::{DetectionModel, EvidenceLedger, EvidenceStrength};
 use asupersync::lab::oracle::OracleSuite;
-use asupersync::lab::OracleReport;
+use asupersync::lab::{OracleReport, ALL_ORACLE_INVARIANTS};
 use asupersync::types::Time;
 
 // ==================== Unified Report Tests ====================
@@ -28,10 +28,14 @@ fn unified_report_clean_suite_all_pass() {
     let report = suite.report(Time::ZERO);
 
     assert!(report.all_passed(), "clean suite should pass all oracles");
-    assert_eq!(report.total, 12, "should check all 12 oracles");
-    assert_eq!(report.passed, 12);
+    assert_eq!(
+        report.total,
+        ALL_ORACLE_INVARIANTS.len(),
+        "should check all oracles"
+    );
+    assert_eq!(report.passed, ALL_ORACLE_INVARIANTS.len());
     assert_eq!(report.failed, 0);
-    assert_eq!(report.entries.len(), 12);
+    assert_eq!(report.entries.len(), ALL_ORACLE_INVARIANTS.len());
     assert!(report.failures().is_empty());
 
     test_complete!("unified_report_clean_suite_all_pass");
@@ -140,7 +144,7 @@ fn unified_report_entry_lookup() {
     let suite = OracleSuite::new();
     let report = suite.report(Time::ZERO);
 
-    // All 12 invariants should be findable.
+    // All invariants should be findable.
     let invariants = [
         "task_leak",
         "obligation_leak",
@@ -178,8 +182,8 @@ fn meta_mutations_all_12_covered() {
     let runner = MetaRunner::new(DEFAULT_TEST_SEED);
     let report = runner.run(builtin_mutations());
 
-    // Should have 12 mutations now (9 original + 3 new).
-    assert_eq!(report.results().len(), 12, "should run 12 mutations");
+    // Should have 13 mutations now (9 original + 3 new + CrossRegionRRefAccess).
+    assert_eq!(report.results().len(), 13, "should run 13 mutations");
 
     // AmbientAuthority oracle has a known detection gap.
     let has_unexpected = report
@@ -320,7 +324,11 @@ fn evidence_ledger_clean_suite_all_against_violation() {
     let report = suite.report(Time::ZERO);
     let ledger = EvidenceLedger::from_report(&report);
 
-    assert_eq!(ledger.entries.len(), 12, "should have 12 evidence entries");
+    assert_eq!(
+        ledger.entries.len(),
+        ALL_ORACLE_INVARIANTS.len(),
+        "should have evidence entries for all invariants"
+    );
     assert_eq!(ledger.summary.violations_detected, 0);
     assert!(ledger.summary.strongest_violation.is_none());
 
@@ -408,10 +416,8 @@ fn evidence_ledger_text_output() {
     let text = ledger.to_text();
 
     assert!(text.contains("EVIDENCE LEDGER"), "should contain header");
-    assert!(
-        text.contains("Invariants examined: 12"),
-        "should report 12 invariants"
-    );
+    let expected = format!("Invariants examined: {}", ALL_ORACLE_INVARIANTS.len());
+    assert!(text.contains(&expected), "should report invariant count");
     assert!(
         text.contains("Violations detected: 0"),
         "should report 0 violations"
@@ -445,8 +451,11 @@ fn evidence_ledger_custom_detection_model() {
     let default_ledger = EvidenceLedger::from_report(&report);
     let conservative_ledger = EvidenceLedger::from_report_with_model(&report, &conservative);
 
-    // Both should have 12 entries with 0 violations.
-    assert_eq!(conservative_ledger.entries.len(), 12);
+    // Both should have entries with 0 violations.
+    assert_eq!(
+        conservative_ledger.entries.len(),
+        ALL_ORACLE_INVARIANTS.len()
+    );
     assert_eq!(conservative_ledger.summary.violations_detected, 0);
 
     // With lower detection rate + higher FP rate, evidence against violation
@@ -482,7 +491,7 @@ fn evidence_ledger_violations_by_strength() {
 
     // Clean entries should be sorted by ascending log10_bf (most confident first).
     let clean = ledger.clean_by_confidence();
-    assert_eq!(clean.len(), 12);
+    assert_eq!(clean.len(), ALL_ORACLE_INVARIANTS.len());
     for w in clean.windows(2) {
         assert!(
             w[0].bayes_factor.log10_bf <= w[1].bayes_factor.log10_bf,
@@ -597,7 +606,7 @@ fn eprocess_all_invariants_monitors_twelve() {
     test_phase!("eprocess_all_invariants_monitors_twelve");
 
     let monitor = EProcessMonitor::all_invariants();
-    assert_eq!(monitor.results().len(), 12);
+    assert_eq!(monitor.results().len(), ALL_ORACLE_INVARIANTS.len());
 
     test_complete!("eprocess_all_invariants_monitors_twelve");
 }
