@@ -610,6 +610,75 @@ Reserve slot + idempotency key; commit sends; cancel triggers best-effort cancel
 * `ResultDelivery { remote_task_id, outcome, execution_time }`
 * `LeaseRenewal { remote_task_id, new_lease, current_state, node }`
 
+**Envelope + serialization (Phase 1+)**
+
+* All messages are carried inside an explicit envelope: `MessageEnvelope { sender, sender_time, payload }`.
+* `sender_time` is a logical clock snapshot (vector clock or equivalent) to preserve causal order.
+* Wire frame (transport-level, not part of `RemoteMessage`):
+  * `magic = "ASR1"` (4 bytes), `version` (u16), `flags` (u16), `len` (u32), then payload bytes.
+  * `version` is protocol version for message schema compatibility.
+* Payload encoding must be canonical and deterministic. Phase 1 recommendation:
+  * `serde` + `postcard` (or equivalent) with fixed-int encoding and stable field order.
+  * No map-order dependence; sets must be encoded in deterministic order.
+  * Unknown fields: ignored for forward compatibility; unknown variants: reject.
+
+**Versioning rules**
+
+* `major.minor` versioning for the envelope:
+  * Unknown major: reject the message and close transport.
+  * Unknown minor: accept if all required fields are present; ignore unknown fields.
+* Any change to semantics of existing fields requires a major bump.
+* New optional fields require a minor bump and must be ignorable.
+
+**Handshake + capability checks**
+
+* A transport-level handshake MUST occur before any `RemoteMessage` is accepted:
+  * `Hello { protocol_version, node_id, clock_mode, max_lease, idempotency_ttl, computation_registry_hash }`
+  * `HelloAck { accepted_version, clock_mode, assigned_node_id }`
+* Capability checks are mandatory:
+  * `SpawnRequest` must reference a registered computation name.
+  * The remote node must validate authorization policy for `origin_node` (ACL or capability token).
+  * `budget` is clamped to remote policy caps; `lease` is clamped to max lease.
+  * `idempotency_key` must be unique per `(computation, input_schema_hash)` or rejected.
+
+**Test vectors (canonical examples)**
+
+```
+SpawnRequest (new):
+  { remote_task_id: 42, computation: "encode_block", input: "0xdeadbeef",
+    lease: 30s, idempotency_key: IK-0001, budget: {poll_quota: 1000},
+    origin_node: "node-a", origin_region: 7, origin_task: 9 }
+Expect:
+  SpawnAck { remote_task_id: 42, status: Accepted, assigned_node: "node-b" }
+  ResultDelivery { remote_task_id: 42, outcome: Ok, execution_time: 5ms }
+
+SpawnRequest (duplicate, same key + inputs):
+  same as above, re-sent
+Expect:
+  SpawnAck { remote_task_id: 42, status: Accepted, assigned_node: "node-b" }
+  ResultDelivery (cached outcome) if already completed
+
+SpawnRequest (idempotency conflict):
+  { remote_task_id: 43, computation: "encode_block", input: "0xBEEF",
+    idempotency_key: IK-0001, ... }
+Expect:
+  SpawnAck { remote_task_id: 43, status: Rejected(IdempotencyConflict), assigned_node: "node-b" }
+
+CancelRequest (best-effort):
+  { remote_task_id: 42, reason: Timeout, origin_node: "node-a" }
+Expect:
+  ResultDelivery { remote_task_id: 42, outcome: Cancelled, ... } (if cancel wins)
+```
+
+**Stub implementation hooks**
+
+* Phase 1 transport integration should implement:
+  * `RemoteTransport::send(to, MessageEnvelope<RemoteMessage>)`
+  * `RemoteTransport::try_recv() -> Option<MessageEnvelope<RemoteMessage>>`
+* The transport is responsible for envelope framing, version checks, and handshake.
+* The runtime remains message-driven and deterministic in lab mode; the lab harness
+  can bypass serialization by injecting `MessageEnvelope<RemoteMessage>` directly.
+
 **Origin-side states (RemoteHandle)**
 
 ```
