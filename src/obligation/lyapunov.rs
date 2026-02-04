@@ -286,8 +286,8 @@ impl StateSnapshot {
                 continue;
             };
 
-            let deadline_ns = deadline.as_nanos() as i128;
-            let now_ns = now.as_nanos() as i128;
+            let deadline_ns = i128::from(deadline.as_nanos());
+            let now_ns = i128::from(now.as_nanos());
             let slack_ns = deadline_ns - now_ns;
             #[allow(clippy::cast_precision_loss)]
             let slack = slack_ns as f64;
