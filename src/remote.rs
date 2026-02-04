@@ -23,6 +23,7 @@ use crate::cx::Cx;
 use crate::trace::distributed::LogicalTime;
 use crate::types::{Budget, CancelReason, ObligationId, RegionId, TaskId, Time};
 use std::fmt;
+use std::marker::PhantomData;
 use std::sync::atomic::{AtomicU64, Ordering};
 use std::time::Duration;
 
@@ -1628,6 +1629,401 @@ pub struct LeaseRenewal {
 }
 
 // ---------------------------------------------------------------------------
+// Session-typed protocol states
+// ---------------------------------------------------------------------------
+
+/// Errors surfaced by the session-typed remote protocol state machine.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub enum RemoteProtocolError {
+    /// Message correlated to a different remote task id than this session.
+    RemoteTaskIdMismatch {
+        /// Expected task id.
+        expected: RemoteTaskId,
+        /// Actual task id from the message.
+        got: RemoteTaskId,
+    },
+    /// Spawn acknowledgement status did not match the expected transition.
+    UnexpectedAckStatus {
+        /// Expected status label.
+        expected: &'static str,
+        /// Actual status.
+        got: SpawnAckStatus,
+    },
+}
+
+impl fmt::Display for RemoteProtocolError {
+    fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
+        match self {
+            Self::RemoteTaskIdMismatch { expected, got } => {
+                write!(f, "remote task id mismatch: expected {expected}, got {got}")
+            }
+            Self::UnexpectedAckStatus { expected, got } => write!(
+                f,
+                "unexpected spawn ack status: expected {expected}, got {got:?}"
+            ),
+        }
+    }
+}
+
+impl std::error::Error for RemoteProtocolError {}
+
+/// Origin-side session state: prior to sending a spawn request.
+#[derive(Debug)]
+pub struct OriginInit;
+/// Origin-side session state: spawn request sent, awaiting ack.
+#[derive(Debug)]
+pub struct OriginSpawned;
+/// Origin-side session state: remote task running.
+#[derive(Debug)]
+pub struct OriginRunning;
+/// Origin-side session state: cancellation request sent.
+#[derive(Debug)]
+pub struct OriginCancelSent;
+/// Origin-side session state: lease expired without renewal.
+#[derive(Debug)]
+pub struct OriginLeaseExpired;
+/// Origin-side session state: terminal result received.
+#[derive(Debug)]
+pub struct OriginCompleted;
+/// Origin-side session state: spawn rejected by remote.
+#[derive(Debug)]
+pub struct OriginRejected;
+
+/// Remote-side session state: prior to receiving a spawn request.
+#[derive(Debug)]
+pub struct RemoteInit;
+/// Remote-side session state: spawn request received, awaiting ack response.
+#[derive(Debug)]
+pub struct RemoteSpawnReceived;
+/// Remote-side session state: cancel received before ack was sent.
+#[derive(Debug)]
+pub struct RemoteCancelPending;
+/// Remote-side session state: remote task running.
+#[derive(Debug)]
+pub struct RemoteRunning;
+/// Remote-side session state: cancel received while running.
+#[derive(Debug)]
+pub struct RemoteCancelReceived;
+/// Remote-side session state: terminal result sent.
+#[derive(Debug)]
+pub struct RemoteCompleted;
+/// Remote-side session state: spawn rejected.
+#[derive(Debug)]
+pub struct RemoteRejected;
+
+/// Session-typed protocol state machine for the originator.
+#[must_use = "OriginSession must be advanced to completion or rejected"]
+#[derive(Debug)]
+pub struct OriginSession<S> {
+    remote_task_id: RemoteTaskId,
+    _state: PhantomData<S>,
+}
+
+impl OriginSession<OriginInit> {
+    /// Creates a new origin-side session for a given remote task id.
+    pub fn new(remote_task_id: RemoteTaskId) -> Self {
+        Self {
+            remote_task_id,
+            _state: PhantomData,
+        }
+    }
+
+    /// Send a spawn request, transitioning into `OriginSpawned`.
+    pub fn send_spawn(
+        self,
+        req: &SpawnRequest,
+    ) -> Result<OriginSession<OriginSpawned>, RemoteProtocolError> {
+        self.ensure_id(req.remote_task_id)?;
+        Ok(self.transition())
+    }
+}
+
+impl<S> OriginSession<S> {
+    /// Returns the correlated remote task id.
+    #[must_use]
+    pub fn remote_task_id(&self) -> RemoteTaskId {
+        self.remote_task_id
+    }
+
+    fn ensure_id(&self, got: RemoteTaskId) -> Result<(), RemoteProtocolError> {
+        if self.remote_task_id == got {
+            Ok(())
+        } else {
+            Err(RemoteProtocolError::RemoteTaskIdMismatch {
+                expected: self.remote_task_id,
+                got,
+            })
+        }
+    }
+
+    fn transition<T>(self) -> OriginSession<T> {
+        OriginSession {
+            remote_task_id: self.remote_task_id,
+            _state: PhantomData,
+        }
+    }
+}
+
+/// Outcome of a spawn acknowledgement on the origin side.
+pub enum OriginAckOutcome {
+    /// Spawn accepted; session is running.
+    Accepted(OriginSession<OriginRunning>),
+    /// Spawn rejected; session ends.
+    Rejected(OriginSession<OriginRejected>),
+}
+
+impl OriginSession<OriginSpawned> {
+    /// Receive the spawn acknowledgement and transition to running or rejected.
+    pub fn recv_spawn_ack(self, ack: &SpawnAck) -> Result<OriginAckOutcome, RemoteProtocolError> {
+        self.ensure_id(ack.remote_task_id)?;
+        match ack.status {
+            SpawnAckStatus::Accepted => Ok(OriginAckOutcome::Accepted(self.transition())),
+            SpawnAckStatus::Rejected(_) => Ok(OriginAckOutcome::Rejected(self.transition())),
+        }
+    }
+
+    /// Send a cancellation before receiving the spawn ack.
+    pub fn send_cancel(
+        self,
+        cancel: &CancelRequest,
+    ) -> Result<OriginSession<OriginCancelSent>, RemoteProtocolError> {
+        self.ensure_id(cancel.remote_task_id)?;
+        Ok(self.transition())
+    }
+}
+
+impl OriginSession<OriginRunning> {
+    /// Receive a lease renewal while running.
+    pub fn recv_lease_renewal(self, renewal: &LeaseRenewal) -> Result<Self, RemoteProtocolError> {
+        self.ensure_id(renewal.remote_task_id)?;
+        Ok(self)
+    }
+
+    /// Send a cancellation request while running.
+    pub fn send_cancel(
+        self,
+        cancel: &CancelRequest,
+    ) -> Result<OriginSession<OriginCancelSent>, RemoteProtocolError> {
+        self.ensure_id(cancel.remote_task_id)?;
+        Ok(self.transition())
+    }
+
+    /// Receive the terminal result.
+    pub fn recv_result(
+        self,
+        result: &ResultDelivery,
+    ) -> Result<OriginSession<OriginCompleted>, RemoteProtocolError> {
+        self.ensure_id(result.remote_task_id)?;
+        Ok(self.transition())
+    }
+
+    /// Mark the lease as expired without renewal.
+    pub fn lease_expired(self) -> OriginSession<OriginLeaseExpired> {
+        self.transition()
+    }
+}
+
+impl OriginSession<OriginCancelSent> {
+    /// Receive the terminal result after cancellation.
+    pub fn recv_result(
+        self,
+        result: &ResultDelivery,
+    ) -> Result<OriginSession<OriginCompleted>, RemoteProtocolError> {
+        self.ensure_id(result.remote_task_id)?;
+        Ok(self.transition())
+    }
+
+    /// Accept a lease renewal while waiting for completion.
+    pub fn recv_lease_renewal(self, renewal: &LeaseRenewal) -> Result<Self, RemoteProtocolError> {
+        self.ensure_id(renewal.remote_task_id)?;
+        Ok(self)
+    }
+}
+
+impl OriginSession<OriginLeaseExpired> {
+    /// Send a cancellation request after lease expiry.
+    pub fn send_cancel(
+        self,
+        cancel: &CancelRequest,
+    ) -> Result<OriginSession<OriginCancelSent>, RemoteProtocolError> {
+        self.ensure_id(cancel.remote_task_id)?;
+        Ok(self.transition())
+    }
+
+    /// Receive a late terminal result after lease expiry.
+    pub fn recv_result(
+        self,
+        result: &ResultDelivery,
+    ) -> Result<OriginSession<OriginCompleted>, RemoteProtocolError> {
+        self.ensure_id(result.remote_task_id)?;
+        Ok(self.transition())
+    }
+}
+
+/// Session-typed protocol state machine for the remote node.
+#[must_use = "RemoteSession must be advanced to completion or rejected"]
+#[derive(Debug)]
+pub struct RemoteSession<S> {
+    remote_task_id: RemoteTaskId,
+    _state: PhantomData<S>,
+}
+
+impl RemoteSession<RemoteInit> {
+    /// Creates a new remote-side session for a given remote task id.
+    pub fn new(remote_task_id: RemoteTaskId) -> Self {
+        Self {
+            remote_task_id,
+            _state: PhantomData,
+        }
+    }
+
+    /// Receive a spawn request.
+    pub fn recv_spawn(
+        self,
+        req: &SpawnRequest,
+    ) -> Result<RemoteSession<RemoteSpawnReceived>, RemoteProtocolError> {
+        self.ensure_id(req.remote_task_id)?;
+        Ok(self.transition())
+    }
+}
+
+impl<S> RemoteSession<S> {
+    /// Returns the correlated remote task id.
+    #[must_use]
+    pub fn remote_task_id(&self) -> RemoteTaskId {
+        self.remote_task_id
+    }
+
+    fn ensure_id(&self, got: RemoteTaskId) -> Result<(), RemoteProtocolError> {
+        if self.remote_task_id == got {
+            Ok(())
+        } else {
+            Err(RemoteProtocolError::RemoteTaskIdMismatch {
+                expected: self.remote_task_id,
+                got,
+            })
+        }
+    }
+
+    fn transition<T>(self) -> RemoteSession<T> {
+        RemoteSession {
+            remote_task_id: self.remote_task_id,
+            _state: PhantomData,
+        }
+    }
+}
+
+impl RemoteSession<RemoteSpawnReceived> {
+    /// Send an accepted spawn acknowledgement.
+    pub fn send_ack_accepted(
+        self,
+        ack: &SpawnAck,
+    ) -> Result<RemoteSession<RemoteRunning>, RemoteProtocolError> {
+        self.ensure_id(ack.remote_task_id)?;
+        match ack.status {
+            SpawnAckStatus::Accepted => Ok(self.transition()),
+            SpawnAckStatus::Rejected(_) => Err(RemoteProtocolError::UnexpectedAckStatus {
+                expected: "Accepted",
+                got: ack.status.clone(),
+            }),
+        }
+    }
+
+    /// Send a rejected spawn acknowledgement.
+    pub fn send_ack_rejected(
+        self,
+        ack: &SpawnAck,
+    ) -> Result<RemoteSession<RemoteRejected>, RemoteProtocolError> {
+        self.ensure_id(ack.remote_task_id)?;
+        match ack.status {
+            SpawnAckStatus::Rejected(_) => Ok(self.transition()),
+            SpawnAckStatus::Accepted => Err(RemoteProtocolError::UnexpectedAckStatus {
+                expected: "Rejected",
+                got: ack.status.clone(),
+            }),
+        }
+    }
+
+    /// Receive a cancellation before the spawn ack is sent.
+    pub fn recv_cancel(
+        self,
+        cancel: &CancelRequest,
+    ) -> Result<RemoteSession<RemoteCancelPending>, RemoteProtocolError> {
+        self.ensure_id(cancel.remote_task_id)?;
+        Ok(self.transition())
+    }
+}
+
+impl RemoteSession<RemoteCancelPending> {
+    /// Send an accepted spawn acknowledgement while a cancel is pending.
+    pub fn send_ack_accepted(
+        self,
+        ack: &SpawnAck,
+    ) -> Result<RemoteSession<RemoteCancelReceived>, RemoteProtocolError> {
+        self.ensure_id(ack.remote_task_id)?;
+        match ack.status {
+            SpawnAckStatus::Accepted => Ok(self.transition()),
+            SpawnAckStatus::Rejected(_) => Err(RemoteProtocolError::UnexpectedAckStatus {
+                expected: "Accepted",
+                got: ack.status.clone(),
+            }),
+        }
+    }
+
+    /// Send a rejected spawn acknowledgement while a cancel is pending.
+    pub fn send_ack_rejected(
+        self,
+        ack: &SpawnAck,
+    ) -> Result<RemoteSession<RemoteRejected>, RemoteProtocolError> {
+        self.ensure_id(ack.remote_task_id)?;
+        match ack.status {
+            SpawnAckStatus::Rejected(_) => Ok(self.transition()),
+            SpawnAckStatus::Accepted => Err(RemoteProtocolError::UnexpectedAckStatus {
+                expected: "Rejected",
+                got: ack.status.clone(),
+            }),
+        }
+    }
+}
+
+impl RemoteSession<RemoteRunning> {
+    /// Receive a cancellation while running.
+    pub fn recv_cancel(
+        self,
+        cancel: &CancelRequest,
+    ) -> Result<RemoteSession<RemoteCancelReceived>, RemoteProtocolError> {
+        self.ensure_id(cancel.remote_task_id)?;
+        Ok(self.transition())
+    }
+
+    /// Send a lease renewal heartbeat.
+    pub fn send_lease_renewal(self, renewal: &LeaseRenewal) -> Result<Self, RemoteProtocolError> {
+        self.ensure_id(renewal.remote_task_id)?;
+        Ok(self)
+    }
+
+    /// Send the terminal result.
+    pub fn send_result(
+        self,
+        result: &ResultDelivery,
+    ) -> Result<RemoteSession<RemoteCompleted>, RemoteProtocolError> {
+        self.ensure_id(result.remote_task_id)?;
+        Ok(self.transition())
+    }
+}
+
+impl RemoteSession<RemoteCancelReceived> {
+    /// Send the terminal result after cancellation.
+    pub fn send_result(
+        self,
+        result: &ResultDelivery,
+    ) -> Result<RemoteSession<RemoteCompleted>, RemoteProtocolError> {
+        self.ensure_id(result.remote_task_id)?;
+        Ok(self.transition())
+    }
+}
+
+// ---------------------------------------------------------------------------
 // Trace events for protocol messages
 // ---------------------------------------------------------------------------
 
@@ -2064,6 +2460,142 @@ mod tests {
         assert_eq!(renewal_msg.remote_task_id(), rtid);
     }
 
+    fn test_spawn_request(cx: &Cx, remote_task_id: RemoteTaskId) -> SpawnRequest {
+        SpawnRequest {
+            remote_task_id,
+            computation: ComputationName::new("compute"),
+            input: RemoteInput::empty(),
+            lease: Duration::from_secs(30),
+            idempotency_key: IdempotencyKey::generate(cx),
+            budget: None,
+            origin_node: NodeId::new("origin-1"),
+            origin_region: cx.region_id(),
+            origin_task: cx.task_id(),
+        }
+    }
+
+    fn test_ack_accepted(remote_task_id: RemoteTaskId) -> SpawnAck {
+        SpawnAck {
+            remote_task_id,
+            status: SpawnAckStatus::Accepted,
+            assigned_node: NodeId::new("worker-1"),
+        }
+    }
+
+    fn test_ack_rejected(remote_task_id: RemoteTaskId) -> SpawnAck {
+        SpawnAck {
+            remote_task_id,
+            status: SpawnAckStatus::Rejected(SpawnRejectReason::CapacityExceeded),
+            assigned_node: NodeId::new("worker-1"),
+        }
+    }
+
+    fn test_cancel(remote_task_id: RemoteTaskId) -> CancelRequest {
+        CancelRequest {
+            remote_task_id,
+            reason: CancelReason::user("cancel"),
+            origin_node: NodeId::new("origin-1"),
+        }
+    }
+
+    fn test_result(remote_task_id: RemoteTaskId, outcome: RemoteOutcome) -> ResultDelivery {
+        ResultDelivery {
+            remote_task_id,
+            outcome,
+            execution_time: Duration::ZERO,
+        }
+    }
+
+    fn test_renewal(remote_task_id: RemoteTaskId) -> LeaseRenewal {
+        LeaseRenewal {
+            remote_task_id,
+            new_lease: Duration::from_secs(10),
+            current_state: RemoteTaskState::Running,
+            node: NodeId::new("worker-1"),
+        }
+    }
+
+    #[test]
+    fn origin_session_cancel_flow() {
+        let cx: Cx = Cx::for_testing();
+        let rtid = RemoteTaskId::next();
+        let origin = OriginSession::<OriginInit>::new(rtid);
+        let req = test_spawn_request(&cx, rtid);
+        let origin = origin.send_spawn(&req).unwrap();
+        let ack = test_ack_accepted(rtid);
+        let outcome = origin.recv_spawn_ack(&ack).unwrap();
+        assert!(matches!(outcome, OriginAckOutcome::Accepted(_)));
+        let origin = match outcome {
+            OriginAckOutcome::Accepted(session) => session,
+            OriginAckOutcome::Rejected(_) => return,
+        };
+        let origin = origin.recv_lease_renewal(&test_renewal(rtid)).unwrap();
+        let origin = origin.send_cancel(&test_cancel(rtid)).unwrap();
+        let result = test_result(
+            rtid,
+            RemoteOutcome::Cancelled(CancelReason::user("cancelled")),
+        );
+        let origin = origin.recv_result(&result).unwrap();
+        assert_eq!(origin.remote_task_id(), rtid);
+    }
+
+    #[test]
+    fn origin_session_reject_flow() {
+        let cx: Cx = Cx::for_testing();
+        let rtid = RemoteTaskId::next();
+        let origin = OriginSession::<OriginInit>::new(rtid);
+        let req = test_spawn_request(&cx, rtid);
+        let origin = origin.send_spawn(&req).unwrap();
+        let ack = test_ack_rejected(rtid);
+        let outcome = origin.recv_spawn_ack(&ack).unwrap();
+        assert!(matches!(outcome, OriginAckOutcome::Rejected(_)));
+        if let OriginAckOutcome::Rejected(session) = outcome {
+            assert_eq!(session.remote_task_id(), rtid);
+        }
+    }
+
+    #[test]
+    fn remote_session_cancel_before_ack_flow() {
+        let cx: Cx = Cx::for_testing();
+        let rtid = RemoteTaskId::next();
+        let remote = RemoteSession::<RemoteInit>::new(rtid);
+        let req = test_spawn_request(&cx, rtid);
+        let remote = remote.recv_spawn(&req).unwrap();
+        let remote = remote.recv_cancel(&test_cancel(rtid)).unwrap();
+        let remote = remote.send_ack_accepted(&test_ack_accepted(rtid)).unwrap();
+        let result = test_result(rtid, RemoteOutcome::Cancelled(CancelReason::user("done")));
+        let remote = remote.send_result(&result).unwrap();
+        assert_eq!(remote.remote_task_id(), rtid);
+    }
+
+    #[test]
+    fn protocol_id_mismatch_is_error() {
+        let cx: Cx = Cx::for_testing();
+        let rtid = RemoteTaskId::next();
+        let origin = OriginSession::<OriginInit>::new(rtid);
+        let req = test_spawn_request(&cx, RemoteTaskId::next());
+        let err = origin.send_spawn(&req).unwrap_err();
+        assert!(matches!(
+            err,
+            RemoteProtocolError::RemoteTaskIdMismatch { .. }
+        ));
+    }
+
+    #[test]
+    fn protocol_ack_status_mismatch_is_error() {
+        let cx: Cx = Cx::for_testing();
+        let rtid = RemoteTaskId::next();
+        let remote = RemoteSession::<RemoteInit>::new(rtid);
+        let req = test_spawn_request(&cx, rtid);
+        let remote = remote.recv_spawn(&req).unwrap();
+        let ack = test_ack_rejected(rtid);
+        let err = remote.send_ack_accepted(&ack).unwrap_err();
+        assert!(matches!(
+            err,
+            RemoteProtocolError::UnexpectedAckStatus { .. }
+        ));
+    }
+
     #[test]
     fn trace_event_names_are_namespaced() {
         // Verify all trace events follow the "remote::" namespace convention.
@@ -2376,11 +2908,11 @@ mod tests {
         assert!(updated);
 
         // Check returns duplicate with outcome
-        if let DedupDecision::Duplicate(record) = store.check(&key, &ComputationName::new("work")) {
+        let decision = store.check(&key, &ComputationName::new("work"));
+        assert!(matches!(decision, DedupDecision::Duplicate(_)));
+        if let DedupDecision::Duplicate(record) = decision {
             assert!(record.outcome.is_some());
             assert!(record.outcome.unwrap().is_success());
-        } else {
-            panic!("expected Duplicate");
         }
     }
 
