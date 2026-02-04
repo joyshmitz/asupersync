@@ -246,7 +246,8 @@ impl DeadlineMonitor {
         if let Some(history) = history {
             if history.len() >= adaptive.min_samples {
                 if let Some(pct) = history.percentile_nanos(adaptive.warning_percentile) {
-                    return Duration::from_nanos(pct);
+                    let threshold = Duration::from_nanos(pct);
+                    return threshold.min(total);
                 }
             }
         }
