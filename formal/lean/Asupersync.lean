@@ -1402,6 +1402,83 @@ theorem cancel_complete_produces_cancelled {Value Error Panic : Type}
   exact cancel_complete_step hTask hState
 
 -- ==========================================================================
+-- Progress: region close transitions are enabled (bd-330st)
+-- ==========================================================================
+
+theorem close_begin_step {Value Error Panic : Type}
+    {s : State Value Error Panic} {r : RegionId} {region : Region Value Error Panic}
+    (hRegion : getRegion s r = some region)
+    (hState : region.state = RegionState.open)
+    : ∃ s', Step s (Label.tau) s' ∧
+        getRegion s' r = some { region with state := RegionState.closing } := by
+  refine ⟨setRegion s r { region with state := RegionState.closing }, ?_, ?_⟩
+  · exact Step.closeBegin hRegion hState rfl
+  · simp [getRegion, setRegion]
+
+theorem close_cancel_children_step {Value Error Panic : Type}
+    {s : State Value Error Panic} {r : RegionId} {region : Region Value Error Panic}
+    (reason : CancelReason)
+    (hRegion : getRegion s r = some region)
+    (hState : region.state = RegionState.closing)
+    (hHasLive :
+      ∃ t ∈ region.children,
+        match getTask s t with
+        | some task => ¬ taskCompleted task
+        | none => False)
+    : ∃ s', Step s (Label.cancel r reason) s' ∧
+        getRegion s' r =
+          some
+            { region with
+                state := RegionState.draining,
+                cancel := some (strengthenOpt region.cancel reason) } := by
+  refine ⟨
+    setRegion s r
+      { region with
+          state := RegionState.draining,
+          cancel := some (strengthenOpt region.cancel reason) },
+    ?_, ?_⟩
+  · exact Step.closeCancelChildren reason hRegion hState hHasLive rfl
+  · simp [getRegion, setRegion]
+
+theorem close_children_done_step {Value Error Panic : Type}
+    {s : State Value Error Panic} {r : RegionId} {region : Region Value Error Panic}
+    (hRegion : getRegion s r = some region)
+    (hState : region.state = RegionState.draining)
+    (hChildren : allTasksCompleted s region.children)
+    (hSubs : allRegionsClosed s region.subregions)
+    : ∃ s', Step s (Label.tau) s' ∧
+        getRegion s' r = some { region with state := RegionState.finalizing } := by
+  refine ⟨setRegion s r { region with state := RegionState.finalizing }, ?_, ?_⟩
+  · exact Step.closeChildrenDone hRegion hState hChildren hSubs rfl
+  · simp [getRegion, setRegion]
+
+theorem close_run_finalizer_step {Value Error Panic : Type}
+    {s : State Value Error Panic} {r : RegionId}
+    {region : Region Value Error Panic} {f : TaskId} {rest : List TaskId}
+    (hRegion : getRegion s r = some region)
+    (hState : region.state = RegionState.finalizing)
+    (hFinalizers : region.finalizers = f :: rest)
+    : ∃ s', Step s (Label.finalize r f) s' ∧
+        getRegion s' r = some { region with finalizers := rest } := by
+  refine ⟨setRegion s r { region with finalizers := rest }, ?_, ?_⟩
+  · exact Step.closeRunFinalizer hRegion hState hFinalizers rfl
+  · simp [getRegion, setRegion]
+
+theorem close_complete_step {Value Error Panic : Type}
+    {s : State Value Error Panic} {r : RegionId}
+    {region : Region Value Error Panic}
+    (outcome : Outcome Value Error CancelReason Panic)
+    (hRegion : getRegion s r = some region)
+    (hState : region.state = RegionState.finalizing)
+    (hFinalizers : region.finalizers = [])
+    (hQuiescent : Quiescent s region)
+    : ∃ s', Step s (Label.close r outcome) s' ∧
+        getRegion s' r = some { region with state := RegionState.closed outcome } := by
+  refine ⟨setRegion s r { region with state := RegionState.closed outcome }, ?_, ?_⟩
+  · exact Step.close outcome hRegion hState hFinalizers hQuiescent rfl
+  · simp [getRegion, setRegion]
+
+-- ==========================================================================
 -- Safety: completed tasks cannot be cancelled (bd-330st)
 -- If a task is completed, the cancelRequest rule cannot fire for it.
 -- ==========================================================================
