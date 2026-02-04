@@ -3,6 +3,7 @@
 use crate::channel::watch;
 use crate::cx::Cx;
 use crate::stream::Stream;
+use std::future::Future;
 use std::pin::Pin;
 use std::task::{Context, Poll};
 
@@ -37,20 +38,25 @@ impl<T: Clone> WatchStream<T> {
 impl<T: Clone + Send + Sync> Stream for WatchStream<T> {
     type Item = T;
 
-    fn poll_next(mut self: Pin<&mut Self>, _cx: &mut Context<'_>) -> Poll<Option<Self::Item>> {
+    fn poll_next(self: Pin<&mut Self>, context: &mut Context<'_>) -> Poll<Option<Self::Item>> {
+        let this = self.get_mut();
+
         // First poll: return current value immediately
-        if !self.has_seen_initial {
-            self.has_seen_initial = true;
-            return Poll::Ready(Some(self.inner.borrow_and_clone()));
+        if !this.has_seen_initial {
+            this.has_seen_initial = true;
+            return Poll::Ready(Some(this.inner.borrow_and_clone()));
         }
 
-        // Wait for changes
-        // changed() blocks in Phase 0
-        let cx = self.cx.clone();
-        let inner = &mut self.inner;
-        match inner.changed(&cx) {
-            Ok(()) => Poll::Ready(Some(inner.borrow_and_clone())),
-            Err(watch::RecvError::Closed | watch::RecvError::Cancelled) => Poll::Ready(None),
+        // Poll the changed future (non-blocking, waker-based)
+        let runtime_cx = this.cx.clone();
+        let result = {
+            let mut future = this.inner.changed(&runtime_cx);
+            Pin::new(&mut future).poll(context)
+        };
+        match result {
+            Poll::Ready(Ok(())) => Poll::Ready(Some(this.inner.borrow_and_clone())),
+            Poll::Ready(Err(_)) => Poll::Ready(None),
+            Poll::Pending => Poll::Pending,
         }
     }
 }

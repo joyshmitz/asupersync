@@ -248,7 +248,7 @@ impl<T: Send + Sync + Clone + 'static> WatchReceiver<T> for WatchReceiverWrapper
         let receiver = &mut self.0;
         Box::pin(async move {
             let cx = current_cx();
-            receiver.changed(&cx).map_err(|_| WatchRecvError)
+            receiver.changed(&cx).await.map_err(|_| WatchRecvError)
         })
     }
 

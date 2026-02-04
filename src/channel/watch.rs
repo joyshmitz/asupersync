@@ -38,7 +38,10 @@
 //! tx.send(new_config)?;
 //! ```
 
-use std::sync::{Arc, Condvar, Mutex, RwLock, RwLockReadGuard};
+use std::future::Future;
+use std::pin::Pin;
+use std::sync::{Arc, Mutex, RwLock, RwLockReadGuard};
+use std::task::{Context, Poll, Waker};
 
 use crate::cx::Cx;
 
@@ -100,8 +103,8 @@ struct WatchInner<T> {
     receiver_count: Mutex<usize>,
     /// Whether the sender has been dropped.
     sender_dropped: Mutex<bool>,
-    /// Notification for value changes.
-    notify: Condvar,
+    /// Wakers for receivers waiting on value changes.
+    waiters: Mutex<Vec<Waker>>,
 }
 
 impl<T> WatchInner<T> {
@@ -110,7 +113,7 @@ impl<T> WatchInner<T> {
             value: RwLock::new((initial, 0)),
             receiver_count: Mutex::new(1), // Sender starts with one implicit receiver
             sender_dropped: Mutex::new(false),
-            notify: Condvar::new(),
+            waiters: Mutex::new(Vec::new()),
         }
     }
 
@@ -124,6 +127,21 @@ impl<T> WatchInner<T> {
 
     fn current_version(&self) -> u64 {
         self.value.read().expect("watch lock poisoned").1
+    }
+
+    fn wake_all_waiters(&self) {
+        let waiters: Vec<Waker> = {
+            let mut w = self.waiters.lock().expect("watch lock poisoned");
+            std::mem::take(&mut *w)
+        };
+        for w in waiters {
+            w.wake();
+        }
+    }
+
+    fn register_waker(&self, waker: Waker) {
+        let mut waiters = self.waiters.lock().expect("watch lock poisoned");
+        waiters.push(waker);
     }
 }
 
@@ -187,14 +205,7 @@ impl<T> Sender<T> {
             guard.1 += 1;
         }
 
-        // Notify all waiting receivers
-        // We take the lock briefly to coordinate with condvar
-        let _guard = self
-            .inner
-            .receiver_count
-            .lock()
-            .expect("watch lock poisoned");
-        self.inner.notify.notify_all();
+        self.inner.wake_all_waiters();
 
         Ok(())
     }
@@ -227,13 +238,7 @@ impl<T> Sender<T> {
             guard.1 += 1;
         }
 
-        // Notify all waiting receivers
-        let _guard = self
-            .inner
-            .receiver_count
-            .lock()
-            .expect("watch lock poisoned");
-        self.inner.notify.notify_all();
+        self.inner.wake_all_waiters();
 
         Ok(())
     }
@@ -297,12 +302,7 @@ impl<T> Drop for Sender<T> {
     fn drop(&mut self) {
         self.inner.mark_sender_dropped();
         // Wake all waiting receivers so they see Closed
-        let _guard = self
-            .inner
-            .receiver_count
-            .lock()
-            .expect("watch lock poisoned");
-        self.inner.notify.notify_all();
+        self.inner.wake_all_waiters();
     }
 }
 
@@ -320,60 +320,23 @@ pub struct Receiver<T> {
 impl<T> Receiver<T> {
     /// Waits until a new value is available.
     ///
-    /// This method blocks until the channel's version exceeds `seen_version`,
-    /// then updates `seen_version` to the current version.
+    /// Returns a future that resolves when the channel's version exceeds
+    /// `seen_version`, then updates `seen_version` to the current version.
     ///
     /// # Cancel Safety
     ///
-    /// This method is cancel-safe. If cancelled during the wait, the receiver's
-    /// `seen_version` is unchanged and the wait can be retried.
+    /// This method is cancel-safe. If the future is dropped before completion,
+    /// the receiver's `seen_version` is unchanged and the wait can be retried.
     ///
     /// # Errors
     ///
     /// Returns `RecvError::Closed` if the sender was dropped.
     /// Returns `RecvError::Cancelled` if the operation was cancelled.
-    pub fn changed(&mut self, cx: &Cx) -> Result<(), RecvError> {
+    pub fn changed<'a, 'b>(&'a mut self, cx: &'b Cx) -> ChangedFuture<'a, 'b, T> {
         cx.trace("watch::changed starting wait");
-
-        loop {
-            // Read version and sender state WITHOUT holding receiver_count
-            // to avoid ABBA deadlock with send() which locks value then
-            // receiver_count.
-            if self.inner.is_sender_dropped() {
-                let current = self.inner.current_version();
-                if current > self.seen_version {
-                    self.seen_version = current;
-                    return Ok(());
-                }
-                cx.trace("watch::changed sender dropped");
-                return Err(RecvError::Closed);
-            }
-
-            let current_version = self.inner.current_version();
-            if current_version > self.seen_version {
-                self.seen_version = current_version;
-                cx.trace("watch::changed received update");
-                return Ok(());
-            }
-
-            // Check cancellation before waiting
-            if cx.checkpoint().is_err() {
-                cx.trace("watch::changed cancelled while waiting");
-                return Err(RecvError::Cancelled);
-            }
-
-            // Hold receiver_count only for the Condvar wait.
-            let lock = self
-                .inner
-                .receiver_count
-                .lock()
-                .expect("watch lock poisoned");
-            let (_guard, _timeout) = self
-                .inner
-                .notify
-                .wait_timeout(lock, std::time::Duration::from_millis(10))
-                .expect("watch lock poisoned");
-            // Lock is dropped here before we re-check version.
+        ChangedFuture {
+            receiver: self,
+            cx,
         }
     }
 
@@ -424,6 +387,70 @@ impl<T> Receiver<T> {
     #[must_use]
     pub fn seen_version(&self) -> u64 {
         self.seen_version
+    }
+}
+
+/// Future returned by [`Receiver::changed`].
+///
+/// Resolves when a new value is available or the channel closes.
+pub struct ChangedFuture<'a, 'b, T> {
+    receiver: &'a mut Receiver<T>,
+    cx: &'b Cx,
+}
+
+impl<T> Future for ChangedFuture<'_, '_, T> {
+    type Output = Result<(), RecvError>;
+
+    fn poll(self: Pin<&mut Self>, context: &mut Context<'_>) -> Poll<Self::Output> {
+        let this = self.get_mut();
+
+        // Check cancellation
+        if this.cx.checkpoint().is_err() {
+            this.cx.trace("watch::changed cancelled");
+            return Poll::Ready(Err(RecvError::Cancelled));
+        }
+
+        // Check sender dropped
+        if this.receiver.inner.is_sender_dropped() {
+            let current = this.receiver.inner.current_version();
+            if current > this.receiver.seen_version {
+                this.receiver.seen_version = current;
+                return Poll::Ready(Ok(()));
+            }
+            this.cx.trace("watch::changed sender dropped");
+            return Poll::Ready(Err(RecvError::Closed));
+        }
+
+        // Check version
+        let current = this.receiver.inner.current_version();
+        if current > this.receiver.seen_version {
+            this.receiver.seen_version = current;
+            this.cx.trace("watch::changed received update");
+            return Poll::Ready(Ok(()));
+        }
+
+        // Register waker before re-checking (avoids missed notification)
+        this.receiver.inner.register_waker(context.waker().clone());
+
+        // Re-check after registration to close the race window
+        let current = this.receiver.inner.current_version();
+        if current > this.receiver.seen_version {
+            this.receiver.seen_version = current;
+            this.cx.trace("watch::changed received update");
+            return Poll::Ready(Ok(()));
+        }
+
+        if this.receiver.inner.is_sender_dropped() {
+            let current = this.receiver.inner.current_version();
+            if current > this.receiver.seen_version {
+                this.receiver.seen_version = current;
+                return Poll::Ready(Ok(()));
+            }
+            this.cx.trace("watch::changed sender dropped");
+            return Poll::Ready(Err(RecvError::Closed));
+        }
+
+        Poll::Pending
     }
 }
 
@@ -500,6 +527,16 @@ mod tests {
         )
     }
 
+    /// Polls a future that should be immediately ready (e.g., after send).
+    fn poll_ready<F: Future + Unpin>(f: &mut F) -> F::Output {
+        let waker = Waker::noop();
+        let mut cx = Context::from_waker(&waker);
+        match Pin::new(f).poll(&mut cx) {
+            Poll::Ready(v) => v,
+            Poll::Pending => panic!("expected Ready, got Pending"),
+        }
+    }
+
     #[test]
     fn basic_send_recv() {
         init_test("basic_send_recv");
@@ -507,7 +544,7 @@ mod tests {
         let (tx, mut rx) = channel(0);
 
         tx.send(42).expect("send failed");
-        rx.changed(&cx).expect("changed failed");
+        poll_ready(&mut rx.changed(&cx)).expect("changed failed");
         let value = *rx.borrow();
         crate::assert_with_log!(value == 42, "recv value", 42, value);
         crate::test_complete!("basic_send_recv");
@@ -532,7 +569,7 @@ mod tests {
 
         for i in 1..=10 {
             tx.send(i).expect("send failed");
-            rx.changed(&cx).expect("changed failed");
+            poll_ready(&mut rx.changed(&cx)).expect("changed failed");
             let value = *rx.borrow();
             crate::assert_with_log!(value == i, "rx value", i, value);
         }
@@ -561,12 +598,12 @@ mod tests {
         let (tx, mut rx) = channel(0);
 
         tx.send_modify(|v| *v = 42).expect("send_modify failed");
-        rx.changed(&cx).expect("changed failed");
+        poll_ready(&mut rx.changed(&cx)).expect("changed failed");
         let first = *rx.borrow();
         crate::assert_with_log!(first == 42, "after first modify", 42, first);
 
         tx.send_modify(|v| *v += 10).expect("send_modify failed");
-        rx.changed(&cx).expect("changed failed");
+        poll_ready(&mut rx.changed(&cx)).expect("changed failed");
         let second = *rx.borrow();
         crate::assert_with_log!(second == 52, "after second modify", 52, second);
         crate::test_complete!("send_modify");
@@ -599,7 +636,7 @@ mod tests {
 
         // Need new value for changed() to return
         tx.send(2).expect("send failed");
-        rx.changed(&cx).expect("changed failed");
+        poll_ready(&mut rx.changed(&cx)).expect("changed failed");
         let value = *rx.borrow();
         crate::assert_with_log!(value == 2, "after second send", 2, value);
         crate::test_complete!("mark_seen");
@@ -616,7 +653,7 @@ mod tests {
 
         // Send first update
         tx.send(1).expect("send failed");
-        rx.changed(&cx).expect("changed failed");
+        poll_ready(&mut rx.changed(&cx)).expect("changed failed");
 
         // Now version=1, seen_version=1
         // has_changed should be false
@@ -627,7 +664,7 @@ mod tests {
         tx.send(2).expect("send failed");
         let changed = rx.has_changed();
         crate::assert_with_log!(changed, "has_changed true", true, changed);
-        rx.changed(&cx).expect("changed failed");
+        poll_ready(&mut rx.changed(&cx)).expect("changed failed");
         let value = *rx.borrow();
         crate::assert_with_log!(value == 2, "value", 2, value);
         crate::test_complete!("changed_returns_only_on_new_value");
@@ -646,8 +683,8 @@ mod tests {
         let rx3 = tx.subscribe();
 
         // rx1 and rx2 see the update (they were created before send)
-        rx1.changed(&cx).expect("changed failed");
-        rx2.changed(&cx).expect("changed failed");
+        poll_ready(&mut rx1.changed(&cx)).expect("changed failed");
+        poll_ready(&mut rx2.changed(&cx)).expect("changed failed");
 
         // rx3 was subscribed after send, so it already sees version 1
         // and its seen_version was set to current (1), so no change pending
@@ -704,12 +741,12 @@ mod tests {
         // Receiver should still see the value
         let closed = rx.is_closed();
         crate::assert_with_log!(closed, "rx closed", true, closed);
-        rx.changed(&cx).expect("should see final update");
+        poll_ready(&mut rx.changed(&cx)).expect("should see final update");
         let value = *rx.borrow();
         crate::assert_with_log!(value == 42, "borrow value", 42, value);
 
         // Now changed() should return error
-        let result = rx.changed(&cx);
+        let result = poll_ready(&mut rx.changed(&cx));
         crate::assert_with_log!(
             result.is_err(),
             "changed returns error",
@@ -768,7 +805,7 @@ mod tests {
         let (tx, mut rx1) = channel(0);
 
         tx.send(1).expect("send failed");
-        rx1.changed(&cx).expect("changed failed");
+        poll_ready(&mut rx1.changed(&cx)).expect("changed failed");
 
         // Clone after rx1 has seen the update
         let rx2 = rx1.clone();
@@ -862,7 +899,7 @@ mod tests {
         let (tx, mut rx) = channel(0);
 
         // changed() should return error due to cancellation
-        let result = rx.changed(&cx);
+        let result = poll_ready(&mut rx.changed(&cx));
         crate::assert_with_log!(
             result.is_err(),
             "changed error on cancel",
@@ -877,10 +914,73 @@ mod tests {
         // After cancellation cleared, should see the update
         cx.set_cancel_requested(false);
         tx.send(1).expect("send failed");
-        rx.changed(&cx).expect("changed failed");
+        poll_ready(&mut rx.changed(&cx)).expect("changed failed");
         let version = rx.seen_version();
         crate::assert_with_log!(version == 1, "seen_version after", 1, version);
         crate::test_complete!("cancel_during_wait_preserves_version");
+    }
+
+    #[test]
+    fn changed_returns_pending_then_ready_after_send() {
+        init_test("changed_returns_pending_then_ready_after_send");
+        let cx = test_cx();
+        let (tx, mut rx) = channel(0);
+
+        // No send yet — changed() should return Pending
+        let waker = Waker::noop();
+        let mut task_cx = Context::from_waker(&waker);
+
+        let mut future = rx.changed(&cx);
+        let poll_result = Pin::new(&mut future).poll(&mut task_cx);
+        crate::assert_with_log!(
+            poll_result.is_pending(),
+            "first poll pending",
+            true,
+            poll_result.is_pending()
+        );
+        drop(future);
+
+        // Send a value
+        tx.send(42).expect("send failed");
+
+        // Now poll again — should be Ready(Ok(()))
+        poll_ready(&mut rx.changed(&cx)).expect("changed after send");
+        let value = *rx.borrow();
+        crate::assert_with_log!(value == 42, "value after send", 42, value);
+        crate::test_complete!("changed_returns_pending_then_ready_after_send");
+    }
+
+    #[test]
+    fn sender_drop_wakes_pending_receiver() {
+        init_test("sender_drop_wakes_pending_receiver");
+        let cx = test_cx();
+        let (tx, mut rx) = channel(0);
+
+        // Poll — should be Pending
+        let waker = Waker::noop();
+        let mut task_cx = Context::from_waker(&waker);
+        let mut future = rx.changed(&cx);
+        let poll_result = Pin::new(&mut future).poll(&mut task_cx);
+        crate::assert_with_log!(
+            poll_result.is_pending(),
+            "pending before drop",
+            true,
+            poll_result.is_pending()
+        );
+        drop(future);
+
+        // Drop sender
+        drop(tx);
+
+        // Poll again — should be Ready(Err(Closed))
+        let result = poll_ready(&mut rx.changed(&cx));
+        crate::assert_with_log!(
+            matches!(result, Err(RecvError::Closed)),
+            "closed after sender drop",
+            true,
+            matches!(result, Err(RecvError::Closed))
+        );
+        crate::test_complete!("sender_drop_wakes_pending_receiver");
     }
 
     #[test]
@@ -895,7 +995,7 @@ mod tests {
 
         // Trigger shutdown
         shutdown_tx.send(true).expect("send failed");
-        shutdown_rx.changed(&cx).expect("changed failed");
+        poll_ready(&mut shutdown_rx.changed(&cx)).expect("changed failed");
 
         // Worker would check this
         let value = *shutdown_rx.borrow();
