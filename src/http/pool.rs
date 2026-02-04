@@ -211,7 +211,7 @@ impl PooledConnectionMeta {
             return false;
         }
         let elapsed_nanos = now.duration_since(self.last_used);
-        elapsed_nanos >= idle_timeout.as_nanos() as u64
+        elapsed_nanos >= u64::try_from(idle_timeout.as_nanos()).unwrap_or(u64::MAX)
     }
 }
 

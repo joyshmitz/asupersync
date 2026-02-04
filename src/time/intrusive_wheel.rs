@@ -330,6 +330,8 @@ pub struct TimerWheel<const SLOTS: usize> {
     slots: [TimerSlot; SLOTS],
     /// Current position in the wheel.
     current: usize,
+    /// Absolute tick count since `base_time`.
+    current_tick: u64,
     /// Resolution per tick (e.g., 1ms).
     resolution: Duration,
     /// Total number of timers in the wheel.
@@ -356,6 +358,7 @@ impl<const SLOTS: usize> TimerWheel<SLOTS> {
             // SAFETY: TimerSlot is a simple struct with const new(), safe to initialize
             slots: std::array::from_fn(|_| TimerSlot::new()),
             current: 0,
+            current_tick: 0,
             resolution,
             count: 0,
             base_time,
@@ -453,6 +456,7 @@ impl<const SLOTS: usize> TimerWheel<SLOTS> {
 
         // Advance cursor
         self.current = (self.current + 1) % SLOTS;
+        self.current_tick = self.current_tick.saturating_add(1);
 
         wakers
     }
@@ -470,14 +474,8 @@ impl<const SLOTS: usize> TimerWheel<SLOTS> {
         // Calculate how many ticks to advance
         let elapsed = now.saturating_duration_since(self.base_time);
         let target_tick = elapsed.as_nanos() / self.resolution.as_nanos().max(1);
-        let current_tick = {
-            // Reconstruct current tick from base_time + current slot history
-            // We need to track absolute ticks to detect full rotations
-            let prev_elapsed = self.base_time.saturating_duration_since(self.base_time);
-            prev_elapsed.as_nanos() / self.resolution.as_nanos().max(1)
-        };
-
-        let ticks_to_advance = target_tick.saturating_sub(current_tick);
+        let target_tick_u64 = target_tick.min(u128::from(u64::MAX)) as u64;
+        let ticks_to_advance = target_tick_u64.saturating_sub(self.current_tick);
 
         // If advancing more than SLOTS ticks, we need to scan all slots
         if ticks_to_advance as usize >= SLOTS {
@@ -487,9 +485,9 @@ impl<const SLOTS: usize> TimerWheel<SLOTS> {
                 self.count = self.count.saturating_sub(wakers.len());
                 all_wakers.extend(wakers);
             }
-            self.current = (target_tick as usize) % SLOTS;
+            self.current = (target_tick_u64 as usize) % SLOTS;
         } else {
-            let target_slot = (target_tick as usize) % SLOTS;
+            let target_slot = (target_tick_u64 as usize) % SLOTS;
 
             // Process slots until we reach target (handling wrap-around)
             while self.current != target_slot {
@@ -505,6 +503,7 @@ impl<const SLOTS: usize> TimerWheel<SLOTS> {
             all_wakers.extend(wakers);
         }
 
+        self.current_tick = target_tick_u64;
         all_wakers
     }
 

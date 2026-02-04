@@ -699,7 +699,7 @@ fn grayscale_to_ansi256(value: u8) -> u8 {
     if value < 8 {
         return 16;
     }
-    if value > 248 {
+    if value > 247 {
         return 231;
     }
     232 + ((u16::from(value) - 8) / 10) as u8

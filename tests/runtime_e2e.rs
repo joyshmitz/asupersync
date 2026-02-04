@@ -10,20 +10,25 @@
 mod common;
 
 use asupersync::cx::Cx;
+use asupersync::error::ErrorKind;
 use asupersync::lab::chaos::ChaosConfig;
 use asupersync::lab::{LabConfig, LabRuntime};
 use asupersync::record::task::TaskState;
-use asupersync::record::ObligationKind;
+use asupersync::record::{
+    AdmissionError, AdmissionKind, ObligationAbortReason, ObligationKind, RegionLimits,
+};
 use asupersync::runtime::state::RuntimeState;
-use asupersync::runtime::yield_now;
+use asupersync::runtime::{global_alloc_count, yield_now};
 use asupersync::test_logging::TestHarness;
 use asupersync::trace::replayer::TraceReplayer;
 use asupersync::types::{Budget, CancelKind, CancelReason, Outcome, RegionId, TaskId, Time};
 use asupersync::util::ArenaIndex;
 use common::*;
 use std::sync::atomic::{AtomicUsize, Ordering};
-use std::sync::Arc;
+use std::sync::{Arc, Mutex};
 use std::time::Duration;
+
+static ALLOC_TEST_GUARD: Mutex<()> = Mutex::new(());
 
 fn init_test(test_name: &str) {
     init_test_logging();
@@ -979,6 +984,153 @@ fn e2e_obligation_abort_on_cancel() {
 
     let summary = harness.finish();
     assert!(summary.passed);
+}
+
+// ============================================================================
+// bd-105vq: Leak Regression E2E Suite + Logging
+// ============================================================================
+
+#[test]
+#[allow(clippy::too_many_lines)]
+fn e2e_leak_regression_obligations_and_heap_limits() {
+    let _guard = ALLOC_TEST_GUARD
+        .lock()
+        .unwrap_or_else(std::sync::PoisonError::into_inner);
+    init_test("e2e_leak_regression_obligations_and_heap_limits");
+
+    test_section!("setup");
+    let mut runtime = LabRuntime::new(LabConfig::new(0x00BA_5EED).worker_count(2));
+    let root = runtime.state.create_root_region(Budget::INFINITE);
+    let heap_limit = std::mem::size_of::<u64>() * 2;
+    let limits = RegionLimits {
+        max_obligations: Some(3),
+        max_heap_bytes: Some(heap_limit),
+        ..RegionLimits::unlimited()
+    };
+    let limits_set = runtime.state.set_region_limits(root, limits);
+    assert_with_log!(limits_set, "limits set", true, limits_set);
+
+    let counter = Arc::new(AtomicUsize::new(0));
+    let task_id = spawn_cancellable_loop(&mut runtime, root, 128, Some(counter.clone()));
+
+    test_section!("heap_allocations");
+    let baseline_allocs = global_alloc_count();
+    tracing::info!(baseline_allocs, "baseline global alloc count");
+    {
+        let region = runtime
+            .state
+            .regions
+            .get(root.arena_index())
+            .expect("region missing");
+        let idx1 = region.heap_alloc(10u64).expect("heap alloc 1");
+        let idx2 = region.heap_alloc(20u64).expect("heap alloc 2");
+        tracing::info!(idx1 = ?idx1, idx2 = ?idx2, "heap alloc indices");
+
+        let stats = region.heap_stats();
+        tracing::info!(stats = ?stats, "heap stats after allocs");
+
+        let err = region.heap_alloc(30u64).expect_err("heap limit enforced");
+        match err {
+            AdmissionError::LimitReached {
+                kind: AdmissionKind::HeapBytes,
+                limit,
+                live,
+            } => {
+                assert_with_log!(limit == heap_limit, "heap limit applied", heap_limit, limit);
+                assert_with_log!(
+                    live == heap_limit,
+                    "heap live bytes tracked",
+                    heap_limit,
+                    live
+                );
+            }
+            other => panic!("unexpected heap admission error: {other:?}"),
+        }
+    }
+
+    test_section!("obligation_admission");
+    let mut obligations = Vec::new();
+    for (idx, kind) in [
+        ObligationKind::SendPermit,
+        ObligationKind::Lease,
+        ObligationKind::Ack,
+    ]
+    .iter()
+    .enumerate()
+    {
+        let ob = runtime
+            .state
+            .create_obligation(*kind, task_id, root, Some(format!("leak regression {idx}")))
+            .expect("create obligation");
+        obligations.push(ob);
+        tracing::info!(obligation = ?ob, kind = ?kind, "obligation created");
+    }
+    let denied = runtime.state.create_obligation(
+        ObligationKind::IoOp,
+        task_id,
+        root,
+        Some("limit".to_string()),
+    );
+    let denied = matches!(denied, Err(ref err) if err.kind() == ErrorKind::AdmissionDenied);
+    assert_with_log!(denied, "obligation admission denied", true, denied);
+
+    let pending = runtime.state.pending_obligation_count();
+    assert_with_log!(
+        pending == obligations.len(),
+        "pending obligations tracked",
+        obligations.len(),
+        pending
+    );
+
+    test_section!("cancel_and_abort");
+    let scheduled = cancel_region(&mut runtime, root, &CancelReason::user("leak regression"));
+    tracing::info!(scheduled, "cancel scheduled");
+    for ob in obligations {
+        let result = runtime
+            .state
+            .abort_obligation(ob, ObligationAbortReason::Cancel);
+        assert_with_log!(result.is_ok(), "abort obligation", true, result.is_ok());
+    }
+    runtime.run_until_quiescent();
+
+    test_section!("verify");
+    let ran = counter.load(Ordering::SeqCst);
+    tracing::info!(ran, "cancellable loop iterations");
+    let pending_after = runtime.state.pending_obligation_count();
+    assert_with_log!(
+        pending_after == 0,
+        "pending obligations drained",
+        0,
+        pending_after
+    );
+    let live_tasks = runtime.state.live_task_count();
+    assert_with_log!(live_tasks == 0, "no live tasks", 0, live_tasks);
+
+    if let Some(region) = runtime.state.regions.get(root.arena_index()) {
+        let stats = region.heap_stats();
+        tracing::info!(stats = ?stats, "heap stats after close");
+        assert_with_log!(stats.live == 0, "heap live reclaimed", 0u64, stats.live);
+        assert_with_log!(
+            stats.bytes_live == 0,
+            "heap bytes reclaimed",
+            0u64,
+            stats.bytes_live
+        );
+    }
+
+    let after_allocs = global_alloc_count();
+    tracing::info!(
+        baseline_allocs,
+        after_allocs,
+        "global alloc count after close"
+    );
+
+    test_complete!(
+        "e2e_leak_regression_obligations_and_heap_limits",
+        obligations = 3,
+        heap_limit = heap_limit,
+        iterations = ran
+    );
 }
 
 #[test]

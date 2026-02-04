@@ -330,6 +330,79 @@ Preconditions:
 If `t` yields, it is re-enqueued via `ENQUEUE`. If `t` completes, it is not re-enqueued.
 This captures the lane priority model without committing to a specific queue implementation.
 
+##### Scheduler state + fairness model
+
+We model the three-lane scheduler with explicit **cancel fairness** via a streak
+counter, matching `src/runtime/scheduler/three_lane.rs`.
+
+State:
+
+- `C`, `T`, `R`: cancel, timed (EDF-ordered), and ready queues
+- `cancel_streak : Nat` (number of consecutive cancel dispatches)
+- `L : Nat` (fairness limit; `cancel_streak_limit`)
+- `suggestion : {MeetDeadlines, DrainObligations, DrainRegions, NoPreference}`
+
+Pseudo-code:
+
+```
+pick_next(S):
+  if suggestion = MeetDeadlines then
+     if due(T) ≠ ∅ then return pop_timed(T) and cancel_streak := 0
+     else if cancel_streak < L and C ≠ ∅ then pop_cancel(C), cancel_streak++
+     else if cancel_streak ≥ L then fairness_yield++
+  else if suggestion ∈ {DrainObligations, DrainRegions} then
+     let L' = 2 * L
+     if cancel_streak < L' and C ≠ ∅ then pop_cancel(C), cancel_streak++
+     else if cancel_streak ≥ L' then fairness_yield++
+     if due(T) ≠ ∅ then pop_timed(T), cancel_streak := 0
+  else // NoPreference
+     if cancel_streak < L and C ≠ ∅ then pop_cancel(C), cancel_streak++
+     else if cancel_streak ≥ L then fairness_yield++
+     if due(T) ≠ ∅ then pop_timed(T), cancel_streak := 0
+
+  if R ≠ ∅ then pop_ready(R), cancel_streak := 0
+  else if stealable_ready ≠ ∅ then pop_ready(steal), cancel_streak := 0
+  else if cancel_streak ≥ effective_limit and C ≠ ∅ then
+       // fallback cancel: no non-cancel work available
+       pop_cancel(C), cancel_streak := 1
+  else none
+```
+
+Bounded fairness lemma (scheduler):
+
+> If `cancel_streak_limit = L`, and a non-cancel task (ready or due-timed)
+> remains continuously enabled, then within at most `L + 1` dispatch steps
+> the scheduler selects a non-cancel task (or `2L + 1` when `Drain*` suggests
+> boosted cancellation). This follows from the guard `cancel_streak < L` (or `< 2L`)
+> and the mandatory ready/timed checks after each fairness yield.
+
+Proof sketch (scheduler fairness):
+
+- Define “continuously enabled” as: a ready task in `R` or a due-timed task in `T`
+  remains present across dispatch steps (no completion/removal) and the scheduler
+  is not halted.
+- Each cancel dispatch increments `cancel_streak` by 1 and can occur only while
+  `cancel_streak < L` (or `< 2L` under Drain*).
+- When `cancel_streak` reaches the limit, the next `pick_next` must check timed/ready
+  before any further cancel dispatch (fairness yield), so an enabled non-cancel
+  task is selected within at most `L + 1` steps (or `2L + 1`).
+- The fallback cancel path only occurs when no non-cancel work is available,
+  preserving the lemma’s premise.
+
+Code alignment (ThreeLaneScheduler::next_task):
+
+- `MeetDeadlines` branch:
+  1. `try_timed_work()` (EDF + due check) matches `if due(T) ≠ ∅ then pop_timed(T)`.
+  2. `cancel_streak < L` gating `try_cancel_work()` matches the guarded cancel dispatch.
+  3. Fairness yield increments map to `preemption_metrics.fairness_yields`.
+- `DrainObligations` / `DrainRegions` branch:
+  - Uses `boosted_limit = 2 * L` and otherwise the same structure; aligns with `L' = 2 * L`.
+- `NoPreference` branch:
+  - Cancel then timed with the same streak guard, matching the default lane ordering.
+- Common tail:
+  - `try_ready_work()` then `try_steal()` correspond to `R ≠ ∅` and `stealable_ready ≠ ∅`.
+  - Fallback cancel when no non-cancel work exists corresponds to the final `effective_limit` clause.
+
 ### 3.1 Task Lifecycle
 
 #### SPAWN — Create task in region
@@ -1596,6 +1669,12 @@ directly onto the existing small-step rules and the lab/runtime tests.
 5. **Cancel protocol**: request → drain → finalize is monotone and idempotent.
 6. **Deterministic trace projection**: `trace` respects label ordering and
    independence (`~`), enabling canonicalization.
+7. **Bounded cancel fairness (scheduler)**: if `cancel_streak_limit = L` and
+   a non-cancel task (ready or due-timed) remains continuously enabled,
+   then within at most `L + 1` dispatch steps the scheduler selects a
+   non-cancel task. This requires a `cancel_streak : Nat` counter in the
+   scheduler state and a lemma of the form:
+   `cancel_streak = L ∧ NonCancelReady σ ⇒ dispatch_non_cancel σ`.
 
 ### 9.3 Code alignment points
 
@@ -1604,6 +1683,10 @@ directly onto the existing small-step rules and the lab/runtime tests.
 - Each invariant maps to lab oracles and property tests; proofs should cite
   the same predicates as the test harness (`no_task_leaks`, `no_obligation_leaks`,
   `losers_drained`, `quiescence_on_close`, `cancel_protocol_respected`).
+- Bounded-fairness lemmas align with `cancel_streak_limit` in
+  `src/runtime/scheduler/three_lane.rs` and lab fairness tests in
+  `tests/scheduler_lane_fairness.rs`, `tests/cancel_lane_fairness_bounds.rs`,
+  and `tests/lab_execution.rs`.
 - Trace normalization rules align with `src/trace/*` (Foata, geodesic, DPOR).
 
 ### 9.4 Suggested milestone slicing

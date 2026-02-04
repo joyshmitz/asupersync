@@ -846,6 +846,11 @@ Cancel > timed (EDF bounded) > ready.
 
 Avoid starvation via poll budgets and fairness injection.
 
+Concrete bound: with `cancel_streak_limit = L`, if any ready or due‑timed task
+remains continuously enabled, then within at most `L + 1` dispatches the
+scheduler must select a non‑cancel task (fairness yield). This bound is enforced
+by the scheduler’s cancel‑streak counter and exercised in lab tests.
+
 ### 11.3 Cooperative preemption
 
 Yield at checkpoints; poll budget and optional CPU budget.

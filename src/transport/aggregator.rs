@@ -837,27 +837,29 @@ impl SymbolReorderer {
                 }
             }
 
+            let mut max_flushed_seq = None;
             for seq in to_remove {
                 if let Some(buffered) = state.buffer.remove(&seq) {
                     flushed.push(buffered.symbol);
                     self.timeout_deliveries.fetch_add(1, Ordering::Relaxed);
+                    max_flushed_seq = Some(seq);
                 }
             }
 
-            // Advance next_expected if we flushed waiting symbols
-            while !state.buffer.contains_key(&state.next_expected) {
-                if state.buffer.is_empty()
-                    || *state.buffer.keys().next().unwrap() > state.next_expected
-                {
-                    // Check if we need to skip ahead
-                    if let Some(&first_key) = state.buffer.keys().next() {
-                        if first_key > state.next_expected + self.config.max_sequence_gap {
-                            state.next_expected = first_key;
-                        }
-                    }
-                    break;
+            // Advance next_expected past flushed symbols so the reorderer
+            // does not get permanently stuck waiting for a gap that will
+            // never be filled.
+            if let Some(max_seq) = max_flushed_seq {
+                if max_seq >= state.next_expected {
+                    state.next_expected = max_seq + 1;
                 }
+            }
+
+            // Drain any consecutive buffered symbols that are now deliverable.
+            while let Some(buffered) = state.buffer.remove(&state.next_expected) {
+                flushed.push(buffered.symbol);
                 state.next_expected += 1;
+                self.reordered_deliveries.fetch_add(1, Ordering::Relaxed);
             }
         }
 

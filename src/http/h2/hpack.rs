@@ -1079,8 +1079,7 @@ fn decode_huffman(src: &Bytes) -> Result<String, H2Error> {
                     }
                     if (code & mask) == candidate {
                         if sym == 256 {
-                            return String::from_utf8(result)
-                                .map_err(|_| H2Error::compression("invalid UTF-8 in huffman"));
+                            return Err(H2Error::compression("invalid huffman code (EOS symbol)"));
                         }
                         result.push(sym as u8);
                         bits = shift;
@@ -1095,9 +1094,21 @@ fn decode_huffman(src: &Bytes) -> Result<String, H2Error> {
             }
 
             if !decoded {
+                // If we have enough bits for the longest possible Huffman
+                // code (30 bits for EOS) and still couldn't decode, the
+                // input is definitively invalid. Returning early also
+                // prevents `bits` from exceeding 64 on subsequent bytes,
+                // which would cause a shift overflow in the u64 accumulator.
+                if bits >= 30 {
+                    return Err(H2Error::compression("invalid huffman code"));
+                }
                 break;
             }
         }
+    }
+
+    if bits >= 8 {
+        return Err(H2Error::compression("invalid huffman padding (overlong)"));
     }
 
     // Check remaining bits are valid padding (all 1s) per RFC 7541 Section 5.2
@@ -1777,12 +1788,10 @@ mod tests {
 
     #[test]
     fn test_decode_huffman_invalid_eos() {
-        // Invalid Huffman sequence (not properly padded with EOS)
-        let invalid_huffman: &[u8] = &[0x00]; // Invalid sequence
+        // EOS symbol must not appear in the decoded stream.
+        let invalid_huffman: &[u8] = &[0xff, 0xff, 0xff, 0xff]; // 32 ones contains EOS (30 ones)
         let result = decode_huffman(&Bytes::copy_from_slice(invalid_huffman));
-        // This may succeed or fail depending on implementation
-        // The key is it shouldn't panic
-        let _ = result;
+        assert_compression_error(result);
     }
 
     #[test]

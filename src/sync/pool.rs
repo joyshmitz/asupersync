@@ -348,6 +348,8 @@ pub enum PoolReturn<R> {
         resource: R,
         /// How long the resource was held.
         hold_duration: Duration,
+        /// When the resource was originally created (for max_lifetime eviction).
+        created_at: Instant,
     },
     /// Resource is broken; discard it.
     Discard {
@@ -385,16 +387,34 @@ pub struct PooledResource<R> {
     return_obligation: ReturnObligation,
     return_tx: PoolReturnSender<R>,
     acquired_at: Instant,
+    created_at: Instant,
 }
 
 impl<R> PooledResource<R> {
-    /// Creates a new pooled resource wrapper.
+    /// Creates a new pooled resource wrapper for a freshly created resource.
     pub fn new(resource: R, return_tx: PoolReturnSender<R>) -> Self {
+        let now = Instant::now();
+        Self {
+            resource: Some(resource),
+            return_obligation: ReturnObligation::new(),
+            return_tx,
+            acquired_at: now,
+            created_at: now,
+        }
+    }
+
+    /// Creates a pooled resource wrapper preserving the original creation time.
+    fn new_with_created_at(
+        resource: R,
+        return_tx: PoolReturnSender<R>,
+        created_at: Instant,
+    ) -> Self {
         Self {
             resource: Some(resource),
             return_obligation: ReturnObligation::new(),
             return_tx,
             acquired_at: Instant::now(),
+            created_at,
         }
     }
 
@@ -439,6 +459,7 @@ impl<R> PooledResource<R> {
             let _ = self.return_tx.send(PoolReturn::Return {
                 resource,
                 hold_duration,
+                created_at: self.created_at,
             });
         }
 
@@ -468,6 +489,7 @@ impl<R> Drop for PooledResource<R> {
             let _ = self.return_tx.send(PoolReturn::Return {
                 resource,
                 hold_duration,
+                created_at: self.created_at,
             });
         }
 
@@ -1003,6 +1025,7 @@ where
                 PoolReturn::Return {
                     resource,
                     hold_duration,
+                    created_at,
                 } => {
                     // Record metrics for the release
                     #[cfg(feature = "metrics")]
@@ -1017,7 +1040,7 @@ where
                         state.idle.push_back(IdleResource {
                             resource,
                             idle_since: Instant::now(),
-                            created_at: Instant::now(), // Note: we lose original created_at
+                            created_at,
                         });
 
                         // Wake up one waiter if any
@@ -1047,8 +1070,8 @@ where
         }
     }
 
-    /// Try to get an idle resource.
-    fn try_get_idle(&self) -> Option<R> {
+    /// Try to get an idle resource, returning its original creation time.
+    fn try_get_idle(&self) -> Option<(R, Instant)> {
         let mut state = self.state.lock().expect("pool state lock poisoned");
 
         // Evict expired resources first and track eviction reasons for metrics
@@ -1088,7 +1111,7 @@ where
         let result = if let Some(idle) = state.idle.pop_front() {
             state.active += 1;
             state.total_acquisitions += 1;
-            Some(idle.resource)
+            Some((idle.resource, idle.created_at))
         } else {
             None
         };
@@ -1190,7 +1213,7 @@ where
                 }
 
                 // Try to get a healthy idle resource.
-                while let Some(resource) = self.try_get_idle() {
+                while let Some((resource, created_at)) = self.try_get_idle() {
                     if self.config.health_check_on_acquire && !self.is_healthy(&resource) {
                         // Unhealthy: undo the active count bump from try_get_idle
                         let mut state = self.state.lock().expect("pool state lock poisoned");
@@ -1209,7 +1232,11 @@ where
                         self.update_metrics_gauges();
                     }
 
-                    return Ok(PooledResource::new(resource, self.return_tx.clone()));
+                    return Ok(PooledResource::new_with_created_at(
+                        resource,
+                        self.return_tx.clone(),
+                        created_at,
+                    ));
                 }
 
                 // Try to create a new resource if under capacity
@@ -1267,7 +1294,7 @@ where
             }
         }
 
-        self.try_get_idle().map(|resource| {
+        self.try_get_idle().map(|(resource, created_at)| {
             // Record metrics for the acquire
             #[cfg(feature = "metrics")]
             if let Some(ref metrics) = self.metrics {
@@ -1275,7 +1302,7 @@ where
                 self.update_metrics_gauges();
             }
 
-            PooledResource::new(resource, self.return_tx.clone())
+            PooledResource::new_with_created_at(resource, self.return_tx.clone(), created_at)
         })
     }
 
@@ -1722,6 +1749,7 @@ mod tests {
             PoolReturn::Return {
                 resource: value,
                 hold_duration: _,
+                ..
             } => {
                 crate::assert_with_log!(value == 42, "return value", 42u8, value);
             }
@@ -1742,6 +1770,7 @@ mod tests {
             PoolReturn::Return {
                 resource: value,
                 hold_duration: _,
+                ..
             } => {
                 crate::assert_with_log!(value == 7, "return value", 7u8, value);
             }
@@ -1935,6 +1964,7 @@ mod tests {
             PoolReturn::Return {
                 resource: value,
                 hold_duration: _,
+                ..
             } => {
                 crate::assert_with_log!(value == 99, "returned value", 99u8, value);
             }
@@ -1971,6 +2001,7 @@ mod tests {
             PoolReturn::Return {
                 resource: value,
                 hold_duration: _,
+                ..
             } => {
                 crate::assert_with_log!(value == 77, "returned value", 77u8, value);
             }

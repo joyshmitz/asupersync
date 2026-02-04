@@ -228,10 +228,17 @@ impl Worker {
             }
         };
 
+        let is_local_task = matches!(&stored, AnyStoredTask::Local(_));
+        let local_queue = if is_local_task {
+            Some(self.local.clone())
+        } else {
+            None
+        };
         let waker = Waker::from(Arc::new(WorkStealingWaker {
             task_id,
             wake_state: Arc::clone(&wake_state),
             global: Arc::clone(&self.global),
+            local: local_queue,
             parker: self.parker.clone(),
         }));
         let mut cx = Context::from_waker(&waker);
@@ -307,8 +314,7 @@ impl Worker {
                 wake_state.clear();
             }
             Poll::Pending => {
-                // Track if this is a local task before consuming it
-                let is_local = matches!(&stored, AnyStoredTask::Local(_));
+                let is_local = is_local_task;
 
                 match stored {
                     AnyStoredTask::Global(t) => {
@@ -322,84 +328,10 @@ impl Worker {
                 }
 
                 if wake_state.finish_poll() {
-                    // For local tasks, we should ideally push to local queue if we own it,
-                    // but pushing to global is safe (it will just be routed back to us
-                    // or picked up by us if we are the only one who can run it).
-                    // Actually, if it's a local task, it *must* run on this thread.
-                    // If we push to global, another worker might pick it up, fail to find it
-                    // in global/its-local, and drop it?
-                    //
-                    // Wait! If another worker picks up a local task ID from global queue:
-                    // 1. It checks global stored_futures -> Not found.
-                    // 2. It checks ITS local storage -> Not found.
-                    // 3. It returns.
-                    // Task is lost!
-                    //
-                    // So local tasks MUST be scheduled to the LOCAL queue of the owning worker.
-                    // `WorkStealingWaker` pushes to `global`. This is a problem for local tasks!
-                    //
-                    // We need `LocalWaker` or `WorkStealingWaker` needs to know if it's local.
-                    // But `Waker` is `Send + Sync`. It can be moved.
-                    // If a local task is woken from another thread, we must schedule it
-                    // such that the OWNING worker runs it.
-                    //
-                    // Phase 1 Scheduler (ThreeLaneScheduler) has `inject_ready`.
-                    // `inject_ready` pushes to global.
-                    //
-                    // We need `inject_local(worker_id, task_id)`.
-                    // But we don't have `worker_id` in `Waker` easily.
-                    //
-                    // Workaround for now:
-                    // We are in `execute` (on the worker thread).
-                    // If `finish_poll` returns true, we need to reschedule.
-                    // We are on the correct thread.
-                    // We can push to `self.local`.
-                    //
-                    // However, `WorkStealingWaker` is used for *external* wakeups too (timers, I/O).
-                    // If I/O wakes a local task, it calls `wake()`.
-                    // `WorkStealingWaker` pushes to `global`.
-                    //
-                    // We need to fix `WorkStealingWaker` to support local scheduling,
-                    // OR we need to ensure local tasks are only woken on their thread
-                    // (unlikely for I/O).
-                    //
-                    // Or we rely on `GlobalInjector` to handle "pinned" tasks?
-                    // Global queue is `SegQueue`. Any worker pops.
-                    //
-                    // If we want to support `spawn_local` fully in Phase 1, we need
-                    // worker-aware scheduling.
-                    //
-                    // For this immediate fix, I will push to `self.local` inside `execute`
-                    // if it's a local task.
-                    // But this doesn't solve external wakeups.
-                    //
-                    // Assumption: For Phase 0/1 transition, maybe we assume limited cross-thread wakeups
-                    // for local tasks? Or maybe we assume `spawn_local` tasks utilize things that
-                    // wake on the same thread?
-                    //
-                    // Actually, `LocalStoredTask` is usually used for `!Send` futures like `Rc`.
-                    // If `Rc` is shared with I/O (e.g. `Rc<RefCell<Socket>>`), that I/O must happen on same thread.
-                    //
-                    // If we use `spawn_local`, we must ensure the task is pinned.
-                    //
-                    // Fix: `WorkStealingWaker` needs to know if it should schedule globally or locally.
-                    // But `Waker` is generic.
-                    //
-                    // Ideally `TaskRecord` stores `pinned_worker: Option<WorkerId>`.
-                    // `ThreeLaneScheduler::inject_ready` checks this and pushes to specific worker's queue?
-                    // `GlobalInjector` doesn't support pushing to specific worker.
-                    //
-                    // Let's defer full pinned scheduling to a proper "Pinned Tasks" feature.
-                    // For now, in `execute`, if `finish_poll` is true:
-                    // - If Global, push to global.
-                    // - If Local, push to `self.local`.
-                    //
-                    // This handles self-wakes (yield_now).
-                    // External wakes will still go to global and be dropped by other workers.
-                    // This is a known limitation of this "quick fix" for `spawn_local`.
-                    // But it's better than `Send` bound.
-                    //
-                    // I'll implement the push to `self.local` for `AnyStoredTask::Local`.
+                    // Local tasks must stay on their owning worker. We reschedule
+                    // local tasks to the local queue and global tasks to the global queue.
+                    // WorkStealingWaker also routes cross-thread wakes for local tasks
+                    // back to this local queue to prevent task loss.
 
                     if is_local {
                         self.local.push(task_id);
@@ -456,13 +388,18 @@ struct WorkStealingWaker {
     task_id: TaskId,
     wake_state: Arc<crate::record::task::TaskWakeState>,
     global: Arc<GlobalQueue>,
+    local: Option<LocalQueue>,
     parker: Parker,
 }
 
 impl WorkStealingWaker {
     fn schedule(&self) {
         if self.wake_state.notify() {
-            self.global.push(self.task_id);
+            if let Some(local) = &self.local {
+                local.push(self.task_id);
+            } else {
+                self.global.push(self.task_id);
+            }
             self.parker.unpark();
         }
     }

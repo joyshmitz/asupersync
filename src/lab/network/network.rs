@@ -408,6 +408,110 @@ impl SimulatedNetwork {
         self.partitions.contains(&LinkKey::new(src, dst))
     }
 
+    fn endpoints_ready(&self, src: HostId, dst: HostId) -> bool {
+        let Some(src_host) = self.hosts.get(&src) else {
+            return false;
+        };
+        let Some(dst_host) = self.hosts.get(&dst) else {
+            return false;
+        };
+        !src_host.crashed && !dst_host.crashed
+    }
+
+    fn drop_packet(&mut self, src: HostId, dst: HostId) {
+        self.metrics.packets_dropped = self.metrics.packets_dropped.saturating_add(1);
+        self.trace_event(NetworkTraceKind::Drop, src, dst);
+    }
+
+    fn check_in_flight(
+        &mut self,
+        link: LinkKey,
+        conditions: &NetworkConditions,
+        src: HostId,
+        dst: HostId,
+    ) -> bool {
+        if conditions.max_in_flight == usize::MAX {
+            return true;
+        }
+        let in_flight = self.in_flight.get(&link).copied().unwrap_or(0);
+        if in_flight >= conditions.max_in_flight {
+            self.drop_packet(src, dst);
+            return false;
+        }
+        true
+    }
+
+    fn compute_delivery_time(
+        &mut self,
+        link: LinkKey,
+        conditions: &NetworkConditions,
+        payload_len: usize,
+    ) -> Time {
+        let base_latency = conditions.latency.sample(&mut self.rng);
+        let jitter = conditions
+            .jitter
+            .as_ref()
+            .map_or(Duration::ZERO, |j| j.sample(&mut self.rng));
+        let mut deliver_at = self.now + base_latency + jitter;
+
+        if self.config.enable_bandwidth {
+            if let Some(bw) = conditions.bandwidth.or(Some(self.config.default_bandwidth)) {
+                if bw > 0 {
+                    let next_available = self
+                        .link_next_available
+                        .get(&link)
+                        .copied()
+                        .unwrap_or(self.now);
+                    if next_available > deliver_at {
+                        deliver_at = next_available;
+                    }
+                    let tx_nanos = bytes_to_nanos(payload_len, bw);
+                    deliver_at = deliver_at.saturating_add_nanos(tx_nanos);
+                    self.link_next_available.insert(link, deliver_at);
+                }
+            }
+        }
+
+        deliver_at
+    }
+
+    fn maybe_reorder(
+        &mut self,
+        deliver_at: Time,
+        src: HostId,
+        dst: HostId,
+        conditions: &NetworkConditions,
+    ) -> Time {
+        if self.should_drop(conditions.packet_reorder) {
+            let reorder_jitter = Duration::from_micros(self.rng.next_u64() % 1000);
+            self.trace_event(NetworkTraceKind::Reorder, src, dst);
+            return deliver_at + reorder_jitter;
+        }
+        deliver_at
+    }
+
+    fn try_schedule_packet(
+        &mut self,
+        link: LinkKey,
+        packet: Packet,
+        src: HostId,
+        dst: HostId,
+    ) -> bool {
+        if self.queue.len() >= self.config.max_queue_depth {
+            self.drop_packet(src, dst);
+            return false;
+        }
+        let scheduled = ScheduledPacket {
+            deliver_at: packet.received_at,
+            sequence: self.next_sequence,
+            packet,
+        };
+        self.next_sequence = self.next_sequence.saturating_add(1);
+        self.queue.push(scheduled);
+        self.increment_in_flight(link);
+        true
+    }
+
     fn increment_in_flight(&mut self, link: LinkKey) {
         let count = self.in_flight.entry(link).or_insert(0);
         *count = count.saturating_add(1);

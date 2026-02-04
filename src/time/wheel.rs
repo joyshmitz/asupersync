@@ -441,7 +441,11 @@ impl TimerWheel {
         let current = self.current_time();
         if deadline > current {
             let duration_ns = deadline.as_nanos().saturating_sub(current.as_nanos());
-            let max_ns = self.config.max_timer_duration.as_nanos() as u64;
+            let max_ns = self
+                .config
+                .max_timer_duration
+                .as_nanos()
+                .min(u128::from(u64::MAX)) as u64;
             if duration_ns > max_ns {
                 return Err(TimerDurationExceeded {
                     duration: Duration::from_nanos(duration_ns),
@@ -724,7 +728,11 @@ impl TimerWheel {
 
         // Calculate the coalesced time boundary if coalescing is enabled
         let coalesced_time = if self.coalescing.enabled {
-            let window_ns = self.coalescing.coalesce_window.as_nanos() as u64;
+            let window_ns = self
+                .coalescing
+                .coalesce_window
+                .as_nanos()
+                .min(u128::from(u64::MAX)) as u64;
             if window_ns > 0 {
                 let now_ns = now.as_nanos();
                 let window_end_ns = ((now_ns / window_ns) + 1) * window_ns;
@@ -776,7 +784,11 @@ impl TimerWheel {
                 .count();
         }
 
-        let window_ns = self.coalescing.coalesce_window.as_nanos() as u64;
+        let window_ns = self
+            .coalescing
+            .coalesce_window
+            .as_nanos()
+            .min(u128::from(u64::MAX)) as u64;
         if window_ns == 0 {
             return self
                 .ready
@@ -805,7 +817,10 @@ impl TimerWheel {
     ///
     /// Timers with deadlines beyond this range from the current time go to overflow.
     fn max_range_ns(&self) -> u64 {
-        self.config.max_wheel_duration.as_nanos() as u64
+        self.config
+            .max_wheel_duration
+            .as_nanos()
+            .min(u128::from(u64::MAX)) as u64
     }
 
     /// Returns the physical wheel range based on level structure.

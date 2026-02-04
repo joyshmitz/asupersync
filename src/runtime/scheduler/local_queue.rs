@@ -144,11 +144,30 @@ impl Stealer {
     pub fn steal(&self) -> Option<TaskId> {
         let mut state = self.state.lock().expect("runtime state lock poisoned");
         let mut stack = self.inner.lock().expect("local queue lock poisoned");
-        stack.steal_one(&mut state.tasks)
+        let Some(task_id) = stack.steal_one(&mut state.tasks) else {
+            drop(stack);
+            drop(state);
+            return None;
+        };
+        let is_local = state
+            .tasks
+            .get(task_id.arena_index())
+            .is_some_and(crate::record::task::TaskRecord::is_local);
+        let result = if is_local {
+            // Local (!Send) tasks must never be stolen; requeue and abort steal.
+            stack.push(task_id, &mut state.tasks);
+            None
+        } else {
+            Some(task_id)
+        };
+        drop(stack);
+        drop(state);
+        result
     }
 
     /// Steals a batch of tasks.
     #[must_use]
+    #[allow(clippy::significant_drop_tightening)]
     pub fn steal_batch(&self, dest: &LocalQueue) -> bool {
         if Arc::ptr_eq(&self.inner, &dest.inner) {
             return false;
@@ -162,12 +181,41 @@ impl Stealer {
             "steal_batch requires a shared RuntimeState"
         );
 
-        let stolen = {
-            let mut state = self.state.lock().expect("runtime state lock poisoned");
-            let mut src = self.inner.lock().expect("local queue lock poisoned");
-            let mut dest_stack = dest.inner.lock().expect("local queue lock poisoned");
-            src.steal_batch_into(usize::MAX, &mut state.tasks, &mut dest_stack)
-        };
+        let mut stolen = 0usize;
+        let mut state = self.state.lock().expect("runtime state lock poisoned");
+        let mut src = self.inner.lock().expect("local queue lock poisoned");
+
+        let initial_len = src.len();
+        if initial_len == 0 {
+            drop(src);
+            drop(state);
+            return false;
+        }
+        let steal_limit = (initial_len / 2).max(1);
+        let mut remaining_attempts = initial_len;
+
+        let mut dest_stack = dest.inner.lock().expect("local queue lock poisoned");
+        while stolen < steal_limit && remaining_attempts > 0 {
+            remaining_attempts -= 1;
+            let Some(task_id) = src.steal_one(&mut state.tasks) else {
+                break;
+            };
+            let is_local = state
+                .tasks
+                .get(task_id.arena_index())
+                .is_some_and(crate::record::task::TaskRecord::is_local);
+            if is_local {
+                // Local (!Send) tasks must not be transferred across workers.
+                src.push(task_id, &mut state.tasks);
+                continue;
+            }
+            dest_stack.push(task_id, &mut state.tasks);
+            stolen += 1;
+        }
+        drop(dest_stack);
+        drop(src);
+        drop(state);
+
         stolen > 0
     }
 }
@@ -214,6 +262,28 @@ mod tests {
         assert_eq!(stealer.steal(), Some(task(2)));
         assert_eq!(stealer.steal(), Some(task(3)));
         assert_eq!(stealer.steal(), None);
+    }
+
+    #[test]
+    fn steal_skips_local_tasks() {
+        let state = LocalQueue::test_state(1);
+        let queue = LocalQueue::new(Arc::clone(&state));
+
+        {
+            let mut guard = state.lock().expect("runtime state lock poisoned");
+            let record = guard
+                .tasks
+                .get_mut(task(1).arena_index())
+                .expect("task record missing");
+            record.mark_local();
+            drop(guard);
+        }
+
+        queue.push(task(1));
+        let stealer = queue.stealer();
+        assert_eq!(stealer.steal(), None, "local task must not be stolen");
+        assert_eq!(queue.pop(), Some(task(1)), "local task remains queued");
+        assert_eq!(queue.pop(), None);
     }
 
     #[test]
@@ -402,6 +472,49 @@ mod tests {
         assert!(src.is_empty());
         // Dest should have the task
         assert_eq!(dest.pop(), Some(task(42)));
+    }
+
+    #[test]
+    fn test_steal_batch_skips_local_tasks() {
+        let state = LocalQueue::test_state(4);
+        let src = LocalQueue::new(Arc::clone(&state));
+        let dest = LocalQueue::new(Arc::clone(&state));
+
+        {
+            let mut guard = state.lock().expect("runtime state lock poisoned");
+            for id in [0, 1] {
+                if let Some(record) = guard.tasks.get_mut(task(id).arena_index()) {
+                    record.mark_local();
+                }
+            }
+            drop(guard);
+        }
+
+        for id in 0..=4 {
+            src.push(task(id));
+        }
+
+        let _ = src.stealer().steal_batch(&dest);
+
+        let mut stolen = Vec::new();
+        while let Some(task_id) = dest.pop() {
+            stolen.push(task_id);
+        }
+
+        assert!(
+            !stolen.contains(&task(0)) && !stolen.contains(&task(1)),
+            "local tasks must not be stolen"
+        );
+
+        let mut seen = HashSet::new();
+        for task_id in stolen {
+            assert!(seen.insert(task_id), "duplicate task found: {task_id:?}");
+        }
+        while let Some(task_id) = src.pop() {
+            assert!(seen.insert(task_id), "duplicate task found: {task_id:?}");
+        }
+
+        assert_eq!(seen.len(), 5, "no tasks should be lost");
     }
 
     #[test]
