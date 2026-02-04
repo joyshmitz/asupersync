@@ -335,6 +335,10 @@ impl Stream {
                 self.state = StreamState::Closed;
                 Ok(())
             }
+            // Sending headers without END_STREAM on an already-open stream
+            // (e.g. server response headers before DATA frames) is valid per
+            // RFC 7540 §8.1 — state stays unchanged.
+            StreamState::Open | StreamState::HalfClosedRemote => Ok(()),
             _ => Err(H2Error::stream(
                 self.id,
                 ErrorCode::StreamClosed,
@@ -372,6 +376,10 @@ impl Stream {
                 self.state = StreamState::Closed;
                 Ok(())
             }
+            // Receiving headers without END_STREAM on an already-open stream
+            // (e.g. informational 1xx or trailing headers before DATA) is valid
+            // per RFC 7540 §8.1 — state stays unchanged.
+            StreamState::Open | StreamState::HalfClosedLocal => Ok(()),
             _ => Err(H2Error::stream(
                 self.id,
                 ErrorCode::StreamClosed,
@@ -964,6 +972,55 @@ mod tests {
         // Sending trailers with end_stream closes the stream
         stream.send_headers(true).unwrap();
         assert_eq!(stream.state(), StreamState::Closed);
+    }
+
+    // =========================================================================
+    // Open/HalfClosed non-end_stream header tests (RFC 7540 §8.1)
+    // =========================================================================
+
+    #[test]
+    fn send_headers_open_without_end_stream_stays_open() {
+        let mut stream = Stream::new(1, 65535, DEFAULT_MAX_HEADER_LIST_SIZE);
+        stream.send_headers(false).unwrap(); // Idle -> Open
+        assert_eq!(stream.state(), StreamState::Open);
+
+        // Server sends response headers without END_STREAM (data follows)
+        stream.send_headers(false).unwrap();
+        assert_eq!(stream.state(), StreamState::Open);
+    }
+
+    #[test]
+    fn send_headers_half_closed_remote_without_end_stream_stays() {
+        let mut stream = Stream::new(1, 65535, DEFAULT_MAX_HEADER_LIST_SIZE);
+        stream.send_headers(false).unwrap(); // Idle -> Open
+        stream.recv_data(100, true).unwrap(); // Open -> HalfClosedRemote
+        assert_eq!(stream.state(), StreamState::HalfClosedRemote);
+
+        // Sending headers without END_STREAM stays HalfClosedRemote
+        stream.send_headers(false).unwrap();
+        assert_eq!(stream.state(), StreamState::HalfClosedRemote);
+    }
+
+    #[test]
+    fn recv_headers_open_without_end_stream_stays_open() {
+        let mut stream = Stream::new(1, 65535, DEFAULT_MAX_HEADER_LIST_SIZE);
+        stream.send_headers(false).unwrap(); // Idle -> Open
+        assert_eq!(stream.state(), StreamState::Open);
+
+        // Receiving response headers without END_STREAM (data follows)
+        stream.recv_headers(false, true).unwrap();
+        assert_eq!(stream.state(), StreamState::Open);
+    }
+
+    #[test]
+    fn recv_headers_half_closed_local_without_end_stream_stays() {
+        let mut stream = Stream::new(1, 65535, DEFAULT_MAX_HEADER_LIST_SIZE);
+        stream.send_headers(true).unwrap(); // Idle -> HalfClosedLocal
+        assert_eq!(stream.state(), StreamState::HalfClosedLocal);
+
+        // Receiving headers without END_STREAM stays HalfClosedLocal
+        stream.recv_headers(false, true).unwrap();
+        assert_eq!(stream.state(), StreamState::HalfClosedLocal);
     }
 
     // =========================================================================

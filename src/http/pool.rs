@@ -340,6 +340,7 @@ impl Pool {
     ///
     /// Returns the connection ID if an idle connection is available.
     pub fn try_acquire(&mut self, key: &PoolKey, now: Time) -> Option<u64> {
+        let _ = self.cleanup_expired(now);
         let host_pool = self.hosts.get_mut(key)?;
 
         // Find an idle connection that's not expired
@@ -363,8 +364,12 @@ impl Pool {
     }
 
     /// Checks if a new connection can be created for the given key.
+    ///
+    /// This also evicts expired idle connections using the provided timestamp
+    /// so stale entries do not block new connections.
     #[must_use]
-    pub fn can_create_connection(&self, key: &PoolKey) -> bool {
+    pub fn can_create_connection(&mut self, key: &PoolKey, now: Time) -> bool {
+        let _ = self.cleanup_expired(now);
         // Check total connection limit
         let total = self
             .hosts
@@ -563,14 +568,14 @@ mod tests {
         let key2 = PoolKey::https("host2.com", None);
 
         // Can create connections up to per-host limit
-        assert!(pool.can_create_connection(&key1));
+        assert!(pool.can_create_connection(&key1, now));
         pool.register_connecting(key1.clone(), now, 2);
-        assert!(pool.can_create_connection(&key1));
+        assert!(pool.can_create_connection(&key1, now));
         pool.register_connecting(key1.clone(), now, 2);
-        assert!(!pool.can_create_connection(&key1)); // At limit for host1
+        assert!(!pool.can_create_connection(&key1, now)); // At limit for host1
 
         // Can still create for different host
-        assert!(pool.can_create_connection(&key2));
+        assert!(pool.can_create_connection(&key2, now));
         pool.register_connecting(key2.clone(), now, 2);
         pool.register_connecting(key2.clone(), now, 2);
 
@@ -579,7 +584,7 @@ mod tests {
 
         // Now at total limit
         let key3 = PoolKey::https("host3.com", None);
-        assert!(!pool.can_create_connection(&key3));
+        assert!(!pool.can_create_connection(&key3, now));
     }
 
     #[test]
@@ -603,6 +608,25 @@ mod tests {
         let removed = pool.cleanup_expired(make_time(150));
         assert_eq!(removed, 1);
         assert!(pool.get_connection_meta(&key, id).is_none());
+    }
+
+    #[test]
+    fn pool_can_create_connection_ignores_expired_idle() {
+        let config = PoolConfig::builder()
+            .max_connections_per_host(1)
+            .max_total_connections(1)
+            .idle_timeout(Duration::from_millis(100))
+            .build();
+        let mut pool = Pool::with_config(config);
+        let key = PoolKey::https("example.com", None);
+
+        let id = pool.register_connecting(key.clone(), make_time(0), 2);
+        pool.mark_connected(&key, id, make_time(0));
+
+        assert!(
+            pool.can_create_connection(&key, make_time(150)),
+            "expired idle connection should not block creation"
+        );
     }
 
     #[test]

@@ -262,7 +262,7 @@ impl DataFrame {
             let pad_length = data[0] as usize;
             data = data.slice(1..);
 
-            if pad_length >= data.len() {
+            if pad_length > data.len() {
                 return Err(H2Error::protocol("DATA frame padding exceeds data length"));
             }
             data = data.slice(..data.len() - pad_length);
@@ -376,7 +376,7 @@ impl HeadersFrame {
 
         // Remove padding
         if padded {
-            if pad_length >= payload.len() {
+            if pad_length > payload.len() {
                 return Err(H2Error::protocol(
                     "HEADERS frame padding exceeds data length",
                 ));
@@ -750,7 +750,7 @@ impl PushPromiseFrame {
 
         // Remove padding
         if padded {
-            if pad_length >= payload.len() {
+            if pad_length > payload.len() {
                 return Err(H2Error::protocol(
                     "PUSH_PROMISE frame padding exceeds data length",
                 ));
@@ -1341,18 +1341,20 @@ mod tests {
     }
 
     #[test]
-    fn test_data_frame_padding_exact_length_rejected() {
+    fn test_data_frame_padding_exact_length_accepted() {
         let header = FrameHeader {
             length: 2,
             frame_type: FrameType::Data as u8,
             flags: data_flags::PADDED,
             stream_id: 1,
         };
-        // Pad length equals remaining data length (1), which is invalid.
+        // Pad length equals remaining bytes (1): zero data bytes, all padding.
+        // Valid per RFC 7540 §6.1 (pad_length < frame_payload_length).
         let payload = Bytes::from_static(&[1, 0xff]);
 
-        let err = DataFrame::parse(&header, payload).unwrap_err();
-        assert_eq!(err.code, ErrorCode::ProtocolError);
+        let parsed = DataFrame::parse(&header, payload).unwrap();
+        assert_eq!(parsed.stream_id, 1);
+        assert!(parsed.data.is_empty());
     }
 
     #[test]
@@ -1399,18 +1401,20 @@ mod tests {
     }
 
     #[test]
-    fn test_headers_frame_padding_exceeds_length() {
+    fn test_headers_frame_padding_exact_length_accepted() {
         let header = FrameHeader {
             length: 3,
             frame_type: FrameType::Headers as u8,
             flags: headers_flags::PADDED | headers_flags::END_HEADERS,
             stream_id: 1,
         };
-        // Pad length (2) >= remaining payload length (2).
+        // Pad length (2) equals remaining payload length (2): empty header block, all padding.
+        // Valid per RFC 7540 §6.2 (pad_length < frame_payload_length).
         let payload = Bytes::from_static(&[2, b'a', b'b']);
 
-        let err = HeadersFrame::parse(&header, payload).unwrap_err();
-        assert_eq!(err.code, ErrorCode::ProtocolError);
+        let parsed = HeadersFrame::parse(&header, payload).unwrap();
+        assert_eq!(parsed.stream_id, 1);
+        assert!(parsed.header_block.is_empty());
     }
 
     #[test]

@@ -825,6 +825,13 @@ impl HierarchicalTimerWheel {
 
         for node in bucket {
             let node_ref = unsafe { node.as_ref() };
+            if node_ref.deadline() <= now {
+                if let Some(waker) = node_ref.take_waker() {
+                    wakers.push(waker);
+                }
+                self.count = self.count.saturating_sub(1);
+                continue;
+            }
             if !node_ref.is_linked() {
                 let (new_level, new_slot) = self.slot_for(node_ref.deadline());
                 node_ref.update_slot_level(new_slot, new_level);
@@ -1165,5 +1172,41 @@ mod tests {
         let next = wheel.next_expiration();
         crate::assert_with_log!(next.is_some(), "has expiration", true, next.is_some());
         crate::test_complete!("intrusive_wheel_next_expiration");
+    }
+
+    #[test]
+    fn hierarchical_cascade_fires_expired() {
+        init_test("hierarchical_cascade_fires_expired");
+        let base = Instant::now()
+            .checked_sub(Duration::from_secs(1))
+            .unwrap_or_else(Instant::now);
+        let mut wheel = HierarchicalTimerWheel::new_at(Duration::from_millis(1), base);
+        let counter = Arc::new(AtomicU64::new(0));
+
+        let mut node = Box::pin(TimerNode::new());
+        let deadline = base + Duration::from_millis(300);
+        let waker = counter_waker(counter.clone());
+
+        unsafe {
+            wheel.insert(node.as_mut(), deadline, waker);
+        }
+
+        let (level, slot) = wheel.slot_for(deadline);
+        crate::assert_with_log!(level == 1, "timer placed in level1", 1u8, level);
+
+        let mut wakers = Vec::new();
+        for _ in 0..(LEVEL0_SLOTS * (slot + 1)) {
+            let mut tick_wakers = unsafe { wheel.tick() };
+            wakers.append(&mut tick_wakers);
+        }
+
+        for waker in wakers {
+            waker.wake();
+        }
+
+        let count = counter.load(Ordering::SeqCst);
+        crate::assert_with_log!(count == 1, "expired fired", 1, count);
+        crate::assert_with_log!(wheel.is_empty(), "wheel empty", true, wheel.is_empty());
+        crate::test_complete!("hierarchical_cascade_fires_expired");
     }
 }

@@ -300,17 +300,37 @@ impl Worker {
 
                 let waiters = state.task_completed(task_id);
                 let finalizers = state.drain_ready_async_finalizers();
+                let mut local_waiters = Vec::new();
+                let mut global_waiters = Vec::new();
+
                 for waiter in waiters {
                     if let Some(record) = state.tasks.get(waiter.arena_index()) {
                         if record.wake_state.notify() {
-                            self.global.push(waiter);
+                            if record.is_local() {
+                                if let Some(worker_id) = record.pinned_worker() {
+                                    assert!(
+                                        worker_id == self.id,
+                                        "Pinned local waiter {waiter:?} has invalid worker id {worker_id}"
+                                    );
+                                }
+                                local_waiters.push(waiter);
+                            } else {
+                                global_waiters.push(waiter);
+                            }
                         }
                     }
+                }
+                drop(state);
+
+                for waiter in global_waiters {
+                    self.global.push(waiter);
+                }
+                for waiter in local_waiters {
+                    self.local.push(waiter);
                 }
                 for (finalizer_task, _) in finalizers {
                     self.global.push(finalizer_task);
                 }
-                drop(state);
                 wake_state.clear();
             }
             Poll::Pending => {
