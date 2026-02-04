@@ -623,15 +623,16 @@ impl MarkingAnalyzer {
     pub fn analyze(&mut self, events: &[MarkingEvent]) -> AnalysisResult {
         self.reset();
 
-        // Record initial state.
-        self.snapshot("initial");
+        // Record initial state (before any events, time is zero).
+        self.snapshot("initial", Time::ZERO);
 
         for event in events {
             self.process_event(event);
         }
 
-        // Record final state.
-        self.snapshot("final");
+        // Record final state using the last event's timestamp (or zero if empty).
+        let final_time = events.last().map_or(Time::ZERO, |e| e.time);
+        self.snapshot("final", final_time);
 
         AnalysisResult {
             timeline: self.timeline.clone(),
@@ -671,12 +672,7 @@ impl MarkingAnalyzer {
         self.kinds_seen = [false; 4];
     }
 
-    fn snapshot(&mut self, cause: &str) {
-        let time = self
-            .timeline
-            .snapshots
-            .last()
-            .map_or(Time::ZERO, |s| s.time);
+    fn snapshot(&mut self, cause: &str, time: Time) {
         self.timeline.snapshots.push(MarkingSnapshot {
             time,
             marking: self.marking.snapshot(),
@@ -734,7 +730,14 @@ impl MarkingAnalyzer {
 
             MarkingEventKind::Leak { kind, region, .. } => {
                 // Leak still decrements (obligation is gone, just erroneously).
-                let _ = self.marking.decrement(*kind, *region);
+                if !self.marking.decrement(*kind, *region) {
+                    self.invalid_transitions.push(InvalidTransition {
+                        time: event.time,
+                        description: format!(
+                            "leak({kind}, {region:?}) but marking is already zero"
+                        ),
+                    });
+                }
                 self.stats.total_leaked += 1;
                 self.timeline.snapshots.push(MarkingSnapshot {
                     time: event.time,
