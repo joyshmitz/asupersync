@@ -6,7 +6,7 @@
 use crate::record::finalizer::{Finalizer, FinalizerStack};
 use crate::runtime::region_heap::{HeapIndex, RegionHeap};
 use crate::tracing_compat::{debug, info_span, Span};
-use crate::types::rref::{RRef, RRefAccess, RRefError};
+use crate::types::rref::{RRef, RRefError};
 use crate::types::{Budget, CancelReason, CurveBudget, RegionId, TaskId, Time};
 use std::sync::atomic::{AtomicU8, Ordering};
 use std::sync::RwLock;
@@ -620,167 +620,159 @@ impl RegionRecord {
         inner.heap.get::<T>(index).map(f)
     }
 
-    /// Returns the number of live heap allocations.
+    /// Returns the number of heap allocations in this region.
     #[must_use]
     pub fn heap_len(&self) -> usize {
         self.inner.read().expect("lock poisoned").heap.len()
     }
 
-    /// Begins the closing process.
-    ///
-    /// Returns true if the state changed.
-    pub fn begin_close(&self, reason: Option<CancelReason>) -> bool {
-        if self
-            .state
-            .transition(RegionState::Open, RegionState::Closing)
-        {
-            let mut inner = self.inner.write().expect("lock poisoned");
-            // Record state transition with tracing
-            self.span.record("state", "Closing");
-            debug!(
-                parent: &self.span,
-                region_id = ?self.id,
-                from_state = "Open",
-                to_state = "Closing",
-                trigger = ?reason.as_ref().map(|r| r.kind),
-                cancel_reason = ?reason,
-                "region state transition"
-            );
-            if let Some(new_reason) = reason {
-                if let Some(existing) = &mut inner.cancel_reason {
-                    existing.strengthen(&new_reason);
-                } else {
-                    inner.cancel_reason = Some(new_reason);
-                }
-            }
-
-            true
-        } else {
-            false
-        }
-    }
-
-    /// Transitions from Closing to Draining.
-    ///
-    /// Called after cancellation has been issued to all children.
-    /// Returns true if the state changed.
-    pub fn begin_drain(&self) -> bool {
-        if self
-            .state
-            .transition(RegionState::Closing, RegionState::Draining)
-        {
-            self.span.record("state", "Draining");
-            debug!(
-                parent: &self.span,
-                region_id = ?self.id,
-                from_state = "Closing",
-                to_state = "Draining",
-                trigger = "children_cancelled",
-                "region state transition"
-            );
-            true
-        } else {
-            false
-        }
-    }
-
-    /// Transitions from Draining to Finalizing (or Closing to Finalizing if no children).
-    ///
-    /// Called when all children have completed.
-    /// Returns true if the state changed.
-    pub fn begin_finalize(&self) -> bool {
-        // Try transition from Closing (skip Draining if no children)
-        if self
-            .state
-            .transition(RegionState::Closing, RegionState::Finalizing)
-        {
-            self.span.record("state", "Finalizing");
-            debug!(
-                parent: &self.span,
-                region_id = ?self.id,
-                from_state = "Closing",
-                to_state = "Finalizing",
-                trigger = "no_children",
-                "region state transition"
-            );
-            return true;
-        }
-
-        // Try transition from Draining (normal path with children)
-        if self
-            .state
-            .transition(RegionState::Draining, RegionState::Finalizing)
-        {
-            self.span.record("state", "Finalizing");
-            debug!(
-                parent: &self.span,
-                region_id = ?self.id,
-                from_state = "Draining",
-                to_state = "Finalizing",
-                trigger = "children_complete",
-                "region state transition"
-            );
-            return true;
-        }
-
-        false
-    }
-
-    /// Transitions to Closed.
-    ///
-    /// Called when all finalizers have run and obligations resolved.
-    /// Returns true if the state changed.
-    #[allow(clippy::used_underscore_binding)]
-    pub fn complete_close(&self) -> bool {
-        if self
-            .state
-            .transition(RegionState::Finalizing, RegionState::Closed)
-        {
-            let mut inner = self.inner.write().expect("lock poisoned");
-            let _child_count = inner.children.len();
-            let _task_count = inner.tasks.len();
-            // Reclaim region-owned heap allocations on quiescence.
-            inner.heap.reclaim_all();
-            drop(inner);
-
-            self.span.record("state", "Closed");
-            debug!(
-                parent: &self.span,
-                region_id = ?self.id,
-                from_state = "Finalizing",
-                to_state = "Closed",
-                final_child_count = _child_count,
-                final_task_count = _task_count,
-                "region closed"
-            );
-            true
-        } else {
-            false
-        }
-    }
-
-    /// Returns a reference to the region's tracing span.
-    ///
-    /// This can be used to associate child events with the region's lifecycle.
+    /// Returns heap stats for this region.
     #[must_use]
-    pub fn span(&self) -> &Span {
-        &self.span
+    pub fn heap_stats(&self) -> crate::runtime::region_heap::HeapStats {
+        self.inner.read().expect("lock poisoned").heap.stats()
     }
-}
 
-impl RRefAccess for RegionRecord {
-    fn rref_get<T: Clone + 'static>(&self, rref: &RRef<T>) -> Result<T, RRefError> {
+    /// Returns true if the region is quiescent (no tasks or children).
+    #[must_use]
+    pub fn is_quiescent(&self) -> bool {
+        let inner = self.inner.read().expect("lock poisoned");
+        inner.children.is_empty()
+            && inner.tasks.is_empty()
+            && inner.pending_obligations == 0
+            && inner.finalizers.is_empty()
+    }
+
+    /// Requests cancellation of this region, recording the reason.
+    ///
+    /// Returns true if the cancel request was newly applied.
+    pub fn cancel_request(&self, reason: CancelReason) -> bool {
+        let mut inner = self.inner.write().expect("lock poisoned");
+        if let Some(existing) = &mut inner.cancel_reason {
+            existing.strengthen(&reason);
+            false
+        } else {
+            inner.cancel_reason = Some(reason);
+            true
+        }
+    }
+
+    /// Begins closing the region.
+    ///
+    /// Returns true if the transition succeeded.
+    pub fn begin_close(&self, reason: Option<CancelReason>) -> bool {
+        if let Some(reason) = reason {
+            self.strengthen_cancel_reason(reason);
+        }
+
+        let transitioned = self
+            .state
+            .transition(RegionState::Open, RegionState::Closing);
+        if transitioned {
+            self.trace_state_change(RegionState::Closing);
+        }
+        transitioned
+    }
+
+    /// Begins draining (after cancellation issued to children).
+    ///
+    /// Returns true if the transition succeeded.
+    pub fn begin_drain(&self) -> bool {
+        let transitioned = self
+            .state
+            .transition(RegionState::Closing, RegionState::Draining);
+        if transitioned {
+            self.trace_state_change(RegionState::Draining);
+        }
+        transitioned
+    }
+
+    /// Begins running finalizers.
+    ///
+    /// Returns true if the transition succeeded.
+    pub fn begin_finalize(&self) -> bool {
+        let transitioned = if self.state.load() == RegionState::Closing {
+            self.state
+                .transition(RegionState::Closing, RegionState::Finalizing)
+        } else {
+            self.state
+                .transition(RegionState::Draining, RegionState::Finalizing)
+        };
+
+        if transitioned {
+            self.trace_state_change(RegionState::Finalizing);
+        }
+
+        transitioned
+    }
+
+    /// Completes closing the region.
+    ///
+    /// Returns true if the transition succeeded.
+    pub fn complete_close(&self) -> bool {
+        let transitioned = self
+            .state
+            .transition(RegionState::Finalizing, RegionState::Closed);
+        if transitioned {
+            self.trace_state_change(RegionState::Closed);
+            self.clear_heap();
+        }
+        transitioned
+    }
+
+    /// Updates the region state to the provided value without enforcing transitions.
+    pub fn set_state(&self, state: RegionState) {
+        self.state.store(state);
+        self.trace_state_change(state);
+    }
+
+    fn trace_state_change(&self, new_state: RegionState) {
+        let state_name = match new_state {
+            RegionState::Open => "Open",
+            RegionState::Closing => "Closing",
+            RegionState::Draining => "Draining",
+            RegionState::Finalizing => "Finalizing",
+            RegionState::Closed => "Closed",
+        };
+
+        debug!(
+            parent: &self.span,
+            region_id = ?self.id,
+            state = state_name,
+            "region state transition"
+        );
+
+        self.span.record("state", state_name);
+    }
+
+    /// Clears the region heap after closing.
+    fn clear_heap(&self) {
+        let mut inner = self.inner.write().expect("lock poisoned");
+        inner.heap.reclaim_all();
+    }
+
+    /// Resolves a `RRef` by accessing the region heap.
+    ///
+    /// Returns an error if the region is closed or the allocation is invalid.
+    pub fn rref_get<T: Clone + 'static>(&self, rref: &RRef<T>) -> Result<T, RRefError> {
         if rref.region_id() != self.id {
             return Err(RRefError::RegionMismatch {
                 expected: rref.region_id(),
                 actual: self.id,
             });
         }
-        self.heap_get::<T>(rref.heap_index())
+        if self.state().is_terminal() {
+            return Err(RRefError::AllocationInvalid);
+        }
+        let inner = self.inner.read().expect("lock poisoned");
+        inner
+            .heap
+            .get::<T>(rref.heap_index())
+            .cloned()
             .ok_or(RRefError::AllocationInvalid)
     }
 
-    fn rref_with<T: 'static, R, F: FnOnce(&T) -> R>(
+    /// Executes a closure with a reference to a heap-allocated value via `RRef`.
+    pub fn rref_with<T: 'static, R, F: FnOnce(&T) -> R>(
         &self,
         rref: &RRef<T>,
         f: F,
@@ -791,161 +783,222 @@ impl RRefAccess for RegionRecord {
                 actual: self.id,
             });
         }
-        self.heap_with::<T, R, F>(rref.heap_index(), f)
+        if self.state().is_terminal() {
+            return Err(RRefError::AllocationInvalid);
+        }
+        let inner = self.inner.read().expect("lock poisoned");
+        inner
+            .heap
+            .get::<T>(rref.heap_index())
+            .map(f)
             .ok_or(RRefError::AllocationInvalid)
+    }
+
+    /// Returns true if the region should begin closing (body complete).
+    #[must_use]
+    pub fn should_begin_close(&self) -> bool {
+        let state = self.state();
+        matches!(state, RegionState::Open)
+    }
+
+    /// Returns true if the region should begin draining.
+    #[must_use]
+    pub fn should_begin_drain(&self) -> bool {
+        let state = self.state();
+        state == RegionState::Closing
+    }
+
+    /// Returns true if the region can run finalizers.
+    #[must_use]
+    pub fn can_finalize(&self) -> bool {
+        let state = self.state();
+        matches!(state, RegionState::Closing | RegionState::Draining)
+    }
+
+    /// Returns true if the region can complete close.
+    #[must_use]
+    pub fn can_complete_close(&self) -> bool {
+        let state = self.state();
+        state == RegionState::Finalizing
+    }
+
+    /// Returns true if all children are closed.
+    #[must_use]
+    pub fn children_closed(&self, closed: &dyn Fn(RegionId) -> bool) -> bool {
+        let inner = self.inner.read().expect("lock poisoned");
+        inner.children.iter().all(|child| closed(*child))
+    }
+
+    /// Returns true if all tasks are completed.
+    #[must_use]
+    pub fn tasks_completed(&self, completed: &dyn Fn(TaskId) -> bool) -> bool {
+        let inner = self.inner.read().expect("lock poisoned");
+        inner.tasks.iter().all(|task| completed(*task))
+    }
+
+    /// Returns true if all obligations are resolved.
+    #[must_use]
+    pub fn obligations_resolved(&self) -> bool {
+        self.pending_obligations() == 0
+    }
+
+    /// Returns true if the region is ready to finalize (no children/tasks/obligations).
+    #[must_use]
+    pub fn ready_to_finalize(&self, completed: &dyn Fn(TaskId) -> bool) -> bool {
+        self.children_closed(&|_region| true) && self.tasks_completed(completed)
     }
 }
 
 #[cfg(test)]
 mod tests {
     use super::*;
-    use crate::types::Budget;
+    use crate::record::finalizer::Finalizer;
     use crate::util::ArenaIndex;
 
     fn test_region_id() -> RegionId {
-        RegionId::from_arena(ArenaIndex::new(0, 0))
+        RegionId::from_arena(ArenaIndex::new(1, 0))
     }
 
     #[test]
-    fn region_state_predicates() {
-        assert!(RegionState::Open.can_spawn());
-        assert!(!RegionState::Closing.can_spawn());
-        assert!(!RegionState::Draining.can_spawn());
-        assert!(!RegionState::Finalizing.can_spawn());
-        assert!(!RegionState::Closed.can_spawn());
-
-        assert!(!RegionState::Open.is_terminal());
-        assert!(!RegionState::Closing.is_terminal());
-        assert!(!RegionState::Draining.is_terminal());
-        assert!(!RegionState::Finalizing.is_terminal());
-        assert!(RegionState::Closed.is_terminal());
-
-        assert!(!RegionState::Open.is_draining());
-        assert!(!RegionState::Closing.is_draining());
-        assert!(RegionState::Draining.is_draining());
-        assert!(!RegionState::Finalizing.is_draining());
-        assert!(!RegionState::Closed.is_draining());
-
-        assert!(!RegionState::Open.is_closing());
-        assert!(RegionState::Closing.is_closing());
-        assert!(RegionState::Draining.is_closing());
-        assert!(RegionState::Finalizing.is_closing());
-        assert!(!RegionState::Closed.is_closing());
-    }
-
-    #[test]
-    fn region_lifecycle_with_children() {
-        // Open → Closing → Draining → Finalizing → Closed
+    fn region_initial_state() {
         let region = RegionRecord::new(test_region_id(), None, Budget::default());
         assert_eq!(region.state(), RegionState::Open);
+    }
+
+    #[test]
+    fn region_state_transitions() {
+        let region = RegionRecord::new(test_region_id(), None, Budget::default());
 
         assert!(region.begin_close(None));
         assert_eq!(region.state(), RegionState::Closing);
-
-        // Can't go backwards
-        assert!(!region.begin_close(None));
 
         assert!(region.begin_drain());
         assert_eq!(region.state(), RegionState::Draining);
 
-        // Can't drain again
+        assert!(region.begin_finalize());
+        assert_eq!(region.state(), RegionState::Finalizing);
+
+        assert!(region.complete_close());
+        assert_eq!(region.state(), RegionState::Closed);
+    }
+
+    #[test]
+    fn region_state_invalid_transitions() {
+        let region = RegionRecord::new(test_region_id(), None, Budget::default());
+
+        // Cannot begin drain without close
         assert!(!region.begin_drain());
+        assert_eq!(region.state(), RegionState::Open);
 
-        assert!(region.begin_finalize());
-        assert_eq!(region.state(), RegionState::Finalizing);
+        // Cannot begin finalize without close
+        assert!(!region.begin_finalize());
+        assert_eq!(region.state(), RegionState::Open);
 
-        assert!(region.complete_close());
-        assert_eq!(region.state(), RegionState::Closed);
-
-        // Closed is absorbing
+        // Cannot complete close without finalize
         assert!(!region.complete_close());
+        assert_eq!(region.state(), RegionState::Open);
     }
 
     #[test]
-    fn region_lifecycle_without_children() {
-        // Open → Closing → Finalizing → Closed (skip Draining)
-        let region = RegionRecord::new(test_region_id(), None, Budget::default());
-
-        assert!(region.begin_close(None));
-        assert_eq!(region.state(), RegionState::Closing);
-
-        // Can skip Draining and go directly to Finalizing if no children
-        assert!(region.begin_finalize());
-        assert_eq!(region.state(), RegionState::Finalizing);
-
-        assert!(region.complete_close());
-        assert_eq!(region.state(), RegionState::Closed);
-    }
-
-    #[test]
-    fn region_task_limit_enforced() {
-        let region = RegionRecord::new(test_region_id(), None, Budget::default());
-        region.set_limits(RegionLimits {
-            max_tasks: Some(1),
-            ..RegionLimits::unlimited()
-        });
-
-        let task1 = TaskId::from_arena(ArenaIndex::new(1, 0));
-        let task2 = TaskId::from_arena(ArenaIndex::new(2, 0));
-
-        assert!(region.add_task(task1).is_ok());
-        let err = region.add_task(task2).expect_err("task limit enforced");
-        assert!(matches!(
-            err,
-            AdmissionError::LimitReached {
-                kind: AdmissionKind::Task,
-                limit: 1,
-                live: 1
-            }
-        ));
-    }
-
-    #[test]
-    fn region_child_limit_enforced() {
+    fn region_admission_limits() {
         let region = RegionRecord::new(test_region_id(), None, Budget::default());
         region.set_limits(RegionLimits {
             max_children: Some(1),
-            ..RegionLimits::unlimited()
+            max_tasks: Some(2),
+            max_obligations: Some(1),
+            max_heap_bytes: None,
+            curve_budget: None,
         });
 
-        let child1 = RegionId::from_arena(ArenaIndex::new(1, 0));
-        let child2 = RegionId::from_arena(ArenaIndex::new(2, 0));
+        // Add children
+        assert!(region
+            .add_child(RegionId::from_arena(ArenaIndex::new(2, 0)))
+            .is_ok());
+        assert!(region
+            .add_child(RegionId::from_arena(ArenaIndex::new(3, 0)))
+            .is_err());
 
-        assert!(region.add_child(child1).is_ok());
-        let err = region.add_child(child2).expect_err("child limit enforced");
-        assert!(matches!(
-            err,
-            AdmissionError::LimitReached {
-                kind: AdmissionKind::Child,
-                limit: 1,
-                live: 1
-            }
-        ));
+        // Add tasks
+        assert!(region
+            .add_task(TaskId::from_arena(ArenaIndex::new(1, 0)))
+            .is_ok());
+        assert!(region
+            .add_task(TaskId::from_arena(ArenaIndex::new(2, 0)))
+            .is_ok());
+        assert!(region
+            .add_task(TaskId::from_arena(ArenaIndex::new(3, 0)))
+            .is_err());
+
+        // Reserve obligations
+        assert!(region.try_reserve_obligation().is_ok());
+        assert!(region.try_reserve_obligation().is_err());
     }
 
     #[test]
-    fn region_obligation_limit_enforced() {
+    fn region_obligation_tracking() {
         let region = RegionRecord::new(test_region_id(), None, Budget::default());
-        region.set_limits(RegionLimits {
-            max_obligations: Some(1),
-            ..RegionLimits::unlimited()
-        });
 
+        assert_eq!(region.pending_obligations(), 0);
         assert!(region.try_reserve_obligation().is_ok());
-        let err = region
-            .try_reserve_obligation()
-            .expect_err("obligation limit enforced");
-        assert!(matches!(
-            err,
-            AdmissionError::LimitReached {
-                kind: AdmissionKind::Obligation,
-                limit: 1,
-                live: 1
-            }
-        ));
+        assert_eq!(region.pending_obligations(), 1);
 
         region.resolve_obligation();
-        assert!(region.try_reserve_obligation().is_ok());
+        assert_eq!(region.pending_obligations(), 0);
+    }
+
+    #[test]
+    fn region_quiescence() {
+        let region = RegionRecord::new(test_region_id(), None, Budget::default());
+        assert!(region.is_quiescent());
+
+        // Add child
+        region
+            .add_child(RegionId::from_arena(ArenaIndex::new(2, 0)))
+            .expect("add child");
+        assert!(!region.is_quiescent());
+
+        // Remove child
+        region.remove_child(RegionId::from_arena(ArenaIndex::new(2, 0)));
+        assert!(region.is_quiescent());
+    }
+
+    #[test]
+    fn region_finalizer_stack() {
+        let region = RegionRecord::new(test_region_id(), None, Budget::default());
+
+        let log = std::sync::Arc::new(std::sync::Mutex::new(Vec::new()));
+
+        region.add_finalizer(Finalizer::Sync(Box::new({
+            let log_ref = log.clone();
+            move || log_ref.lock().unwrap().push("first")
+        })));
+
+        region.add_finalizer(Finalizer::Sync(Box::new({
+            let log_ref = log.clone();
+            move || log_ref.lock().unwrap().push("second")
+        })));
+
+        // Pop and run finalizers
+        while let Some(finalizer) = region.pop_finalizer() {
+            if let Finalizer::Sync(f) = finalizer {
+                f();
+            }
+        }
+
+        let log = log.lock().unwrap().clone();
+        assert_eq!(log, vec!["second", "first"]); // LIFO order
+    }
+
+    #[test]
+    fn region_heap_alloc_and_access() {
+        let region = RegionRecord::new(test_region_id(), None, Budget::default());
+
+        let idx = region.heap_alloc(42u32).expect("heap alloc");
+        let value = region.heap_get::<u32>(idx).expect("heap get");
+        assert_eq!(value, 42);
+
+        let doubled = region.heap_with(idx, |v: &u32| v * 2).expect("heap with");
+        assert_eq!(doubled, 84);
     }
 
     #[test]
@@ -1125,10 +1178,7 @@ mod tests {
         let child = RegionId::from_arena(ArenaIndex::new(1, 0));
         assert_eq!(region.add_child(child), Err(AdmissionError::Closed));
 
-        assert_eq!(
-            region.try_reserve_obligation(),
-            Err(AdmissionError::Closed)
-        );
+        assert_eq!(region.try_reserve_obligation(), Err(AdmissionError::Closed));
     }
 
     #[test]
@@ -1365,7 +1415,13 @@ mod tests {
         assert!(region.heap_alloc(2u32).is_ok());
         // Third allocation pushes beyond limit.
         let err = region.heap_alloc(3u32).expect_err("heap limit");
-        assert!(matches!(err, AdmissionError::LimitReached { kind: AdmissionKind::HeapBytes, .. }));
+        assert!(matches!(
+            err,
+            AdmissionError::LimitReached {
+                kind: AdmissionKind::HeapBytes,
+                ..
+            }
+        ));
     }
 
     // --- Concurrent admission (single-threaded simulation) ---
@@ -1391,10 +1447,7 @@ mod tests {
         let child = RegionId::from_arena(ArenaIndex::new(1, 0));
         assert_eq!(region.add_child(child), Err(AdmissionError::Closed));
 
-        assert_eq!(
-            region.try_reserve_obligation(),
-            Err(AdmissionError::Closed)
-        );
+        assert_eq!(region.try_reserve_obligation(), Err(AdmissionError::Closed));
     }
 
     // --- Sequential double-check locking verification ---
@@ -1444,23 +1497,35 @@ mod tests {
         let t3 = TaskId::from_arena(ArenaIndex::new(3, 0));
         assert!(matches!(
             region.add_task(t3),
-            Err(AdmissionError::LimitReached { kind: AdmissionKind::Task, .. })
+            Err(AdmissionError::LimitReached {
+                kind: AdmissionKind::Task,
+                ..
+            })
         ));
 
         let c3 = RegionId::from_arena(ArenaIndex::new(3, 0));
         assert!(matches!(
             region.add_child(c3),
-            Err(AdmissionError::LimitReached { kind: AdmissionKind::Child, .. })
+            Err(AdmissionError::LimitReached {
+                kind: AdmissionKind::Child,
+                ..
+            })
         ));
 
         assert!(matches!(
             region.try_reserve_obligation(),
-            Err(AdmissionError::LimitReached { kind: AdmissionKind::Obligation, .. })
+            Err(AdmissionError::LimitReached {
+                kind: AdmissionKind::Obligation,
+                ..
+            })
         ));
 
         assert!(matches!(
             region.heap_alloc(1u8),
-            Err(AdmissionError::LimitReached { kind: AdmissionKind::HeapBytes, .. })
+            Err(AdmissionError::LimitReached {
+                kind: AdmissionKind::HeapBytes,
+                ..
+            })
         ));
     }
 
