@@ -1529,6 +1529,206 @@ mod tests {
         ));
     }
 
+    // --- Region Heap Reclamation Proof & Tests (bd-1ow9g) ---
+    //
+    // These tests verify that region heap reclamation only occurs at
+    // quiescence and that the global allocation counter returns to
+    // baseline after all regions are closed.
+
+    #[test]
+    fn global_alloc_count_returns_to_baseline_single_region() {
+        use crate::runtime::region_heap::global_alloc_count;
+        let baseline = global_alloc_count();
+
+        let region = RegionRecord::new(test_region_id(), None, Budget::default());
+        region.heap_alloc(1u32).unwrap();
+        region.heap_alloc(2u64).unwrap();
+        region.heap_alloc("hello".to_string()).unwrap();
+
+        // 3 allocations above baseline
+        assert_eq!(global_alloc_count(), baseline + 3);
+
+        // Close the region
+        assert!(region.begin_close(None));
+        assert!(region.begin_finalize());
+        assert!(region.complete_close());
+
+        // Counter must return to baseline
+        assert_eq!(global_alloc_count(), baseline);
+    }
+
+    #[test]
+    fn global_alloc_count_multi_region_hierarchy() {
+        use crate::runtime::region_heap::global_alloc_count;
+        let baseline = global_alloc_count();
+
+        // Create parent and two children
+        let parent_id = RegionId::from_arena(ArenaIndex::new(100, 0));
+        let child1_id = RegionId::from_arena(ArenaIndex::new(101, 0));
+        let child2_id = RegionId::from_arena(ArenaIndex::new(102, 0));
+
+        let parent = RegionRecord::new(parent_id, None, Budget::default());
+        let child1 = RegionRecord::new(child1_id, Some(parent_id), Budget::default());
+        let child2 = RegionRecord::new(child2_id, Some(parent_id), Budget::default());
+
+        parent.add_child(child1_id).unwrap();
+        parent.add_child(child2_id).unwrap();
+
+        // Allocate in all three regions
+        parent.heap_alloc(10u32).unwrap();
+        parent.heap_alloc(20u32).unwrap();
+        child1.heap_alloc(30u64).unwrap();
+        child2.heap_alloc(40u64).unwrap();
+        child2.heap_alloc(50u64).unwrap();
+
+        assert_eq!(global_alloc_count(), baseline + 5);
+
+        // Close children first (structured concurrency: innermost first)
+        assert!(child1.begin_close(None));
+        assert!(child1.begin_finalize());
+        assert!(child1.complete_close());
+        assert_eq!(global_alloc_count(), baseline + 4);
+
+        assert!(child2.begin_close(None));
+        assert!(child2.begin_finalize());
+        assert!(child2.complete_close());
+        assert_eq!(global_alloc_count(), baseline + 2);
+
+        // Remove children and close parent
+        parent.remove_child(child1_id);
+        parent.remove_child(child2_id);
+        assert!(parent.begin_close(None));
+        assert!(parent.begin_finalize());
+        assert!(parent.complete_close());
+        assert_eq!(global_alloc_count(), baseline);
+    }
+
+    #[test]
+    fn heap_alloc_allowed_during_cleanup_phases() {
+        // Unlike add_task/add_child, heap_alloc does not reject during
+        // Closing/Draining/Finalizing phases. This is by design: finalizers
+        // and cleanup code may need temporary heap allocations. Reclamation
+        // happens atomically at complete_close(), after all finalizers finish.
+        let region = RegionRecord::new(test_region_id(), None, Budget::default());
+
+        region.heap_alloc(42u32).unwrap();
+        assert_eq!(region.heap_len(), 1);
+
+        // Closing — heap_alloc still allowed
+        assert!(region.begin_close(None));
+        region.heap_alloc(99u32).unwrap();
+        assert_eq!(region.heap_len(), 2);
+
+        // Finalizing — heap_alloc still allowed (finalizers may allocate)
+        assert!(region.begin_finalize());
+        region.heap_alloc(200u32).unwrap();
+        assert_eq!(region.heap_len(), 3);
+
+        // Close — all 3 allocations reclaimed
+        assert!(region.complete_close());
+        assert_eq!(region.heap_len(), 0);
+    }
+
+    #[test]
+    fn heap_reclamation_timing_matches_state_machine() {
+        let region = RegionRecord::new(test_region_id(), None, Budget::default());
+        region.heap_alloc(1u32).unwrap();
+        region.heap_alloc(2u64).unwrap();
+
+        // Heap still live during Closing
+        assert!(region.begin_close(None));
+        assert_eq!(region.heap_len(), 2);
+        assert_eq!(region.state(), RegionState::Closing);
+
+        // Heap still live during Draining
+        assert!(region.begin_drain());
+        assert_eq!(region.heap_len(), 2);
+        assert_eq!(region.state(), RegionState::Draining);
+
+        // Heap still live during Finalizing
+        assert!(region.begin_finalize());
+        assert_eq!(region.heap_len(), 2);
+        assert_eq!(region.state(), RegionState::Finalizing);
+
+        // Heap reclaimed only on complete_close (Finalizing → Closed)
+        assert!(region.complete_close());
+        assert_eq!(region.heap_len(), 0);
+        assert_eq!(region.state(), RegionState::Closed);
+    }
+
+    #[test]
+    fn heap_stats_consistent_through_lifecycle() {
+        let region = RegionRecord::new(test_region_id(), None, Budget::default());
+
+        // Allocate various types
+        region.heap_alloc(42u32).unwrap();
+        region.heap_alloc(3.14f64).unwrap();
+        region.heap_alloc(vec![1u8, 2, 3]).unwrap();
+
+        let stats_before = region.heap_stats();
+        assert_eq!(stats_before.allocations, 3);
+        assert_eq!(stats_before.live, 3);
+        assert_eq!(stats_before.reclaimed, 0);
+
+        // Close the region
+        assert!(region.begin_close(None));
+        assert!(region.begin_finalize());
+        assert!(region.complete_close());
+
+        let stats_after = region.heap_stats();
+        assert_eq!(stats_after.allocations, 3);
+        assert_eq!(stats_after.live, 0);
+        assert_eq!(stats_after.reclaimed, 3);
+    }
+
+    #[test]
+    fn rref_accessible_through_finalizing_invalid_after_closed() {
+        let region_id = test_region_id();
+        let region = RegionRecord::new(region_id, None, Budget::default());
+
+        let idx = region.heap_alloc(99u32).unwrap();
+        let rref = RRef::<u32>::new(region_id, idx);
+
+        // RRef accessible during normal lifecycle
+        assert_eq!(region.rref_get(&rref).unwrap(), 99);
+
+        // Close begins — still accessible (Closing is not terminal)
+        assert!(region.begin_close(None));
+        assert_eq!(region.rref_get(&rref).unwrap(), 99);
+
+        // Draining — still accessible
+        assert!(region.begin_drain());
+        assert_eq!(region.rref_get(&rref).unwrap(), 99);
+
+        // Finalizing — still accessible (finalizers may need data)
+        assert!(region.begin_finalize());
+        assert_eq!(region.rref_get(&rref).unwrap(), 99);
+
+        // Closed — heap reclaimed, RRef invalid
+        assert!(region.complete_close());
+        let err = region.rref_get(&rref).expect_err("invalid after close");
+        assert_eq!(err, RRefError::AllocationInvalid);
+    }
+
+    #[test]
+    fn complete_close_is_idempotent_for_reclamation() {
+        use crate::runtime::region_heap::global_alloc_count;
+        let baseline = global_alloc_count();
+
+        let region = RegionRecord::new(test_region_id(), None, Budget::default());
+        region.heap_alloc(1u32).unwrap();
+        region.heap_alloc(2u32).unwrap();
+
+        assert!(region.begin_close(None));
+        assert!(region.begin_finalize());
+        assert!(region.complete_close());
+        assert_eq!(global_alloc_count(), baseline);
+
+        // Second call to complete_close should be a no-op
+        assert!(!region.complete_close());
+        assert_eq!(global_alloc_count(), baseline);
+    }
+
     #[test]
     fn interleaved_add_remove_never_over_admits() {
         // Simulate rapid add/remove cycles and verify the live count

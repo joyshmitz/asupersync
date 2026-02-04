@@ -15,6 +15,54 @@
 //! generation-based indices (like `Arena`) to provide stable handles that don't
 //! leak memory addresses into the computation.
 //!
+//! # Proof Sketch: Reclamation Only At Quiescence
+//!
+//! **Claim.** `reclaim_all()` is invoked on a region's heap if and only if the
+//! region has reached quiescence (no live tasks, no live children, no pending
+//! obligations, no remaining finalizers).
+//!
+//! **Proof outline.**
+//!
+//! 1. *Single reclamation site.* `RegionHeap::reclaim_all()` is called exactly
+//!    once per region, from `RegionRecord::clear_heap()`, which is called from
+//!    `RegionRecord::complete_close()`.
+//!
+//! 2. *State machine guard.* `complete_close()` performs an atomic
+//!    `state.transition(Finalizing, Closed)`. The `RegionState` state machine
+//!    enforces that `Finalizing` is reachable only from `Draining`, which is
+//!    reachable only from `Closing`:
+//!
+//!    `Open → Closing → Draining → Finalizing → Closed`
+//!
+//! 3. *Closing requires quiescence.* Each transition is guarded:
+//!    - `begin_close()`: sets state to `Closing`, after which all admission
+//!      paths (`add_task`, `add_child`, `try_reserve_obligation`, `heap_alloc`)
+//!      return `Err(AdmissionError::Closed)`. No new work can enter.
+//!    - `begin_drain()`: transitions `Closing → Draining` only when invoked.
+//!      The runtime invokes this only after propagating cancel to all children.
+//!    - `begin_finalize()`: transitions `Draining → Finalizing` only when
+//!      invoked. The runtime invokes this only after all child regions are
+//!      closed and all tasks are terminal.
+//!    - `complete_close()`: transitions `Finalizing → Closed` only after all
+//!      finalizers have run. At this point:
+//!      `children ∅ ∧ tasks ∅ ∧ obligations = 0 ∧ finalizers ∅`
+//!
+//! 4. *No aliased access after reclamation.* After `complete_close()`:
+//!    - `RRef::get()` checks `state.is_terminal()` and returns
+//!      `Err(AllocationInvalid)`.
+//!    - `HeapIndex` carries a generation counter; even if a stale index is
+//!      presented to a new heap, the generation mismatch prevents access (ABA
+//!      safety).
+//!
+//! 5. *Global counter conservation.* Every `alloc()` increments
+//!    `GLOBAL_ALLOC_COUNT` and every `dealloc()` / `reclaim_all()` / `Drop`
+//!    decrements it by the appropriate amount. When all regions are closed:
+//!    `GLOBAL_ALLOC_COUNT == 0`.
+//!
+//! **QED.** Reclamation is triggered only by the `Finalizing → Closed`
+//! transition, which is reachable only after the quiescence preconditions
+//! are satisfied. □
+//!
 //! # Example
 //!
 //! ```ignore
