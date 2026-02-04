@@ -26,6 +26,7 @@ use asupersync::test_utils::init_test_logging;
 use asupersync::time::{TimerDriverHandle, VirtualClock};
 use asupersync::types::{Budget, TaskId, Time};
 use std::sync::atomic::{AtomicUsize, Ordering};
+use asupersync::sync::ContendedMutex;
 use std::sync::{Arc, Mutex};
 use std::time::Duration;
 
@@ -33,18 +34,18 @@ use std::time::Duration;
 // HELPERS
 // ===========================================================================
 
-fn setup_state() -> Arc<Mutex<RuntimeState>> {
-    Arc::new(Mutex::new(RuntimeState::new()))
+fn setup_state() -> Arc<ContendedMutex<RuntimeState>> {
+    Arc::new(ContendedMutex::new("runtime_state", RuntimeState::new()))
 }
 
-fn setup_state_with_clock(start_nanos: u64) -> (Arc<Mutex<RuntimeState>>, Arc<VirtualClock>) {
+fn setup_state_with_clock(start_nanos: u64) -> (Arc<ContendedMutex<RuntimeState>>, Arc<VirtualClock>) {
     let clock = Arc::new(VirtualClock::starting_at(Time::from_nanos(start_nanos)));
     let mut rs = RuntimeState::new();
     rs.set_timer_driver(TimerDriverHandle::with_virtual_clock(Arc::clone(&clock)));
-    (Arc::new(Mutex::new(rs)), clock)
+    (Arc::new(ContendedMutex::new("runtime_state", rs)), clock)
 }
 
-fn create_task(state: &Arc<Mutex<RuntimeState>>, region: asupersync::types::RegionId) -> TaskId {
+fn create_task(state: &Arc<ContendedMutex<RuntimeState>>, region: asupersync::types::RegionId) -> TaskId {
     let mut guard = state.lock().unwrap();
     let (id, _) = guard
         .create_task(region, Budget::INFINITE, async {})
@@ -53,7 +54,7 @@ fn create_task(state: &Arc<Mutex<RuntimeState>>, region: asupersync::types::Regi
 }
 
 fn create_n_tasks(
-    state: &Arc<Mutex<RuntimeState>>,
+    state: &Arc<ContendedMutex<RuntimeState>>,
     region: asupersync::types::RegionId,
     n: usize,
 ) -> Vec<TaskId> {

@@ -43,7 +43,7 @@ impl WorkStealingScheduler {
     /// This also creates the workers and their local queues.
     pub fn new(
         worker_count: usize,
-        state: &std::sync::Arc<std::sync::Mutex<crate::runtime::RuntimeState>>,
+        state: &std::sync::Arc<crate::sync::ContendedMutex<crate::runtime::RuntimeState>>,
     ) -> Self {
         Self {
             inner: ThreeLaneScheduler::new(worker_count, state),
