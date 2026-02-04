@@ -8,7 +8,7 @@ Source of truth: asupersync_v4_formal_semantics.md
 
 This file intentionally starts minimal. The goal is to mechanize the operational
 rules and proofs incrementally while keeping the model faithful to the doc.
--/-
+-/
 
 abbrev RegionId := Nat
 abbrev TaskId := Nat
@@ -247,14 +247,18 @@ def regionClosed (r : Region Value Error Panic) : Prop :=
   | RegionState.closed _ => True
   | _ => False
 
+def listAll {α : Type} (p : α → Prop) : List α → Prop
+  | [] => True
+  | x :: xs => p x ∧ listAll p xs
+
 def allTasksCompleted (s : State Value Error Panic) (ts : List TaskId) : Prop :=
-  List.All (fun t =>
+  listAll (fun t =>
     match getTask s t with
     | some task => taskCompleted task
     | none => False) ts
 
 def allRegionsClosed (s : State Value Error Panic) (rs : List RegionId) : Prop :=
-  List.All (fun r =>
+  listAll (fun r =>
     match getRegion s r with
     | some region => regionClosed region
     | none => False) rs
@@ -284,10 +288,9 @@ inductive Label (Value Error Panic : Type) where
   | finalize (r : RegionId) (f : TaskId)
   | close (r : RegionId) (outcome : Outcome Value Error CancelReason Panic)
   | tick
-  deriving DecidableEq, Repr
 
 /-- Small-step operational relation. -/
-inductive Step (Value Error Panic : Type) :
+inductive Step {Value Error Panic : Type} :
   State Value Error Panic -> Label Value Error Panic -> State Value Error Panic -> Prop where
   /-- ENQUEUE: put a runnable task into the appropriate lane. -/
   | enqueue {s s' : State Value Error Panic} {t : TaskId} {task : Task Value Error Panic}
@@ -560,16 +563,6 @@ inductive Step (Value Error Panic : Type) :
       (hUpdate :
         s' = setRegion s r { region with state := RegionState.closed outcome }) :
       Step s (Label.close r outcome) s'
-
-  /-- FINALIZE: run one finalizer in LIFO order. -/
-  | finalize {s s' : State Value Error Panic} {r : RegionId} {f : TaskId}
-      {region : Region Value Error Panic} {rest : List TaskId}
-      (hRegion : getRegion s r = some region)
-      (hState : region.state = RegionState.finalizing)
-      (hFinalizers : region.finalizers = f :: rest)
-      (hUpdate :
-        s' = setRegion s r { region with finalizers := rest }) :
-      Step s (Label.finalize r f) s'
 
   /-- TICK: advance virtual time by one unit. -/
   | tick {s s' : State Value Error Panic}
@@ -1072,7 +1065,7 @@ theorem cancel_request_preserves_obligation {Value Error Panic : Type}
     (hStep : Step s (Label.cancel r reason) s')
     : getObligation s' o = getObligation s o := by
   cases hStep with
-  | cancelRequest _ _ hTask hRegion hRegionMatch hNotCompleted hUpdate =>
+  | cancelRequest reason _ hTask hRegion _ _ hUpdate =>
     subst hUpdate
     simp [getObligation, setTask, setRegion]
   | closeCancelChildren _ hRegion hState hHasLive hUpdate =>
@@ -1922,8 +1915,6 @@ theorem committed_obligation_stable {Value Error Panic : Type}
     subst hUpdate; exact ⟨ob, by simp [getObligation, setRegion]; exact hOb, hCommitted⟩
   | closeRunFinalizer _ _ _ hUpdate =>
     subst hUpdate; exact ⟨ob, by simp [getObligation, setRegion]; exact hOb, hCommitted⟩
-  | finalize _ _ _ hUpdate =>
-    subst hUpdate; exact ⟨ob, by simp [getObligation, setRegion]; exact hOb, hCommitted⟩
   | tick hUpdate =>
     subst hUpdate; exact ⟨ob, by simpa [getObligation] using hOb, hCommitted⟩
 
@@ -1936,7 +1927,7 @@ theorem popNext_cancel_priority (sched : SchedulerState)
     (hCancel : sched.cancelLane ≠ [])
     : ∃ t rest, popNext sched = some (t, { sched with cancelLane := rest }) := by
   cases h : sched.cancelLane with
-  | nil => exact absurd rfl hCancel
+  | nil => exact (hCancel (by simpa [h]))
   | cons t rest =>
     exact ⟨t, rest, by simp [popNext, popLane, h]⟩
 
@@ -2191,8 +2182,6 @@ theorem aborted_obligation_stable {Value Error Panic : Type}
     subst hUpdate; exact ⟨ob, by simp [getObligation, setRegion]; exact hOb, hAborted⟩
   | closeRunFinalizer _ _ _ hUpdate =>
     subst hUpdate; exact ⟨ob, by simp [getObligation, setRegion]; exact hOb, hAborted⟩
-  | finalize _ _ _ hUpdate =>
-    subst hUpdate; exact ⟨ob, by simp [getObligation, setRegion]; exact hOb, hAborted⟩
   | tick hUpdate =>
     subst hUpdate; exact ⟨ob, by simpa [getObligation] using hOb, hAborted⟩
 
@@ -2273,8 +2262,6 @@ theorem leaked_obligation_stable {Value Error Panic : Type}
     subst hUpdate; exact ⟨ob, by simp [getObligation, setRegion]; exact hOb, hLeaked⟩
   | closeRunFinalizer _ _ _ hUpdate =>
     subst hUpdate; exact ⟨ob, by simp [getObligation, setRegion]; exact hOb, hLeaked⟩
-  | finalize _ _ _ hUpdate =>
-    subst hUpdate; exact ⟨ob, by simp [getObligation, setRegion]; exact hOb, hLeaked⟩
   | tick hUpdate =>
     subst hUpdate; exact ⟨ob, by simpa [getObligation] using hOb, hLeaked⟩
 
@@ -2310,7 +2297,7 @@ theorem resolved_obligation_stable {Value Error Panic : Type}
     - setTask_same_region_preserves_wellformed (schedule, complete, cancelMasked,
         cancelAcknowledge, cancelFinalize, cancelComplete, cancelChild)
     - setRegion_structural_preserves_wellformed (cancelPropagate, closeBegin,
-        closeCancelChildren, closeChildrenDone, closeRunFinalizer, close, finalize)
+      closeCancelChildren, closeChildrenDone, closeRunFinalizer, close)
     - resolve_preserves_wellformed (commit, abort, leak)
     - spawn_preserves_wellformed, reserve_preserves_wellformed,
       cancelRequest_preserves_wellformed, tick_preserves_wellformed -/
@@ -2377,8 +2364,6 @@ theorem step_preserves_wellformed {Value Error Panic : Type}
   | closeRunFinalizer hRegion _ _ hUpdate =>
     subst hUpdate; exact setRegion_structural_preserves_wellformed hWF hRegion rfl rfl rfl
   | close _ hRegion _ _ _ hUpdate =>
-    subst hUpdate; exact setRegion_structural_preserves_wellformed hWF hRegion rfl rfl rfl
-  | finalize hRegion _ _ hUpdate =>
     subst hUpdate; exact setRegion_structural_preserves_wellformed hWF hRegion rfl rfl rfl
   -- Time advancement
   | tick hUpdate =>
