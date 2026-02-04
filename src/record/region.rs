@@ -1511,7 +1511,7 @@ mod tests {
             assert_eq!(limit, 3);
             assert_eq!(live, 3);
         } else {
-            assert!(false, "expected LimitReached, got {err:?}");
+            panic!("expected LimitReached, got {err:?}");
         }
     }
 
