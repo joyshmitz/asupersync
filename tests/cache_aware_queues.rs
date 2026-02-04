@@ -16,7 +16,7 @@ mod common;
 
 use std::alloc::{GlobalAlloc, Layout, System};
 use std::collections::HashSet;
-use std::sync::atomic::{AtomicU64, Ordering};
+use std::sync::atomic::{AtomicBool, AtomicU64, Ordering};
 use std::sync::{Arc, Mutex};
 
 // ── Counting allocator (same pattern as allocation_audit.rs) ──────────
@@ -25,11 +25,14 @@ struct CountingAllocator;
 
 static ALLOC_COUNT: AtomicU64 = AtomicU64::new(0);
 static ALLOC_BYTES: AtomicU64 = AtomicU64::new(0);
+static ALLOC_COUNTING_ENABLED: AtomicBool = AtomicBool::new(false);
 
 unsafe impl GlobalAlloc for CountingAllocator {
     unsafe fn alloc(&self, layout: Layout) -> *mut u8 {
-        ALLOC_COUNT.fetch_add(1, Ordering::Relaxed);
-        ALLOC_BYTES.fetch_add(layout.size() as u64, Ordering::Relaxed);
+        if ALLOC_COUNTING_ENABLED.load(Ordering::Relaxed) {
+            ALLOC_COUNT.fetch_add(1, Ordering::Relaxed);
+            ALLOC_BYTES.fetch_add(layout.size() as u64, Ordering::Relaxed);
+        }
         unsafe { System.alloc(layout) }
     }
 
@@ -49,6 +52,23 @@ struct AllocSnapshot {
     bytes: u64,
 }
 
+struct AllocCountingGuard {
+    prev: bool,
+}
+
+impl AllocCountingGuard {
+    fn enable() -> Self {
+        let prev = ALLOC_COUNTING_ENABLED.swap(true, Ordering::SeqCst);
+        Self { prev }
+    }
+}
+
+impl Drop for AllocCountingGuard {
+    fn drop(&mut self) {
+        ALLOC_COUNTING_ENABLED.store(self.prev, Ordering::SeqCst);
+    }
+}
+
 impl AllocSnapshot {
     fn take() -> Self {
         Self {
@@ -64,6 +84,14 @@ impl AllocSnapshot {
     fn bytes_since(&self, before: &Self) -> u64 {
         self.bytes.saturating_sub(before.bytes)
     }
+}
+
+fn measure_allocs<F: FnOnce()>(f: F) -> (u64, u64) {
+    let _guard = AllocCountingGuard::enable();
+    let before = AllocSnapshot::take();
+    f();
+    let after = AllocSnapshot::take();
+    (after.allocs_since(&before), after.bytes_since(&before))
 }
 
 // ── Helpers ───────────────────────────────────────────────────────────

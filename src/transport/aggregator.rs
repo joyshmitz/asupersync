@@ -808,8 +808,15 @@ impl SymbolReorderer {
                         path,
                     },
                 );
+            } else if gap > self.config.max_sequence_gap {
+                // Gap too large: give up waiting on missing sequence and advance.
+                state.buffer.clear();
+                state.next_expected = seq + 1;
+                state.last_delivery = now;
+                self.timeout_deliveries.fetch_add(1, Ordering::Relaxed);
+                ready.push(symbol);
             }
-            // else: gap too large or buffer full, drop the symbol
+            // else: buffer full, drop the symbol
         }
         // else: seq < next_expected - this is a late duplicate, ignore
 
@@ -1506,6 +1513,37 @@ mod tests {
         crate::test_complete!("test_reorderer_timeout");
     }
 
+    // Test 10.1: Reorderer gap too large gives up and advances
+    #[test]
+    fn test_reorderer_gap_too_large_advances() {
+        init_test("test_reorderer_gap_too_large_advances");
+        let config = ReordererConfig {
+            immediate_delivery: false,
+            max_sequence_gap: 2,
+            ..Default::default()
+        };
+        let reorderer = SymbolReorderer::new(config);
+
+        let path = PathId(1);
+        let now = Time::ZERO;
+
+        let s0 = Symbol::new_for_test(1, 0, 0, &[0]);
+        let s5 = Symbol::new_for_test(1, 0, 5, &[5]);
+        let s6 = Symbol::new_for_test(1, 0, 6, &[6]);
+
+        let out0 = reorderer.process(s0, path, now);
+        crate::assert_with_log!(out0.len() == 1, "out0 len", 1, out0.len());
+
+        // Gap 4 > max_sequence_gap => deliver immediately and advance
+        let out5 = reorderer.process(s5, path, now);
+        crate::assert_with_log!(out5.len() == 1, "out5 len", 1, out5.len());
+
+        let out6 = reorderer.process(s6, path, now);
+        crate::assert_with_log!(out6.len() == 1, "out6 len", 1, out6.len());
+
+        crate::test_complete!("test_reorderer_gap_too_large_advances");
+    }
+
     // Test 11: MultipathAggregator basic flow
     #[test]
     fn test_aggregator_basic() {
@@ -1589,11 +1627,11 @@ mod tests {
             stats.duplicates_detected
         );
 
-        if let Some(path) = aggregator.paths().get(p2) {
+        let path = aggregator.paths().get(p2);
+        crate::assert_with_log!(path.is_some(), "path exists", true, path.is_some());
+        if let Some(path) = path {
             let duplicates = path.duplicates_received.load(Ordering::Relaxed);
             crate::assert_with_log!(duplicates == 1, "path duplicates", 1, duplicates);
-        } else {
-            panic!("expected path to exist");
         }
 
         crate::test_complete!("test_aggregator_multi_path_dedup");

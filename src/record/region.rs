@@ -1070,6 +1070,29 @@ mod tests {
     }
 
     #[test]
+    fn region_obligation_limit_released_after_resolve() {
+        let region = RegionRecord::new(test_region_id(), None, Budget::default());
+        region.set_limits(RegionLimits {
+            max_obligations: Some(1),
+            ..RegionLimits::unlimited()
+        });
+
+        assert!(region.try_reserve_obligation().is_ok());
+        assert!(matches!(
+            region.try_reserve_obligation(),
+            Err(AdmissionError::LimitReached {
+                kind: AdmissionKind::Obligation,
+                ..
+            })
+        ));
+        assert_eq!(region.pending_obligations(), 1);
+
+        region.resolve_obligation();
+        assert_eq!(region.pending_obligations(), 0);
+        assert!(region.try_reserve_obligation().is_ok());
+    }
+
+    #[test]
     fn region_quiescence() {
         let region = RegionRecord::new(test_region_id(), None, Budget::default());
         assert!(region.is_quiescent());
@@ -1480,13 +1503,15 @@ mod tests {
         }
 
         let overflow_task = TaskId::from_arena(ArenaIndex::new(99, 0));
-        match region.add_task(overflow_task) {
-            Err(AdmissionError::LimitReached { kind, limit, live }) => {
-                assert_eq!(kind, AdmissionKind::Task);
-                assert_eq!(limit, 3);
-                assert_eq!(live, 3);
-            }
-            other => panic!("expected LimitReached, got {other:?}"),
+        let err = region
+            .add_task(overflow_task)
+            .expect_err("expected admission error");
+        if let AdmissionError::LimitReached { kind, limit, live } = err {
+            assert_eq!(kind, AdmissionKind::Task);
+            assert_eq!(limit, 3);
+            assert_eq!(live, 3);
+        } else {
+            assert!(false, "expected LimitReached, got {err:?}");
         }
     }
 
