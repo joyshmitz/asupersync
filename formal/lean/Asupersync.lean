@@ -554,10 +554,8 @@ inductive Step (Value Error Panic : Type) :
       {region : Region Value Error Panic}
       (outcome : Outcome Value Error CancelReason Panic)
       (hRegion : getRegion s r = some region)
-      (hState :
-        region.state = RegionState.closing ∨
-        region.state = RegionState.draining ∨
-        region.state = RegionState.finalizing)
+      (hState : region.state = RegionState.finalizing)
+      (hFinalizers : region.finalizers = [])
       (hQuiescent : Quiescent s region)
       (hUpdate :
         s' = setRegion s r { region with state := RegionState.closed outcome }) :
@@ -747,7 +745,7 @@ theorem close_implies_quiescent {Value Error Panic : Type}
     (hStep : Step s (Label.close r outcome) s')
     : ∃ region, getRegion s r = some region ∧ Quiescent s region := by
   cases hStep with
-  | close outcome hRegion hState hQuiescent hUpdate =>
+  | close outcome hRegion hState hFinalizers hQuiescent hUpdate =>
     exact ⟨_, hRegion, hQuiescent⟩
 
 -- ==========================================================================
@@ -1914,7 +1912,7 @@ theorem committed_obligation_stable {Value Error Panic : Type}
     subst hUpdate; exact ⟨ob, by simp [getObligation, setRegion]; exact hOb, hCommitted⟩
   | cancelChild _ _ _ _ _ hUpdate =>
     subst hUpdate; exact ⟨ob, by simp [getObligation, setTask]; exact hOb, hCommitted⟩
-  | close _ _ _ _ hUpdate =>
+  | close _ _ _ _ _ hUpdate =>
     subst hUpdate; exact ⟨ob, by simp [getObligation, setRegion]; exact hOb, hCommitted⟩
   | closeBegin _ _ hUpdate =>
     subst hUpdate; exact ⟨ob, by simp [getObligation, setRegion]; exact hOb, hCommitted⟩
@@ -2183,7 +2181,7 @@ theorem aborted_obligation_stable {Value Error Panic : Type}
     subst hUpdate; exact ⟨ob, by simp [getObligation, setRegion]; exact hOb, hAborted⟩
   | cancelChild _ _ _ _ _ hUpdate =>
     subst hUpdate; exact ⟨ob, by simp [getObligation, setTask]; exact hOb, hAborted⟩
-  | close _ _ _ _ hUpdate =>
+  | close _ _ _ _ _ hUpdate =>
     subst hUpdate; exact ⟨ob, by simp [getObligation, setRegion]; exact hOb, hAborted⟩
   | closeBegin _ _ hUpdate =>
     subst hUpdate; exact ⟨ob, by simp [getObligation, setRegion]; exact hOb, hAborted⟩
@@ -2265,7 +2263,7 @@ theorem leaked_obligation_stable {Value Error Panic : Type}
     subst hUpdate; exact ⟨ob, by simp [getObligation, setRegion]; exact hOb, hLeaked⟩
   | cancelChild _ _ _ _ _ hUpdate =>
     subst hUpdate; exact ⟨ob, by simp [getObligation, setTask]; exact hOb, hLeaked⟩
-  | close _ _ _ _ hUpdate =>
+  | close _ _ _ _ _ hUpdate =>
     subst hUpdate; exact ⟨ob, by simp [getObligation, setRegion]; exact hOb, hLeaked⟩
   | closeBegin _ _ hUpdate =>
     subst hUpdate; exact ⟨ob, by simp [getObligation, setRegion]; exact hOb, hLeaked⟩
@@ -2378,7 +2376,7 @@ theorem step_preserves_wellformed {Value Error Panic : Type}
     subst hUpdate; exact setRegion_structural_preserves_wellformed hWF hRegion rfl rfl rfl
   | closeRunFinalizer hRegion _ _ hUpdate =>
     subst hUpdate; exact setRegion_structural_preserves_wellformed hWF hRegion rfl rfl rfl
-  | close _ hRegion _ _ hUpdate =>
+  | close _ hRegion _ _ _ hUpdate =>
     subst hUpdate; exact setRegion_structural_preserves_wellformed hWF hRegion rfl rfl rfl
   | finalize hRegion _ _ hUpdate =>
     subst hUpdate; exact setRegion_structural_preserves_wellformed hWF hRegion rfl rfl rfl
