@@ -1,0 +1,42 @@
+{
+    "status": "pass",
+    "exit_code": 0,
+    "distinct_states": 118700,
+    "total_states_generated": 451973,
+    "search_depth": 23,
+    "violations": 0,
+    "spec": "formal/tla/Asupersync.tla",
+    "config": "formal/tla/Asupersync_MC.cfg",
+    "bead": "bd-11g3i",
+    "bounds": {
+        "TaskIds": [1, 2],
+        "RegionIds": [1, 2],
+        "ObligationIds": [1],
+        "MAX_MASK": 2
+    },
+    "invariants_checked": [
+        "TypeInvariant",
+        "WellFormedInvariant",
+        "NoOrphanTasks",
+        "NoLeakedObligations",
+        "CloseImpliesQuiescent"
+    ],
+    "assumptions": [
+        "Finite task/region/obligation sets (2 tasks, 2 regions, 1 obligation)",
+        "Mask depth bounded by MAX_MASK=2 (real system uses 64)",
+        "CancelReason abstracted to a single symbolic value",
+        "No time/budget modeling (abstracted away)",
+        "Region tree structure enforced (no cycles)",
+        "Obligation kinds not distinguished (only state matters)"
+    ],
+    "cross_references": {
+        "lean_spec": "formal/lean/Asupersync.lean",
+        "task_state_machine": "src/record/task.rs:21-50",
+        "region_state_machine": "src/record/region.rs:22-36",
+        "obligation_state_machine": "src/record/obligation.rs:125-130",
+        "lean_step_constructors": "formal/lean/Asupersync.lean:300-570",
+        "lean_wellformed": "formal/lean/Asupersync.lean:1144-1163"
+    },
+    "tlc_version": "2.16 (2020-12-31)",
+    "checked_at": "2026-02-04T06:12:51Z"
+}
