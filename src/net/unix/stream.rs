@@ -248,15 +248,20 @@ impl UnixStream {
         let mut registration = self.registration.lock().expect("lock poisoned");
 
         if let Some(existing) = registration.as_mut() {
+            let merged = existing.interest() | interest;
+            // Always call set_interest to re-arm the reactor registration.
+            // The polling crate uses oneshot-style notifications: after an event
+            // fires, the registration is disarmed and must be re-armed via modify().
+            if let Err(err) = existing.set_interest(merged) {
+                if err.kind() == io::ErrorKind::NotConnected {
+                    *registration = None;
+                    cx.waker().wake_by_ref();
+                    return Ok(());
+                }
+                return Err(err);
+            }
             if existing.update_waker(cx.waker().clone()) {
-                if existing.interest().contains(interest) {
-                    return Ok(());
-                }
-
-                let merged = existing.interest() | interest;
-                if existing.set_interest(merged).is_ok() {
-                    return Ok(());
-                }
+                return Ok(());
             }
 
             *registration = None;

@@ -230,15 +230,17 @@ impl TcpStream {
     fn register_interest(&mut self, cx: &Context<'_>, interest: Interest) -> io::Result<()> {
         if let Some(registration) = &mut self.registration {
             let combined = registration.interest() | interest;
-            if combined != registration.interest() {
-                if let Err(err) = registration.set_interest(combined) {
-                    if err.kind() == io::ErrorKind::NotConnected {
-                        self.registration = None;
-                        cx.waker().wake_by_ref();
-                        return Ok(());
-                    }
-                    return Err(err);
+            // Always call set_interest to re-arm the reactor registration.
+            // The polling crate uses oneshot-style notifications: after an event
+            // fires, the registration is disarmed and must be re-armed via modify()
+            // before new events will be delivered.
+            if let Err(err) = registration.set_interest(combined) {
+                if err.kind() == io::ErrorKind::NotConnected {
+                    self.registration = None;
+                    cx.waker().wake_by_ref();
+                    return Ok(());
                 }
+                return Err(err);
             }
             if registration.update_waker(cx.waker().clone()) {
                 return Ok(());

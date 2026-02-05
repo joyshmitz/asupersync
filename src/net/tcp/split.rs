@@ -206,15 +206,16 @@ impl OwnedReadHalf {
 
         if let Some(registration) = guard.as_mut() {
             let combined = registration.interest() | interest;
-            if combined != registration.interest() {
-                if let Err(err) = registration.set_interest(combined) {
-                    if err.kind() == io::ErrorKind::NotConnected {
-                        *guard = None;
-                        cx.waker().wake_by_ref();
-                        return Ok(());
-                    }
-                    return Err(err);
+            // Always call set_interest to re-arm the reactor registration.
+            // The polling crate uses oneshot-style notifications: after an event
+            // fires, the registration is disarmed and must be re-armed via modify().
+            if let Err(err) = registration.set_interest(combined) {
+                if err.kind() == io::ErrorKind::NotConnected {
+                    *guard = None;
+                    cx.waker().wake_by_ref();
+                    return Ok(());
                 }
+                return Err(err);
             }
             if registration.update_waker(cx.waker().clone()) {
                 return Ok(());
@@ -315,15 +316,16 @@ impl OwnedWriteHalf {
 
         if let Some(registration) = guard.as_mut() {
             let combined = registration.interest() | interest;
-            if combined != registration.interest() {
-                if let Err(err) = registration.set_interest(combined) {
-                    if err.kind() == io::ErrorKind::NotConnected {
-                        *guard = None;
-                        cx.waker().wake_by_ref();
-                        return Ok(());
-                    }
-                    return Err(err);
+            // Always call set_interest to re-arm the reactor registration.
+            // The polling crate uses oneshot-style notifications: after an event
+            // fires, the registration is disarmed and must be re-armed via modify().
+            if let Err(err) = registration.set_interest(combined) {
+                if err.kind() == io::ErrorKind::NotConnected {
+                    *guard = None;
+                    cx.waker().wake_by_ref();
+                    return Ok(());
                 }
+                return Err(err);
             }
             if registration.update_waker(cx.waker().clone()) {
                 return Ok(());
