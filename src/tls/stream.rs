@@ -5,6 +5,7 @@
 
 use super::error::TlsError;
 use crate::io::{AsyncRead, AsyncWrite, ReadBuf};
+use crate::tracing_compat::{debug, error, trace};
 
 #[cfg(feature = "tls")]
 use rustls::{ClientConnection, ServerConnection};
@@ -233,7 +234,7 @@ impl<IO: AsyncRead + AsyncWrite + Unpin> TlsStream<IO> {
             // Process any pending TLS data
             if let Err(e) = self.conn.process_new_packets() {
                 #[cfg(feature = "tracing-integration")]
-                tracing::error!(error = %e, "TLS error during handshake");
+                error!(error = %e, "TLS error during handshake");
                 self.state = TlsState::Closed;
                 return Poll::Ready(Err(TlsError::Handshake(e.to_string())));
             }
@@ -263,7 +264,7 @@ impl<IO: AsyncRead + AsyncWrite + Unpin> TlsStream<IO> {
             if !self.conn.is_handshaking() {
                 self.state = TlsState::Ready;
                 #[cfg(feature = "tracing-integration")]
-                tracing::debug!("TLS handshake complete");
+                debug!("TLS handshake complete");
                 return Poll::Ready(Ok(()));
             }
 
@@ -364,7 +365,7 @@ impl<IO: AsyncRead + AsyncWrite + Unpin> TlsStream<IO> {
         // Send close_notify if not already done
         if self.state != TlsState::ShuttingDown {
             #[cfg(feature = "tracing-integration")]
-            tracing::debug!("Initiating TLS shutdown");
+            debug!("Initiating TLS shutdown");
             self.state = TlsState::ShuttingDown;
             self.conn.send_close_notify();
         }
@@ -381,7 +382,7 @@ impl<IO: AsyncRead + AsyncWrite + Unpin> TlsStream<IO> {
 
         self.state = TlsState::Closed;
         #[cfg(feature = "tracing-integration")]
-        tracing::debug!("TLS shutdown complete");
+        debug!("TLS shutdown complete");
         Poll::Ready(Ok(()))
     }
 }
@@ -416,7 +417,7 @@ impl<IO: AsyncRead + AsyncWrite + Unpin> AsyncRead for TlsStream<IO> {
                     buf.advance(n);
                     if n > 0 {
                         #[cfg(feature = "tracing-integration")]
-                        tracing::trace!(bytes = n, "TLS read");
+                        trace!(bytes = n, "TLS read");
                         return Poll::Ready(Ok(()));
                     }
                 }
@@ -476,7 +477,7 @@ impl<IO: AsyncRead + AsyncWrite + Unpin> AsyncWrite for TlsStream<IO> {
         // Write to the TLS session
         let n = io::Write::write(&mut self.conn.writer(), buf)?;
         #[cfg(feature = "tracing-integration")]
-        tracing::trace!(bytes = n, "TLS write");
+        trace!(bytes = n, "TLS write");
 
         // Flush encrypted data to underlying IO
         while self.conn.wants_write() {

@@ -24,8 +24,6 @@
 //! drop(permit);
 //! ```
 
-#![allow(unsafe_code)]
-
 use std::collections::VecDeque;
 use std::future::Future;
 use std::pin::Pin;
@@ -533,20 +531,26 @@ mod tests {
         )
     }
 
-    fn poll_once<T>(future: &mut impl Future<Output = T>) -> Option<T> {
+    fn poll_once<T, F>(future: &mut F) -> Option<T>
+    where
+        F: Future<Output = T> + Unpin,
+    {
         let waker = Waker::noop();
         let mut cx = Context::from_waker(waker);
-        match unsafe { Pin::new_unchecked(future) }.poll(&mut cx) {
+        match Pin::new(future).poll(&mut cx) {
             Poll::Ready(v) => Some(v),
             Poll::Pending => None,
         }
     }
 
-    fn poll_until_ready<T>(future: &mut impl Future<Output = T>) -> T {
+    fn poll_until_ready<T, F>(future: &mut F) -> T
+    where
+        F: Future<Output = T> + Unpin,
+    {
         let waker = Waker::noop();
         let mut cx = Context::from_waker(waker);
         loop {
-            match unsafe { Pin::new_unchecked(&mut *future) }.poll(&mut cx) {
+            match Pin::new(&mut *future).poll(&mut cx) {
                 Poll::Ready(v) => return v,
                 Poll::Pending => std::thread::yield_now(),
             }

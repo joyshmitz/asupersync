@@ -34,10 +34,10 @@
 
 use super::file::{TraceFileError, TraceFileResult, HEADER_SIZE, TRACE_FILE_VERSION, TRACE_MAGIC};
 use super::replay::{ReplayEvent, TraceMetadata, REPLAY_SCHEMA_VERSION};
+use crate::tracing_compat::warn;
 use std::fs::File;
 use std::io::{BufReader, Read, Seek, SeekFrom};
 use std::path::Path;
-use tracing::warn;
 
 type SkipHandler = dyn Fn(&str, &[u8]) + Send + Sync;
 
@@ -260,6 +260,7 @@ impl CompatReader {
             } => {
                 // For forward compat with newer traces, we proceed but may skip events
                 // Log a warning via structured tracing (caller can also check stats).
+                let _ = (found, max_supported);
                 warn!(
                     found,
                     max_supported,

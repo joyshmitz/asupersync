@@ -64,7 +64,7 @@ use crate::runtime::task_handle::JoinError;
 use crate::time::{timeout, TimeSource, TimerDriverHandle, WallClock};
 use crate::trace::distributed::{LogicalClockHandle, LogicalTime};
 use crate::trace::{TraceBufferHandle, TraceEvent};
-use crate::tracing_compat::{debug, info, trace};
+use crate::tracing_compat::{debug, error, info, trace};
 use crate::types::{Budget, CancelKind, CancelReason, CxInner, RegionId, TaskId, Time};
 use crate::util::{EntropySource, OsEntropy};
 use std::cell::RefCell;
@@ -1061,7 +1061,7 @@ impl<Caps> Cx<Caps> {
                 crate::types::task_context::MAX_MASK_DEPTH,
             );
             if inner.mask_depth >= crate::types::task_context::MAX_MASK_DEPTH {
-                tracing::error!(
+                error!(
                     depth = inner.mask_depth,
                     max = crate::types::task_context::MAX_MASK_DEPTH,
                     "INV-MASK-BOUNDED violated: mask depth saturated, cancellation may be unobservable"

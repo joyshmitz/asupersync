@@ -145,6 +145,53 @@ impl<T> Arena<T> {
         }
     }
 
+    /// Inserts a value produced by `f` into the arena and returns its index.
+    ///
+    /// The closure receives the assigned `ArenaIndex`, allowing callers to
+    /// construct records that embed their final ID without placeholder updates.
+    pub fn insert_with<F>(&mut self, f: F) -> ArenaIndex
+    where
+        F: FnOnce(ArenaIndex) -> T,
+    {
+        self.len += 1;
+
+        if let Some(free_index) = self.free_head {
+            let slot = &mut self.slots[free_index as usize];
+            match slot {
+                Slot::Vacant {
+                    next_free,
+                    generation,
+                } => {
+                    let gen = *generation;
+                    self.free_head = *next_free;
+                    let idx = ArenaIndex {
+                        index: free_index,
+                        generation: gen,
+                    };
+                    let value = f(idx);
+                    *slot = Slot::Occupied {
+                        value,
+                        generation: gen,
+                    };
+                    idx
+                }
+                Slot::Occupied { .. } => unreachable!("free list pointed to occupied slot"),
+            }
+        } else {
+            let index = u32::try_from(self.slots.len()).expect("arena overflow");
+            let idx = ArenaIndex {
+                index,
+                generation: 0,
+            };
+            let value = f(idx);
+            self.slots.push(Slot::Occupied {
+                value,
+                generation: 0,
+            });
+            idx
+        }
+    }
+
     /// Removes the value at the given index and returns it.
     ///
     /// Returns `None` if the index is invalid or the slot is vacant.
@@ -283,5 +330,12 @@ mod tests {
         // Old index should not work
         assert_eq!(arena.get(idx1), None);
         assert_eq!(arena.get(idx2), Some(&2));
+    }
+
+    #[test]
+    fn insert_with_passes_assigned_index() {
+        let mut arena = Arena::new();
+        let idx = arena.insert_with(super::ArenaIndex::index);
+        assert_eq!(arena.get(idx), Some(&idx.index()));
     }
 }

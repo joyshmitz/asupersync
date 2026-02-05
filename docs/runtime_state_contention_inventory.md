@@ -99,9 +99,9 @@
 4. Emit trace (D)
 5. Potentially recurse via advance_region_state -> parent cascade
 
-**Recommended lock order:** D -> E -> B -> A -> C
+**Recommended lock order:** E -> D -> B -> A -> C
 
-This ensures task_completed acquires: A (task removal) -> C (orphan scan) -> B (region update) -> D (trace emit), following the ordering convention.
+This ensures `task_completed` acquires locks in the canonical order (E→D→B→A→C) while performing task removal, obligation scan, region update, and trace emission under the corresponding guards.
 
 ## Canonical Lock Order (bd-20way)
 
@@ -340,8 +340,9 @@ before and after sharding. Verified by: Lab oracle replay + trace diffing.
 3. Emit trace events (D) for each cancellation
 
 All three must complete as a unit. Partial cancellation (flag set but tasks
-not notified) violates cancel-correctness. The lock order D→B→A ensures
-all shards are held during the operation.
+not notified) violates cancel-correctness. The lock order E→D→B→A ensures
+all shards are held during the operation (E is typically lock-free but still
+first in the canonical order).
 
 ### INV-3: Obligation Linearity (No Leaks, No Double-Commit)
 
@@ -349,7 +350,7 @@ Every obligation must transition through exactly one of:
 `Reserved → Committed` or `Reserved → Aborted` or `Reserved → Leaked`.
 
 `task_completed` must scan and abort orphan obligations atomically with
-task removal. Lock order D→B→A→C ensures the task is removed (A) before
+task removal. Lock order E→D→B→A→C ensures the task is removed (A) before
 orphan scan (C), preventing the window where a new obligation could be
 created for a dead task.
 
@@ -473,7 +474,7 @@ When reviewing sharding PRs, verify:
 - [ ] **No reverse acquisitions**: No code path acquires A before B, C before A, etc.
 - [ ] **ShardGuard usage**: All multi-shard operations use `ShardGuard::for_*()` constructors
 - [ ] **Trace determinism**: Lab oracle tests pass with identical trace output
-- [ ] **Cancel atomicity**: cancel_request holds D+B+A for the entire cascade
+- [ ] **Cancel atomicity**: cancel_request holds E+D+B+A for the entire cascade
 - [ ] **Obligation orphan scan**: task_completed holds A+C simultaneously
 - [ ] **No shard leak**: Shard locks not exposed to task code (only through Cx/scope)
 - [ ] **Config immutability**: Shard E has no lock; all fields are read-only after init
