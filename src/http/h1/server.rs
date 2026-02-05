@@ -209,7 +209,7 @@ where
         state: &ConnectionState,
     ) -> Option<ReadOutcome>
     where
-        T: AsyncRead + AsyncWrite + Unpin + Send,
+        T: AsyncRead + AsyncWrite + Unpin,
     {
         let read_future = Box::pin(async {
             if let Some(signal) = &self.shutdown_signal {
