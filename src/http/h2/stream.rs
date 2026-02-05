@@ -18,6 +18,9 @@ const HEADER_FRAGMENT_MULTIPLIER: usize = 4;
 /// caps the size even if max_header_list_size is very large (e.g. u32::MAX).
 const MAX_HEADER_FRAGMENT_SIZE: usize = 256 * 1024;
 
+/// Maximum valid HTTP/2 stream ID (31-bit, MSB must be 0).
+const MAX_STREAM_ID: u32 = 0x7FFF_FFFF;
+
 /// Stream state as defined in RFC 7540 Section 5.1.
 ///
 /// ```text
@@ -513,6 +516,9 @@ impl Stream {
 
     /// Take pending data that fits in the window.
     pub fn take_pending_data(&mut self, max_len: usize) -> Option<(Bytes, bool)> {
+        if max_len == 0 {
+            return None;
+        }
         if let Some(front) = self.pending_data.front_mut() {
             if front.data.len() <= max_len {
                 // Take entire chunk
@@ -603,8 +609,17 @@ impl StreamStore {
             if id == 0 {
                 return Err(H2Error::protocol("stream ID 0 is reserved"));
             }
+            if id > MAX_STREAM_ID {
+                return Err(H2Error::protocol("stream ID exceeds maximum"));
+            }
 
             let is_client_stream = id % 2 == 1;
+            if self.is_client && is_client_stream {
+                return Err(H2Error::protocol("invalid stream ID parity"));
+            }
+            if !self.is_client && !is_client_stream {
+                return Err(H2Error::protocol("invalid stream ID parity"));
+            }
             if self.is_client && !is_client_stream {
                 // Server-initiated stream received by client
                 if id < self.next_server_stream_id {
@@ -622,13 +637,18 @@ impl StreamStore {
             let stream = Stream::new(id, self.initial_window_size, self.max_header_list_size);
             self.streams.insert(id, stream);
         }
-        Ok(self.streams.get_mut(&id).unwrap())
+        self.streams.get_mut(&id).ok_or_else(|| {
+            H2Error::connection(ErrorCode::InternalError, "stream missing after insert")
+        })
     }
 
     /// Reserve a remote-initiated stream (e.g., PUSH_PROMISE).
     pub fn reserve_remote_stream(&mut self, id: u32) -> Result<&mut Stream, H2Error> {
         if id == 0 {
             return Err(H2Error::protocol("stream ID 0 is reserved"));
+        }
+        if id > MAX_STREAM_ID {
+            return Err(H2Error::protocol("stream ID exceeds maximum"));
         }
         if self.streams.contains_key(&id) {
             return Err(H2Error::protocol("stream ID already used"));
@@ -656,7 +676,12 @@ impl StreamStore {
         let stream =
             Stream::new_reserved_remote(id, self.initial_window_size, self.max_header_list_size);
         self.streams.insert(id, stream);
-        Ok(self.streams.get_mut(&id).unwrap())
+        self.streams.get_mut(&id).ok_or_else(|| {
+            H2Error::connection(
+                ErrorCode::InternalError,
+                "reserved stream missing after insert",
+            )
+        })
     }
 
     /// Allocate a new stream ID.
@@ -671,10 +696,16 @@ impl StreamStore {
         }
 
         let id = if self.is_client {
+            if self.next_client_stream_id > MAX_STREAM_ID {
+                return Err(H2Error::protocol("stream ID exhausted"));
+            }
             let id = self.next_client_stream_id;
             self.next_client_stream_id += 2;
             id
         } else {
+            if self.next_server_stream_id > MAX_STREAM_ID {
+                return Err(H2Error::protocol("stream ID exhausted"));
+            }
             let id = self.next_server_stream_id;
             self.next_server_stream_id += 2;
             id
@@ -1363,6 +1394,21 @@ mod tests {
         assert!(end2);
     }
 
+    #[test]
+    fn pending_data_zero_window_returns_none() {
+        let mut stream = Stream::new(1, 65535, DEFAULT_MAX_HEADER_LIST_SIZE);
+        stream.queue_data(Bytes::from_static(b"hello"), true);
+
+        let taken = stream.take_pending_data(0);
+        assert!(taken.is_none());
+        assert!(stream.has_pending_data());
+
+        let (data, end) = stream.take_pending_data(5).unwrap();
+        assert_eq!(&data[..], b"hello");
+        assert!(end);
+        assert!(!stream.has_pending_data());
+    }
+
     // =========================================================================
     // Stream Store ID Validation Tests
     // =========================================================================
@@ -1372,6 +1418,32 @@ mod tests {
         let mut store = StreamStore::new(true, 65535, DEFAULT_MAX_HEADER_LIST_SIZE);
 
         let result = store.get_or_create(0);
+        assert!(result.is_err());
+    }
+
+    #[test]
+    fn stream_store_rejects_stream_id_over_max() {
+        let mut store = StreamStore::new(true, 65535, DEFAULT_MAX_HEADER_LIST_SIZE);
+
+        let result = store.get_or_create(MAX_STREAM_ID + 1);
+        assert!(result.is_err());
+    }
+
+    #[test]
+    fn stream_store_client_rejects_client_initiated_stream() {
+        let mut store = StreamStore::new(true, 65535, DEFAULT_MAX_HEADER_LIST_SIZE);
+
+        // Client should not accept odd stream IDs from the server.
+        let result = store.get_or_create(1);
+        assert!(result.is_err());
+    }
+
+    #[test]
+    fn stream_store_server_rejects_server_initiated_stream() {
+        let mut store = StreamStore::new(false, 65535, DEFAULT_MAX_HEADER_LIST_SIZE);
+
+        // Server should not accept even stream IDs from the client.
+        let result = store.get_or_create(2);
         assert!(result.is_err());
     }
 
@@ -1401,6 +1473,16 @@ mod tests {
         // Trying to create stream 3 now should fail (ID already "used")
         let result = store.get_or_create(3);
         assert!(result.is_err());
+    }
+
+    #[test]
+    fn stream_store_allocate_stream_id_exhausts_at_max() {
+        let mut store = StreamStore::new(true, 65535, DEFAULT_MAX_HEADER_LIST_SIZE);
+        store.next_client_stream_id = MAX_STREAM_ID;
+
+        let id = store.allocate_stream_id().unwrap();
+        assert_eq!(id, MAX_STREAM_ID);
+        assert!(store.allocate_stream_id().is_err());
     }
 
     #[test]

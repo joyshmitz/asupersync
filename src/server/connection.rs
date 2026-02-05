@@ -3,8 +3,10 @@
 //! Provides [`ConnectionManager`] for tracking active connections with capacity limits,
 //! and [`ConnectionGuard`] for RAII-based connection deregistration.
 
+use crate::combinator::select::{Either, Select};
 use crate::server::shutdown::{ShutdownPhase, ShutdownSignal};
 use crate::sync::Notify;
+use crate::time::sleep_until;
 use std::collections::HashMap;
 use std::net::SocketAddr;
 use std::sync::atomic::{AtomicU64, Ordering};
@@ -220,23 +222,6 @@ impl ConnectionManager {
             return self.shutdown_signal.collect_stats(0, 0);
         }
 
-        // Spawn a deadline timer thread that notifies when the drain deadline
-        // expires. This ensures the loop below always wakes up to check the
-        // deadline, even if no connections close in the interim.
-        // ubs:ignore — fire-and-forget by design; Arc<Notify> keeps allocation alive,
-        // thread exits after sleep, spurious post-return notification is harmless
-        let _deadline_timer = self.shutdown_signal.drain_deadline().map(|deadline| {
-            let notify = self.all_closed.clone();
-            std::thread::spawn(move || {
-                let now = std::time::Instant::now();
-                if let Some(remaining) = deadline.checked_duration_since(now) {
-                    std::thread::sleep(remaining);
-                }
-                // notify_one stores a permit if no waiters yet, avoiding missed deadlines.
-                notify.notify_one();
-            })
-        });
-
         loop {
             if self.is_empty() {
                 // All connections drained gracefully
@@ -247,7 +232,7 @@ impl ConnectionManager {
 
             // Check if drain deadline has passed
             if let Some(deadline) = self.shutdown_signal.drain_deadline() {
-                if std::time::Instant::now() >= deadline {
+                if ShutdownSignal::current_time() >= deadline {
                     // Timeout expired — transition to force close
                     let remaining = self.active_count();
                     let drained = initial_count.saturating_sub(remaining);
@@ -267,7 +252,7 @@ impl ConnectionManager {
             }
 
             if let Some(deadline) = self.shutdown_signal.drain_deadline() {
-                if std::time::Instant::now() >= deadline {
+                if ShutdownSignal::current_time() >= deadline {
                     let remaining = self.active_count();
                     let drained = initial_count.saturating_sub(remaining);
                     let _ = self.shutdown_signal.begin_force_close();
@@ -275,7 +260,14 @@ impl ConnectionManager {
                 }
             }
 
-            notified.await;
+            if let Some(deadline) = self.shutdown_signal.drain_deadline() {
+                let sleep = sleep_until(deadline);
+                match Select::new(notified, sleep).await {
+                    Either::Left(()) | Either::Right(()) => {}
+                }
+            } else {
+                notified.await;
+            }
         }
     }
 }

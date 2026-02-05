@@ -381,7 +381,12 @@ impl Connection {
         }
 
         let stream_id = self.streams.allocate_stream_id()?;
-        let stream = self.streams.get_mut(stream_id).unwrap();
+        let stream = self.streams.get_mut(stream_id).ok_or_else(|| {
+            H2Error::connection(
+                ErrorCode::InternalError,
+                "allocated stream missing from store",
+            )
+        })?;
         stream.send_headers(end_stream)?;
 
         self.pending_ops.push_back(PendingOp::Headers {
@@ -615,7 +620,9 @@ impl Connection {
         stream_id: u32,
         end_stream: bool,
     ) -> Result<Option<ReceivedFrame>, H2Error> {
-        let stream = self.streams.get_mut(stream_id).unwrap();
+        let stream = self.streams.get_mut(stream_id).ok_or_else(|| {
+            H2Error::connection(ErrorCode::InternalError, "decode_headers missing stream")
+        })?;
         let fragments = stream.take_header_fragments();
 
         // Concatenate all fragments

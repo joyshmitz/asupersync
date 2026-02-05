@@ -5,11 +5,14 @@
 //! [`ShutdownController`] by adding drain-phase
 //! awareness and timeout semantics.
 
+use crate::cx::Cx;
 use crate::signal::{ShutdownController, ShutdownReceiver};
 use crate::sync::Notify;
+use crate::time::wall_now;
+use crate::types::Time;
 use std::sync::atomic::{AtomicU8, Ordering};
 use std::sync::Arc;
-use std::time::{Duration, Instant};
+use std::time::Duration;
 
 /// Phases of a graceful server shutdown.
 ///
@@ -69,8 +72,8 @@ struct SignalState {
     phase: AtomicU8,
     controller: ShutdownController,
     phase_notify: Notify,
-    drain_deadline: std::sync::Mutex<Option<Instant>>,
-    drain_start: std::sync::Mutex<Option<Instant>>,
+    drain_deadline: std::sync::Mutex<Option<Time>>,
+    drain_start: std::sync::Mutex<Option<Time>>,
 }
 
 /// Broadcast signal for server shutdown coordination.
@@ -102,6 +105,16 @@ pub struct ShutdownSignal {
 }
 
 impl ShutdownSignal {
+    pub(crate) fn current_time() -> Time {
+        Cx::current()
+            .and_then(|cx| cx.timer_driver())
+            .map_or_else(wall_now, |timer| timer.now())
+    }
+
+    fn duration_to_nanos(duration: Duration) -> u64 {
+        duration.as_nanos().min(u128::from(u64::MAX)) as u64
+    }
+
     /// Creates a new shutdown signal in the [`Running`](ShutdownPhase::Running) phase.
     #[must_use]
     pub fn new() -> Self {
@@ -142,7 +155,7 @@ impl ShutdownSignal {
 
     /// Returns the drain deadline, if one has been set.
     #[must_use]
-    pub fn drain_deadline(&self) -> Option<Instant> {
+    pub fn drain_deadline(&self) -> Option<Time> {
         self.state
             .drain_deadline
             .lock()
@@ -172,14 +185,15 @@ impl ShutdownSignal {
             Ordering::Acquire,
         );
         if result.is_ok() {
-            let now = Instant::now();
+            let now = Self::current_time();
+            let deadline = now.saturating_add_nanos(Self::duration_to_nanos(timeout));
             {
-                let mut deadline = self
+                let mut deadline_guard = self
                     .state
                     .drain_deadline
                     .lock()
                     .expect("drain_deadline lock poisoned");
-                *deadline = Some(now + timeout);
+                *deadline_guard = Some(deadline);
             }
             {
                 let mut start = self
@@ -235,9 +249,9 @@ impl ShutdownSignal {
         self.phase()
     }
 
-    /// Returns the instant when drain began, if applicable.
+    /// Returns the time when drain began, if applicable.
     #[must_use]
-    pub fn drain_start(&self) -> Option<Instant> {
+    pub fn drain_start(&self) -> Option<Time> {
         self.state
             .drain_start
             .lock()
@@ -258,9 +272,10 @@ impl ShutdownSignal {
     /// * `force_closed` — Number of connections force-closed after timeout.
     #[must_use]
     pub fn collect_stats(&self, drained: usize, force_closed: usize) -> ShutdownStats {
-        let duration = self
-            .drain_start()
-            .map_or(Duration::ZERO, |start| start.elapsed());
+        let duration = self.drain_start().map_or(Duration::ZERO, |start| {
+            let now = Self::current_time();
+            Duration::from_nanos(now.duration_since(start))
+        });
         ShutdownStats {
             drained,
             force_closed,
