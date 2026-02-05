@@ -519,20 +519,22 @@ impl Stream {
         if max_len == 0 {
             return None;
         }
-        if let Some(front) = self.pending_data.front_mut() {
+        if let Some(front) = self.pending_data.front() {
             if front.data.len() <= max_len {
                 // Take entire chunk
-                let pending = self.pending_data.pop_front().unwrap();
-                Some((pending.data, pending.end_stream))
-            } else {
-                // Take partial chunk
-                let data = front.data.slice(..max_len);
-                front.data = front.data.slice(max_len..);
-                Some((data, false))
+                let pending = self.pending_data.pop_front()?;
+                return Some((pending.data, pending.end_stream));
             }
-        } else {
-            None
         }
+
+        if let Some(front) = self.pending_data.front_mut() {
+            // Take partial chunk
+            let data = front.data.slice(..max_len);
+            front.data = front.data.slice(max_len..);
+            return Some((data, false));
+        }
+
+        None
     }
 }
 

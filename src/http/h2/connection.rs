@@ -507,6 +507,13 @@ impl Connection {
         let stream = self.streams.get_or_create(frame.stream_id)?;
         let payload_len =
             u32::try_from(frame.data.len()).map_err(|_| H2Error::frame_size("data too large"))?;
+        let window_delta = i32::try_from(payload_len)
+            .map_err(|_| H2Error::flow_control("data too large for window"))?;
+        if window_delta > self.recv_window {
+            return Err(H2Error::flow_control(
+                "data exceeds connection flow control window",
+            ));
+        }
         stream.recv_data(payload_len, frame.end_stream)?;
 
         // Auto stream-level WINDOW_UPDATE when recv window drops below 50%.
@@ -524,8 +531,6 @@ impl Connection {
         }
 
         // Update connection-level window
-        let window_delta = i32::try_from(payload_len)
-            .map_err(|_| H2Error::flow_control("data too large for window"))?;
         self.recv_window -= window_delta;
 
         let low_watermark = DEFAULT_CONNECTION_WINDOW_SIZE / 2;
@@ -1139,6 +1144,23 @@ mod tests {
             found_connection_update,
             "expected connection-level WINDOW_UPDATE"
         );
+    }
+
+    #[test]
+    fn data_frame_exceeding_connection_window_errors() {
+        let mut conn = Connection::server(Settings::default());
+        conn.recv_window = 1;
+
+        let headers = Frame::Headers(HeadersFrame::new(1, Bytes::new(), false, true));
+        conn.process_frame(headers).expect("process headers frame");
+
+        let data = Bytes::from(vec![0_u8; 2]);
+        let frame = Frame::Data(DataFrame::new(1, data, false));
+        let result = conn.process_frame(frame);
+
+        assert!(result.is_err());
+        let err = result.err().expect("flow control error");
+        assert_eq!(err.code, ErrorCode::FlowControlError);
     }
 
     #[test]
