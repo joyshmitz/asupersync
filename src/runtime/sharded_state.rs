@@ -539,7 +539,7 @@ mod lock_order {
     use std::cell::RefCell;
 
     thread_local! {
-        static HELD: RefCell<Vec<LockShard>> = RefCell::new(Vec::new());
+        static HELD: RefCell<Vec<LockShard>> = const { RefCell::new(Vec::new()) };
     }
 
     pub fn before_lock(next: LockShard) {
@@ -548,9 +548,7 @@ mod lock_order {
             if let Some(last) = held.last() {
                 debug_assert!(
                     last.order() < next.order(),
-                    "lock order violation: {:?} before {:?}",
-                    last,
-                    next
+                    "lock order violation: {last:?} before {next:?}"
                 );
             }
         });
