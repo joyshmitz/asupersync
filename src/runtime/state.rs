@@ -662,6 +662,51 @@ impl RuntimeState {
         self.regions.get_mut(region_id.arena_index())
     }
 
+    /// Returns an iterator over all region records.
+    pub fn regions_iter(&self) -> impl Iterator<Item = (ArenaIndex, &RegionRecord)> {
+        self.regions.iter()
+    }
+
+    /// Returns the number of regions in the table.
+    #[must_use]
+    pub fn regions_len(&self) -> usize {
+        self.regions.len()
+    }
+
+    /// Returns `true` if there are no regions.
+    #[must_use]
+    pub fn regions_is_empty(&self) -> bool {
+        self.regions.is_empty()
+    }
+
+    /// Returns a shared reference to an obligation record by ID.
+    #[must_use]
+    pub fn obligation(&self, obligation_id: ObligationId) -> Option<&ObligationRecord> {
+        self.obligations.get(obligation_id.arena_index())
+    }
+
+    /// Returns a mutable reference to an obligation record by ID.
+    pub fn obligation_mut(&mut self, obligation_id: ObligationId) -> Option<&mut ObligationRecord> {
+        self.obligations.get_mut(obligation_id.arena_index())
+    }
+
+    /// Returns an iterator over all obligation records.
+    pub fn obligations_iter(&self) -> impl Iterator<Item = (ArenaIndex, &ObligationRecord)> {
+        self.obligations.iter()
+    }
+
+    /// Returns the number of obligations in the table.
+    #[must_use]
+    pub fn obligations_len(&self) -> usize {
+        self.obligations.len()
+    }
+
+    /// Returns `true` if there are no obligations.
+    #[must_use]
+    pub fn obligations_is_empty(&self) -> bool {
+        self.obligations.is_empty()
+    }
+
     /// Returns `true` if this runtime has an I/O driver.
     #[must_use]
     pub fn has_io_driver(&self) -> bool {
@@ -676,8 +721,7 @@ impl RuntimeState {
     pub fn snapshot(&self) -> RuntimeSnapshot {
         let mut obligations_by_task: HashMap<TaskId, Vec<ObligationId>> = HashMap::new();
         let obligations: Vec<ObligationSnapshot> = self
-            .obligations
-            .iter()
+            .obligations_iter()
             .map(|(_, record)| {
                 obligations_by_task
                     .entry(record.holder)
@@ -688,8 +732,7 @@ impl RuntimeState {
             .collect();
 
         let regions: Vec<RegionSnapshot> = self
-            .regions
-            .iter()
+            .regions_iter()
             .map(|(_, record)| RegionSnapshot::from_record(record))
             .collect();
 
@@ -1471,8 +1514,7 @@ impl RuntimeState {
     /// Counts live regions.
     #[must_use]
     pub fn live_region_count(&self) -> usize {
-        self.regions
-            .iter()
+        self.regions_iter()
             .filter(|(_, r)| !r.state().is_terminal())
             .count()
     }
@@ -1480,8 +1522,7 @@ impl RuntimeState {
     /// Counts pending obligations.
     #[must_use]
     pub fn pending_obligation_count(&self) -> usize {
-        self.obligations
-            .iter()
+        self.obligations_iter()
             .filter(|(_, o)| o.is_pending())
             .count()
     }
