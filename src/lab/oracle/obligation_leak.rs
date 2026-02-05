@@ -120,7 +120,7 @@ impl ObligationLeakOracle {
     pub fn snapshot_from_state(&mut self, state: &RuntimeState, now: Time) {
         self.reset();
 
-        for (_, obligation) in state.obligations.iter() {
+        for (_, obligation) in state.obligations_iter() {
             self.obligations.insert(
                 obligation.id,
                 ObligationSnapshot {
@@ -132,7 +132,7 @@ impl ObligationLeakOracle {
             );
         }
 
-        for (_, region) in state.regions.iter() {
+        for (_, region) in state.regions_iter() {
             if region.state().is_terminal() {
                 self.region_closes.push((region.id, now));
             }
@@ -182,7 +182,6 @@ impl ObligationLeakOracle {
 #[cfg(test)]
 mod tests {
     use super::*;
-    use crate::record::ObligationRecord;
     use crate::record::TaskRecord;
     use crate::types::{Budget, ObligationId, RegionId, TaskId};
     use crate::util::ArenaIndex;
@@ -227,15 +226,9 @@ mod tests {
         let task_id = TaskId::from_arena(task_idx);
         state.task_mut(task_id).unwrap().id = task_id;
 
-        let obl_idx = state.obligations.insert(ObligationRecord::new(
-            ObligationId::from_arena(ArenaIndex::new(0, 0)),
-            ObligationKind::Ack,
-            task_id,
-            root,
-            Time::ZERO,
-        ));
-        let obl_id = ObligationId::from_arena(obl_idx);
-        state.obligations.get_mut(obl_idx).unwrap().id = obl_id;
+        let obl_id = state
+            .create_obligation(ObligationKind::Ack, task_id, root, None)
+            .expect("create obligation");
 
         let mut oracle = ObligationLeakOracle::new();
         oracle.snapshot_from_state(&state, Time::ZERO);

@@ -309,7 +309,7 @@ impl StateSnapshot {
         let mut pending_leases: u32 = 0;
         let mut pending_io_ops: u32 = 0;
 
-        for (_, obligation) in state.obligations.iter() {
+        for (_, obligation) in state.obligations_iter() {
             if !obligation.is_pending() {
                 continue;
             }
@@ -336,7 +336,7 @@ impl StateSnapshot {
         // -- Region scan: one pass for draining count. --
 
         let mut draining_regions: u32 = 0;
-        for (_, region) in state.regions.iter() {
+        for (_, region) in state.regions_iter() {
             match region.state() {
                 crate::record::region::RegionState::Draining
                 | crate::record::region::RegionState::Finalizing => {

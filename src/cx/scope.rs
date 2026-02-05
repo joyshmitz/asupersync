@@ -372,9 +372,7 @@ impl<P: Policy> Scope<'_, P> {
                 fn drop(&mut self) {
                     if !self.committed {
                         // Rollback task creation
-                        if let Some(region) =
-                            self.state.regions.get_mut(self.region_id.arena_index())
-                        {
+                        if let Some(region) = self.state.region_mut(self.region_id) {
                             region.remove_task(self.task_id);
                         }
                         self.state.remove_task(self.task_id);
@@ -580,9 +578,7 @@ impl<P: Policy> Scope<'_, P> {
                 fn drop(&mut self) {
                     if !self.committed {
                         // Rollback task creation
-                        if let Some(region) =
-                            self.state.regions.get_mut(self.region_id.arena_index())
-                        {
+                        if let Some(region) = self.state.region_mut(self.region_id) {
                             region.remove_task(self.task_id);
                         }
                         self.state.remove_task(self.task_id);
@@ -653,7 +649,7 @@ impl<P: Policy> Scope<'_, P> {
 
         // No local scheduler available: rollback to avoid a permanently parked task.
         let _ = crate::runtime::local::remove_local_task(task_id);
-        if let Some(region) = state.regions.get(self.region.arena_index()) {
+        if let Some(region) = state.region(self.region) {
             region.remove_task(task_id);
         }
         state.remove_task(task_id);
@@ -1008,7 +1004,7 @@ impl<P: Policy> Scope<'_, P> {
         }
 
         // Add task to the owning region
-        if let Some(region) = state.regions.get(self.region.arena_index()) {
+        if let Some(region) = state.region(self.region) {
             if let Err(err) = region.add_task(task_id) {
                 // Rollback task creation
                 state.remove_task(task_id);
@@ -1251,7 +1247,7 @@ mod tests {
 
         // Task should not exist
         assert!(state.tasks_is_empty());
-        let region_record = state.regions.get(region.arena_index()).unwrap();
+        let region_record = state.region(region).unwrap();
         assert!(region_record.task_ids().is_empty());
     }
 
@@ -1316,7 +1312,7 @@ mod tests {
         let (handle, _stored) = scope.spawn(&mut state, &cx, |_| async { 42_i32 }).unwrap();
 
         // Check region has the task
-        let region_record = state.regions.get(region.arena_index()).unwrap();
+        let region_record = state.region(region).unwrap();
         assert!(region_record.task_ids().contains(&handle.task_id()));
     }
 
@@ -1337,7 +1333,7 @@ mod tests {
         assert_ne!(handle1.task_id(), handle3.task_id());
 
         // All tasks should be in the region
-        let region_record = state.regions.get(region.arena_index()).unwrap();
+        let region_record = state.region(region).unwrap();
         assert!(region_record.task_ids().contains(&handle1.task_id()));
         assert!(region_record.task_ids().contains(&handle2.task_id()));
         assert!(region_record.task_ids().contains(&handle3.task_id()));
@@ -1351,7 +1347,7 @@ mod tests {
         let scope = test_scope(region, Budget::INFINITE);
 
         // Transition region to Closing
-        let region_record = state.regions.get_mut(region.arena_index()).expect("region");
+        let region_record = state.region_mut(region).expect("region");
         region_record.begin_close(None);
 
         // Attempt to spawn should fail

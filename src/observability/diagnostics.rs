@@ -122,7 +122,7 @@ impl Diagnostics {
 
         // Held obligations in this region.
         let mut held = Vec::new();
-        for (_, ob) in self.state.obligations.iter() {
+        for (_, ob) in self.state.obligations_iter() {
             if ob.region == region_id && ob.state == ObligationState::Reserved {
                 held.push((ob.id, ob.holder, ob.kind));
             }
@@ -274,7 +274,7 @@ impl Diagnostics {
         let now = self.now();
         let mut leaks = Vec::new();
 
-        for (_, ob) in self.state.obligations.iter() {
+        for (_, ob) in self.state.obligations_iter() {
             if ob.state == ObligationState::Reserved {
                 let age = std::time::Duration::from_nanos(now.duration_since(ob.reserved_at));
                 leaks.push(ObligationLeak {

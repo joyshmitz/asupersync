@@ -785,7 +785,7 @@ impl LabRuntime {
     fn obligation_leaks(&self) -> Vec<ObligationLeak> {
         let mut leaks = Vec::new();
 
-        for (_, obligation) in self.state.obligations.iter() {
+        for (_, obligation) in self.state.obligations_iter() {
             if !obligation.is_pending() {
                 continue;
             }
@@ -796,8 +796,7 @@ impl LabRuntime {
                 .is_none_or(|t| t.state.is_terminal());
             let region_closed = self
                 .state
-                .regions
-                .get(obligation.region.arena_index())
+                .region(obligation.region)
                 .is_none_or(|r| r.state().is_terminal());
 
             if holder_terminal || region_closed {
@@ -822,7 +821,7 @@ impl LabRuntime {
 
     fn quiescence_violations(&self) -> Vec<InvariantViolation> {
         let mut violations = Vec::new();
-        for (_, region) in self.state.regions.iter() {
+        for (_, region) in self.state.regions_iter() {
             if region.state().is_terminal() {
                 // Check if any children or tasks are NOT terminal
                 let live_tasks = region
@@ -832,8 +831,7 @@ impl LabRuntime {
 
                 let live_children = region.child_ids().iter().any(|&rid| {
                     self.state
-                        .regions
-                        .get(rid.arena_index())
+                        .region(rid)
                         .is_some_and(|r| !r.state().is_terminal())
                 });
 
@@ -860,7 +858,7 @@ impl LabRuntime {
             }
 
             let mut held = Vec::new();
-            for (_, obligation) in self.state.obligations.iter() {
+            for (_, obligation) in self.state.obligations_iter() {
                 if obligation.is_pending() && obligation.holder == task.id {
                     held.push(obligation.id);
                 }
@@ -903,7 +901,7 @@ impl LabRuntime {
 
             let mut held_kinds = Vec::new();
             for oid in &held {
-                for (_, obligation) in self.state.obligations.iter() {
+                for (_, obligation) in self.state.obligations_iter() {
                     if obligation.id == *oid {
                         held_kinds.push((obligation.id, obligation.kind));
                         break;
@@ -1222,10 +1220,10 @@ where
 mod tests {
     use super::*;
     use crate::record::TaskRecord;
-    use crate::record::{ObligationAbortReason, ObligationKind, ObligationRecord};
+    use crate::record::{ObligationAbortReason, ObligationKind};
     use crate::runtime::deadline_monitor::{AdaptiveDeadlineConfig, WarningReason};
     use crate::runtime::reactor::{Event, Interest};
-    use crate::types::{Budget, CxInner, ObligationId, Outcome, TaskId};
+    use crate::types::{Budget, CxInner, Outcome, TaskId};
     use crate::util::ArenaIndex;
     use std::sync::{Arc, Mutex, RwLock};
     use std::task::{Wake, Waker};
@@ -1503,15 +1501,10 @@ mod tests {
         runtime.state.task_mut(task_id).unwrap().id = task_id;
 
         // Create a pending obligation held by that task.
-        let obl_idx = runtime.state.obligations.insert(ObligationRecord::new(
-            ObligationId::from_arena(ArenaIndex::new(0, 0)),
-            ObligationKind::SendPermit,
-            task_id,
-            root,
-            runtime.state.now,
-        ));
-        let obl_id = ObligationId::from_arena(obl_idx);
-        runtime.state.obligations.get_mut(obl_idx).unwrap().id = obl_id;
+        let obl_id = runtime
+            .state
+            .create_obligation(ObligationKind::SendPermit, task_id, root, None)
+            .expect("create obligation");
 
         for _ in 0..4 {
             runtime.step();
@@ -1565,15 +1558,10 @@ mod tests {
         let task_id = TaskId::from_arena(task_idx);
         runtime.state.task_mut(task_id).unwrap().id = task_id;
 
-        let obl_idx = runtime.state.obligations.insert(ObligationRecord::new(
-            ObligationId::from_arena(ArenaIndex::new(0, 0)),
-            ObligationKind::SendPermit,
-            task_id,
-            root,
-            runtime.state.now,
-        ));
-        let obl_id = ObligationId::from_arena(obl_idx);
-        runtime.state.obligations.get_mut(obl_idx).unwrap().id = obl_id;
+        let _ = runtime
+            .state
+            .create_obligation(ObligationKind::SendPermit, task_id, root, None)
+            .expect("create obligation");
 
         // Run enough steps to exceed threshold and trigger panic.
         for _ in 0..3 {
@@ -1595,15 +1583,10 @@ mod tests {
         let task_id = TaskId::from_arena(task_idx);
         runtime.state.task_mut(task_id).unwrap().id = task_id;
 
-        let obl_idx = runtime.state.obligations.insert(ObligationRecord::new(
-            ObligationId::from_arena(ArenaIndex::new(0, 0)),
-            ObligationKind::SendPermit,
-            task_id,
-            root,
-            runtime.state.now,
-        ));
-        let obl_id = ObligationId::from_arena(obl_idx);
-        runtime.state.obligations.get_mut(obl_idx).unwrap().id = obl_id;
+        let obl_id = runtime
+            .state
+            .create_obligation(ObligationKind::SendPermit, task_id, root, None)
+            .expect("create obligation");
 
         runtime
             .state
@@ -1653,22 +1636,14 @@ mod tests {
         let task_id = TaskId::from_arena(task_idx);
         runtime.state.task_mut(task_id).unwrap().id = task_id;
 
-        let obl_idx = runtime.state.obligations.insert(ObligationRecord::new(
-            ObligationId::from_arena(ArenaIndex::new(0, 0)),
-            ObligationKind::Ack,
-            task_id,
-            root,
-            runtime.state.now,
-        ));
-        let obl_id = ObligationId::from_arena(obl_idx);
-        runtime.state.obligations.get_mut(obl_idx).unwrap().id = obl_id;
-
+        let obl_id = runtime
+            .state
+            .create_obligation(ObligationKind::Ack, task_id, root, None)
+            .expect("create obligation");
         runtime
             .state
-            .obligations
-            .get_mut(obl_idx)
-            .unwrap()
-            .commit(runtime.state.now);
+            .commit_obligation(obl_id)
+            .expect("commit obligation");
 
         runtime
             .state
