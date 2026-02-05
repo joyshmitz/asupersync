@@ -130,6 +130,7 @@ pub mod reactor;
 pub mod region_heap;
 pub mod region_table;
 pub mod scheduler;
+pub mod sharded_state;
 /// Async wrapper for blocking pool operations.
 pub mod spawn_blocking;
 pub mod state;
@@ -164,6 +165,7 @@ pub use reactor::{Event, Events, Interest, LabReactor, Reactor, Registration, So
 pub use region_heap::{global_alloc_count, HeapIndex, HeapRef, HeapStats, RegionHeap};
 pub use region_table::RegionTable;
 pub use scheduler::Scheduler;
+pub use sharded_state::{ShardedConfig, ShardedState, ShardGuard};
 pub use spawn_blocking::{spawn_blocking, spawn_blocking_io};
 pub use state::{RegionCreateError, RuntimeSnapshot, RuntimeState, SpawnError};
 pub use stored_task::StoredTask;

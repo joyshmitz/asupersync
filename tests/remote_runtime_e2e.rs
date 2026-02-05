@@ -30,7 +30,6 @@
 #[macro_use]
 mod common;
 
-use common::*;
 use asupersync::lab::network::{
     DistributedHarness, Fault, FaultScript, HarnessFault, HarnessTraceEvent, HarnessTraceKind,
     NetworkConditions, NetworkConfig, NodeEvent,
@@ -40,6 +39,7 @@ use asupersync::remote::{
     SagaState,
 };
 use asupersync::types::Time;
+use common::*;
 use std::time::Duration;
 
 // ---------------------------------------------------------------------------
@@ -80,6 +80,61 @@ fn harness_three(
     let b = h.add_node("relay");
     let c = h.add_node("target");
     (h, a, b, c)
+}
+
+fn run_replay_scenario(seed: u64, conditions: NetworkConditions) -> Vec<String> {
+    let mut h = DistributedHarness::new(make_config(seed, conditions));
+    let a = h.add_node("origin");
+    let b = h.add_node("worker");
+
+    for i in 0..5u64 {
+        let tid = RemoteTaskId::from_raw(11_000 + i);
+        h.inject_spawn(&a, &b, tid);
+    }
+    h.run_for(Duration::from_millis(500));
+
+    h.trace()
+        .iter()
+        .map(|e| format!("{:?}:{:?}", e.time, e.kind))
+        .collect()
+}
+
+fn run_replay_with_faults(seed: u64, conditions: NetworkConditions) -> Vec<String> {
+    let mut h = DistributedHarness::new(make_config(seed, conditions));
+    let a = h.add_node("origin");
+    let b = h.add_node("worker");
+
+    let host_a = h.node(&a).unwrap().host_id;
+    let host_b = h.node(&b).unwrap().host_id;
+
+    h.set_fault_script(
+        FaultScript::new()
+            .at(
+                Duration::from_millis(50),
+                HarnessFault::Network(Fault::Partition {
+                    hosts_a: vec![host_a],
+                    hosts_b: vec![host_b],
+                }),
+            )
+            .at(
+                Duration::from_millis(150),
+                HarnessFault::Network(Fault::Heal {
+                    hosts_a: vec![host_a],
+                    hosts_b: vec![host_b],
+                }),
+            ),
+    );
+
+    for i in 0..3u64 {
+        let tid = RemoteTaskId::from_raw(11_100 + i);
+        h.inject_spawn(&a, &b, tid);
+    }
+    h.run_for(Duration::from_millis(400));
+
+    h.trace()
+        .iter()
+        .map(|e| format!("{:?}:{:?}", e.time, e.kind))
+        .collect()
 }
 
 /// Count trace events matching a predicate.
@@ -347,7 +402,11 @@ fn duplicate_spawn_returns_cached_ack() {
 fn duplicate_after_completion_resends_result() {
     let seed = 49;
     let conditions = NetworkConditions::local();
-    init_test("duplicate_after_completion_resends_result", seed, &conditions);
+    init_test(
+        "duplicate_after_completion_resends_result",
+        seed,
+        &conditions,
+    );
     let (mut h, a, b) = harness_two(seed, conditions);
     let tid = RemoteTaskId::from_raw(5100);
 
@@ -401,7 +460,11 @@ fn idempotency_store_conflict_detection() {
 fn causal_clocks_advance_on_message_exchange() {
     let seed = 50;
     let conditions = NetworkConditions::local();
-    init_test("causal_clocks_advance_on_message_exchange", seed, &conditions);
+    init_test(
+        "causal_clocks_advance_on_message_exchange",
+        seed,
+        &conditions,
+    );
     let (mut h, a, b) = harness_two(seed, conditions);
     let tid = RemoteTaskId::from_raw(6000);
 
@@ -657,7 +720,11 @@ fn partition_blocks_ack_heal_recovers() {
 fn cancel_lost_to_partition_retransmit_after_heal() {
     let seed = 57;
     let conditions = NetworkConditions::local();
-    init_test("cancel_lost_to_partition_retransmit_after_heal", seed, &conditions);
+    init_test(
+        "cancel_lost_to_partition_retransmit_after_heal",
+        seed,
+        &conditions,
+    );
     let (mut h, a, b) = harness_two(seed, conditions);
     let host_a = h.node(&a).unwrap().host_id;
     let host_b = h.node(&b).unwrap().host_id;
@@ -709,7 +776,11 @@ fn cancel_lost_to_partition_retransmit_after_heal() {
 fn crash_drops_all_tasks_restart_accepts_new() {
     let seed = 58;
     let conditions = NetworkConditions::local();
-    init_test("crash_drops_all_tasks_restart_accepts_new", seed, &conditions);
+    init_test(
+        "crash_drops_all_tasks_restart_accepts_new",
+        seed,
+        &conditions,
+    );
     let (mut h, a, b) = harness_two(seed, conditions);
     let t1 = RemoteTaskId::from_raw(10_000);
 
@@ -753,7 +824,11 @@ fn crash_drops_all_tasks_restart_accepts_new() {
 fn messages_to_crashed_node_are_silently_dropped() {
     let seed = 59;
     let conditions = NetworkConditions::local();
-    init_test("messages_to_crashed_node_are_silently_dropped", seed, &conditions);
+    init_test(
+        "messages_to_crashed_node_are_silently_dropped",
+        seed,
+        &conditions,
+    );
     let (mut h, a, b) = harness_two(seed, conditions);
     let tid = RemoteTaskId::from_raw(10_100);
 
@@ -782,27 +857,13 @@ fn messages_to_crashed_node_are_silently_dropped() {
 fn deterministic_replay_same_seed_identical_trace() {
     let seed = 0xCAFE;
     let conditions = NetworkConditions::wan();
-    init_test("deterministic_replay_same_seed_identical_trace", seed, &conditions);
-
-    fn run_scenario(seed: u64, conditions: NetworkConditions) -> Vec<String> {
-        let mut h = DistributedHarness::new(make_config(seed, conditions));
-        let a = h.add_node("origin");
-        let b = h.add_node("worker");
-
-        for i in 0..5u64 {
-            let tid = RemoteTaskId::from_raw(11_000 + i);
-            h.inject_spawn(&a, &b, tid);
-        }
-        h.run_for(Duration::from_millis(500));
-
-        h.trace()
-            .iter()
-            .map(|e| format!("{:?}:{:?}", e.time, e.kind))
-            .collect()
-    }
-
-    let run1 = run_scenario(seed, conditions.clone());
-    let run2 = run_scenario(seed, conditions);
+    init_test(
+        "deterministic_replay_same_seed_identical_trace",
+        seed,
+        &conditions,
+    );
+    let run1 = run_replay_scenario(seed, conditions.clone());
+    let run2 = run_replay_scenario(seed, conditions);
     assert_eq!(run1, run2, "same seed must produce identical trace");
     assert!(
         !run1.is_empty(),
@@ -815,47 +876,8 @@ fn deterministic_replay_with_faults() {
     let seed = 0xBEEF;
     let conditions = NetworkConditions::lan();
     init_test("deterministic_replay_with_faults", seed, &conditions);
-
-    fn run_with_faults(seed: u64, conditions: NetworkConditions) -> Vec<String> {
-        let mut h = DistributedHarness::new(make_config(seed, conditions));
-        let a = h.add_node("origin");
-        let b = h.add_node("worker");
-
-        let host_a = h.node(&a).unwrap().host_id;
-        let host_b = h.node(&b).unwrap().host_id;
-
-        h.set_fault_script(
-            FaultScript::new()
-                .at(
-                    Duration::from_millis(50),
-                    HarnessFault::Network(Fault::Partition {
-                        hosts_a: vec![host_a],
-                        hosts_b: vec![host_b],
-                    }),
-                )
-                .at(
-                    Duration::from_millis(150),
-                    HarnessFault::Network(Fault::Heal {
-                        hosts_a: vec![host_a],
-                        hosts_b: vec![host_b],
-                    }),
-                ),
-        );
-
-        for i in 0..3u64 {
-            let tid = RemoteTaskId::from_raw(11_100 + i);
-            h.inject_spawn(&a, &b, tid);
-        }
-        h.run_for(Duration::from_millis(400));
-
-        h.trace()
-            .iter()
-            .map(|e| format!("{:?}:{:?}", e.time, e.kind))
-            .collect()
-    }
-
-    let run1 = run_with_faults(seed, conditions.clone());
-    let run2 = run_with_faults(seed, conditions);
+    let run1 = run_replay_with_faults(seed, conditions.clone());
+    let run2 = run_replay_with_faults(seed, conditions);
     assert_eq!(run1, run2);
 }
 
@@ -915,7 +937,11 @@ fn saga_failure_triggers_lifo_compensation() {
 fn saga_first_step_failure_no_compensations() {
     let seed = 0;
     let conditions = NetworkConditions::ideal();
-    init_test("saga_first_step_failure_no_compensations", seed, &conditions);
+    init_test(
+        "saga_first_step_failure_no_compensations",
+        seed,
+        &conditions,
+    );
     let mut saga = Saga::new();
 
     let err = saga
@@ -1021,7 +1047,11 @@ fn stress_wan_conditions_all_tasks_resolve() {
 fn stress_congested_network_eventual_completion() {
     let seed = 62;
     let conditions = NetworkConditions::congested();
-    init_test("stress_congested_network_eventual_completion", seed, &conditions);
+    init_test(
+        "stress_congested_network_eventual_completion",
+        seed,
+        &conditions,
+    );
     let (mut h, a, b) = harness_two(seed, conditions);
     let n = 15u64;
 
