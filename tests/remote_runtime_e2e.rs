@@ -707,7 +707,10 @@ fn cancel_lost_to_partition_retransmit_after_heal() {
 
 #[test]
 fn crash_drops_all_tasks_restart_accepts_new() {
-    let (mut h, a, b) = harness_two(58, NetworkConditions::local());
+    let seed = 58;
+    let conditions = NetworkConditions::local();
+    init_test("crash_drops_all_tasks_restart_accepts_new", seed, &conditions);
+    let (mut h, a, b) = harness_two(seed, conditions);
     let t1 = RemoteTaskId::from_raw(10_000);
 
     h.inject_spawn(&a, &b, t1);
@@ -748,7 +751,10 @@ fn crash_drops_all_tasks_restart_accepts_new() {
 
 #[test]
 fn messages_to_crashed_node_are_silently_dropped() {
-    let (mut h, a, b) = harness_two(59, NetworkConditions::local());
+    let seed = 59;
+    let conditions = NetworkConditions::local();
+    init_test("messages_to_crashed_node_are_silently_dropped", seed, &conditions);
+    let (mut h, a, b) = harness_two(seed, conditions);
     let tid = RemoteTaskId::from_raw(10_100);
 
     // Crash B immediately.
@@ -774,8 +780,12 @@ fn messages_to_crashed_node_are_silently_dropped() {
 
 #[test]
 fn deterministic_replay_same_seed_identical_trace() {
-    fn run_scenario(seed: u64) -> Vec<String> {
-        let mut h = DistributedHarness::new(make_config(seed, NetworkConditions::wan()));
+    let seed = 0xCAFE;
+    let conditions = NetworkConditions::wan();
+    init_test("deterministic_replay_same_seed_identical_trace", seed, &conditions);
+
+    fn run_scenario(seed: u64, conditions: NetworkConditions) -> Vec<String> {
+        let mut h = DistributedHarness::new(make_config(seed, conditions));
         let a = h.add_node("origin");
         let b = h.add_node("worker");
 
@@ -791,8 +801,8 @@ fn deterministic_replay_same_seed_identical_trace() {
             .collect()
     }
 
-    let run1 = run_scenario(0xCAFE);
-    let run2 = run_scenario(0xCAFE);
+    let run1 = run_scenario(seed, conditions.clone());
+    let run2 = run_scenario(seed, conditions);
     assert_eq!(run1, run2, "same seed must produce identical trace");
     assert!(
         !run1.is_empty(),
@@ -802,8 +812,12 @@ fn deterministic_replay_same_seed_identical_trace() {
 
 #[test]
 fn deterministic_replay_with_faults() {
-    fn run_with_faults(seed: u64) -> Vec<String> {
-        let mut h = DistributedHarness::new(make_config(seed, NetworkConditions::lan()));
+    let seed = 0xBEEF;
+    let conditions = NetworkConditions::lan();
+    init_test("deterministic_replay_with_faults", seed, &conditions);
+
+    fn run_with_faults(seed: u64, conditions: NetworkConditions) -> Vec<String> {
+        let mut h = DistributedHarness::new(make_config(seed, conditions));
         let a = h.add_node("origin");
         let b = h.add_node("worker");
 
@@ -840,8 +854,8 @@ fn deterministic_replay_with_faults() {
             .collect()
     }
 
-    let run1 = run_with_faults(0xBEEF);
-    let run2 = run_with_faults(0xBEEF);
+    let run1 = run_with_faults(seed, conditions.clone());
+    let run2 = run_with_faults(seed, conditions);
     assert_eq!(run1, run2);
 }
 
@@ -851,6 +865,9 @@ fn deterministic_replay_with_faults() {
 
 #[test]
 fn saga_all_steps_succeed() {
+    let seed = 0;
+    let conditions = NetworkConditions::ideal();
+    init_test("saga_all_steps_succeed", seed, &conditions);
     let mut saga = Saga::new();
 
     saga.step("reserve-slot", || Ok(1), || "unreserve-slot".into())
@@ -868,6 +885,9 @@ fn saga_all_steps_succeed() {
 
 #[test]
 fn saga_failure_triggers_lifo_compensation() {
+    let seed = 0;
+    let conditions = NetworkConditions::ideal();
+    init_test("saga_failure_triggers_lifo_compensation", seed, &conditions);
     let mut saga = Saga::new();
 
     saga.step("step-a", || Ok(()), || "undo-a".into())
@@ -893,6 +913,9 @@ fn saga_failure_triggers_lifo_compensation() {
 
 #[test]
 fn saga_first_step_failure_no_compensations() {
+    let seed = 0;
+    let conditions = NetworkConditions::ideal();
+    init_test("saga_first_step_failure_no_compensations", seed, &conditions);
     let mut saga = Saga::new();
 
     let err = saga
@@ -916,7 +939,10 @@ fn saga_first_step_failure_no_compensations() {
 
 #[test]
 fn stress_mixed_workload_lossy_network() {
-    let (mut h, a, b) = harness_two(60, NetworkConditions::lossy());
+    let seed = 60;
+    let conditions = NetworkConditions::lossy();
+    init_test("stress_mixed_workload_lossy_network", seed, &conditions);
+    let (mut h, a, b) = harness_two(seed, conditions);
     let n_spawn = 20u64;
 
     // Spawn a batch of tasks.
