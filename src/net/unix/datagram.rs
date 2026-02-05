@@ -38,6 +38,7 @@ use crate::net::unix::stream::UCred;
 use crate::runtime::io_driver::IoRegistration;
 use crate::runtime::reactor::Interest;
 use std::io;
+use std::os::unix::ffi::OsStrExt;
 use std::os::unix::net::{self, SocketAddr};
 use std::path::{Path, PathBuf};
 use std::task::{Context, Poll};
@@ -660,6 +661,63 @@ impl UnixDatagram {
         .await
     }
 
+    fn socket_addr_from_storage(
+        storage: &libc::sockaddr_storage,
+        addr_len: libc::socklen_t,
+    ) -> io::Result<SocketAddr> {
+        let family_size = std::mem::size_of::<libc::sa_family_t>();
+        let len = addr_len as usize;
+        if len < family_size {
+            return Err(io::Error::new(
+                io::ErrorKind::InvalidData,
+                "unix sockaddr length too short",
+            ));
+        }
+
+        // SAFETY: sockaddr_storage is large enough for sockaddr_un.
+        let addr_un = unsafe { &*(storage as *const _ as *const libc::sockaddr_un) };
+        if addr_un.sun_family as libc::c_int != libc::AF_UNIX {
+            return Err(io::Error::new(
+                io::ErrorKind::InvalidData,
+                "non-unix sockaddr in unix datagram",
+            ));
+        }
+
+        let path_len = len.saturating_sub(family_size);
+        let path_bytes =
+            unsafe { std::slice::from_raw_parts(addr_un.sun_path.as_ptr() as *const u8, path_len) };
+
+        if path_bytes.is_empty() {
+            let empty = std::ffi::OsStr::from_bytes(&[]);
+            return SocketAddr::from_pathname(empty)
+                .map_err(|e| io::Error::new(io::ErrorKind::InvalidData, e));
+        }
+
+        if path_bytes[0] == 0 {
+            #[cfg(target_os = "linux")]
+            {
+                return <SocketAddr as std::os::linux::net::SocketAddrExt>::from_abstract_name(
+                    &path_bytes[1..],
+                )
+                .map_err(|e| io::Error::new(io::ErrorKind::InvalidData, e));
+            }
+            #[cfg(not(target_os = "linux"))]
+            {
+                return Err(io::Error::new(
+                    io::ErrorKind::InvalidData,
+                    "abstract unix address unsupported",
+                ));
+            }
+        }
+
+        let nul = path_bytes
+            .iter()
+            .position(|&b| b == 0)
+            .unwrap_or(path_bytes.len());
+        let path = std::ffi::OsStr::from_bytes(&path_bytes[..nul]);
+        SocketAddr::from_pathname(path).map_err(|e| io::Error::new(io::ErrorKind::InvalidData, e))
+    }
+
     /// Peeks at incoming data and returns the source address.
     ///
     /// Like [`recv_from`](Self::recv_from), but the data remains in the receive buffer.
@@ -683,16 +741,7 @@ impl UnixDatagram {
             };
 
             if ret >= 0 {
-                // Convert sockaddr_storage to SocketAddr
-                // For Unix sockets, we can use the local_addr as a placeholder
-                // since the actual address parsing is complex
-                let addr = self.local_addr().unwrap_or_else(|_| {
-                    // Return an unnamed socket address
-                    SocketAddr::from_pathname(std::path::Path::new("")).unwrap_or_else(|_| {
-                        // This should not happen in practice
-                        panic!("failed to create placeholder socket address")
-                    })
-                });
+                let addr = Self::socket_addr_from_storage(&addr_storage, addr_len)?;
                 let len = usize::try_from(ret).unwrap_or(0);
                 Poll::Ready(Ok((len, addr)))
             } else {
@@ -889,6 +938,55 @@ mod tests {
             crate::assert_with_log!(&buf == b"hello", "received data", b"hello", buf);
         });
         crate::test_complete!("test_datagram_bind_send_to");
+    }
+
+    #[test]
+    fn test_peek_from_reports_peer_and_preserves_data() {
+        init_test("test_datagram_peek_from");
+        futures_lite::future::block_on(async {
+            let dir = tempdir().expect("create temp dir");
+            let server_path = dir.path().join("server.sock");
+            let client_path = dir.path().join("client.sock");
+
+            let mut server = UnixDatagram::bind(&server_path).expect("bind server failed");
+            let mut client = UnixDatagram::bind(&client_path).expect("bind client failed");
+
+            client
+                .send_to(b"peek", &server_path)
+                .await
+                .expect("send_to failed");
+
+            let mut peek_buf = [0u8; 4];
+            let (n, addr) = server
+                .peek_from(&mut peek_buf)
+                .await
+                .expect("peek_from failed");
+            crate::assert_with_log!(n == 4, "peek bytes", 4, n);
+            crate::assert_with_log!(&peek_buf == b"peek", "peek data", b"peek", peek_buf);
+            let peek_path = addr.as_pathname().map(|p| p.to_path_buf());
+            crate::assert_with_log!(
+                peek_path.as_ref() == Some(&client_path),
+                "peek addr",
+                Some(&client_path),
+                peek_path.as_ref()
+            );
+
+            let mut recv_buf = [0u8; 4];
+            let (n2, addr2) = server
+                .recv_from(&mut recv_buf)
+                .await
+                .expect("recv_from failed");
+            crate::assert_with_log!(n2 == 4, "recv bytes", 4, n2);
+            crate::assert_with_log!(&recv_buf == b"peek", "recv data", b"peek", recv_buf);
+            let recv_path = addr2.as_pathname().map(|p| p.to_path_buf());
+            crate::assert_with_log!(
+                recv_path.as_ref() == Some(&client_path),
+                "recv addr",
+                Some(&client_path),
+                recv_path.as_ref()
+            );
+        });
+        crate::test_complete!("test_datagram_peek_from");
     }
 
     #[test]

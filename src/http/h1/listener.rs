@@ -248,6 +248,9 @@ where
 
         let stats = self.connection_manager.drain_with_stats().await;
         tasks.join_all().await;
+        if self.connection_manager.is_empty() {
+            self.shutdown_signal.mark_stopped();
+        }
         Ok(stats)
     }
 }
@@ -354,8 +357,12 @@ fn is_transient_accept_error(err: &io::Error) -> bool {
 mod tests {
     use super::*;
     use crate::http::h1::types::Response;
+    use crate::io::AsyncWriteExt;
+    use crate::runtime::yield_now;
     use crate::runtime::RuntimeBuilder;
+    use crate::sync::Notify;
     use crate::test_utils::init_test_logging;
+    use std::sync::Arc;
 
     #[test]
     fn default_config() {
@@ -486,6 +493,75 @@ mod tests {
             let stats = listener.run(&handle).await.expect("run");
             assert_eq!(stats.drained, 0);
             assert_eq!(stats.force_closed, 0);
+        });
+    }
+
+    #[test]
+    fn force_close_marks_stopped_when_connections_finish() {
+        init_test_logging();
+        let runtime = RuntimeBuilder::current_thread()
+            .build()
+            .expect("build runtime");
+        let handle = runtime.handle();
+
+        runtime.block_on(async {
+            let started = Arc::new(Notify::new());
+            let finished = Arc::new(Notify::new());
+            let started_signal = Arc::clone(&started);
+            let finished_signal = Arc::clone(&finished);
+
+            let mut config = Http1ListenerConfig::default();
+            config.drain_timeout = Duration::from_millis(0);
+
+            let listener = Http1Listener::bind_with_config(
+                "127.0.0.1:0",
+                move |_req| {
+                    let started = Arc::clone(&started_signal);
+                    let finished = Arc::clone(&finished_signal);
+                    async move {
+                        started.notify_one();
+                        finished.notified().await;
+                        Response::new(200, "OK", Vec::new())
+                    }
+                },
+                config,
+            )
+            .await
+            .expect("bind failed");
+
+            let addr = listener.local_addr().expect("local_addr");
+            let shutdown = listener.shutdown_signal();
+
+            let run_handle = handle
+                .clone()
+                .try_spawn(async move { listener.run(&handle).await })
+                .expect("spawn listener");
+
+            let mut client = crate::net::tcp::stream::TcpStream::connect(addr)
+                .await
+                .expect("connect");
+            client
+                .write_all(b"GET / HTTP/1.1\r\nHost: localhost\r\n\r\n")
+                .await
+                .expect("write request");
+
+            started.notified().await;
+            let began = shutdown.begin_drain(Duration::from_millis(0));
+            assert!(began);
+
+            loop {
+                if shutdown.phase() == ShutdownPhase::ForceClosing {
+                    break;
+                }
+                shutdown.phase_changed().await;
+            }
+
+            finished.notify_one();
+            let stats = run_handle.await.expect("run");
+            assert!(stats.force_closed > 0, "expected force close path");
+            assert_eq!(shutdown.phase(), ShutdownPhase::Stopped);
+
+            yield_now().await;
         });
     }
 }
