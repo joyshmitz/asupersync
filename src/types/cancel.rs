@@ -300,7 +300,7 @@ impl CancelWitness {
                 to: next.phase,
             });
         }
-        if next.reason.kind() < prev.reason.kind() {
+        if next.reason.severity() < prev.reason.severity() {
             return Err(CancelWitnessError::ReasonWeakened {
                 from: prev.reason.kind(),
                 to: next.reason.kind(),
@@ -820,7 +820,7 @@ impl CancelReason {
     ///
     /// Returns `true` if the reason was changed.
     pub fn strengthen(&mut self, other: &Self) -> bool {
-        if other.kind > self.kind {
+        if other.kind.severity() > self.kind.severity() {
             self.kind = other.kind;
             self.origin_region = other.origin_region;
             self.origin_task = other.origin_task;
@@ -830,13 +830,14 @@ impl CancelReason {
             return true;
         }
 
-        if other.kind < self.kind {
+        if other.kind.severity() < self.kind.severity() {
             return false;
         }
 
         // Same severity: use deterministic tie-breaking
         // Prefer earlier timestamp, then lexicographically smaller message
         if other.timestamp < self.timestamp {
+            self.kind = other.kind;
             self.origin_region = other.origin_region;
             self.origin_task = other.origin_task;
             self.timestamp = other.timestamp;
@@ -852,10 +853,12 @@ impl CancelReason {
         // Same timestamp: fallback to message comparison
         match (self.message, other.message) {
             (None, Some(msg)) => {
+                self.kind = other.kind;
                 self.message = Some(msg);
                 true
             }
             (Some(current), Some(candidate)) if candidate < current => {
+                self.kind = other.kind;
                 self.message = Some(candidate);
                 true
             }
