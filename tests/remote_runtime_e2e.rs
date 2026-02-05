@@ -27,6 +27,10 @@
 //!   Remote protocol: src/remote.rs
 //!   Fault sim tests: tests/network_fault_simulation.rs
 
+#[macro_use]
+mod common;
+
+use common::*;
 use asupersync::lab::network::{
     DistributedHarness, Fault, FaultScript, HarnessFault, HarnessTraceEvent, HarnessTraceKind,
     NetworkConditions, NetworkConfig, NodeEvent,
@@ -41,6 +45,12 @@ use std::time::Duration;
 // ---------------------------------------------------------------------------
 // Helpers
 // ---------------------------------------------------------------------------
+
+fn init_test(name: &str, seed: u64, conditions: &NetworkConditions) {
+    init_test_logging();
+    test_phase!(name);
+    tracing::info!(seed, ?conditions, "remote runtime e2e config");
+}
 
 /// Build a NetworkConfig from seed and conditions.
 fn make_config(seed: u64, conditions: NetworkConditions) -> NetworkConfig {
@@ -99,7 +109,10 @@ fn count_sent(h: &DistributedHarness, from: &NodeId, to: &NodeId, msg_type: &str
 
 #[test]
 fn spawn_ack_complete_lifecycle() {
-    let (mut h, a, b) = harness_two(42, NetworkConditions::local());
+    let seed = 42;
+    let conditions = NetworkConditions::local();
+    init_test("spawn_ack_complete_lifecycle", seed, &conditions);
+    let (mut h, a, b) = harness_two(seed, conditions);
     let tid = RemoteTaskId::from_raw(1000);
 
     h.inject_spawn(&a, &b, tid);
@@ -129,7 +142,10 @@ fn spawn_ack_complete_lifecycle() {
 
 #[test]
 fn spawn_ack_sent_immediately() {
-    let (mut h, a, b) = harness_two(43, NetworkConditions::local());
+    let seed = 43;
+    let conditions = NetworkConditions::local();
+    init_test("spawn_ack_sent_immediately", seed, &conditions);
+    let (mut h, a, b) = harness_two(seed, conditions);
     let tid = RemoteTaskId::from_raw(2000);
 
     h.inject_spawn(&a, &b, tid);
@@ -153,7 +169,10 @@ fn spawn_ack_sent_immediately() {
 
 #[test]
 fn cancel_before_completion() {
-    let (mut h, a, b) = harness_two(44, NetworkConditions::local());
+    let seed = 44;
+    let conditions = NetworkConditions::local();
+    init_test("cancel_before_completion", seed, &conditions);
+    let (mut h, a, b) = harness_two(seed, conditions);
     let tid = RemoteTaskId::from_raw(3000);
 
     h.inject_spawn(&a, &b, tid);
@@ -177,7 +196,10 @@ fn cancel_before_completion() {
 
 #[test]
 fn cancel_after_completion_is_no_op() {
-    let (mut h, a, b) = harness_two(45, NetworkConditions::local());
+    let seed = 45;
+    let conditions = NetworkConditions::local();
+    init_test("cancel_after_completion_is_no_op", seed, &conditions);
+    let (mut h, a, b) = harness_two(seed, conditions);
     let tid = RemoteTaskId::from_raw(3100);
 
     h.inject_spawn(&a, &b, tid);
@@ -207,7 +229,10 @@ fn cancel_after_completion_is_no_op() {
 
 #[test]
 fn lease_expiry_clears_running_tasks() {
-    let (mut h, a, b) = harness_two(46, NetworkConditions::local());
+    let seed = 46;
+    let conditions = NetworkConditions::local();
+    init_test("lease_expiry_clears_running_tasks", seed, &conditions);
+    let (mut h, a, b) = harness_two(seed, conditions);
     let t1 = RemoteTaskId::from_raw(4000);
     let t2 = RemoteTaskId::from_raw(4001);
 
@@ -236,7 +261,14 @@ fn lease_expiry_clears_running_tasks() {
 
 #[test]
 fn lease_expiry_during_partition_delivers_after_heal() {
-    let (mut h, a, b) = harness_two(47, NetworkConditions::local());
+    let seed = 47;
+    let conditions = NetworkConditions::local();
+    init_test(
+        "lease_expiry_during_partition_delivers_after_heal",
+        seed,
+        &conditions,
+    );
+    let (mut h, a, b) = harness_two(seed, conditions);
     let host_a = h.node(&a).unwrap().host_id;
     let host_b = h.node(&b).unwrap().host_id;
     let tid = RemoteTaskId::from_raw(4100);
@@ -283,7 +315,10 @@ fn lease_expiry_during_partition_delivers_after_heal() {
 
 #[test]
 fn duplicate_spawn_returns_cached_ack() {
-    let (mut h, a, b) = harness_two(48, NetworkConditions::local());
+    let seed = 48;
+    let conditions = NetworkConditions::local();
+    init_test("duplicate_spawn_returns_cached_ack", seed, &conditions);
+    let (mut h, a, b) = harness_two(seed, conditions);
     let tid = RemoteTaskId::from_raw(5000);
 
     h.inject_spawn(&a, &b, tid);
@@ -310,7 +345,10 @@ fn duplicate_spawn_returns_cached_ack() {
 
 #[test]
 fn duplicate_after_completion_resends_result() {
-    let (mut h, a, b) = harness_two(49, NetworkConditions::local());
+    let seed = 49;
+    let conditions = NetworkConditions::local();
+    init_test("duplicate_after_completion_resends_result", seed, &conditions);
+    let (mut h, a, b) = harness_two(seed, conditions);
     let tid = RemoteTaskId::from_raw(5100);
 
     h.inject_spawn(&a, &b, tid);
@@ -330,6 +368,9 @@ fn duplicate_after_completion_resends_result() {
 
 #[test]
 fn idempotency_store_conflict_detection() {
+    let seed = 0;
+    let conditions = NetworkConditions::ideal();
+    init_test("idempotency_store_conflict_detection", seed, &conditions);
     // Unit-level test: same key, different computation → conflict.
     let mut store = IdempotencyStore::new(Duration::from_secs(60));
     let key = IdempotencyKey::from_raw(0xABCD);
@@ -358,7 +399,10 @@ fn idempotency_store_conflict_detection() {
 
 #[test]
 fn causal_clocks_advance_on_message_exchange() {
-    let (mut h, a, b) = harness_two(50, NetworkConditions::local());
+    let seed = 50;
+    let conditions = NetworkConditions::local();
+    init_test("causal_clocks_advance_on_message_exchange", seed, &conditions);
+    let (mut h, a, b) = harness_two(seed, conditions);
     let tid = RemoteTaskId::from_raw(6000);
 
     // Record initial clock state.
@@ -384,7 +428,14 @@ fn causal_clocks_advance_on_message_exchange() {
 
 #[test]
 fn causal_ordering_preserved_across_multiple_spawns() {
-    let (mut h, a, b) = harness_two(51, NetworkConditions::local());
+    let seed = 51;
+    let conditions = NetworkConditions::local();
+    init_test(
+        "causal_ordering_preserved_across_multiple_spawns",
+        seed,
+        &conditions,
+    );
+    let (mut h, a, b) = harness_two(seed, conditions);
 
     // Send 5 spawns sequentially, each after the previous arrives.
     for i in 0..5u64 {
@@ -416,7 +467,10 @@ fn causal_ordering_preserved_across_multiple_spawns() {
 
 #[test]
 fn three_node_chain_spawn_cascade() {
-    let (mut h, a, b, c) = harness_three(52, NetworkConditions::local());
+    let seed = 52;
+    let conditions = NetworkConditions::local();
+    init_test("three_node_chain_spawn_cascade", seed, &conditions);
+    let (mut h, a, b, c) = harness_three(seed, conditions);
     let t1 = RemoteTaskId::from_raw(7000);
     let t2 = RemoteTaskId::from_raw(7001);
 
@@ -454,7 +508,10 @@ fn three_node_chain_spawn_cascade() {
 
 #[test]
 fn three_node_cancel_cascade() {
-    let (mut h, a, b, c) = harness_three(53, NetworkConditions::local());
+    let seed = 53;
+    let conditions = NetworkConditions::local();
+    init_test("three_node_cancel_cascade", seed, &conditions);
+    let (mut h, a, b, c) = harness_three(seed, conditions);
     let t1 = RemoteTaskId::from_raw(7100);
     let t2 = RemoteTaskId::from_raw(7101);
 
@@ -486,7 +543,10 @@ fn three_node_cancel_cascade() {
 
 #[test]
 fn fan_out_10_tasks_all_complete() {
-    let (mut h, a, b) = harness_two(54, NetworkConditions::local());
+    let seed = 54;
+    let conditions = NetworkConditions::local();
+    init_test("fan_out_10_tasks_all_complete", seed, &conditions);
+    let (mut h, a, b) = harness_two(seed, conditions);
     let n = 10;
 
     for i in 0..n {
@@ -503,7 +563,10 @@ fn fan_out_10_tasks_all_complete() {
 
 #[test]
 fn fan_out_cancel_half() {
-    let (mut h, a, b) = harness_two(55, NetworkConditions::local());
+    let seed = 55;
+    let conditions = NetworkConditions::local();
+    init_test("fan_out_cancel_half", seed, &conditions);
+    let (mut h, a, b) = harness_two(seed, conditions);
     let n = 10u64;
 
     for i in 0..n {
@@ -534,7 +597,10 @@ fn fan_out_cancel_half() {
 
 #[test]
 fn partition_blocks_ack_heal_recovers() {
-    let (mut h, a, b) = harness_two(56, NetworkConditions::local());
+    let seed = 56;
+    let conditions = NetworkConditions::local();
+    init_test("partition_blocks_ack_heal_recovers", seed, &conditions);
+    let (mut h, a, b) = harness_two(seed, conditions);
     let host_a = h.node(&a).unwrap().host_id;
     let host_b = h.node(&b).unwrap().host_id;
     let tid = RemoteTaskId::from_raw(9000);
@@ -589,7 +655,10 @@ fn partition_blocks_ack_heal_recovers() {
 
 #[test]
 fn cancel_lost_to_partition_retransmit_after_heal() {
-    let (mut h, a, b) = harness_two(57, NetworkConditions::local());
+    let seed = 57;
+    let conditions = NetworkConditions::local();
+    init_test("cancel_lost_to_partition_retransmit_after_heal", seed, &conditions);
+    let (mut h, a, b) = harness_two(seed, conditions);
     let host_a = h.node(&a).unwrap().host_id;
     let host_b = h.node(&b).unwrap().host_id;
     let tid = RemoteTaskId::from_raw(9100);
