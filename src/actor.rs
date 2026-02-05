@@ -143,11 +143,8 @@ impl ActorStateCell {
 /// This is intentionally lightweight and non-opinionated; higher-level actor
 /// features (mailbox policies, supervision trees, etc.) can extend this.
 struct ActorCell<M> {
-    actor_id: ActorId,
-    owner: RegionId,
     mailbox: mpsc::Receiver<M>,
     state: Arc<ActorStateCell>,
-    created_at: Time,
 }
 
 /// A message-driven actor that processes messages from a bounded mailbox.
@@ -826,11 +823,8 @@ impl<P: crate::types::Policy> crate::cx::Scope<'_, P> {
         let state_for_task = Arc::clone(&actor_state);
 
         let cell = ActorCell {
-            actor_id,
-            owner: self.region_id(),
             mailbox: msg_rx,
             state: Arc::clone(&actor_state),
-            created_at: Time::ZERO,
         };
 
         // Create the actor loop future
@@ -940,11 +934,8 @@ impl<P: crate::types::Policy> crate::cx::Scope<'_, P> {
         let state_for_task = Arc::clone(&actor_state);
 
         let cell = ActorCell {
-            actor_id,
-            owner: self.region_id(),
             mailbox: msg_rx,
             state: Arc::clone(&actor_state),
-            created_at: Time::ZERO,
         };
 
         let wrapped = async move {
