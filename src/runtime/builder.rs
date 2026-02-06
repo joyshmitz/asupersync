@@ -968,6 +968,7 @@ impl RuntimeInner {
             }
             guard.set_cancel_attribution_config(config.cancel_attribution);
             guard.set_obligation_leak_response(config.obligation_leak_response);
+            guard.set_leak_escalation(config.leak_escalation);
             if guard.timer_driver().is_none() {
                 guard.set_timer_driver(TimerDriverHandle::with_wall_clock());
             }
@@ -988,7 +989,7 @@ impl RuntimeInner {
         scheduler.set_steal_batch_size(config.steal_batch_size);
         scheduler.set_enable_parking(config.enable_parking);
 
-        let mut worker_threads = Vec::new();
+        let mut worker_threads: Vec<std::thread::JoinHandle<()>> = Vec::new();
         if config.worker_threads > 0 {
             let workers = scheduler.take_workers();
             for worker in workers {
@@ -1013,7 +1014,15 @@ impl RuntimeInner {
                             callback();
                         }
                     })
-                    .map_err(|e| io::Error::other(format!("failed to spawn worker thread: {e}")))?;
+                    .map_err(|e| {
+                        // Signal already-running workers to exit their run loops,
+                        // then join them so they don't leak.
+                        scheduler.shutdown();
+                        while let Some(handle) = worker_threads.pop() {
+                            let _ = handle.join();
+                        }
+                        io::Error::other(format!("failed to spawn worker thread: {e}"))
+                    })?;
                 worker_threads.push(handle);
             }
         }
