@@ -655,8 +655,10 @@ theorem commit_resolves {Value Error Panic : Type}
     : ∃ ob', getObligation s' o = some ob' ∧ ob'.state = ObligationState.committed := by
   cases hStep with
   | commit hOb hHolder hState hRegion hUpdate =>
+    rename_i t ob region
     subst hUpdate
-    exact ⟨_, by simp [getObligation, setRegion, setObligation], rfl⟩
+    refine ⟨{ ob with state := ObligationState.committed }, ?_, rfl⟩
+    simp [getObligation, setRegion, setObligation]
 
 -- ==========================================================================
 -- Safety Lemma 2: Abort resolves an obligation
@@ -669,8 +671,26 @@ theorem abort_resolves {Value Error Panic : Type}
     : ∃ ob', getObligation s' o = some ob' ∧ ob'.state = ObligationState.aborted := by
   cases hStep with
   | abort hOb hHolder hState hRegion hUpdate =>
+    rename_i t ob region
     subst hUpdate
-    exact ⟨_, by simp [getObligation, setRegion, setObligation], rfl⟩
+    refine ⟨{ ob with state := ObligationState.aborted }, ?_, rfl⟩
+    simp [getObligation, setRegion, setObligation]
+
+-- ==========================================================================
+-- Safety: Leak marks obligation as leaked (bd-3bg3e)
+-- After a leak step, the obligation is in leaked state.
+-- ==========================================================================
+
+theorem leak_marks_leaked {Value Error Panic : Type}
+    {s s' : State Value Error Panic} {o : ObligationId}
+    (hStep : Step s (Label.leak o) s')
+    : ∃ ob', getObligation s' o = some ob' ∧ ob'.state = ObligationState.leaked := by
+  cases hStep with
+  | leak outcome hTask hTaskState hOb hHolder hState hRegion hUpdate =>
+    rename_i t ob region
+    subst hUpdate
+    refine ⟨{ ob with state := ObligationState.leaked }, ?_, rfl⟩
+    simp [getObligation, setRegion, setObligation]
 
 -- ==========================================================================
 -- Safety Lemma 3: Commit removes obligation from region ledger
@@ -685,10 +705,16 @@ theorem commit_removes_from_ledger {Value Error Panic : Type}
     : ∃ region', getRegion s' ob.region = some region' ∧ o ∉ region'.ledger := by
   cases hStep with
   | commit hOb' hHolder hState hRegion hUpdate =>
+    rename_i t ob' region
     subst hUpdate
-    simp [getObligation] at hOb hOb'
-    rw [hOb] at hOb'; injection hOb' with hOb'
-    exact ⟨_, by simp [getRegion, setRegion, setObligation], by rw [← hOb']; exact removeObligationId_not_mem o _⟩
+    -- Identify the obligation record from the step with the one passed in.
+    have hob_eq : ob' = ob := by
+      have : ob = ob' := by simpa [hOb] using hOb'
+      exact this.symm
+    subst hob_eq
+    refine ⟨{ region with ledger := removeObligationId o region.ledger }, ?_, ?_⟩
+    · simp [getRegion, setRegion, setObligation]
+    · exact removeObligationId_not_mem o _
 
 -- ==========================================================================
 -- Safety Lemma 4a: Abort removes obligation from region ledger
@@ -703,10 +729,15 @@ theorem abort_removes_from_ledger {Value Error Panic : Type}
     : ∃ region', getRegion s' ob.region = some region' ∧ o ∉ region'.ledger := by
   cases hStep with
   | abort hOb' hHolder hState hRegion hUpdate =>
+    rename_i t ob' region
     subst hUpdate
-    simp [getObligation] at hOb hOb'
-    rw [hOb] at hOb'; injection hOb' with hOb'
-    exact ⟨_, by simp [getRegion, setRegion, setObligation], by rw [← hOb']; exact removeObligationId_not_mem o _⟩
+    have hob_eq : ob' = ob := by
+      have : ob = ob' := by simpa [hOb] using hOb'
+      exact this.symm
+    subst hob_eq
+    refine ⟨{ region with ledger := removeObligationId o region.ledger }, ?_, ?_⟩
+    · simp [getRegion, setRegion, setObligation]
+    · exact removeObligationId_not_mem o _
 
 -- ==========================================================================
 -- Safety Lemma 4b: Leak removes obligation from region ledger
@@ -721,10 +752,15 @@ theorem leak_removes_from_ledger {Value Error Panic : Type}
     : ∃ region', getRegion s' ob.region = some region' ∧ o ∉ region'.ledger := by
   cases hStep with
   | leak outcome hTask hTaskState hOb' hHolder hState hRegion hUpdate =>
+    rename_i t ob' region
     subst hUpdate
-    simp [getObligation] at hOb hOb'
-    rw [hOb] at hOb'; injection hOb' with hOb'
-    exact ⟨_, by simp [getRegion, setRegion, setObligation], by rw [← hOb']; exact removeObligationId_not_mem o _⟩
+    have hob_eq : ob' = ob := by
+      have : ob = ob' := by simpa [hOb] using hOb'
+      exact this.symm
+    subst hob_eq
+    refine ⟨{ region with ledger := removeObligationId o region.ledger }, ?_, ?_⟩
+    · simp [getRegion, setRegion, setObligation]
+    · exact removeObligationId_not_mem o _
 
 -- ==========================================================================
 -- Safety Lemma 4: Region close implies quiescence
@@ -791,7 +827,7 @@ theorem listAll_mem {α : Type} {p : α → Prop} {xs : List α} {x : α}
     (hAll : listAll p xs) (hMem : x ∈ xs)
     : p x := by
   induction xs with
-  | nil => exact absurd hMem (List.not_mem_nil x)
+  | nil => cases hMem
   | cons y ys ih =>
     cases hMem with
     | head => exact hAll.1
@@ -839,46 +875,6 @@ theorem close_quiescence_decomposition {Value Error Panic : Type}
   obtain ⟨region, hRegion, hQ⟩ := close_implies_quiescent hStep
   exact ⟨region, hRegion, hQ.1, hQ.2.1, hQ.2.2.1, hQ.2.2.2⟩
 
-/-- In a well-formed state, closing a region ensures every child task
-    referenced by that region exists and is in a completed state.
-    Combines WellFormed.children_exist with quiescence. -/
-theorem close_children_exist_completed {Value Error Panic : Type}
-    {s s' : State Value Error Panic} {r : RegionId}
-    {outcome : Outcome Value Error CancelReason Panic}
-    (hWF : WellFormed s)
-    (hStep : Step s (Label.close r outcome) s')
-    : ∃ region, getRegion s r = some region ∧
-        ∀ t, t ∈ region.children →
-          ∃ task, getTask s t = some task ∧ taskCompleted task := by
-  obtain ⟨region, hRegion, hQ⟩ := close_implies_quiescent hStep
-  refine ⟨region, hRegion, fun t hMem => ?_⟩
-  obtain ⟨task, hTask⟩ := hWF.children_exist r region hRegion t hMem
-  have hPred : (match getTask s t with
-    | some task => taskCompleted task
-    | none => False) := listAll_mem hQ.1 hMem
-  rw [hTask] at hPred
-  exact ⟨task, hTask, hPred⟩
-
-/-- In a well-formed state, closing a region ensures every subregion
-    referenced by that region exists and has a closed state.
-    Combines WellFormed.subregions_exist with quiescence. -/
-theorem close_subregions_exist_closed {Value Error Panic : Type}
-    {s s' : State Value Error Panic} {r : RegionId}
-    {outcome : Outcome Value Error CancelReason Panic}
-    (hWF : WellFormed s)
-    (hStep : Step s (Label.close r outcome) s')
-    : ∃ region, getRegion s r = some region ∧
-        ∀ r', r' ∈ region.subregions →
-          ∃ sub, getRegion s r' = some sub ∧ regionClosed sub := by
-  obtain ⟨region, hRegion, hQ⟩ := close_implies_quiescent hStep
-  refine ⟨region, hRegion, fun r' hMem => ?_⟩
-  obtain ⟨sub, hSub⟩ := hWF.subregions_exist r region hRegion r' hMem
-  have hPred : (match getRegion s r' with
-    | some region => regionClosed region
-    | none => False) := listAll_mem hQ.2.1 hMem
-  rw [hSub] at hPred
-  exact ⟨sub, hSub, hPred⟩
-
 -- ==========================================================================
 -- Lease Semantics and Liveness (bd-yj06g)
 --
@@ -904,10 +900,15 @@ theorem lease_reserve_in_ledger {Value Error Panic : Type}
         ∃ region', getRegion s' ob.region = some region' ∧ o ∈ region'.ledger := by
   cases hStep with
   | reserve hTask hRegion hAbsent hUpdate =>
+    rename_i t task region k
     subst hUpdate
-    refine ⟨_, by simp [getObligation, setObligation, setRegion], rfl,
-            _, by simp [getRegion, setRegion, setObligation], ?_⟩
-    simp [List.mem_append]
+    let ob : ObligationRecord :=
+      { kind := k, holder := t, region := task.region, state := ObligationState.reserved }
+    refine ⟨ob, ?_, rfl, ?_⟩
+    · simp [ob, getObligation, setObligation, setRegion]
+    · refine ⟨{ region with ledger := region.ledger ++ [o] }, ?_, ?_⟩
+      · simp [ob, getRegion, setRegion, setObligation]
+      · simp
 
 /-- An unresolved lease (or any obligation) in the ledger blocks region close.
     If an obligation o is in a region's ledger, that region cannot close,
@@ -926,35 +927,8 @@ theorem obligation_in_ledger_blocks_close {Value Error Panic : Type}
   rw [← hEq] at hLedger
   exact absurd (hLedger ▸ hInLedger) (by simp)
 
-/-- Committing a lease (or any obligation) removes it from the ledger.
-    After commit, the obligation is no longer blocking region close. -/
-theorem commit_removes_from_ledger {Value Error Panic : Type}
-    {s s' : State Value Error Panic} {o : ObligationId}
-    {ob : ObligationRecord}
-    (hStep : Step s (Label.commit o) s')
-    (hOb : getObligation s o = some ob)
-    : ∃ region', getRegion s' ob.region = some region' ∧ o ∉ region'.ledger := by
-  cases hStep with
-  | commit hOb' hHolder hState hRegion hUpdate =>
-    subst hUpdate
-    simp [getObligation] at hOb hOb'
-    rw [hOb] at hOb'; injection hOb' with hOb'
-    exact ⟨_, by simp [getRegion, setRegion, setObligation], by rw [← hOb']; exact removeObligationId_not_mem o _⟩
-
-/-- Aborting a lease (or any obligation) removes it from the ledger.
-    After abort, the obligation is no longer blocking region close. -/
-theorem abort_removes_from_ledger {Value Error Panic : Type}
-    {s s' : State Value Error Panic} {o : ObligationId}
-    {ob : ObligationRecord}
-    (hStep : Step s (Label.abort o) s')
-    (hOb : getObligation s o = some ob)
-    : ∃ region', getRegion s' ob.region = some region' ∧ o ∉ region'.ledger := by
-  cases hStep with
-  | abort hOb' hHolder hState hRegion hUpdate =>
-    subst hUpdate
-    simp [getObligation] at hOb hOb'
-    rw [hOb] at hOb'; injection hOb' with hOb'
-    exact ⟨_, by simp [getRegion, setRegion, setObligation], by rw [← hOb']; exact removeObligationId_not_mem o _⟩
+-- We use the global `commit_removes_from_ledger` / `abort_removes_from_ledger`
+-- lemmas above; they apply to leases as a special case.
 
 /-- Lease liveness: any resolution (commit, abort, or leak) of a lease
     removes the obligation from the ledger, making progress toward
@@ -1038,8 +1012,14 @@ theorem reserve_creates_reserved {Value Error Panic : Type}
     : ∃ ob', getObligation s' o = some ob' ∧ ob'.state = ObligationState.reserved := by
   cases hStep with
   | reserve hTask hRegion hAbsent hUpdate =>
+    rename_i t task region k
     subst hUpdate
-    exact ⟨_, by simp [getObligation, setRegion, setObligation], rfl⟩
+    refine ⟨
+      { kind := k, holder := t, region := task.region, state := ObligationState.reserved },
+      ?_,
+      rfl
+    ⟩
+    simp [getObligation, setRegion, setObligation]
 
 -- ==========================================================================
 -- Safety Lemma 10: Cancellation protocol monotonicity
@@ -1074,11 +1054,14 @@ theorem cancelling_from_cancelRequested {Value Error Panic : Type}
       · exact ⟨reason, cleanup, Or.inr hState⟩
   | schedule hTask0 hRegion hTaskState hRegionState hUpdate =>
       rcases hCancelling with ⟨task', hGet, reason, cleanup, hState⟩
+      rename_i tStep task region
       subst hUpdate
-      by_cases hEq : t = t_1
+      by_cases hEq : t = tStep
       · subst hEq
         have hEqTask : task' = { task with state := TaskState.running } := by
-          simpa [getTask, setTask] using hGet
+          have : { task with state := TaskState.running } = task' := by
+            simpa [getTask, setTask] using hGet
+          exact this.symm
         have hContra :
             (TaskState.running : TaskState Value Error Panic) =
               TaskState.cancelling reason cleanup := by
@@ -1087,80 +1070,101 @@ theorem cancelling_from_cancelRequested {Value Error Panic : Type}
       · refine ⟨task', ?_, ?_⟩
         · simpa [getTask, setTask, hEq] using hGet
         · exact ⟨reason, cleanup, Or.inr hState⟩
-  | cancelMasked hTask0 hState hMask hUpdate =>
+  | cancelMasked reason0 cleanup0 hTask0 hState hMask hUpdate =>
       rcases hCancelling with ⟨task', hGet, reason', cleanup', hState'⟩
+      rename_i tStep task
       subst hUpdate
-      by_cases hEq : t = t_1
+      by_cases hEq : t = tStep
       · subst hEq
         have hEqTask : task' = { task with
             mask := task.mask - 1,
-            state := TaskState.cancelRequested reason cleanup } := by
-          simpa [getTask, setTask] using hGet
+            state := TaskState.cancelRequested reason0 cleanup0 } := by
+          have :
+              { task with
+                mask := task.mask - 1,
+                state := TaskState.cancelRequested reason0 cleanup0 } =
+                task' := by
+            simpa [getTask, setTask] using hGet
+          exact this.symm
         have hContra :
-            (TaskState.cancelRequested reason cleanup : TaskState Value Error Panic) =
+            (TaskState.cancelRequested reason0 cleanup0 : TaskState Value Error Panic) =
               TaskState.cancelling reason' cleanup' := by
           simpa [hEqTask] using hState'
         cases hContra
       · refine ⟨task', ?_, ?_⟩
         · simpa [getTask, setTask, hEq] using hGet
         · exact ⟨reason', cleanup', Or.inr hState'⟩
-  | cancelAcknowledge hTask0 hState hMask hUpdate =>
+  | cancelAcknowledge reason0 cleanup0 hTask0 hState hMask hUpdate =>
       rcases hCancelling with ⟨task', hGet, reason', cleanup', hState'⟩
+      rename_i tStep task
       subst hUpdate
-      by_cases hEq : t = t_1
+      by_cases hEq : t = tStep
       · subst hEq
         refine ⟨task, hTask0, ?_⟩
-        exact ⟨reason, cleanup, Or.inl hState⟩
+        exact ⟨reason0, cleanup0, Or.inl hState⟩
       · refine ⟨task', ?_, ?_⟩
         · simpa [getTask, setTask, hEq] using hGet
         · exact ⟨reason', cleanup', Or.inr hState'⟩
-  | cancelFinalize hTask0 hState hUpdate =>
+  | cancelFinalize reason0 cleanup0 hTask0 hState hUpdate =>
       rcases hCancelling with ⟨task', hGet, reason', cleanup', hState'⟩
+      rename_i tStep task
       subst hUpdate
-      by_cases hEq : t = t_1
+      by_cases hEq : t = tStep
       · subst hEq
-        have hEqTask : task' = { task with state := TaskState.finalizing reason cleanup } := by
-          simpa [getTask, setTask] using hGet
+        have hEqTask : task' = { task with state := TaskState.finalizing reason0 cleanup0 } := by
+          have : { task with state := TaskState.finalizing reason0 cleanup0 } = task' := by
+            simpa [getTask, setTask] using hGet
+          exact this.symm
         have hContra :
-            (TaskState.finalizing reason cleanup : TaskState Value Error Panic) =
+            (TaskState.finalizing reason0 cleanup0 : TaskState Value Error Panic) =
               TaskState.cancelling reason' cleanup' := by
           simpa [hEqTask] using hState'
         cases hContra
       · refine ⟨task', ?_, ?_⟩
         · simpa [getTask, setTask, hEq] using hGet
         · exact ⟨reason', cleanup', Or.inr hState'⟩
-  | cancelComplete hTask0 hState hUpdate =>
+  | cancelComplete reason0 cleanup0 hTask0 hState hUpdate =>
       rcases hCancelling with ⟨task', hGet, reason', cleanup', hState'⟩
+      rename_i tStep task
       subst hUpdate
-      by_cases hEq : t = t_1
+      by_cases hEq : t = tStep
       · subst hEq
         have hEqTask :
-            task' = { task with state := TaskState.completed (Outcome.cancelled reason) } := by
-          simpa [getTask, setTask] using hGet
+            task' = { task with state := TaskState.completed (Outcome.cancelled reason0) } := by
+          have :
+              { task with state := TaskState.completed (Outcome.cancelled reason0) } =
+                task' := by
+            simpa [getTask, setTask] using hGet
+          exact this.symm
         have hContra :
-            (TaskState.completed (Outcome.cancelled reason) : TaskState Value Error Panic) =
+            (TaskState.completed (Outcome.cancelled reason0) : TaskState Value Error Panic) =
               TaskState.cancelling reason' cleanup' := by
           simpa [hEqTask] using hState'
         cases hContra
       · refine ⟨task', ?_, ?_⟩
         · simpa [getTask, setTask, hEq] using hGet
         · exact ⟨reason', cleanup', Or.inr hState'⟩
-  | cancelPropagate hRegion hCancel hChild hSub hUpdate =>
+  | cancelPropagate reason0 hRegion hCancel hChild hSub hUpdate =>
       rcases hCancelling with ⟨task', hGet, reason, cleanup, hState⟩
       subst hUpdate
       refine ⟨task', ?_, ?_⟩
       · simpa [getTask] using hGet
       · exact ⟨reason, cleanup, Or.inr hState⟩
-  | cancelChild hRegion hCancel hChild hTask0 hNotCompleted hUpdate =>
+  | cancelChild reason0 cleanup0 hRegion hCancel hChild hTask0 hNotCompleted hUpdate =>
       rcases hCancelling with ⟨task', hGet, reason', cleanup', hState'⟩
+      rename_i rStep tStep region task
       subst hUpdate
-      by_cases hEq : t = t_1
+      by_cases hEq : t = tStep
       · subst hEq
         have hEqTask :
-            task' = { task with state := TaskState.cancelRequested reason cleanup } := by
-          simpa [getTask, setTask] using hGet
+            task' = { task with state := TaskState.cancelRequested reason0 cleanup0 } := by
+          have :
+              { task with state := TaskState.cancelRequested reason0 cleanup0 } =
+                task' := by
+            simpa [getTask, setTask] using hGet
+          exact this.symm
         have hContra :
-            (TaskState.cancelRequested reason cleanup : TaskState Value Error Panic) =
+            (TaskState.cancelRequested reason0 cleanup0 : TaskState Value Error Panic) =
               TaskState.cancelling reason' cleanup' := by
           simpa [hEqTask] using hState'
         cases hContra
@@ -1191,10 +1195,13 @@ theorem reserve_holder_exists {Value Error Panic : Type}
     : ∃ ob task, getObligation s' o = some ob ∧ getTask s' ob.holder = some task := by
   cases hStep with
   | reserve hTask hRegion hAbsent hUpdate =>
+    rename_i t task region k
     subst hUpdate
-    refine ⟨_, _, by simp [getObligation, setRegion, setObligation], ?_⟩
-    simp [getTask, setRegion, setObligation]
-    exact hTask
+    let ob : ObligationRecord :=
+      { kind := k, holder := t, region := task.region, state := ObligationState.reserved }
+    refine ⟨ob, task, ?_, ?_⟩
+    · simp [ob, getObligation, setRegion, setObligation]
+    · simpa [ob, getTask, setRegion, setObligation] using hTask
 
 -- ==========================================================================
 -- Budget algebra: combine is commutative (bd-3bg3e, GrayMeadow)
@@ -1220,7 +1227,7 @@ end BudgetAlgebra
 theorem strengthenOpt_rank_ge_incoming (current : Option CancelReason) (incoming : CancelReason) :
     CancelKind.rank (strengthenOpt current incoming).kind ≥ CancelKind.rank incoming.kind := by
   cases current with
-  | none => simp [strengthenOpt]; exact Nat.le_refl _
+  | none => simpa [strengthenOpt]
   | some r =>
     simp [strengthenOpt, strengthenReason]
     split
@@ -1335,24 +1342,14 @@ theorem reserve_adds_to_ledger {Value Error Panic : Type}
         o ∈ region.ledger := by
   cases hStep with
   | reserve hTask hRegion hAbsent hUpdate =>
+    rename_i t task region k
     subst hUpdate
-    refine ⟨_, _, by simp [getObligation, setRegion, setObligation], ?_, ?_⟩
-    · simp [getRegion, setRegion, setObligation]
-    · simp [List.mem_append]
-
--- ==========================================================================
--- Safety: Leak marks obligation as leaked (bd-3bg3e)
--- After a leak step, the obligation is in leaked state.
--- ==========================================================================
-
-theorem leak_marks_leaked {Value Error Panic : Type}
-    {s s' : State Value Error Panic} {o : ObligationId}
-    (hStep : Step s (Label.leak o) s')
-    : ∃ ob', getObligation s' o = some ob' ∧ ob'.state = ObligationState.leaked := by
-  cases hStep with
-  | leak _ hTask hTaskState hOb hHolder hState hRegion hUpdate =>
-    subst hUpdate
-    exact ⟨_, by simp [getObligation, setRegion, setObligation], rfl⟩
+    let ob : ObligationRecord :=
+      { kind := k, holder := t, region := task.region, state := ObligationState.reserved }
+    refine ⟨ob, { region with ledger := region.ledger ++ [o] }, ?_, ?_, ?_⟩
+    · simp [ob, getObligation, setRegion, setObligation]
+    · simp [ob, getRegion, setRegion, setObligation]
+    · simp
 
 -- ==========================================================================
 -- Well-formedness predicate (bd-fxos5, GrayMeadow)
@@ -1380,6 +1377,84 @@ structure WellFormed {Value Error Panic : Type} (s : State Value Error Panic) : 
   /-- Every subregion referenced by a region exists. -/
   subregions_exist : ∀ r region, getRegion s r = some region →
     ∀ r', r' ∈ region.subregions → ∃ sub, getRegion s r' = some sub
+ 
+/-- In a well-formed state, closing a region ensures every child task
+    referenced by that region exists and is in a completed state.
+    Combines WellFormed.children_exist with quiescence. -/
+theorem close_children_exist_completed {Value Error Panic : Type}
+    {s s' : State Value Error Panic} {r : RegionId}
+    {outcome : Outcome Value Error CancelReason Panic}
+    (hWF : WellFormed s)
+    (hStep : Step s (Label.close r outcome) s')
+    : ∃ region, getRegion s r = some region ∧
+        ∀ t, t ∈ region.children →
+          ∃ task, getTask s t = some task ∧ taskCompleted task := by
+  obtain ⟨region, hRegion, hQ⟩ := close_implies_quiescent hStep
+  refine ⟨region, hRegion, fun t hMem => ?_⟩
+  obtain ⟨task, hTask⟩ := hWF.children_exist r region hRegion t hMem
+  have hPred :
+      (match getTask s t with
+        | some task => taskCompleted task
+        | none => False) := by
+    have hAll :
+        listAll
+            (fun t0 =>
+              match getTask s t0 with
+              | some task0 => taskCompleted task0
+              | none => False)
+            region.children := by
+      simpa [allTasksCompleted] using hQ.1
+    exact
+      listAll_mem
+        (p := fun t0 =>
+          match getTask s t0 with
+          | some task0 => taskCompleted task0
+          | none => False)
+        (xs := region.children)
+        (x := t)
+        (hAll := hAll)
+        (hMem := hMem)
+  rw [hTask] at hPred
+  exact ⟨task, hTask, hPred⟩
+
+/-- In a well-formed state, closing a region ensures every subregion
+    referenced by that region exists and has a closed state.
+    Combines WellFormed.subregions_exist with quiescence. -/
+theorem close_subregions_exist_closed {Value Error Panic : Type}
+    {s s' : State Value Error Panic} {r : RegionId}
+    {outcome : Outcome Value Error CancelReason Panic}
+    (hWF : WellFormed s)
+    (hStep : Step s (Label.close r outcome) s')
+    : ∃ region, getRegion s r = some region ∧
+        ∀ r', r' ∈ region.subregions →
+          ∃ sub, getRegion s r' = some sub ∧ regionClosed sub := by
+  obtain ⟨region, hRegion, hQ⟩ := close_implies_quiescent hStep
+  refine ⟨region, hRegion, fun r' hMem => ?_⟩
+  obtain ⟨sub, hSub⟩ := hWF.subregions_exist r region hRegion r' hMem
+  have hPred :
+      (match getRegion s r' with
+        | some region0 => regionClosed region0
+        | none => False) := by
+    have hAll :
+        listAll
+            (fun r0 =>
+              match getRegion s r0 with
+              | some region0 => regionClosed region0
+              | none => False)
+            region.subregions := by
+      simpa [allRegionsClosed] using hQ.2.1
+    exact
+      listAll_mem
+        (p := fun r0 =>
+          match getRegion s r0 with
+          | some region0 => regionClosed region0
+          | none => False)
+        (xs := region.subregions)
+        (x := r')
+        (hAll := hAll)
+        (hMem := hMem)
+  rw [hSub] at hPred
+  exact ⟨sub, hSub, hPred⟩
 
 -- ==========================================================================
 -- Terminal state: no step can fire (bd-fxos5)
@@ -1465,13 +1540,14 @@ theorem complete_preserves_wellformed {Value Error Panic : Type}
     : WellFormed s' := by
   cases hStep with
   | complete _ hTask hTaskState hUpdate =>
+    rename_i tStep task
     subst hUpdate
     exact {
       task_region_exists := fun t' task' h => by
-        by_cases hEq : t' = t
+        by_cases hEq : t' = tStep
         · subst hEq
           simp [getTask, setTask] at h
-          obtain ⟨region, hReg⟩ := hWF.task_region_exists t task hTask
+          obtain ⟨region, hReg⟩ := hWF.task_region_exists tStep task hTask
           exact ⟨region, by simp [getRegion, setTask]; exact hReg⟩
         · exact hWF.task_region_exists t' task' (by simp [getTask, setTask, hEq] at h; exact h)
       obligation_region_exists := fun o ob h =>
@@ -1479,7 +1555,7 @@ theorem complete_preserves_wellformed {Value Error Panic : Type}
       obligation_holder_exists := fun o ob h => by
         simp [getObligation, setTask] at h
         obtain ⟨task', hTask'⟩ := hWF.obligation_holder_exists o ob h
-        by_cases hEq : ob.holder = t
+        by_cases hEq : ob.holder = tStep
         · exact ⟨{ task with state := TaskState.completed outcome },
             by simp [getTask, setTask, hEq]⟩
         · exact ⟨task', by simp [getTask, setTask, hEq]; exact hTask'⟩
@@ -1490,7 +1566,7 @@ theorem complete_preserves_wellformed {Value Error Panic : Type}
       children_exist := fun r region h t' hMem => by
         simp [getRegion, setTask] at h
         obtain ⟨task', hTask'⟩ := hWF.children_exist r region h t' hMem
-        by_cases hEq : t' = t
+        by_cases hEq : t' = tStep
         · exact ⟨{ task with state := TaskState.completed outcome },
             by simp [getTask, setTask, hEq]⟩
         · exact ⟨task', by simp [getTask, setTask, hEq]; exact hTask'⟩
