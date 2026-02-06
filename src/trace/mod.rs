@@ -86,8 +86,9 @@ pub use crashpack::{
     FailureInfo, FailureOutcome, SupervisionSnapshot, CRASHPACK_SCHEMA_VERSION,
 };
 pub use divergence::{
-    diagnose_divergence, minimal_divergent_prefix, AffectedEntities, DiagnosticConfig,
-    DivergenceCategory, DivergenceReport, EventSummary,
+    diagnose_divergence, minimal_divergent_prefix, minimize_divergent_prefix, AffectedEntities,
+    DiagnosticConfig, DivergenceCategory, DivergenceReport, EventSummary, MinimizationConfig,
+    MinimizationResult,
 };
 pub use dpor::{
     detect_hb_races, detect_races, estimated_classes, racing_events, trace_coverage_analysis,
