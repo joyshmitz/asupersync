@@ -112,7 +112,7 @@ impl Default for CrashPackConfig {
 /// Description of the triggering failure.
 ///
 /// Captures which task failed, where, and what the outcome was.
-#[derive(Debug, Clone)]
+#[derive(Debug, Clone, Serialize)]
 pub struct FailureInfo {
     /// The task that failed.
     pub task: TaskId,
@@ -141,7 +141,7 @@ impl Eq for FailureInfo {}
 ///
 /// This is intentionally smaller than [`crate::types::Outcome`]. Crash packs are repro
 /// artifacts, so we only record the deterministic summary needed for debugging.
-#[derive(Debug, Clone, PartialEq, Eq)]
+#[derive(Debug, Clone, PartialEq, Eq, Serialize)]
 pub enum FailureOutcome {
     /// Application error.
     Err,
@@ -189,7 +189,7 @@ impl From<EvidenceEntry> for EvidenceEntrySnapshot {
 ///
 /// Records what the supervisor decided and why, providing the "evidence
 /// ledger" for debugging supervision chain behavior.
-#[derive(Debug, Clone, PartialEq, Eq)]
+#[derive(Debug, Clone, PartialEq, Eq, Serialize)]
 pub struct SupervisionSnapshot {
     /// Virtual time when the decision was made.
     pub virtual_time: Time,
@@ -276,7 +276,7 @@ impl CrashPackManifest {
 ///
 /// All fields except `manifest.created_at` are deterministic: given the same
 /// seed, config, and code, the same crash pack is produced.
-#[derive(Debug, Clone)]
+#[derive(Debug, Clone, Serialize)]
 pub struct CrashPack {
     /// Top-level manifest with version, config, and fingerprint.
     pub manifest: CrashPackManifest,
@@ -501,6 +501,199 @@ impl CrashPackBuilder {
             supervision_log,
             oracle_violations: self.oracle_violations,
         }
+    }
+}
+
+// =============================================================================
+// Artifact Writer Capability (bd-1skcu)
+// =============================================================================
+
+/// Identifier for a written crash pack artifact.
+///
+/// Returned by [`CrashPackWriter::write`] to identify where the artifact was
+/// stored. The path is deterministic: given the same seed and fingerprint, the
+/// same artifact path is produced.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct ArtifactId {
+    /// The full path or identifier of the written artifact.
+    path: String,
+}
+
+impl ArtifactId {
+    /// Returns the artifact path/identifier as a string.
+    #[must_use]
+    pub fn path(&self) -> &str {
+        &self.path
+    }
+}
+
+impl std::fmt::Display for ArtifactId {
+    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        write!(f, "{}", self.path)
+    }
+}
+
+/// Error returned when writing a crash pack fails.
+#[derive(Debug)]
+pub enum CrashPackWriteError {
+    /// Serialization failed.
+    Serialize(String),
+    /// I/O error while writing.
+    Io(std::io::Error),
+}
+
+impl std::fmt::Display for CrashPackWriteError {
+    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        match self {
+            Self::Serialize(msg) => write!(f, "crash pack serialization failed: {msg}"),
+            Self::Io(e) => write!(f, "crash pack I/O error: {e}"),
+        }
+    }
+}
+
+impl std::error::Error for CrashPackWriteError {
+    fn source(&self) -> Option<&(dyn std::error::Error + 'static)> {
+        match self {
+            Self::Io(e) => Some(e),
+            Self::Serialize(_) => None,
+        }
+    }
+}
+
+/// Capability for writing crash packs to persistent storage.
+///
+/// This is the **only** way to persist a crash pack. There are no ambient
+/// filesystem writes — callers must hold an explicit `&dyn CrashPackWriter`
+/// to write artifacts. This follows asupersync's capability-security model.
+///
+/// # Deterministic Paths
+///
+/// Artifact paths are deterministic: `crashpack-{seed:016x}-{fingerprint:016x}-v{version}.json`.
+/// Two writes of the same crash pack produce the same path.
+pub trait CrashPackWriter: Send + Sync + std::fmt::Debug {
+    /// Write a crash pack, returning an [`ArtifactId`] identifying the artifact.
+    fn write(&self, pack: &CrashPack) -> Result<ArtifactId, CrashPackWriteError>;
+
+    /// Whether this writer persists to durable storage.
+    fn is_persistent(&self) -> bool;
+
+    /// Implementation name (e.g., `"file"`, `"memory"`).
+    fn name(&self) -> &'static str;
+}
+
+/// Compute the deterministic artifact filename for a crash pack.
+///
+/// Format: `crashpack-{seed:016x}-{fingerprint:016x}-v{version}.json`
+#[must_use]
+pub fn artifact_filename(pack: &CrashPack) -> String {
+    format!(
+        "crashpack-{:016x}-{:016x}-v{}.json",
+        pack.seed(),
+        pack.fingerprint(),
+        pack.manifest.schema_version,
+    )
+}
+
+/// File-based crash pack writer.
+///
+/// Writes JSON crash packs to a specified directory with deterministic
+/// filenames. The directory must exist; this writer does not create it
+/// (explicit opt-in means the caller sets up the output directory).
+#[derive(Debug)]
+pub struct FileCrashPackWriter {
+    base_dir: std::path::PathBuf,
+}
+
+impl FileCrashPackWriter {
+    /// Create a writer targeting the given directory.
+    ///
+    /// The directory must already exist.
+    #[must_use]
+    pub fn new(base_dir: std::path::PathBuf) -> Self {
+        Self { base_dir }
+    }
+
+    /// Returns the base directory for artifact output.
+    #[must_use]
+    pub fn base_dir(&self) -> &std::path::Path {
+        &self.base_dir
+    }
+}
+
+impl CrashPackWriter for FileCrashPackWriter {
+    fn write(&self, pack: &CrashPack) -> Result<ArtifactId, CrashPackWriteError> {
+        let filename = artifact_filename(pack);
+        let path = self.base_dir.join(&filename);
+
+        let json = serde_json::to_string_pretty(pack)
+            .map_err(|e| CrashPackWriteError::Serialize(e.to_string()))?;
+
+        std::fs::write(&path, json.as_bytes()).map_err(CrashPackWriteError::Io)?;
+
+        Ok(ArtifactId {
+            path: path.to_string_lossy().into_owned(),
+        })
+    }
+
+    fn is_persistent(&self) -> bool {
+        true
+    }
+
+    fn name(&self) -> &'static str {
+        "file"
+    }
+}
+
+/// In-memory crash pack writer for testing.
+///
+/// Collects written packs in a `Vec` behind a mutex. Not persistent.
+#[derive(Debug, Default)]
+pub struct MemoryCrashPackWriter {
+    packs: std::sync::Mutex<Vec<(ArtifactId, String)>>,
+}
+
+impl MemoryCrashPackWriter {
+    /// Create an empty in-memory writer.
+    #[must_use]
+    pub fn new() -> Self {
+        Self::default()
+    }
+
+    /// Returns all written packs as `(artifact_id, json)` pairs.
+    pub fn written(&self) -> Vec<(ArtifactId, String)> {
+        self.packs.lock().expect("lock poisoned").clone()
+    }
+
+    /// Returns the number of packs written.
+    #[must_use]
+    pub fn count(&self) -> usize {
+        self.packs.lock().expect("lock poisoned").len()
+    }
+}
+
+impl CrashPackWriter for MemoryCrashPackWriter {
+    fn write(&self, pack: &CrashPack) -> Result<ArtifactId, CrashPackWriteError> {
+        let filename = artifact_filename(pack);
+        let json = serde_json::to_string_pretty(pack)
+            .map_err(|e| CrashPackWriteError::Serialize(e.to_string()))?;
+
+        let artifact_id = ArtifactId {
+            path: filename,
+        };
+        self.packs
+            .lock()
+            .expect("lock poisoned")
+            .push((artifact_id.clone(), json));
+
+        Ok(artifact_id)
+    }
+
+    fn is_persistent(&self) -> bool {
+        false
+    }
+
+    fn name(&self) -> &'static str {
+        "memory"
     }
 }
 
@@ -953,8 +1146,6 @@ mod tests {
     #[test]
     fn from_trace_canonical_prefix_matches_foata_layers() {
         init_test("from_trace_canonical_prefix_matches_foata_layers");
-
-        use crate::trace::canonicalize::{canonicalize, trace_event_key};
 
         let events = [
             TraceEvent::spawn(1, Time::ZERO, tid(1), rid(1)),
