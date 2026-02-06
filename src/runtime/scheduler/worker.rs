@@ -197,7 +197,7 @@ impl Worker {
         trace!(task_id = ?task_id, worker_id = self.id, "executing task");
 
         // Try to find the task in global state first
-        let (mut stored, task_cx, wake_state, metrics) = {
+        let (mut stored, task_cx, wake_state, metrics, cached_waker) = {
             let mut state = self.state.lock().expect("runtime state lock poisoned");
 
             if let Some(stored) = state.remove_stored_future(task_id) {
@@ -207,9 +207,16 @@ impl Worker {
                     record.wake_state.begin_poll();
                     let task_cx = record.cx.clone();
                     let wake_state = Arc::clone(&record.wake_state);
+                    let cached = record.cached_waker.take();
                     let metrics = state.metrics_provider();
                     drop(state);
-                    (AnyStoredTask::Global(stored), task_cx, wake_state, metrics)
+                    (
+                        AnyStoredTask::Global(stored),
+                        task_cx,
+                        wake_state,
+                        metrics,
+                        cached,
+                    )
                 } else {
                     return; // Task record missing?
                 }
@@ -226,6 +233,7 @@ impl Worker {
                         record.wake_state.begin_poll();
                         let task_cx = record.cx.clone();
                         let wake_state = Arc::clone(&record.wake_state);
+                        let cached = record.cached_waker.take();
                         let metrics = state.metrics_provider();
                         drop(state);
                         (
@@ -233,6 +241,7 @@ impl Worker {
                             task_cx,
                             wake_state,
                             metrics,
+                            cached,
                         )
                     } else {
                         return; // Task record missing
@@ -244,18 +253,24 @@ impl Worker {
         };
 
         let is_local_task = matches!(&stored, AnyStoredTask::Local(_));
-        let local_queue = if is_local_task {
-            Some(self.local.clone())
+        // Reuse cached waker if available (WorkStealingWaker fields are immutable
+        // per task lifetime — no priority field to compare, unlike ThreeLaneWaker).
+        let waker = if let Some((w, _)) = cached_waker {
+            w
         } else {
-            None
+            let local_queue = if is_local_task {
+                Some(self.local.clone())
+            } else {
+                None
+            };
+            Waker::from(Arc::new(WorkStealingWaker {
+                task_id,
+                wake_state: Arc::clone(&wake_state),
+                global: Arc::clone(&self.global),
+                local: local_queue,
+                parker: self.parker.clone(),
+            }))
         };
-        let waker = Waker::from(Arc::new(WorkStealingWaker {
-            task_id,
-            wake_state: Arc::clone(&wake_state),
-            global: Arc::clone(&self.global),
-            local: local_queue,
-            parker: self.parker.clone(),
-        }));
         let mut cx = Context::from_waker(&waker);
         let _cx_guard = crate::cx::Cx::set_current(task_cx);
 
@@ -359,10 +374,20 @@ impl Worker {
                     AnyStoredTask::Global(t) => {
                         let mut state = self.state.lock().expect("runtime state lock poisoned");
                         state.store_spawned_task(task_id, t);
+                        // Cache waker back in the task record for reuse on next poll
+                        if let Some(record) = state.task_mut(task_id) {
+                            record.cached_waker = Some((waker, 0));
+                        }
                         drop(state);
                     }
                     AnyStoredTask::Local(t) => {
                         crate::runtime::local::store_local_task(task_id, t);
+                        // Cache waker for local tasks too (record is in global state)
+                        let mut state = self.state.lock().expect("runtime state lock poisoned");
+                        if let Some(record) = state.task_mut(task_id) {
+                            record.cached_waker = Some((waker, 0));
+                        }
+                        drop(state);
                     }
                 }
 

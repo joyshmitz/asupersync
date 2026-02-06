@@ -638,13 +638,12 @@ mod tests {
         ];
 
         // Create 100 obligations across 10 tasks (10 per task)
-        let mut all_ids = Vec::new();
         for task_n in 0..10 {
             let task = test_task_id(task_n);
             for i in 0..10 {
                 let kind = kinds[(task_n as usize * 10 + i) % kinds.len()];
                 let id = make_obligation(&mut table, kind, task, region);
-                all_ids.push((task_n, id));
+                let _ = id;
             }
         }
         assert_eq!(table.len(), 100);
