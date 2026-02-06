@@ -512,6 +512,7 @@ pub trait TokenKind: sealed::Sealed {
 }
 
 /// Marker type for [`ObligationKind::SendPermit`].
+#[derive(Debug)]
 pub enum SendPermit {}
 impl sealed::Sealed for SendPermit {}
 impl TokenKind for SendPermit {
@@ -521,6 +522,7 @@ impl TokenKind for SendPermit {
 }
 
 /// Marker type for [`ObligationKind::Ack`].
+#[derive(Debug)]
 pub enum AckKind {}
 impl sealed::Sealed for AckKind {}
 impl TokenKind for AckKind {
@@ -530,6 +532,7 @@ impl TokenKind for AckKind {
 }
 
 /// Marker type for [`ObligationKind::Lease`].
+#[derive(Debug)]
 pub enum LeaseKind {}
 impl sealed::Sealed for LeaseKind {}
 impl TokenKind for LeaseKind {
@@ -539,6 +542,7 @@ impl TokenKind for LeaseKind {
 }
 
 /// Marker type for [`ObligationKind::IoOp`].
+#[derive(Debug)]
 pub enum IoOpKind {}
 impl sealed::Sealed for IoOpKind {}
 impl TokenKind for IoOpKind {

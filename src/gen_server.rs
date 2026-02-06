@@ -36,8 +36,8 @@
 //!         -> Pin<Box<dyn Future<Output = ()> + Send + '_>>
 //!     {
 //!         match msg {
-//!             Request::Get => { reply.send(self.count); }
-//!             Request::Add(n) => { self.count += n; reply.send(self.count); }
+//!             Request::Get => { let _ = reply.send(self.count); }
+//!             Request::Add(n) => { self.count += n; let _ = reply.send(self.count); }
 //!         }
 //!         Box::pin(async {})
 //!     }
@@ -61,7 +61,9 @@ use std::sync::Arc;
 use crate::actor::{ActorId, ActorState};
 use crate::channel::mpsc;
 use crate::channel::oneshot;
+use crate::channel::session::{self, TrackedOneshotSender};
 use crate::cx::Cx;
+use crate::obligation::graded::{AbortedProof, CommittedProof, SendPermit};
 use crate::runtime::{JoinError, SpawnError};
 use crate::types::{CxInner, Outcome, TaskId};
 
@@ -119,54 +121,77 @@ pub trait GenServer: Send + 'static {
 
 /// Handle for sending a reply to a call.
 ///
-/// This is a linear token: it **must** be consumed by calling `send()`.
-/// Dropping it without sending is a programming error (detected in lab mode).
+/// This is a **linear obligation token**: it **must** be consumed by calling
+/// [`send()`](Self::send) or [`abort()`](Self::abort). Dropping without
+/// consuming triggers a panic via [`ObligationToken<SendPermit>`].
+///
+/// Backed by [`TrackedOneshotSender`](session::TrackedOneshotSender) from
+/// `channel::session`, making "silent reply drop" structurally impossible.
 pub struct Reply<R> {
     cx: Cx,
-    tx: Option<oneshot::Sender<R>>,
+    tx: TrackedOneshotSender<R>,
 }
 
 impl<R: Send + 'static> Reply<R> {
-    fn new(cx: &Cx, tx: oneshot::Sender<R>) -> Self {
-        Self {
-            cx: cx.clone(),
-            tx: Some(tx),
+    fn new(cx: &Cx, tx: TrackedOneshotSender<R>) -> Self {
+        Self { cx: cx.clone(), tx }
+    }
+
+    /// Send the reply value to the caller, returning a [`CommittedProof`].
+    ///
+    /// Consumes the reply handle. If the caller has dropped (e.g., timed out),
+    /// the obligation is aborted cleanly (no panic).
+    pub fn send(self, value: R) -> ReplyOutcome {
+        match self.tx.send(&self.cx, value) {
+            Ok(proof) => ReplyOutcome::Committed(proof),
+            Err(_send_err) => {
+                // Receiver (caller) dropped — e.g., timed out. The
+                // TrackedOneshotSender::send already aborted the obligation.
+                self.cx.trace("gen_server::reply_caller_gone");
+                ReplyOutcome::CallerGone
+            }
         }
     }
 
-    /// Send the reply value to the caller.
+    /// Explicitly abort the reply obligation without sending a value.
     ///
-    /// Consumes the reply handle. If the caller has dropped (e.g., timed out),
-    /// the reply is silently discarded.
-    pub fn send(mut self, value: R) {
-        if let Some(tx) = self.tx.take() {
-            // Non-blocking: this never suspends.
-            let _ = tx.send(&self.cx, value);
-        }
+    /// Use this when the server intentionally chooses not to reply (e.g.,
+    /// delegating to another process). Returns an [`AbortedProof`].
+    #[must_use]
+    pub fn abort(self) -> AbortedProof<SendPermit> {
+        let permit = self.tx.reserve(&self.cx);
+        permit.abort()
     }
 
     /// Check if the caller is still waiting for a reply.
     #[must_use]
     pub fn is_closed(&self) -> bool {
-        self.tx.as_ref().is_none_or(oneshot::Sender::is_closed)
-    }
-}
-
-impl<R> Drop for Reply<R> {
-    fn drop(&mut self) {
-        if self.tx.is_some() {
-            // Caller observes a closed oneshot. In lab, this can be turned into a
-            // first-class obligation leak via a dedicated oracle (future work).
-            self.cx.trace("gen_server::reply_dropped_without_send");
-        }
+        self.tx.is_closed()
     }
 }
 
 impl<R> std::fmt::Debug for Reply<R> {
     fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
         f.debug_struct("Reply")
-            .field("pending", &self.tx.is_some())
+            .field("pending", &!self.tx.is_closed())
             .finish_non_exhaustive()
+    }
+}
+
+/// Outcome of sending a reply.
+pub enum ReplyOutcome {
+    /// Reply was successfully delivered, obligation committed.
+    Committed(CommittedProof<SendPermit>),
+    /// Caller has already gone (e.g., timed out). Obligation was aborted.
+    CallerGone,
+}
+
+impl std::fmt::Debug for ReplyOutcome {
+    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        match self {
+            Self::Committed(_) => f.debug_tuple("Committed").finish(),
+            Self::CallerGone => write!(f, "CallerGone"),
+        }
     }
 }
 
@@ -178,7 +203,7 @@ impl<R> std::fmt::Debug for Reply<R> {
 enum Envelope<S: GenServer> {
     Call {
         request: S::Call,
-        reply_tx: oneshot::Sender<S::Reply>,
+        reply_tx: TrackedOneshotSender<S::Reply>,
     },
     Cast {
         msg: S::Cast,
@@ -304,9 +329,12 @@ impl std::error::Error for CastError {}
 impl<S: GenServer> GenServerHandle<S> {
     /// Send a call (request-response) to the server.
     ///
-    /// Blocks until the server replies or the server stops.
+    /// Blocks until the server replies or the server stops. The reply channel
+    /// uses obligation-tracked oneshot from `channel::session`, ensuring that
+    /// if the server drops the reply without sending, the obligation token
+    /// panics rather than silently losing the reply.
     pub async fn call(&self, cx: &Cx, request: S::Call) -> Result<S::Reply, CallError> {
-        let (reply_tx, reply_rx) = oneshot::channel::<S::Reply>();
+        let (reply_tx, reply_rx) = session::tracked_oneshot::<S::Reply>();
         let envelope = Envelope::Call { request, reply_tx };
 
         self.sender
@@ -400,7 +428,7 @@ impl<S: GenServer> Clone for GenServerRef<S> {
 impl<S: GenServer> GenServerRef<S> {
     /// Send a call to the server.
     pub async fn call(&self, cx: &Cx, request: S::Call) -> Result<S::Reply, CallError> {
-        let (reply_tx, reply_rx) = oneshot::channel::<S::Reply>();
+        let (reply_tx, reply_rx) = session::tracked_oneshot::<S::Reply>();
         let envelope = Envelope::Call { request, reply_tx };
         self.sender
             .send(cx, envelope)
@@ -685,10 +713,12 @@ mod tests {
             reply: Reply<u64>,
         ) -> Pin<Box<dyn Future<Output = ()> + Send + '_>> {
             match request {
-                CounterCall::Get => reply.send(self.count),
+                CounterCall::Get => {
+                    let _ = reply.send(self.count);
+                }
                 CounterCall::Add(n) => {
                     self.count += n;
-                    reply.send(self.count);
+                    let _ = reply.send(self.count);
                 }
             }
             Box::pin(async {})
@@ -837,10 +867,12 @@ mod tests {
             reply: Reply<u64>,
         ) -> Pin<Box<dyn Future<Output = ()> + Send + '_>> {
             match request {
-                CounterCall::Get => reply.send(self.count),
+                CounterCall::Get => {
+                    let _ = reply.send(self.count);
+                }
                 CounterCall::Add(n) => {
                     self.count += n;
-                    reply.send(self.count);
+                    let _ = reply.send(self.count);
                 }
             }
             Box::pin(async {})
@@ -957,14 +989,14 @@ mod tests {
         init_test("reply_debug_format");
 
         let cx = Cx::for_testing();
-        let (tx, _rx) = oneshot::channel::<u64>();
+        let (tx, _rx) = session::tracked_oneshot::<u64>();
         let reply = Reply::new(&cx, tx);
         let debug_str = format!("{reply:?}");
         assert!(debug_str.contains("Reply"));
         assert!(debug_str.contains("pending"));
 
-        // Consume the reply to avoid the drop warning
-        reply.send(42);
+        // Consume the reply to avoid the obligation panic
+        let _ = reply.send(42);
 
         crate::test_complete!("reply_debug_format");
     }
