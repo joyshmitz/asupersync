@@ -185,7 +185,7 @@ impl Default for CancelAttributionConfig {
 }
 
 /// The kind of cancellation request.
-#[derive(Debug, Clone, Copy, PartialEq, Eq, Hash, PartialOrd, Ord)]
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Hash, PartialOrd, Ord, serde::Serialize)]
 pub enum CancelKind {
     /// Explicit cancellation requested by user code.
     User,
