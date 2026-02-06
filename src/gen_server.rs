@@ -392,7 +392,10 @@ impl<R: Send + 'static> Reply<R> {
     /// the obligation is aborted cleanly (no panic).
     pub fn send(self, value: R) -> ReplyOutcome {
         match self.permit.send(value) {
-            Ok(proof) => ReplyOutcome::Committed(proof),
+            Ok(proof) => {
+                self.cx.trace("gen_server::reply_committed");
+                ReplyOutcome::Committed(proof)
+            }
             Err(_send_err) => {
                 // Receiver (caller) dropped — e.g., timed out. The tracked
                 // permit aborts the obligation cleanly in this case.
@@ -408,6 +411,7 @@ impl<R: Send + 'static> Reply<R> {
     /// delegating to another process). Returns an [`AbortedProof`].
     #[must_use]
     pub fn abort(self) -> AbortedProof<SendPermit> {
+        self.cx.trace("gen_server::reply_aborted");
         self.permit.abort()
     }
 
@@ -617,6 +621,7 @@ impl<S: GenServer> GenServerHandle<S> {
     /// panics rather than silently losing the reply.
     pub async fn call(&self, cx: &Cx, request: S::Call) -> Result<S::Reply, CallError> {
         if cx.checkpoint().is_err() {
+            cx.trace("gen_server::call_rejected_cancelled");
             let reason = cx
                 .cancel_reason()
                 .unwrap_or_else(crate::types::CancelReason::parent_cancelled);
@@ -627,6 +632,7 @@ impl<S: GenServer> GenServerHandle<S> {
             self.state.load(),
             ActorState::Stopping | ActorState::Stopped
         ) {
+            cx.trace("gen_server::call_rejected_stopped");
             return Err(CallError::ServerStopped);
         }
 
@@ -648,18 +654,26 @@ impl<S: GenServer> GenServerHandle<S> {
                 let _aborted = reply_permit.abort();
             }
             if was_cancelled {
+                cx.trace("gen_server::call_send_cancelled");
                 let reason = cx
                     .cancel_reason()
                     .unwrap_or_else(crate::types::CancelReason::parent_cancelled);
                 return Err(CallError::Cancelled(reason));
             }
+            cx.trace("gen_server::call_send_failed");
             return Err(CallError::ServerStopped);
         }
 
+        cx.trace("gen_server::call_enqueued");
+
         match reply_rx.recv(cx).await {
             Ok(v) => Ok(v),
-            Err(oneshot::RecvError::Closed) => Err(CallError::NoReply),
+            Err(oneshot::RecvError::Closed) => {
+                cx.trace("gen_server::call_no_reply");
+                Err(CallError::NoReply)
+            }
             Err(oneshot::RecvError::Cancelled) => {
+                cx.trace("gen_server::call_reply_cancelled");
                 let reason = cx
                     .cancel_reason()
                     .unwrap_or_else(crate::types::CancelReason::parent_cancelled);
@@ -671,6 +685,7 @@ impl<S: GenServer> GenServerHandle<S> {
     /// Send a cast (fire-and-forget) to the server.
     pub async fn cast(&self, cx: &Cx, msg: S::Cast) -> Result<(), CastError> {
         if cx.checkpoint().is_err() {
+            cx.trace("gen_server::cast_rejected_cancelled");
             let reason = cx
                 .cancel_reason()
                 .unwrap_or_else(crate::types::CancelReason::parent_cancelled);
@@ -681,17 +696,22 @@ impl<S: GenServer> GenServerHandle<S> {
             self.state.load(),
             ActorState::Stopping | ActorState::Stopped
         ) {
+            cx.trace("gen_server::cast_rejected_stopped");
             return Err(CastError::ServerStopped);
         }
         let envelope = Envelope::Cast { msg };
         self.sender.send(cx, envelope).await.map_err(|e| match e {
             mpsc::SendError::Cancelled(_) => {
+                cx.trace("gen_server::cast_send_cancelled");
                 let reason = cx
                     .cancel_reason()
                     .unwrap_or_else(crate::types::CancelReason::parent_cancelled);
                 CastError::Cancelled(reason)
             }
-            mpsc::SendError::Disconnected(_) | mpsc::SendError::Full(_) => CastError::ServerStopped,
+            mpsc::SendError::Disconnected(_) | mpsc::SendError::Full(_) => {
+                cx.trace("gen_server::cast_send_failed");
+                CastError::ServerStopped
+            }
         })
     }
 
@@ -862,6 +882,7 @@ impl<S: GenServer> GenServerRef<S> {
     /// Send a call to the server.
     pub async fn call(&self, cx: &Cx, request: S::Call) -> Result<S::Reply, CallError> {
         if cx.checkpoint().is_err() {
+            cx.trace("gen_server::call_rejected_cancelled");
             let reason = cx
                 .cancel_reason()
                 .unwrap_or_else(crate::types::CancelReason::parent_cancelled);
@@ -872,6 +893,7 @@ impl<S: GenServer> GenServerRef<S> {
             self.state.load(),
             ActorState::Stopping | ActorState::Stopped
         ) {
+            cx.trace("gen_server::call_rejected_stopped");
             return Err(CallError::ServerStopped);
         }
 
@@ -891,18 +913,26 @@ impl<S: GenServer> GenServerRef<S> {
                 let _aborted = reply_permit.abort();
             }
             if was_cancelled {
+                cx.trace("gen_server::call_send_cancelled");
                 let reason = cx
                     .cancel_reason()
                     .unwrap_or_else(crate::types::CancelReason::parent_cancelled);
                 return Err(CallError::Cancelled(reason));
             }
+            cx.trace("gen_server::call_send_failed");
             return Err(CallError::ServerStopped);
         }
 
+        cx.trace("gen_server::call_enqueued");
+
         match reply_rx.recv(cx).await {
             Ok(v) => Ok(v),
-            Err(oneshot::RecvError::Closed) => Err(CallError::NoReply),
+            Err(oneshot::RecvError::Closed) => {
+                cx.trace("gen_server::call_no_reply");
+                Err(CallError::NoReply)
+            }
             Err(oneshot::RecvError::Cancelled) => {
+                cx.trace("gen_server::call_reply_cancelled");
                 let reason = cx
                     .cancel_reason()
                     .unwrap_or_else(crate::types::CancelReason::parent_cancelled);
@@ -914,6 +944,7 @@ impl<S: GenServer> GenServerRef<S> {
     /// Send a cast to the server.
     pub async fn cast(&self, cx: &Cx, msg: S::Cast) -> Result<(), CastError> {
         if cx.checkpoint().is_err() {
+            cx.trace("gen_server::cast_rejected_cancelled");
             let reason = cx
                 .cancel_reason()
                 .unwrap_or_else(crate::types::CancelReason::parent_cancelled);
@@ -924,17 +955,22 @@ impl<S: GenServer> GenServerRef<S> {
             self.state.load(),
             ActorState::Stopping | ActorState::Stopped
         ) {
+            cx.trace("gen_server::cast_rejected_stopped");
             return Err(CastError::ServerStopped);
         }
         let envelope = Envelope::Cast { msg };
         self.sender.send(cx, envelope).await.map_err(|e| match e {
             mpsc::SendError::Cancelled(_) => {
+                cx.trace("gen_server::cast_send_cancelled");
                 let reason = cx
                     .cancel_reason()
                     .unwrap_or_else(crate::types::CancelReason::parent_cancelled);
                 CastError::Cancelled(reason)
             }
-            mpsc::SendError::Disconnected(_) | mpsc::SendError::Full(_) => CastError::ServerStopped,
+            mpsc::SendError::Disconnected(_) | mpsc::SendError::Full(_) => {
+                cx.trace("gen_server::cast_send_failed");
+                CastError::ServerStopped
+            }
         })
     }
 
