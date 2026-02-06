@@ -64,6 +64,7 @@
 #![cfg_attr(test, allow(clippy::large_stack_frames))]
 
 pub mod actor;
+pub mod app;
 pub mod audit;
 pub mod bytes;
 pub mod cancel;

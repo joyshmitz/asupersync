@@ -76,6 +76,7 @@ impl AppSpec {
     }
 
     /// Override the root region's budget (defaults to parent budget if unset).
+    #[must_use]
     pub fn with_budget(mut self, budget: Budget) -> Self {
         self.budget = Some(budget);
         self.supervisor = self.supervisor.with_budget(budget);
@@ -83,18 +84,21 @@ impl AppSpec {
     }
 
     /// Set the restart policy for the root supervisor.
+    #[must_use]
     pub fn with_restart_policy(mut self, policy: RestartPolicy) -> Self {
         self.supervisor = self.supervisor.with_restart_policy(policy);
         self
     }
 
     /// Set the tie-break strategy for deterministic start ordering.
+    #[must_use]
     pub fn with_tie_break(mut self, tie_break: StartTieBreak) -> Self {
         self.supervisor = self.supervisor.with_tie_break(tie_break);
         self
     }
 
     /// Add a child specification to the application's root supervisor.
+    #[must_use]
     pub fn child(mut self, child: ChildSpec) -> Self {
         self.supervisor = self.supervisor.child(child);
         self
@@ -189,16 +193,19 @@ impl Drop for AppHandle {
 
 impl AppHandle {
     /// Application name.
+    #[must_use]
     pub fn name(&self) -> &str {
         &self.name
     }
 
     /// The root region owned by this application.
+    #[must_use]
     pub fn root_region(&self) -> RegionId {
         self.root_region
     }
 
     /// The supervisor handle for the app's root supervisor.
+    #[must_use]
     pub fn supervisor(&self) -> &SupervisorHandle {
         &self.supervisor
     }
@@ -244,6 +251,7 @@ impl AppHandle {
     }
 
     /// Check whether the app's root region has reached terminal (Closed) state.
+    #[must_use]
     pub fn is_stopped(&self, state: &RuntimeState) -> bool {
         state
             .region(self.root_region)
@@ -292,6 +300,7 @@ impl AppHandle {
     ///
     /// Returns the raw region ID. The caller assumes responsibility for
     /// lifecycle management of the root region.
+    #[must_use]
     pub fn into_raw(mut self) -> RawAppHandle {
         self.resolved = true;
         RawAppHandle {
@@ -389,20 +398,19 @@ mod tests {
     use crate::types::Budget;
 
     fn init_test(name: &str) {
-        #[cfg(any(test, feature = "test-internals"))]
-        crate::test_logging::init(name);
-        let _ = name;
+        crate::test_utils::init_test_logging();
+        crate::test_phase!(name);
     }
 
     fn make_child(name: &str) -> ChildSpec {
         ChildSpec {
             name: name.to_string(),
             start: Box::new(
-                |_scope: &crate::cx::Scope<'static, crate::types::policy::FailFast>,
+                |scope: &crate::cx::Scope<'static, crate::types::policy::FailFast>,
                  state: &mut RuntimeState,
                  _cx: &Cx| {
-                    let region = _scope.region_id();
-                    let budget = _scope.budget();
+                    let region = scope.region_id();
+                    let budget = scope.budget();
                     state
                         .create_task(region, budget, async { 42_u8 })
                         .map(|(_, stored)| stored.task_id())

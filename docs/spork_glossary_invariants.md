@@ -119,12 +119,41 @@ Spork processes shut down through Asupersync's cancellation protocol:
 
 1. **Cancel request**: `cx.cancel_requested` is set (or mailbox is closed)
 2. **Drain phase**: Actor processes remaining buffered messages (capped at mailbox capacity)
-3. **on_stop**: Cleanup hook runs (finalizers, obligation discharge)
+3. **Stop hook**: Cleanup hook runs (finalizers, obligation discharge)
 4. **Completion**: Task completes with an `Outcome` (Ok/Err/Cancelled/Panicked)
 
 Region close ensures quiescence: all children must complete before the region reports closed.
 
 Mapped to: `run_actor_loop` phases in `src/actor.rs` lines 679-744, cancellation protocol in `src/types/cancel.rs`.
+
+**GenServer init/terminate (Spork)**
+
+GenServer lifecycle is OTP-style, with init/terminate semantics expressed through
+`GenServer::on_start` / `GenServer::on_stop`:
+
+1. **init**: `on_start(&Cx)` runs once before processing any messages.
+2. **loop**: calls/casts/info are processed sequentially.
+3. **stop requested**: cancellation requested or mailbox disconnected.
+4. **drain**: bounded drain of buffered mailbox entries.
+   - Calls are *not* executed during drain; their reply obligations are aborted deterministically.
+   - Cast/info may still run during drain (bounded by mailbox capacity).
+5. **terminate**: `on_stop(&Cx)` runs once after drain.
+
+**Budgets**
+
+- **init budget**: `GenServer::on_start_budget()` is met with the task/region budget and applied only
+  for the duration of `on_start`. Budget consumption during init is preserved when restoring the
+  original budget for the message loop.
+- **terminate budget**: `GenServer::on_stop_budget()` is applied for drain + `on_stop`, yielding
+  bounded cleanup.
+
+**Masking Rules**
+
+- **init is unmasked**: if cancellation is already requested before init begins, init is skipped.
+- **drain + on_stop are masked**: cancellation is masked for cleanup so drain and `on_stop` can run
+  deterministically under the terminate budget.
+
+Mapped to: `run_gen_server_loop` phases in `src/gen_server.rs`.
 
 **Graceful Stop vs Abort**
 - `stop()`: Signals the actor to finish processing and exit. Currently identical to abort; future improvement will drain buffered messages before exiting.

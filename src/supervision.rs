@@ -1608,6 +1608,100 @@ pub struct EvidenceEntry {
     pub binding_constraint: BindingConstraint,
 }
 
+impl EvidenceEntry {
+    /// Convert this supervision-specific evidence entry into a generalized
+    /// [`evidence::EvidenceRecord`](crate::evidence::EvidenceRecord).
+    ///
+    /// Maps [`BindingConstraint`] to the appropriate
+    /// [`Verdict`](crate::evidence::Verdict) +
+    /// [`SupervisionDetail`](crate::evidence::SupervisionDetail) pair.
+    #[must_use]
+    pub fn to_evidence_record(&self) -> crate::evidence::EvidenceRecord {
+        use crate::evidence::{
+            EvidenceDetail, EvidenceRecord, Subsystem, SupervisionDetail, Verdict,
+        };
+
+        let (verdict, detail) = match &self.binding_constraint {
+            BindingConstraint::MonotoneSeverity { outcome_kind } => (
+                Verdict::Stop,
+                SupervisionDetail::MonotoneSeverity {
+                    outcome_kind: *outcome_kind,
+                },
+            ),
+            BindingConstraint::ExplicitStopStrategy => {
+                (Verdict::Stop, SupervisionDetail::ExplicitStop)
+            }
+            BindingConstraint::EscalateStrategy => {
+                (Verdict::Escalate, SupervisionDetail::ExplicitEscalate)
+            }
+            BindingConstraint::RestartAllowed { attempt } => {
+                // Extract delay from the decision if it was a Restart.
+                let delay = match &self.decision {
+                    SupervisionDecision::Restart { delay, .. } => *delay,
+                    _ => None,
+                };
+                (
+                    Verdict::Restart,
+                    SupervisionDetail::RestartAllowed {
+                        attempt: *attempt,
+                        delay,
+                    },
+                )
+            }
+            BindingConstraint::WindowExhausted {
+                max_restarts,
+                window,
+            } => (
+                Verdict::Stop,
+                SupervisionDetail::WindowExhausted {
+                    max_restarts: *max_restarts,
+                    window: *window,
+                },
+            ),
+            BindingConstraint::InsufficientCost {
+                required,
+                remaining,
+            } => (
+                Verdict::Stop,
+                SupervisionDetail::BudgetRefused {
+                    constraint: format!("insufficient cost: need {required}, have {remaining}"),
+                },
+            ),
+            BindingConstraint::DeadlineTooClose {
+                min_required,
+                remaining,
+            } => (
+                Verdict::Stop,
+                SupervisionDetail::BudgetRefused {
+                    constraint: format!(
+                        "deadline too close: need {min_required:?}, have {remaining:?}"
+                    ),
+                },
+            ),
+            BindingConstraint::InsufficientPolls {
+                min_required,
+                remaining,
+            } => (
+                Verdict::Stop,
+                SupervisionDetail::BudgetRefused {
+                    constraint: format!(
+                        "insufficient polls: need {min_required}, have {remaining}"
+                    ),
+                },
+            ),
+        };
+
+        EvidenceRecord {
+            timestamp: self.timestamp,
+            task_id: self.task_id,
+            region_id: self.region_id,
+            subsystem: Subsystem::Supervision,
+            verdict,
+            detail: EvidenceDetail::Supervision(detail),
+        }
+    }
+}
+
 /// Deterministic, append-only ledger of supervision evidence.
 ///
 /// Collects structured [`EvidenceEntry`] records for every supervision
@@ -1699,6 +1793,7 @@ pub struct Supervisor {
     strategy: SupervisionStrategy,
     history: Option<RestartHistory>,
     evidence: EvidenceLedger,
+    generalized_evidence: crate::evidence::GeneralizedLedger,
 }
 
 impl Supervisor {
@@ -1713,6 +1808,7 @@ impl Supervisor {
             strategy,
             history,
             evidence: EvidenceLedger::new(),
+            generalized_evidence: crate::evidence::GeneralizedLedger::new(),
         }
     }
 
@@ -1970,6 +2066,22 @@ impl Supervisor {
     /// Useful for draining evidence in test assertions.
     pub fn take_evidence(&mut self) -> EvidenceLedger {
         std::mem::take(&mut self.evidence)
+    }
+
+    /// Access the generalized evidence ledger.
+    ///
+    /// Returns a reference to the generalized ledger containing one
+    /// [`EvidenceRecord`](crate::evidence::EvidenceRecord) per supervision
+    /// decision.  This is the subsystem-agnostic format suitable for
+    /// cross-subsystem rendering and analysis.
+    #[must_use]
+    pub fn generalized_evidence(&self) -> &crate::evidence::GeneralizedLedger {
+        &self.generalized_evidence
+    }
+
+    /// Take ownership of the generalized evidence ledger.
+    pub fn take_generalized_evidence(&mut self) -> crate::evidence::GeneralizedLedger {
+        std::mem::take(&mut self.generalized_evidence)
     }
 }
 
