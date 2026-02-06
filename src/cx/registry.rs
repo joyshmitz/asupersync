@@ -1050,54 +1050,52 @@ mod tests {
     /// event list in the same order.
     #[test]
     fn conformance_event_ordering_stable_across_seeds() {
-        init_test("conformance_event_ordering_stable_across_seeds");
-
-        // Build the canonical event sequence for a known operation order.
-        // The events are constructed manually to match what the registry
-        // operations WOULD emit (the NameRegistry itself doesn't emit events;
-        // the caller is responsible for emitting RegistryEvents).
         fn build_event_sequence() -> Vec<RegistryEvent> {
-            let mut events = Vec::new();
-
-            // Simulate: register "b", register "a", register "c", cleanup region 0
-            events.push(RegistryEvent::NameRegistered {
-                name: "b".into(),
-                holder: tid(2),
-                region: rid(0),
-            });
-            events.push(RegistryEvent::NameRegistered {
-                name: "a".into(),
-                holder: tid(1),
-                region: rid(0),
-            });
-            events.push(RegistryEvent::NameRegistered {
-                name: "c".into(),
-                holder: tid(3),
-                region: rid(0),
-            });
-            events.push(RegistryEvent::RegionCleanup {
-                region: rid(0),
-                count: 3,
-            });
-            // Abort events follow BTreeMap order (a, b, c)
-            events.push(RegistryEvent::NameAborted {
-                name: "a".into(),
-                holder: tid(1),
-                reason: "region cleanup".into(),
-            });
-            events.push(RegistryEvent::NameAborted {
-                name: "b".into(),
-                holder: tid(2),
-                reason: "region cleanup".into(),
-            });
-            events.push(RegistryEvent::NameAborted {
-                name: "c".into(),
-                holder: tid(3),
-                reason: "region cleanup".into(),
-            });
-
-            events
+            // Build the canonical event sequence for a known operation order.
+            // The events are constructed manually to match what the registry
+            // operations WOULD emit (the NameRegistry itself doesn't emit events;
+            // the caller is responsible for emitting RegistryEvents).
+            vec![
+                // Simulate: register "b", register "a", register "c", cleanup region 0
+                RegistryEvent::NameRegistered {
+                    name: "b".into(),
+                    holder: tid(2),
+                    region: rid(0),
+                },
+                RegistryEvent::NameRegistered {
+                    name: "a".into(),
+                    holder: tid(1),
+                    region: rid(0),
+                },
+                RegistryEvent::NameRegistered {
+                    name: "c".into(),
+                    holder: tid(3),
+                    region: rid(0),
+                },
+                RegistryEvent::RegionCleanup {
+                    region: rid(0),
+                    count: 3,
+                },
+                // Abort events follow BTreeMap order (a, b, c)
+                RegistryEvent::NameAborted {
+                    name: "a".into(),
+                    holder: tid(1),
+                    reason: "region cleanup".into(),
+                },
+                RegistryEvent::NameAborted {
+                    name: "b".into(),
+                    holder: tid(2),
+                    reason: "region cleanup".into(),
+                },
+                RegistryEvent::NameAborted {
+                    name: "c".into(),
+                    holder: tid(3),
+                    reason: "region cleanup".into(),
+                },
+            ]
         }
+
+        init_test("conformance_event_ordering_stable_across_seeds");
 
         // Run the same sequence 10 times; verify it matches the canonical ordering
         let canonical = build_event_sequence();
@@ -1219,7 +1217,7 @@ mod tests {
         for i in 0..10 {
             let name = format!("svc_{i:03}");
             let lease = reg
-                .register(&name, tid(i), rid(i % 3), Time::from_secs(i as u64))
+                .register(&name, tid(i), rid(i % 3), Time::from_secs(u64::from(i)))
                 .unwrap();
             active_leases.push(lease);
         }

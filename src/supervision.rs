@@ -4274,7 +4274,7 @@ mod tests {
                 assert_eq!(tid, test_task_id());
                 assert_eq!(rid, test_region_id());
             }
-            other => assert!(false, "expected Escalate, got {other:?}"),
+            other => unreachable!("expected Escalate, got {other:?}"),
         }
 
         crate::test_complete!("conformance_escalation_without_parent_region");
@@ -4419,7 +4419,7 @@ mod tests {
                     assert_eq!(rid, region);
                     assert_eq!(reason, StopReason::ExplicitStop);
                 }
-                other => assert!(false, "expected Stop, got {other:?}"),
+                other => unreachable!("expected Stop, got {other:?}"),
             }
         }
 
@@ -4447,8 +4447,7 @@ mod tests {
                         assert_eq!(rid, region);
                         assert_eq!(attempt, expected_attempt);
                     }
-                    other => assert!(
-                        false,
+                    other => unreachable!(
                         "expected Restart attempt={expected_attempt}, got {other:?}"
                     ),
                 }
@@ -4470,7 +4469,7 @@ mod tests {
                     assert_eq!(rid, region);
                     assert_eq!(parent_region_id, Some(parent));
                 }
-                other => assert!(false, "expected Escalate, got {other:?}"),
+                other => unreachable!("expected Escalate, got {other:?}"),
             }
         }
 
@@ -4500,7 +4499,7 @@ mod tests {
                 assert_eq!(attempt, 1);
                 assert_eq!(delay, config.backoff.delay_for_attempt(0));
             }
-            other => assert!(false, "expected Restart, got {other:?}"),
+            other => unreachable!("expected Restart, got {other:?}"),
         }
 
         // Attempt 2: delay should be for attempt index 1 = 200ms
@@ -4516,7 +4515,7 @@ mod tests {
                 assert_eq!(attempt, 2);
                 assert_eq!(delay, config.backoff.delay_for_attempt(1));
             }
-            other => assert!(false, "expected Restart, got {other:?}"),
+            other => unreachable!("expected Restart, got {other:?}"),
         }
 
         // Attempt 3: delay should be for attempt index 2 = 400ms
@@ -4532,7 +4531,7 @@ mod tests {
                 assert_eq!(attempt, 3);
                 assert_eq!(delay, config.backoff.delay_for_attempt(2));
             }
-            other => assert!(false, "expected Restart, got {other:?}"),
+            other => unreachable!("expected Restart, got {other:?}"),
         }
 
         crate::test_complete!("conformance_restart_delay_matches_backoff");
@@ -4677,7 +4676,7 @@ mod tests {
                     assert_eq!(child, "required_fail");
                 }
                 other @ SupervisorSpawnError::RegionCreate(_) => {
-                    assert!(false, "expected ChildStartFailed, got {other:?}");
+                    unreachable!("expected ChildStartFailed, got {other:?}");
                 }
             }
         }
@@ -4866,7 +4865,7 @@ mod tests {
                 assert!(remaining.contains(&"b".to_string()));
                 assert!(remaining.contains(&"c".to_string()));
             }
-            other => assert!(false, "expected CycleDetected, got {other:?}"),
+            other => unreachable!("expected CycleDetected, got {other:?}"),
         }
 
         crate::test_complete!("conformance_compile_rejects_cycles");
