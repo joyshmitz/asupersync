@@ -1722,26 +1722,8 @@ impl Supervisor {
         &self.strategy
     }
 
-    fn record_evidence(
-        &mut self,
-        now: u64,
-        task_id: TaskId,
-        region_id: RegionId,
-        outcome: &Outcome<(), ()>,
-        strategy_kind: &'static str,
-        decision: SupervisionDecision,
-        constraint: BindingConstraint,
-    ) -> SupervisionDecision {
-        self.evidence.push(EvidenceEntry {
-            timestamp: now,
-            task_id,
-            region_id,
-            outcome: outcome.clone(),
-            strategy_kind,
-            decision: decision.clone(),
-            binding_constraint: constraint,
-        });
-        decision
+    fn record_evidence(&mut self, entry: EvidenceEntry) {
+        self.evidence.push(entry);
     }
 
     fn decide_err_with_budget(
@@ -1955,15 +1937,17 @@ impl Supervisor {
             }
         };
 
-        self.record_evidence(
-            now,
+        self.record_evidence(EvidenceEntry {
+            timestamp: now,
             task_id,
             region_id,
-            outcome,
+            outcome: outcome.clone(),
             strategy_kind,
-            decision,
-            constraint,
-        )
+            decision: decision.clone(),
+            binding_constraint: constraint,
+        });
+
+        decision
     }
 
     /// Get the restart history (if using Restart strategy).
@@ -3248,7 +3232,7 @@ mod tests {
             test_task_id(),
             test_region_id(),
             None,
-            Outcome::Err(()),
+            &Outcome::Err(()),
             0,
             Some(&budget),
         );
@@ -3279,7 +3263,7 @@ mod tests {
             test_task_id(),
             test_region_id(),
             None,
-            Outcome::Err(()),
+            &Outcome::Err(()),
             0,
             Some(&budget),
         );
@@ -3301,7 +3285,8 @@ mod tests {
         let mut supervisor = Supervisor::new(SupervisionStrategy::Restart(config));
 
         // Two restarts allowed without budget checks
-        let d1 = supervisor.on_failure(test_task_id(), test_region_id(), None, Outcome::Err(()), 0);
+        let d1 =
+            supervisor.on_failure(test_task_id(), test_region_id(), None, &Outcome::Err(()), 0);
         assert!(matches!(
             d1,
             SupervisionDecision::Restart { attempt: 1, .. }
@@ -3311,7 +3296,7 @@ mod tests {
             test_task_id(),
             test_region_id(),
             None,
-            Outcome::Err(()),
+            &Outcome::Err(()),
             1_000_000_000,
         );
         assert!(matches!(
@@ -3324,7 +3309,7 @@ mod tests {
             test_task_id(),
             test_region_id(),
             None,
-            Outcome::Err(()),
+            &Outcome::Err(()),
             2_000_000_000,
         );
         assert!(matches!(
@@ -4006,7 +3991,7 @@ mod tests {
                     test_task_id(),
                     test_region_id(),
                     Some(parent),
-                    outcome.clone(),
+                    outcome,
                     0,
                 );
 
@@ -4259,7 +4244,7 @@ mod tests {
             test_task_id(),
             test_region_id(),
             None, // no parent
-            Outcome::Err(()),
+            &Outcome::Err(()),
             0,
         );
 
@@ -4290,7 +4275,8 @@ mod tests {
         let mut supervisor = Supervisor::new(SupervisionStrategy::Restart(config));
 
         // First failure: restarts
-        let d1 = supervisor.on_failure(test_task_id(), test_region_id(), None, Outcome::Err(()), 0);
+        let d1 =
+            supervisor.on_failure(test_task_id(), test_region_id(), None, &Outcome::Err(()), 0);
         assert!(matches!(
             d1,
             SupervisionDecision::Restart { attempt: 1, .. }
@@ -4301,7 +4287,7 @@ mod tests {
             test_task_id(),
             test_region_id(),
             None,
-            Outcome::Err(()),
+            &Outcome::Err(()),
             1_000_000_000,
         );
         assert!(matches!(
@@ -4317,7 +4303,7 @@ mod tests {
             test_task_id(),
             test_region_id(),
             None,
-            Outcome::Err(()),
+            &Outcome::Err(()),
             2_000_000_000,
         );
         assert!(matches!(
@@ -4408,7 +4394,7 @@ mod tests {
         // Stop strategy
         {
             let mut sup = Supervisor::new(SupervisionStrategy::Stop);
-            let decision = sup.on_failure(task, region, Some(parent), Outcome::Err(()), 0);
+            let decision = sup.on_failure(task, region, Some(parent), &Outcome::Err(()), 0);
             match decision {
                 SupervisionDecision::Stop {
                     task_id: tid,
@@ -4433,7 +4419,7 @@ mod tests {
                     task,
                     region,
                     Some(parent),
-                    Outcome::Err(()),
+                    &Outcome::Err(()),
                     u64::from(expected_attempt - 1) * 1_000_000_000,
                 );
                 match decision {
@@ -4447,9 +4433,9 @@ mod tests {
                         assert_eq!(rid, region);
                         assert_eq!(attempt, expected_attempt);
                     }
-                    other => unreachable!(
-                        "expected Restart attempt={expected_attempt}, got {other:?}"
-                    ),
+                    other => {
+                        unreachable!("expected Restart attempt={expected_attempt}, got {other:?}")
+                    }
                 }
             }
         }
@@ -4457,7 +4443,7 @@ mod tests {
         // Escalate strategy
         {
             let mut sup = Supervisor::new(SupervisionStrategy::Escalate);
-            let decision = sup.on_failure(task, region, Some(parent), Outcome::Err(()), 0);
+            let decision = sup.on_failure(task, region, Some(parent), &Outcome::Err(()), 0);
             match decision {
                 SupervisionDecision::Escalate {
                     task_id: tid,
@@ -4493,7 +4479,8 @@ mod tests {
         let mut supervisor = Supervisor::new(SupervisionStrategy::Restart(config.clone()));
 
         // Attempt 1: delay should be for attempt index 0 = 100ms
-        let d1 = supervisor.on_failure(test_task_id(), test_region_id(), None, Outcome::Err(()), 0);
+        let d1 =
+            supervisor.on_failure(test_task_id(), test_region_id(), None, &Outcome::Err(()), 0);
         match d1 {
             SupervisionDecision::Restart { delay, attempt, .. } => {
                 assert_eq!(attempt, 1);
@@ -4507,7 +4494,7 @@ mod tests {
             test_task_id(),
             test_region_id(),
             None,
-            Outcome::Err(()),
+            &Outcome::Err(()),
             1_000_000_000,
         );
         match d2 {
@@ -4523,7 +4510,7 @@ mod tests {
             test_task_id(),
             test_region_id(),
             None,
-            Outcome::Err(()),
+            &Outcome::Err(()),
             2_000_000_000,
         );
         match d3 {
@@ -4740,7 +4727,8 @@ mod tests {
         let mut supervisor = Supervisor::new(SupervisionStrategy::Restart(config));
 
         // First failure at t=0: restart
-        let d1 = supervisor.on_failure(test_task_id(), test_region_id(), None, Outcome::Err(()), 0);
+        let d1 =
+            supervisor.on_failure(test_task_id(), test_region_id(), None, &Outcome::Err(()), 0);
         assert!(matches!(
             d1,
             SupervisionDecision::Restart { attempt: 1, .. }
@@ -4751,7 +4739,7 @@ mod tests {
             test_task_id(),
             test_region_id(),
             None,
-            Outcome::Err(()),
+            &Outcome::Err(()),
             1_000_000_000,
         );
         assert!(matches!(
@@ -4767,7 +4755,7 @@ mod tests {
             test_task_id(),
             test_region_id(),
             None,
-            Outcome::Err(()),
+            &Outcome::Err(()),
             6_000_000_000,
         );
         assert!(
@@ -4920,7 +4908,7 @@ mod tests {
             test_task_id(),
             test_region_id(),
             None,
-            Outcome::Err(()),
+            &Outcome::Err(()),
             1000,
         );
 
@@ -4950,14 +4938,14 @@ mod tests {
             test_task_id(),
             test_region_id(),
             None,
-            Outcome::Err(()),
+            &Outcome::Err(()),
             1000,
         );
         let _d2 = supervisor.on_failure(
             test_task_id(),
             test_region_id(),
             None,
-            Outcome::Err(()),
+            &Outcome::Err(()),
             2000,
         );
 
@@ -4993,14 +4981,14 @@ mod tests {
             test_task_id(),
             test_region_id(),
             None,
-            Outcome::Err(()),
+            &Outcome::Err(()),
             1000,
         );
         supervisor.on_failure(
             test_task_id(),
             test_region_id(),
             None,
-            Outcome::Err(()),
+            &Outcome::Err(()),
             2000,
         );
         // Third should be window exhausted
@@ -5008,7 +4996,7 @@ mod tests {
             test_task_id(),
             test_region_id(),
             None,
-            Outcome::Err(()),
+            &Outcome::Err(()),
             3000,
         );
 
@@ -5046,7 +5034,7 @@ mod tests {
             test_task_id(),
             test_region_id(),
             None,
-            Outcome::Panicked(PanicPayload::new("boom")),
+            &Outcome::Panicked(PanicPayload::new("boom")),
             1000,
         );
 
@@ -5074,7 +5062,7 @@ mod tests {
             test_task_id(),
             test_region_id(),
             None,
-            Outcome::Cancelled(CancelReason::user("test")),
+            &Outcome::Cancelled(CancelReason::user("test")),
             1000,
         );
 
@@ -5100,7 +5088,7 @@ mod tests {
             test_task_id(),
             test_region_id(),
             None,
-            Outcome::Ok(()),
+            &Outcome::Ok(()),
             1000,
         );
 
@@ -5124,7 +5112,7 @@ mod tests {
             test_task_id(),
             test_region_id(),
             Some(parent),
-            Outcome::Err(()),
+            &Outcome::Err(()),
             1000,
         );
 
@@ -5153,7 +5141,7 @@ mod tests {
             test_task_id(),
             test_region_id(),
             None,
-            Outcome::Err(()),
+            &Outcome::Err(()),
             1000,
             Some(&budget),
         );
@@ -5185,7 +5173,7 @@ mod tests {
             test_task_id(),
             test_region_id(),
             None,
-            Outcome::Err(()),
+            &Outcome::Err(()),
             1000,
             Some(&budget),
         );
@@ -5221,7 +5209,7 @@ mod tests {
             test_task_id(),
             test_region_id(),
             None,
-            Outcome::Err(()),
+            &Outcome::Err(()),
             now_nanos,
             Some(&budget),
         );
@@ -5249,7 +5237,7 @@ mod tests {
                 test_task_id(),
                 test_region_id(),
                 None,
-                Outcome::Err(()),
+                &Outcome::Err(()),
                 i * 1_000_000_000,
             );
         }
@@ -5290,17 +5278,16 @@ mod tests {
         let task_a = TaskId::from_arena(ArenaIndex::new(0, 1));
         let task_b = TaskId::from_arena(ArenaIndex::new(0, 2));
 
-        supervisor.on_failure(task_a, test_region_id(), None, Outcome::Err(()), 1000);
-        supervisor.on_failure(task_b, test_region_id(), None, Outcome::Err(()), 2000);
-        supervisor.on_failure(task_a, test_region_id(), None, Outcome::Err(()), 3000);
+        supervisor.on_failure(task_a, test_region_id(), None, &Outcome::Err(()), 1000);
+        supervisor.on_failure(task_b, test_region_id(), None, &Outcome::Err(()), 2000);
+        supervisor.on_failure(task_a, test_region_id(), None, &Outcome::Err(()), 3000);
 
         let a_entries: Vec<_> = supervisor.evidence().for_task(task_a).collect();
         assert_eq!(a_entries.len(), 2);
         assert_eq!(a_entries[0].timestamp, 1000);
         assert_eq!(a_entries[1].timestamp, 3000);
 
-        let b_entries: Vec<_> = supervisor.evidence().for_task(task_b).collect();
-        assert_eq!(b_entries.len(), 1);
+        assert_eq!(supervisor.evidence().for_task(task_b).count(), 1);
 
         crate::test_complete!("evidence_for_task_filter");
     }
@@ -5317,35 +5304,39 @@ mod tests {
             test_task_id(),
             test_region_id(),
             None,
-            Outcome::Err(()),
+            &Outcome::Err(()),
             1000,
         );
         supervisor.on_failure(
             test_task_id(),
             test_region_id(),
             None,
-            Outcome::Err(()),
+            &Outcome::Err(()),
             2000,
         );
         supervisor.on_failure(
             test_task_id(),
             test_region_id(),
             None,
-            Outcome::Panicked(PanicPayload::new("oops")),
+            &Outcome::Panicked(PanicPayload::new("oops")),
             3000,
         );
 
-        let restarts: Vec<_> = supervisor
-            .evidence()
-            .with_constraint(|c| matches!(c, BindingConstraint::RestartAllowed { .. }))
-            .collect();
-        assert_eq!(restarts.len(), 2);
+        assert_eq!(
+            supervisor
+                .evidence()
+                .with_constraint(|c| matches!(c, BindingConstraint::RestartAllowed { .. }))
+                .count(),
+            2
+        );
 
-        let severity: Vec<_> = supervisor
-            .evidence()
-            .with_constraint(|c| matches!(c, BindingConstraint::MonotoneSeverity { .. }))
-            .collect();
-        assert_eq!(severity.len(), 1);
+        assert_eq!(
+            supervisor
+                .evidence()
+                .with_constraint(|c| matches!(c, BindingConstraint::MonotoneSeverity { .. }))
+                .count(),
+            1
+        );
 
         crate::test_complete!("evidence_with_constraint_filter");
     }
@@ -5359,7 +5350,7 @@ mod tests {
             test_task_id(),
             test_region_id(),
             None,
-            Outcome::Err(()),
+            &Outcome::Err(()),
             1000,
         );
 
@@ -5377,7 +5368,7 @@ mod tests {
 
         // Verify that the same inputs always produce the same evidence,
         // regardless of strategy — evidence is a deterministic function of inputs.
-        let outcomes = vec![
+        let outcomes = [
             Outcome::Ok(()),
             Outcome::Err(()),
             Outcome::Cancelled(CancelReason::user("test")),
@@ -5394,8 +5385,8 @@ mod tests {
 
             for (i, outcome) in outcomes.iter().enumerate() {
                 let t = (i as u64) * 1000;
-                sup_a.on_failure(test_task_id(), test_region_id(), None, outcome.clone(), t);
-                sup_b.on_failure(test_task_id(), test_region_id(), None, outcome.clone(), t);
+                sup_a.on_failure(test_task_id(), test_region_id(), None, outcome, t);
+                sup_b.on_failure(test_task_id(), test_region_id(), None, outcome, t);
             }
 
             let a = sup_a.evidence();
@@ -5472,14 +5463,14 @@ mod tests {
             test_task_id(),
             test_region_id(),
             None,
-            Outcome::Err(()),
+            &Outcome::Err(()),
             1000,
         ); // restart
         sup_no_budget.on_failure(
             test_task_id(),
             test_region_id(),
             None,
-            Outcome::Err(()),
+            &Outcome::Err(()),
             2000,
         ); // exhausted
 
@@ -5490,7 +5481,7 @@ mod tests {
             test_task_id(),
             test_region_id(),
             None,
-            Outcome::Err(()),
+            &Outcome::Err(()),
             1000,
             Some(&budget),
         ); // restart
@@ -5498,7 +5489,7 @@ mod tests {
             test_task_id(),
             test_region_id(),
             None,
-            Outcome::Err(()),
+            &Outcome::Err(()),
             2000,
             Some(&budget),
         ); // exhausted
