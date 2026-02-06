@@ -158,7 +158,8 @@ impl ScheduledSet {
                     u32::try_from(idx).expect("idx fits u32"),
                     old_gen,
                 ));
-                debug_assert!(self.overflow.insert(old_task));
+                let was_new = self.overflow.insert(old_task);
+                debug_assert!(was_new);
 
                 let inserted = self.overflow.insert(task);
                 if inserted {
