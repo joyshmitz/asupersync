@@ -1489,4 +1489,342 @@ mod tests {
 
         crate::test_complete!("conformance_same_pack_same_artifact_path");
     }
+
+    // =================================================================
+    // Golden Crashpack + Replay Tests (bd-3mfjw)
+    // =================================================================
+
+    /// A controlled failure scenario: two workers in a region, one panics.
+    fn golden_failure_events() -> Vec<TraceEvent> {
+        vec![
+            TraceEvent::region_created(1, Time::ZERO, rid(1), None),
+            TraceEvent::spawn(2, Time::ZERO, tid(1), rid(1)),
+            TraceEvent::spawn(3, Time::ZERO, tid(2), rid(1)),
+            TraceEvent::poll(4, Time::from_nanos(100), tid(1), rid(1)),
+            TraceEvent::poll(5, Time::from_nanos(100), tid(2), rid(1)),
+            TraceEvent::complete(6, Time::from_nanos(200), tid(1), rid(1)),
+        ]
+    }
+
+    fn golden_config() -> CrashPackConfig {
+        CrashPackConfig {
+            seed: 42,
+            config_hash: 0xDEAD,
+            worker_count: 4,
+            max_steps: Some(1000),
+            commit_hash: Some("abc123def".to_string()),
+        }
+    }
+
+    fn golden_failure_info() -> FailureInfo {
+        FailureInfo {
+            task: tid(2),
+            region: rid(1),
+            outcome: FailureOutcome::Panicked {
+                message: "worker panic in golden scenario".to_string(),
+            },
+            virtual_time: Time::from_nanos(200),
+        }
+    }
+
+    #[test]
+    fn golden_deterministic_emission() {
+        init_test("golden_deterministic_emission");
+
+        let events = golden_failure_events();
+
+        // Build the same crash pack twice.
+        let pack1 = CrashPack::builder(golden_config())
+            .failure(golden_failure_info())
+            .from_trace(&events)
+            .build();
+
+        let pack2 = CrashPack::builder(golden_config())
+            .failure(golden_failure_info())
+            .from_trace(&events)
+            .build();
+
+        // Determinism: same inputs → same pack (modulo created_at).
+        assert_eq!(pack1, pack2);
+        assert_eq!(pack1.fingerprint(), pack2.fingerprint());
+        assert_eq!(pack1.canonical_prefix, pack2.canonical_prefix);
+        assert_eq!(pack1.manifest.event_count, pack2.manifest.event_count);
+
+        crate::test_complete!("golden_deterministic_emission");
+    }
+
+    #[test]
+    fn golden_fingerprint_stability() {
+        init_test("golden_fingerprint_stability");
+
+        let events = golden_failure_events();
+        let pack = CrashPack::builder(golden_config())
+            .failure(golden_failure_info())
+            .from_trace(&events)
+            .build();
+
+        // The fingerprint must be non-zero and consistent.
+        let fp = pack.fingerprint();
+        assert_ne!(fp, 0);
+
+        // Rebuild from scratch — fingerprint must match exactly.
+        let fp2 = CrashPack::builder(golden_config())
+            .failure(golden_failure_info())
+            .from_trace(&events)
+            .build()
+            .fingerprint();
+        assert_eq!(fp, fp2);
+
+        // Independently compute via trace_fingerprint().
+        use crate::trace::canonicalize::trace_fingerprint;
+        assert_eq!(fp, trace_fingerprint(&events));
+
+        crate::test_complete!("golden_fingerprint_stability");
+    }
+
+    #[test]
+    fn golden_canonical_prefix_structure() {
+        init_test("golden_canonical_prefix_structure");
+
+        let events = golden_failure_events();
+        let pack = CrashPack::builder(golden_config())
+            .failure(golden_failure_info())
+            .from_trace(&events)
+            .build();
+
+        // Expected Foata structure for the golden scenario:
+        //   Layer 0: region_created(R1) — no predecessors
+        //   Layer 1: spawn(T1,R1), spawn(T2,R1) — depend on region_created
+        //   Layer 2: poll(T1,R1), poll(T2,R1) — depend on respective spawns
+        //   Layer 3: complete(T1,R1) — depends on poll(T1)
+        assert_eq!(
+            pack.canonical_prefix.len(),
+            4,
+            "expected 4 Foata layers, got {}",
+            pack.canonical_prefix.len()
+        );
+        assert_eq!(pack.canonical_prefix[0].len(), 1); // region_created
+        assert_eq!(pack.canonical_prefix[1].len(), 2); // spawn×2
+        assert_eq!(pack.canonical_prefix[2].len(), 2); // poll×2
+        assert_eq!(pack.canonical_prefix[3].len(), 1); // complete
+
+        // Event count matches input.
+        assert_eq!(pack.manifest.event_count, 6);
+
+        crate::test_complete!("golden_canonical_prefix_structure");
+    }
+
+    #[test]
+    fn golden_equivalent_schedule_same_pack() {
+        init_test("golden_equivalent_schedule_same_pack");
+
+        // The golden scenario with independent spawns/polls in swapped order.
+        // This is a different schedule of the same concurrent execution.
+        let events_a = golden_failure_events();
+        let events_b = vec![
+            TraceEvent::region_created(1, Time::ZERO, rid(1), None),
+            TraceEvent::spawn(2, Time::ZERO, tid(2), rid(1)), // T2 first
+            TraceEvent::spawn(3, Time::ZERO, tid(1), rid(1)), // T1 second
+            TraceEvent::poll(4, Time::from_nanos(100), tid(2), rid(1)),
+            TraceEvent::poll(5, Time::from_nanos(100), tid(1), rid(1)),
+            TraceEvent::complete(6, Time::from_nanos(200), tid(1), rid(1)),
+        ];
+
+        let pack_a = CrashPack::builder(golden_config())
+            .failure(golden_failure_info())
+            .from_trace(&events_a)
+            .build();
+        let pack_b = CrashPack::builder(golden_config())
+            .failure(golden_failure_info())
+            .from_trace(&events_b)
+            .build();
+
+        // Same equivalence class → same crash pack.
+        assert_eq!(pack_a.fingerprint(), pack_b.fingerprint());
+        assert_eq!(pack_a.canonical_prefix, pack_b.canonical_prefix);
+        assert_eq!(pack_a, pack_b);
+
+        crate::test_complete!("golden_equivalent_schedule_same_pack");
+    }
+
+    #[test]
+    fn golden_replay_prefix_round_trip() {
+        init_test("golden_replay_prefix_round_trip");
+
+        use crate::trace::replay::{
+            CompactRegionId, CompactTaskId, ReplayEvent, ReplayTrace, TraceMetadata,
+        };
+        use crate::trace::replayer::TraceReplayer;
+
+        // Build a ReplayTrace matching the golden scenario.
+        let replay_events = vec![
+            ReplayEvent::RngSeed { seed: 42 },
+            ReplayEvent::RegionCreated {
+                region: CompactRegionId(1),
+                parent: None,
+                at_tick: 0,
+            },
+            ReplayEvent::TaskSpawned {
+                task: CompactTaskId(1),
+                region: CompactRegionId(1),
+                at_tick: 0,
+            },
+            ReplayEvent::TaskSpawned {
+                task: CompactTaskId(2),
+                region: CompactRegionId(1),
+                at_tick: 0,
+            },
+            ReplayEvent::TaskScheduled {
+                task: CompactTaskId(1),
+                at_tick: 100,
+            },
+            ReplayEvent::TaskScheduled {
+                task: CompactTaskId(2),
+                at_tick: 100,
+            },
+            ReplayEvent::TaskCompleted {
+                task: CompactTaskId(1),
+                outcome: 0, // Ok
+            },
+        ];
+
+        let trace = ReplayTrace {
+            metadata: TraceMetadata::new(42),
+            events: replay_events.clone(),
+            cursor: 0,
+        };
+
+        // Build crash pack with the divergent prefix.
+        let pack = CrashPack::builder(golden_config())
+            .failure(golden_failure_info())
+            .from_trace(&golden_failure_events())
+            .divergent_prefix(replay_events.clone())
+            .build();
+
+        assert!(pack.has_divergent_prefix());
+        assert_eq!(pack.divergent_prefix.len(), 7);
+
+        // Verify the replayer can step through the divergent prefix
+        // without any divergence errors.
+        let mut replayer = TraceReplayer::new(trace);
+        for expected_event in &replay_events {
+            let actual = replayer.next().expect("replayer should have more events");
+            assert_eq!(actual, expected_event);
+        }
+        assert!(replayer.is_completed());
+
+        crate::test_complete!("golden_replay_prefix_round_trip");
+    }
+
+    #[test]
+    fn golden_replay_serialization_round_trip() {
+        init_test("golden_replay_serialization_round_trip");
+
+        use crate::trace::replay::{
+            CompactRegionId, CompactTaskId, ReplayEvent, ReplayTrace, TraceMetadata,
+        };
+
+        let replay_events = vec![
+            ReplayEvent::RngSeed { seed: 42 },
+            ReplayEvent::TaskSpawned {
+                task: CompactTaskId(1),
+                region: CompactRegionId(1),
+                at_tick: 0,
+            },
+            ReplayEvent::TaskCompleted {
+                task: CompactTaskId(1),
+                outcome: 3, // Panicked
+            },
+        ];
+
+        let mut trace = ReplayTrace::new(TraceMetadata::new(42));
+        for ev in &replay_events {
+            trace.push(ev.clone());
+        }
+
+        // Serialize → deserialize round trip.
+        let bytes = trace.to_bytes().expect("serialize");
+        let loaded = ReplayTrace::from_bytes(&bytes).expect("deserialize");
+
+        assert_eq!(loaded.metadata.seed, 42);
+        assert_eq!(loaded.events.len(), 3);
+        assert_eq!(loaded.events, replay_events);
+
+        crate::test_complete!("golden_replay_serialization_round_trip");
+    }
+
+    #[test]
+    fn golden_crash_pack_json_round_trip() {
+        init_test("golden_crash_pack_json_round_trip");
+
+        let events = golden_failure_events();
+        let pack = CrashPack::builder(golden_config())
+            .failure(golden_failure_info())
+            .from_trace(&events)
+            .oracle_violations(vec!["invariant-x".into()])
+            .build();
+
+        let writer = MemoryCrashPackWriter::new();
+        writer.write(&pack).unwrap();
+        let written = writer.written();
+        let json = &written[0].1;
+
+        // Parse the JSON and verify key fields.
+        let parsed: serde_json::Value = serde_json::from_str(json).unwrap();
+        assert_eq!(parsed["manifest"]["config"]["seed"], 42);
+        assert_eq!(parsed["manifest"]["config"]["config_hash"], 0xDEAD_u64);
+        assert_eq!(parsed["manifest"]["event_count"], 6);
+        assert_ne!(parsed["manifest"]["fingerprint"], 0);
+        assert_eq!(parsed["oracle_violations"][0], "invariant-x");
+
+        // Canonical prefix should be present.
+        let prefix = &parsed["canonical_prefix"];
+        assert!(prefix.is_array());
+        assert_eq!(prefix.as_array().unwrap().len(), 4); // 4 Foata layers
+
+        crate::test_complete!("golden_crash_pack_json_round_trip");
+    }
+
+    #[test]
+    fn golden_minimization_integration() {
+        init_test("golden_minimization_integration");
+
+        use crate::trace::divergence::{minimize_divergent_prefix, MinimizationConfig};
+        use crate::trace::replay::{
+            CompactRegionId, CompactTaskId, ReplayEvent, ReplayTrace, TraceMetadata,
+        };
+
+        // Build a replay prefix: the failure "happens" at event index 5+.
+        let replay_events: Vec<_> = (0..20)
+            .map(|i| ReplayEvent::RngValue { value: i })
+            .collect();
+
+        let trace = ReplayTrace {
+            metadata: TraceMetadata::new(42),
+            events: replay_events,
+            cursor: 0,
+        };
+
+        // Oracle: failure reproduces when prefix has >= 12 events.
+        let threshold = 12;
+        let result = minimize_divergent_prefix(&trace, &MinimizationConfig::default(), |prefix| {
+            prefix.len() >= threshold
+        });
+
+        assert_eq!(result.minimized_len, threshold);
+        assert_eq!(result.original_len, 20);
+        assert!(!result.truncated);
+
+        // The minimized prefix can be set on a crash pack.
+        let pack = CrashPack::builder(golden_config())
+            .failure(golden_failure_info())
+            .from_trace(&golden_failure_events())
+            .divergent_prefix(result.prefix.events)
+            .build();
+
+        assert!(pack.has_divergent_prefix());
+        assert_eq!(pack.divergent_prefix.len(), threshold);
+
+        crate::test_complete!("golden_minimization_integration");
+    }
 }
