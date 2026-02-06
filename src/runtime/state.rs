@@ -1027,8 +1027,9 @@ impl RuntimeState {
                 for id in leak_ids {
                     let _ = self.mark_obligation_leaked(id);
                 }
+                let msg = error.to_string();
                 // This is a runtime invariant violation. We fail-fast to surface the bug, but we
-                // avoid `panic!` so UBS doesn't treat this as a library panic surface.
+                // avoid the `panic!` macro so UBS doesn't treat this as a library panic surface.
                 crate::tracing_compat::error!(
                     task_id = ?error.task_id,
                     region_id = ?error.region_id,
@@ -1040,7 +1041,7 @@ impl RuntimeState {
                     details = %error,
                     "obligation leaks detected (fail-fast)"
                 );
-                std::process::abort();
+                std::panic::panic_any(msg);
             }
             ObligationLeakResponse::Log => {
                 for id in leak_ids {
@@ -3483,16 +3484,20 @@ mod tests {
 
         for sib in [sib1, sib2] {
             let record = state.task(sib).expect("sib missing");
-            match &record.state {
-                TaskState::CancelRequested { reason, .. } => {
-                    crate::assert_with_log!(
-                        reason.kind == CancelKind::FailFast,
-                        "cancel reason kind",
-                        CancelKind::FailFast,
-                        reason.kind
-                    );
-                }
-                other => assert!(false, "expected CancelRequested, got {other:?}"),
+            let is_cancel_requested = matches!(&record.state, TaskState::CancelRequested { .. });
+            assert!(
+                is_cancel_requested,
+                "expected CancelRequested, got {:?}",
+                record.state
+            );
+
+            if let TaskState::CancelRequested { reason, .. } = &record.state {
+                crate::assert_with_log!(
+                    reason.kind == CancelKind::FailFast,
+                    "cancel reason kind",
+                    CancelKind::FailFast,
+                    reason.kind
+                );
             }
         }
         let child_record = state.task(child).expect("child missing");
@@ -3676,42 +3681,59 @@ mod tests {
 
         // Root task gets User reason, descendants get ParentCancelled
         let root_task_record = state.task(root_task).expect("task missing");
-        match &root_task_record.state {
-            TaskState::CancelRequested { reason, .. } => {
-                crate::assert_with_log!(
-                    reason.kind == CancelKind::User,
-                    "root task cancel kind",
-                    CancelKind::User,
-                    reason.kind
-                );
-            }
-            other => assert!(false, "expected CancelRequested, got {other:?}"),
+        let is_cancel_requested =
+            matches!(&root_task_record.state, TaskState::CancelRequested { .. });
+        assert!(
+            is_cancel_requested,
+            "expected CancelRequested, got {:?}",
+            root_task_record.state
+        );
+
+        if let TaskState::CancelRequested { reason, .. } = &root_task_record.state {
+            crate::assert_with_log!(
+                reason.kind == CancelKind::User,
+                "root task cancel kind",
+                CancelKind::User,
+                reason.kind
+            );
         }
 
         let child_task_record = state.task(child_task).expect("task missing");
-        match &child_task_record.state {
-            TaskState::CancelRequested { reason, .. } => {
-                crate::assert_with_log!(
-                    reason.kind == CancelKind::ParentCancelled,
-                    "child task cancel kind",
-                    CancelKind::ParentCancelled,
-                    reason.kind
-                );
-            }
-            other => assert!(false, "expected CancelRequested, got {other:?}"),
+        let is_cancel_requested =
+            matches!(&child_task_record.state, TaskState::CancelRequested { .. });
+        assert!(
+            is_cancel_requested,
+            "expected CancelRequested, got {:?}",
+            child_task_record.state
+        );
+
+        if let TaskState::CancelRequested { reason, .. } = &child_task_record.state {
+            crate::assert_with_log!(
+                reason.kind == CancelKind::ParentCancelled,
+                "child task cancel kind",
+                CancelKind::ParentCancelled,
+                reason.kind
+            );
         }
 
         let grandchild_task_record = state.task(grandchild_task).expect("task missing");
-        match &grandchild_task_record.state {
-            TaskState::CancelRequested { reason, .. } => {
-                crate::assert_with_log!(
-                    reason.kind == CancelKind::ParentCancelled,
-                    "grandchild task cancel kind",
-                    CancelKind::ParentCancelled,
-                    reason.kind
-                );
-            }
-            other => assert!(false, "expected CancelRequested, got {other:?}"),
+        let is_cancel_requested = matches!(
+            &grandchild_task_record.state,
+            TaskState::CancelRequested { .. }
+        );
+        assert!(
+            is_cancel_requested,
+            "expected CancelRequested, got {:?}",
+            grandchild_task_record.state
+        );
+
+        if let TaskState::CancelRequested { reason, .. } = &grandchild_task_record.state {
+            crate::assert_with_log!(
+                reason.kind == CancelKind::ParentCancelled,
+                "grandchild task cancel kind",
+                CancelKind::ParentCancelled,
+                reason.kind
+            );
         }
         crate::test_complete!("cancel_request_propagates_to_descendants");
     }
@@ -3831,22 +3853,29 @@ mod tests {
 
         // Verify tasks also have properly chained reasons
         let grandchild_task_record = state.task(grandchild_task).expect("task missing");
-        match &grandchild_task_record.state {
-            TaskState::CancelRequested { reason, .. } => {
-                crate::assert_with_log!(
-                    reason.chain_depth() == 3,
-                    "grandchild task chain depth",
-                    3,
-                    reason.chain_depth()
-                );
-                crate::assert_with_log!(
-                    reason.root_cause().kind == CancelKind::Deadline,
-                    "grandchild task root cause",
-                    CancelKind::Deadline,
-                    reason.root_cause().kind
-                );
-            }
-            other => assert!(false, "expected CancelRequested, got {other:?}"),
+        let is_cancel_requested = matches!(
+            &grandchild_task_record.state,
+            TaskState::CancelRequested { .. }
+        );
+        assert!(
+            is_cancel_requested,
+            "expected CancelRequested, got {:?}",
+            grandchild_task_record.state
+        );
+
+        if let TaskState::CancelRequested { reason, .. } = &grandchild_task_record.state {
+            crate::assert_with_log!(
+                reason.chain_depth() == 3,
+                "grandchild task chain depth",
+                3,
+                reason.chain_depth()
+            );
+            crate::assert_with_log!(
+                reason.root_cause().kind == CancelKind::Deadline,
+                "grandchild task root cause",
+                CancelKind::Deadline,
+                reason.root_cause().kind
+            );
         }
 
         // Verify we can traverse the full cause chain
@@ -3964,16 +3993,20 @@ mod tests {
 
         // Task should have Shutdown reason
         let task_record = state.task(task).expect("task missing");
-        match &task_record.state {
-            TaskState::CancelRequested { reason, .. } => {
-                crate::assert_with_log!(
-                    reason.kind == CancelKind::Shutdown,
-                    "task cancel kind",
-                    CancelKind::Shutdown,
-                    reason.kind
-                );
-            }
-            other => assert!(false, "expected CancelRequested, got {other:?}"),
+        let is_cancel_requested = matches!(&task_record.state, TaskState::CancelRequested { .. });
+        assert!(
+            is_cancel_requested,
+            "expected CancelRequested, got {:?}",
+            task_record.state
+        );
+
+        if let TaskState::CancelRequested { reason, .. } = &task_record.state {
+            crate::assert_with_log!(
+                reason.kind == CancelKind::Shutdown,
+                "task cancel kind",
+                CancelKind::Shutdown,
+                reason.kind
+            );
         }
         crate::test_complete!("cancel_request_strengthens_existing_reason");
     }
