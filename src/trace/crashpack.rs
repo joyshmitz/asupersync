@@ -2839,7 +2839,10 @@ mod tests {
         assert_eq!(pack.seed(), 42);
         assert_eq!(pack.manifest.schema_version, CRASHPACK_SCHEMA_VERSION);
         assert_eq!(pack.manifest.event_count, 6);
-        assert!(pack.manifest.fingerprint != 0, "fingerprint should be non-zero");
+        assert!(
+            pack.manifest.fingerprint != 0,
+            "fingerprint should be non-zero"
+        );
         assert!(pack.has_violations());
         assert_eq!(pack.oracle_violations, vec!["balance-invariant"]);
 
@@ -2850,8 +2853,12 @@ mod tests {
         );
 
         // Manifest auto-populates the attachment table.
-        assert!(pack.manifest.has_attachment(&AttachmentKind::CanonicalPrefix));
-        assert!(pack.manifest.has_attachment(&AttachmentKind::OracleViolations));
+        assert!(pack
+            .manifest
+            .has_attachment(&AttachmentKind::CanonicalPrefix));
+        assert!(pack
+            .manifest
+            .has_attachment(&AttachmentKind::OracleViolations));
 
         crate::test_complete!("walkthrough_01_forced_failure_and_emission");
     }
@@ -3067,7 +3074,9 @@ mod tests {
         );
 
         // Attachment table reflects the divergent prefix.
-        assert!(pack.manifest.has_attachment(&AttachmentKind::DivergentPrefix));
+        assert!(pack
+            .manifest
+            .has_attachment(&AttachmentKind::DivergentPrefix));
         let att = pack
             .manifest
             .attachment(&AttachmentKind::DivergentPrefix)
