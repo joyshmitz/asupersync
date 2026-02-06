@@ -3,6 +3,7 @@
 //! Each event in the trace represents an observable action in the runtime.
 //! Events carry sufficient information for replay and analysis.
 
+use crate::monitor::DownReason;
 use crate::record::{ObligationAbortReason, ObligationKind, ObligationState};
 use crate::trace::distributed::LogicalTime;
 use crate::types::{CancelReason, ObligationId, RegionId, TaskId, Time};
@@ -74,6 +75,18 @@ pub enum TraceEventKind {
     ChaosInjection,
     /// User-defined trace point.
     UserTrace,
+    /// A monitor was established.
+    MonitorCreated,
+    /// A monitor was removed.
+    MonitorDropped,
+    /// A Down notification was delivered.
+    DownDelivered,
+    /// A link was established.
+    LinkCreated,
+    /// A link was removed.
+    LinkDropped,
+    /// An exit signal was delivered to a linked task.
+    ExitDelivered,
 }
 
 /// Additional data carried by a trace event.
@@ -199,6 +212,60 @@ pub enum TraceData {
         idle_steps: u64,
         /// Obligations held by the task at detection time.
         held: Vec<(ObligationId, ObligationKind)>,
+    },
+    /// Monitor lifecycle event.
+    Monitor {
+        /// Monitor reference id.
+        monitor_ref: u64,
+        /// The task watching for termination.
+        watcher: TaskId,
+        /// The region owning the watcher (for region-close cleanup).
+        watcher_region: RegionId,
+        /// The task being monitored.
+        monitored: TaskId,
+    },
+    /// Down notification delivery.
+    ///
+    /// Includes the deterministic ordering key (`completion_vt`, `monitored`).
+    Down {
+        /// Monitor reference id from establishment.
+        monitor_ref: u64,
+        /// The task receiving the notification.
+        watcher: TaskId,
+        /// The task that terminated.
+        monitored: TaskId,
+        /// Virtual time of monitored task completion.
+        completion_vt: Time,
+        /// Why it terminated.
+        reason: DownReason,
+    },
+    /// Link lifecycle event.
+    Link {
+        /// Link reference id.
+        link_ref: u64,
+        /// One side of the link.
+        task_a: TaskId,
+        /// Region owning task_a (for region-close cleanup).
+        region_a: RegionId,
+        /// The other side of the link.
+        task_b: TaskId,
+        /// Region owning task_b (for region-close cleanup).
+        region_b: RegionId,
+    },
+    /// Exit signal delivery to a linked task.
+    ///
+    /// Includes the deterministic ordering key (`failure_vt`, `from`).
+    Exit {
+        /// Link reference id.
+        link_ref: u64,
+        /// The task that terminated (source of the exit).
+        from: TaskId,
+        /// The linked task receiving the exit signal.
+        to: TaskId,
+        /// Virtual time of failure used for deterministic ordering.
+        failure_vt: Time,
+        /// Why it terminated.
+        reason: DownReason,
     },
     /// User message.
     Message(String),
@@ -618,6 +685,152 @@ impl TraceEvent {
         )
     }
 
+    /// Creates a monitor created event.
+    #[must_use]
+    pub fn monitor_created(
+        seq: u64,
+        time: Time,
+        monitor_ref: u64,
+        watcher: TaskId,
+        watcher_region: RegionId,
+        monitored: TaskId,
+    ) -> Self {
+        Self::new(
+            seq,
+            time,
+            TraceEventKind::MonitorCreated,
+            TraceData::Monitor {
+                monitor_ref,
+                watcher,
+                watcher_region,
+                monitored,
+            },
+        )
+    }
+
+    /// Creates a monitor dropped event.
+    #[must_use]
+    pub fn monitor_dropped(
+        seq: u64,
+        time: Time,
+        monitor_ref: u64,
+        watcher: TaskId,
+        watcher_region: RegionId,
+        monitored: TaskId,
+    ) -> Self {
+        Self::new(
+            seq,
+            time,
+            TraceEventKind::MonitorDropped,
+            TraceData::Monitor {
+                monitor_ref,
+                watcher,
+                watcher_region,
+                monitored,
+            },
+        )
+    }
+
+    /// Creates a down delivered event.
+    #[must_use]
+    pub fn down_delivered(
+        seq: u64,
+        time: Time,
+        monitor_ref: u64,
+        watcher: TaskId,
+        monitored: TaskId,
+        completion_vt: Time,
+        reason: DownReason,
+    ) -> Self {
+        Self::new(
+            seq,
+            time,
+            TraceEventKind::DownDelivered,
+            TraceData::Down {
+                monitor_ref,
+                watcher,
+                monitored,
+                completion_vt,
+                reason,
+            },
+        )
+    }
+
+    /// Creates a link created event.
+    #[must_use]
+    pub fn link_created(
+        seq: u64,
+        time: Time,
+        link_ref: u64,
+        task_a: TaskId,
+        region_a: RegionId,
+        task_b: TaskId,
+        region_b: RegionId,
+    ) -> Self {
+        Self::new(
+            seq,
+            time,
+            TraceEventKind::LinkCreated,
+            TraceData::Link {
+                link_ref,
+                task_a,
+                region_a,
+                task_b,
+                region_b,
+            },
+        )
+    }
+
+    /// Creates a link dropped event.
+    #[must_use]
+    pub fn link_dropped(
+        seq: u64,
+        time: Time,
+        link_ref: u64,
+        task_a: TaskId,
+        region_a: RegionId,
+        task_b: TaskId,
+        region_b: RegionId,
+    ) -> Self {
+        Self::new(
+            seq,
+            time,
+            TraceEventKind::LinkDropped,
+            TraceData::Link {
+                link_ref,
+                task_a,
+                region_a,
+                task_b,
+                region_b,
+            },
+        )
+    }
+
+    /// Creates an exit delivered event.
+    #[must_use]
+    pub fn exit_delivered(
+        seq: u64,
+        time: Time,
+        link_ref: u64,
+        from: TaskId,
+        to: TaskId,
+        failure_vt: Time,
+        reason: DownReason,
+    ) -> Self {
+        Self::new(
+            seq,
+            time,
+            TraceEventKind::ExitDelivered,
+            TraceData::Exit {
+                link_ref,
+                from,
+                to,
+                failure_vt,
+                reason,
+            },
+        )
+    }
+
     /// Creates a user trace event.
     #[must_use]
     pub fn user_trace(seq: u64, time: Time, message: impl Into<String>) -> Self {
@@ -718,6 +931,45 @@ impl fmt::Display for TraceEvent {
                 }
                 write!(f, "]")?;
             }
+            TraceData::Monitor {
+                monitor_ref,
+                watcher,
+                watcher_region,
+                monitored,
+            } => write!(
+                f,
+                " monitor_ref={monitor_ref} watcher={watcher} watcher_region={watcher_region} monitored={monitored}"
+            )?,
+            TraceData::Down {
+                monitor_ref,
+                watcher,
+                monitored,
+                completion_vt,
+                reason,
+            } => write!(
+                f,
+                " down monitor_ref={monitor_ref} watcher={watcher} monitored={monitored} completion_vt={completion_vt} reason={reason}"
+            )?,
+            TraceData::Link {
+                link_ref,
+                task_a,
+                region_a,
+                task_b,
+                region_b,
+            } => write!(
+                f,
+                " link_ref={link_ref} a={task_a} region_a={region_a} b={task_b} region_b={region_b}"
+            )?,
+            TraceData::Exit {
+                link_ref,
+                from,
+                to,
+                failure_vt,
+                reason,
+            } => write!(
+                f,
+                " exit link_ref={link_ref} from={from} to={to} failure_vt={failure_vt} reason={reason}"
+            )?,
             TraceData::Message(msg) => write!(f, " \"{msg}\"")?,
             TraceData::Chaos { kind, task, detail } => {
                 write!(f, " chaos:{kind}")?;

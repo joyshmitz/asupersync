@@ -462,6 +462,12 @@ fn kind_discriminant(kind: TraceEventKind) -> u8 {
         TraceEventKind::FuturelockDetected => 27,
         TraceEventKind::ChaosInjection => 28,
         TraceEventKind::UserTrace => 29,
+        TraceEventKind::MonitorCreated => 30,
+        TraceEventKind::MonitorDropped => 31,
+        TraceEventKind::DownDelivered => 32,
+        TraceEventKind::LinkCreated => 33,
+        TraceEventKind::LinkDropped => 34,
+        TraceEventKind::ExitDelivered => 35,
     }
 }
 
@@ -533,6 +539,40 @@ fn event_sort_key(event: &TraceEvent) -> (u8, u64, u64, u64) {
             msg.hash(&mut h);
             (k, h.finish(), 0, 0)
         }
+        TraceData::Monitor {
+            monitor_ref,
+            watcher,
+            monitored,
+            ..
+        } => (
+            k,
+            *monitor_ref,
+            pack_arena(watcher.0),
+            pack_arena(monitored.0),
+        ),
+        TraceData::Down {
+            monitor_ref,
+            monitored,
+            completion_vt,
+            ..
+        } => (
+            k,
+            completion_vt.as_nanos(),
+            pack_arena(monitored.0),
+            *monitor_ref,
+        ),
+        TraceData::Link {
+            link_ref,
+            task_a,
+            task_b,
+            ..
+        } => (k, *link_ref, pack_arena(task_a.0), pack_arena(task_b.0)),
+        TraceData::Exit {
+            link_ref,
+            from,
+            failure_vt,
+            ..
+        } => (k, failure_vt.as_nanos(), pack_arena(from.0), *link_ref),
         TraceData::None => (k, 0, 0, 0),
     }
 }
