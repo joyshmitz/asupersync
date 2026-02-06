@@ -461,6 +461,7 @@ enum CancelKindRecord {
     ParentCancelled,
     ResourceUnavailable,
     Shutdown,
+    LinkedExit,
 }
 
 impl From<CancelKind> for CancelKindRecord {
@@ -476,6 +477,7 @@ impl From<CancelKind> for CancelKindRecord {
             CancelKind::ParentCancelled => Self::ParentCancelled,
             CancelKind::ResourceUnavailable => Self::ResourceUnavailable,
             CancelKind::Shutdown => Self::Shutdown,
+            CancelKind::LinkedExit => Self::LinkedExit,
         }
     }
 }
@@ -493,6 +495,7 @@ impl From<CancelKindRecord> for CancelKind {
             CancelKindRecord::ParentCancelled => Self::ParentCancelled,
             CancelKindRecord::ResourceUnavailable => Self::ResourceUnavailable,
             CancelKindRecord::Shutdown => Self::Shutdown,
+            CancelKindRecord::LinkedExit => Self::LinkedExit,
         }
     }
 }
