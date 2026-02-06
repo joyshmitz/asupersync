@@ -6,6 +6,7 @@
 //! - Obligations (resources to be resolved)
 //! - Current time
 
+use super::region_table::RegionCreateError;
 use crate::cx::cx::ObservabilityState;
 use crate::error::{Error, ErrorKind};
 use crate::observability::metrics::{MetricsProvider, NoOpMetrics, OutcomeKind};
@@ -85,43 +86,6 @@ impl std::fmt::Display for SpawnError {
 }
 
 impl std::error::Error for SpawnError {}
-
-/// Errors that can occur when creating a child region.
-#[derive(Debug, Clone, PartialEq, Eq)]
-pub enum RegionCreateError {
-    /// The parent region does not exist.
-    ParentNotFound(RegionId),
-    /// The parent region is closed or draining and cannot accept new children.
-    ParentClosed(RegionId),
-    /// The parent region has reached its admission limit for children.
-    ParentAtCapacity {
-        /// The parent region that rejected the child.
-        region: RegionId,
-        /// The configured admission limit.
-        limit: usize,
-        /// The number of live children at the time of rejection.
-        live: usize,
-    },
-}
-
-impl std::fmt::Display for RegionCreateError {
-    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
-        match self {
-            Self::ParentNotFound(id) => write!(f, "parent region not found: {id:?}"),
-            Self::ParentClosed(id) => write!(f, "parent region closed: {id:?}"),
-            Self::ParentAtCapacity {
-                region,
-                limit,
-                live,
-            } => write!(
-                f,
-                "parent region admission limit reached: region={region:?} limit={limit} live={live}"
-            ),
-        }
-    }
-}
-
-impl std::error::Error for RegionCreateError {}
 
 #[derive(Debug, Clone, Copy)]
 enum TaskCompletionKind {
