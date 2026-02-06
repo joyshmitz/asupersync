@@ -450,10 +450,20 @@ pub struct NameRegistry {
     /// Leases granted to waiters, pending retrieval by the waiter's task.
     /// Use [`take_granted`](Self::take_granted) to drain.
     granted: Vec<GrantedLease>,
+    /// Name ownership watchers keyed by watch reference.
+    watchers_by_ref: BTreeMap<NameWatchRef, NameWatcher>,
+    /// Reverse index: name -> watch refs interested in ownership changes.
+    watchers_by_name: BTreeMap<String, Vec<NameWatchRef>>,
+    /// Reverse index: watcher region -> watch refs (for region-close cleanup).
+    watchers_by_region: BTreeMap<RegionId, Vec<NameWatchRef>>,
+    /// Buffered ownership change notifications.
+    notifications: Vec<NameOwnershipNotification>,
+    /// Monotonic counter for allocating `NameWatchRef` values.
+    next_watch_ref: u64,
 }
 
 /// Internal entry for a registered name.
-#[derive(Debug, PartialEq, Eq)]
+#[derive(Debug, Clone, PartialEq, Eq)]
 struct NameEntry {
     /// The task holding this name.
     holder: TaskId,
@@ -485,6 +495,54 @@ pub struct GrantedLease {
     pub lease: NameLease,
 }
 
+/// Reference returned by [`NameRegistry::watch_name`].
+#[derive(Debug, Clone, Copy, PartialEq, Eq, PartialOrd, Ord, Hash)]
+pub struct NameWatchRef(u64);
+
+impl NameWatchRef {
+    /// Returns the numeric identifier for this watch reference.
+    #[must_use]
+    pub fn id(self) -> u64 {
+        self.0
+    }
+}
+
+/// Ownership transition type for name-monitor notifications.
+#[derive(Debug, Clone, Copy, PartialEq, Eq, PartialOrd, Ord)]
+pub enum NameOwnershipKind {
+    /// A name became owned by a task.
+    Acquired,
+    /// A previously owned name was released from the registry.
+    Released,
+}
+
+/// Notification emitted to a name watcher on ownership changes.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct NameOwnershipNotification {
+    /// The watch reference that matched.
+    pub watch_ref: NameWatchRef,
+    /// The watcher task that subscribed.
+    pub watcher: TaskId,
+    /// The region that owns the watcher.
+    pub watcher_region: RegionId,
+    /// The name whose ownership changed.
+    pub name: String,
+    /// The task that acquired or released the name.
+    pub holder: TaskId,
+    /// The holder's region.
+    pub region: RegionId,
+    /// Kind of ownership change.
+    pub kind: NameOwnershipKind,
+}
+
+#[derive(Debug, Clone)]
+struct NameWatcher {
+    watch_ref: NameWatchRef,
+    watcher: TaskId,
+    watcher_region: RegionId,
+    name: String,
+}
+
 impl NameRegistry {
     /// Creates an empty name registry.
     #[must_use]
@@ -494,6 +552,126 @@ impl NameRegistry {
             pending: BTreeMap::new(),
             waiters: BTreeMap::new(),
             granted: Vec::new(),
+            watchers_by_ref: BTreeMap::new(),
+            watchers_by_name: BTreeMap::new(),
+            watchers_by_region: BTreeMap::new(),
+            notifications: Vec::new(),
+            next_watch_ref: 1,
+        }
+    }
+
+    /// Register interest in ownership changes for a specific name.
+    ///
+    /// Watchers receive notifications when the name is acquired or released.
+    /// Delivery is deterministic for a fixed schedule and watch set.
+    pub fn watch_name(
+        &mut self,
+        name: impl Into<String>,
+        watcher: TaskId,
+        watcher_region: RegionId,
+    ) -> NameWatchRef {
+        let name = name.into();
+        let watch_ref = NameWatchRef(self.next_watch_ref);
+        self.next_watch_ref = self.next_watch_ref.saturating_add(1);
+
+        let watcher_record = NameWatcher {
+            watch_ref,
+            watcher,
+            watcher_region,
+            name: name.clone(),
+        };
+        self.watchers_by_ref.insert(watch_ref, watcher_record);
+        self.watchers_by_name
+            .entry(name)
+            .or_default()
+            .push(watch_ref);
+        self.watchers_by_region
+            .entry(watcher_region)
+            .or_default()
+            .push(watch_ref);
+        watch_ref
+    }
+
+    /// Remove a name watch reference.
+    ///
+    /// Returns `true` if the watch existed.
+    pub fn unwatch_name(&mut self, watch_ref: NameWatchRef) -> bool {
+        let Some(record) = self.watchers_by_ref.remove(&watch_ref) else {
+            return false;
+        };
+        if let Some(refs) = self.watchers_by_name.get_mut(&record.name) {
+            refs.retain(|r| *r != watch_ref);
+            if refs.is_empty() {
+                self.watchers_by_name.remove(&record.name);
+            }
+        }
+        if let Some(refs) = self.watchers_by_region.get_mut(&record.watcher_region) {
+            refs.retain(|r| *r != watch_ref);
+            if refs.is_empty() {
+                self.watchers_by_region.remove(&record.watcher_region);
+            }
+        }
+        true
+    }
+
+    /// Remove all name watchers owned by a region.
+    ///
+    /// Returns the removed watch refs in deterministic order.
+    pub fn cleanup_name_watchers_region(&mut self, region: RegionId) -> Vec<NameWatchRef> {
+        let Some(refs) = self.watchers_by_region.remove(&region) else {
+            return Vec::new();
+        };
+        let mut removed = Vec::with_capacity(refs.len());
+        for watch_ref in refs {
+            if let Some(record) = self.watchers_by_ref.remove(&watch_ref) {
+                if let Some(name_refs) = self.watchers_by_name.get_mut(&record.name) {
+                    name_refs.retain(|r| *r != watch_ref);
+                    if name_refs.is_empty() {
+                        self.watchers_by_name.remove(&record.name);
+                    }
+                }
+                removed.push(watch_ref);
+            }
+        }
+        removed.sort();
+        removed
+    }
+
+    /// Returns the number of active name watchers.
+    #[must_use]
+    pub fn name_watcher_count(&self) -> usize {
+        self.watchers_by_ref.len()
+    }
+
+    /// Drain queued name ownership notifications in deterministic order.
+    pub fn take_name_notifications(&mut self) -> Vec<NameOwnershipNotification> {
+        std::mem::take(&mut self.notifications)
+    }
+
+    fn emit_name_change(
+        &mut self,
+        name: &str,
+        holder: TaskId,
+        region: RegionId,
+        kind: NameOwnershipKind,
+    ) {
+        let Some(refs) = self.watchers_by_name.get(name).cloned() else {
+            return;
+        };
+        let mut refs = refs;
+        refs.sort();
+        for watch_ref in refs {
+            if let Some(watcher) = self.watchers_by_ref.get(&watch_ref) {
+                self.notifications.push(NameOwnershipNotification {
+                    watch_ref: watcher.watch_ref,
+                    watcher: watcher.watcher,
+                    watcher_region: watcher.watcher_region,
+                    name: name.to_string(),
+                    holder,
+                    region,
+                    kind,
+                });
+            }
         }
     }
 
@@ -530,6 +708,7 @@ impl NameRegistry {
                 acquired_at: now,
             },
         );
+        self.emit_name_change(&name, holder, region, NameOwnershipKind::Acquired);
         Ok(NameLease::new(name, holder, region, now))
     }
 
@@ -591,7 +770,10 @@ impl NameRegistry {
             let _ = permit.abort();
             return Err(NameLeaseError::NotFound { name });
         };
+        let holder = entry.holder;
+        let region = entry.region;
         self.leases.insert(name, entry);
+        self.emit_name_change(permit.name(), holder, region, NameOwnershipKind::Acquired);
         Ok(permit.commit())
     }
 
@@ -643,6 +825,7 @@ impl NameRegistry {
                         acquired_at: now,
                     },
                 );
+                self.emit_name_change(&name, holder, region, NameOwnershipKind::Acquired);
                 let lease = NameLease::new(&name, holder, region, now);
                 Ok(NameCollisionOutcome::Registered { lease })
             }
@@ -655,9 +838,18 @@ impl NameRegistry {
                         current_holder,
                     }),
                     NameCollisionPolicy::Replace => {
+                        let displaced_active = self.leases.get(&name).cloned();
                         // Remove old entries from both maps.
                         self.leases.remove(&name);
                         self.pending.remove(&name);
+                        if let Some(displaced) = displaced_active {
+                            self.emit_name_change(
+                                &name,
+                                displaced.holder,
+                                displaced.region,
+                                NameOwnershipKind::Released,
+                            );
+                        }
                         // Insert new entry.
                         self.leases.insert(
                             name.clone(),
@@ -667,6 +859,7 @@ impl NameRegistry {
                                 acquired_at: now,
                             },
                         );
+                        self.emit_name_change(&name, holder, region, NameOwnershipKind::Acquired);
                         let lease = NameLease::new(&name, holder, region, now);
                         Ok(NameCollisionOutcome::Replaced {
                             lease,
@@ -700,13 +893,22 @@ impl NameRegistry {
     ///
     /// Returns `NameLeaseError::NotFound` if the name is not registered.
     pub fn unregister(&mut self, name: &str) -> Result<(), NameLeaseError> {
-        if self.leases.remove(name).is_some() {
-            Ok(())
-        } else {
-            Err(NameLeaseError::NotFound {
-                name: name.to_string(),
-            })
-        }
+        self.leases.remove(name).map_or_else(
+            || {
+                Err(NameLeaseError::NotFound {
+                    name: name.to_string(),
+                })
+            },
+            |entry| {
+                self.emit_name_change(
+                    name,
+                    entry.holder,
+                    entry.region,
+                    NameOwnershipKind::Released,
+                );
+                Ok(())
+            },
+        )
     }
 
     /// Unregister a name and grant it to the first eligible waiter.
@@ -719,11 +921,17 @@ impl NameRegistry {
     ///
     /// Returns `NameLeaseError::NotFound` if the name is not registered.
     pub fn unregister_and_grant(&mut self, name: &str, now: Time) -> Result<(), NameLeaseError> {
-        if self.leases.remove(name).is_none() {
+        let Some(entry) = self.leases.remove(name) else {
             return Err(NameLeaseError::NotFound {
                 name: name.to_string(),
             });
-        }
+        };
+        self.emit_name_change(
+            name,
+            entry.holder,
+            entry.region,
+            NameOwnershipKind::Released,
+        );
         self.try_grant_to_first_waiter(name, now);
         Ok(())
     }
@@ -755,6 +963,12 @@ impl NameRegistry {
                 region: waiter.region,
                 acquired_at: now,
             },
+        );
+        self.emit_name_change(
+            name,
+            waiter.holder,
+            waiter.region,
+            NameOwnershipKind::Acquired,
         );
         let lease = NameLease::new(name, waiter.holder, waiter.region, now);
         self.granted.push(GrantedLease {
@@ -830,6 +1044,15 @@ impl NameRegistry {
     /// in the region. The caller is responsible for resolving the corresponding
     /// obligations (leases released/aborted; permits aborted).
     pub fn cleanup_region(&mut self, region: RegionId) -> Vec<String> {
+        // Region close semantics: watchers owned by the region are removed before
+        // ownership-change notifications are emitted.
+        let _removed_watchers = self.cleanup_name_watchers_region(region);
+        let mut active_removed: Vec<(String, TaskId, RegionId)> = self
+            .leases
+            .iter()
+            .filter(|(_, e)| e.region == region)
+            .map(|(name, e)| (name.clone(), e.holder, e.region))
+            .collect();
         let mut to_remove: Vec<String> = self
             .leases
             .iter()
@@ -847,6 +1070,10 @@ impl NameRegistry {
             self.leases.remove(name);
             self.pending.remove(name);
         }
+        active_removed.sort_by(|a, b| a.0.cmp(&b.0));
+        for (name, holder, holder_region) in active_removed {
+            self.emit_name_change(&name, holder, holder_region, NameOwnershipKind::Released);
+        }
         // Also remove waiters belonging to this region.
         for queue in self.waiters.values_mut() {
             queue.retain(|w| w.region != region);
@@ -863,6 +1090,12 @@ impl NameRegistry {
     /// by the task. The caller is responsible for resolving the corresponding
     /// obligations.
     pub fn cleanup_task(&mut self, task: TaskId) -> Vec<String> {
+        let mut active_removed: Vec<(String, TaskId, RegionId)> = self
+            .leases
+            .iter()
+            .filter(|(_, e)| e.holder == task)
+            .map(|(name, e)| (name.clone(), e.holder, e.region))
+            .collect();
         let mut to_remove: Vec<String> = self
             .leases
             .iter()
@@ -879,6 +1112,10 @@ impl NameRegistry {
         for name in &to_remove {
             self.leases.remove(name);
             self.pending.remove(name);
+        }
+        active_removed.sort_by(|a, b| a.0.cmp(&b.0));
+        for (name, holder, region) in active_removed {
+            self.emit_name_change(&name, holder, region, NameOwnershipKind::Released);
         }
         // Also remove waiters belonging to this task.
         for queue in self.waiters.values_mut() {
@@ -1427,6 +1664,140 @@ mod tests {
         assert_eq!(reg.len(), 0);
 
         crate::test_complete!("registry_default_is_empty");
+    }
+
+    // ---------------------------------------------------------------
+    // Name monitor tests (bd-2kbem)
+    // ---------------------------------------------------------------
+
+    #[test]
+    fn name_watch_emits_acquire_and_release() {
+        init_test("name_watch_emits_acquire_and_release");
+
+        let mut reg = NameRegistry::new();
+        let watch_ref = reg.watch_name("svc", tid(50), rid(9));
+        assert_eq!(reg.name_watcher_count(), 1);
+
+        let mut lease = reg
+            .register("svc", tid(1), rid(1), Time::from_secs(10))
+            .unwrap();
+        reg.unregister("svc").unwrap();
+        lease.release().unwrap();
+
+        let notifications = reg.take_name_notifications();
+        assert_eq!(notifications.len(), 2);
+
+        let acquired = &notifications[0];
+        assert_eq!(acquired.watch_ref, watch_ref);
+        assert_eq!(acquired.watcher, tid(50));
+        assert_eq!(acquired.watcher_region, rid(9));
+        assert_eq!(acquired.name, "svc");
+        assert_eq!(acquired.holder, tid(1));
+        assert_eq!(acquired.region, rid(1));
+        assert_eq!(acquired.kind, NameOwnershipKind::Acquired);
+
+        let released = &notifications[1];
+        assert_eq!(released.watch_ref, watch_ref);
+        assert_eq!(released.watcher, tid(50));
+        assert_eq!(released.watcher_region, rid(9));
+        assert_eq!(released.name, "svc");
+        assert_eq!(released.holder, tid(1));
+        assert_eq!(released.region, rid(1));
+        assert_eq!(released.kind, NameOwnershipKind::Released);
+
+        assert!(reg.take_name_notifications().is_empty());
+
+        crate::test_complete!("name_watch_emits_acquire_and_release");
+    }
+
+    #[test]
+    fn name_watch_multiple_watchers_ordered_by_ref() {
+        init_test("name_watch_multiple_watchers_ordered_by_ref");
+
+        let mut reg = NameRegistry::new();
+        let w1 = reg.watch_name("svc", tid(10), rid(7));
+        let w2 = reg.watch_name("svc", tid(11), rid(7));
+        let w3 = reg.watch_name("svc", tid(12), rid(8));
+
+        let mut lease = reg.register("svc", tid(1), rid(1), Time::ZERO).unwrap();
+        let notifications = reg.take_name_notifications();
+        assert_eq!(notifications.len(), 3);
+
+        let refs: Vec<NameWatchRef> = notifications.iter().map(|n| n.watch_ref).collect();
+        assert_eq!(refs, vec![w1, w2, w3]);
+        assert!(notifications
+            .iter()
+            .all(|n| n.kind == NameOwnershipKind::Acquired));
+
+        lease.release().unwrap();
+
+        crate::test_complete!("name_watch_multiple_watchers_ordered_by_ref");
+    }
+
+    #[test]
+    fn name_watch_region_cleanup_suppresses_release_notifications() {
+        init_test("name_watch_region_cleanup_suppresses_release_notifications");
+
+        let mut reg = NameRegistry::new();
+        let _closed_region_watch = reg.watch_name("svc", tid(10), rid(1));
+        let open_region_watch = reg.watch_name("svc", tid(11), rid(2));
+
+        let mut lease = reg.register("svc", tid(1), rid(1), Time::ZERO).unwrap();
+        let acquired = reg.take_name_notifications();
+        assert_eq!(acquired.len(), 2);
+
+        let removed_watchers = reg.cleanup_name_watchers_region(rid(1));
+        assert_eq!(removed_watchers.len(), 1);
+        assert_eq!(reg.name_watcher_count(), 1);
+
+        reg.unregister("svc").unwrap();
+        lease.release().unwrap();
+        let released = reg.take_name_notifications();
+        assert_eq!(released.len(), 1);
+        assert_eq!(released[0].watch_ref, open_region_watch);
+        assert_eq!(released[0].kind, NameOwnershipKind::Released);
+
+        crate::test_complete!("name_watch_region_cleanup_suppresses_release_notifications");
+    }
+
+    #[test]
+    fn name_watch_replace_emits_release_then_acquire() {
+        init_test("name_watch_replace_emits_release_then_acquire");
+
+        let mut reg = NameRegistry::new();
+        let watch_ref = reg.watch_name("svc", tid(42), rid(9));
+
+        let mut old_lease = reg.register("svc", tid(1), rid(1), Time::ZERO).unwrap();
+        reg.take_name_notifications();
+
+        let outcome = reg
+            .register_with_policy(
+                "svc",
+                tid(2),
+                rid(2),
+                Time::from_secs(5),
+                NameCollisionPolicy::Replace,
+            )
+            .unwrap();
+
+        let mut new_lease = match outcome {
+            NameCollisionOutcome::Replaced { lease, .. } => lease,
+            other => panic!("expected Replaced outcome, got {other:?}"),
+        };
+
+        let notifications = reg.take_name_notifications();
+        assert_eq!(notifications.len(), 2);
+        assert_eq!(notifications[0].watch_ref, watch_ref);
+        assert_eq!(notifications[0].kind, NameOwnershipKind::Released);
+        assert_eq!(notifications[0].holder, tid(1));
+        assert_eq!(notifications[1].watch_ref, watch_ref);
+        assert_eq!(notifications[1].kind, NameOwnershipKind::Acquired);
+        assert_eq!(notifications[1].holder, tid(2));
+
+        old_lease.abort().unwrap();
+        new_lease.release().unwrap();
+
+        crate::test_complete!("name_watch_replace_emits_release_then_acquire");
     }
 
     // ---------------------------------------------------------------

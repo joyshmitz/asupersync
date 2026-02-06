@@ -304,10 +304,8 @@ async fn wait_for_connect(socket: &Socket) -> io::Result<Option<IoRegistration>>
         match socket.peer_addr() {
             Ok(_) => Poll::Ready(Ok(())),
             Err(err) if err.kind() == io::ErrorKind::NotConnected => {
-                if let Some(existing) = registration.as_ref() {
-                    if !existing.update_waker(cx.waker().clone()) {
-                        registration = None;
-                    }
+                if let Err(err) = rearm_connect_registration(&mut registration, cx) {
+                    return Poll::Ready(Err(err));
                 }
 
                 if registration.is_none() {
@@ -334,6 +332,36 @@ async fn wait_for_connect(socket: &Socket) -> io::Result<Option<IoRegistration>>
     }
 
     Ok(registration)
+}
+
+/// Re-arm a pending connect registration that uses oneshot reactor semantics.
+///
+/// The polling backend disarms registrations after each readiness event. Even
+/// when the interest flags are unchanged (`WRITABLE` during connect), we must
+/// call `set_interest` again to ensure subsequent connect progress events are
+/// delivered.
+fn rearm_connect_registration(
+    registration: &mut Option<IoRegistration>,
+    cx: &Context<'_>,
+) -> io::Result<()> {
+    let Some(existing) = registration.as_mut() else {
+        return Ok(());
+    };
+
+    if let Err(err) = existing.set_interest(Interest::WRITABLE) {
+        if err.kind() == io::ErrorKind::NotConnected {
+            *registration = None;
+            cx.waker().wake_by_ref();
+            return Ok(());
+        }
+        return Err(err);
+    }
+
+    if !existing.update_waker(cx.waker().clone()) {
+        *registration = None;
+    }
+
+    Ok(())
 }
 
 async fn wait_for_connect_fallback(socket: &Socket) -> io::Result<()> {
@@ -523,12 +551,15 @@ impl TcpStreamApi for TcpStream {
 #[cfg(test)]
 mod tests {
     use super::*;
+    use crate::runtime::reactor::{Events, Reactor, Token};
     use crate::runtime::{IoDriverHandle, LabReactor};
     use crate::types::{Budget, RegionId, TaskId};
     use futures_lite::future;
     use std::future::poll_fn;
     use std::future::Future;
+    use std::io;
     use std::net::{SocketAddr, TcpListener};
+    use std::sync::atomic::{AtomicUsize, Ordering};
     use std::sync::Arc;
     use std::task::{Context, Poll, Wake, Waker};
     use std::time::Duration;
@@ -541,6 +572,56 @@ mod tests {
 
     fn noop_waker() -> Waker {
         Waker::from(Arc::new(NoopWaker))
+    }
+
+    struct CountingReactor {
+        inner: LabReactor,
+        modify_calls: AtomicUsize,
+    }
+
+    impl CountingReactor {
+        fn new() -> Arc<Self> {
+            Arc::new(Self {
+                inner: LabReactor::new(),
+                modify_calls: AtomicUsize::new(0),
+            })
+        }
+
+        fn modify_calls(&self) -> usize {
+            self.modify_calls.load(Ordering::SeqCst)
+        }
+    }
+
+    impl Reactor for CountingReactor {
+        fn register(
+            &self,
+            source: &dyn crate::runtime::reactor::Source,
+            token: Token,
+            interest: Interest,
+        ) -> io::Result<()> {
+            self.inner.register(source, token, interest)
+        }
+
+        fn modify(&self, token: Token, interest: Interest) -> io::Result<()> {
+            self.modify_calls.fetch_add(1, Ordering::SeqCst);
+            self.inner.modify(token, interest)
+        }
+
+        fn deregister(&self, token: Token) -> io::Result<()> {
+            self.inner.deregister(token)
+        }
+
+        fn poll(&self, events: &mut Events, timeout: Option<Duration>) -> io::Result<usize> {
+            self.inner.poll(events, timeout)
+        }
+
+        fn wake(&self) -> io::Result<()> {
+            self.inner.wake()
+        }
+
+        fn registration_count(&self) -> usize {
+            self.inner.registration_count()
+        }
     }
 
     #[test]
@@ -628,5 +709,60 @@ mod tests {
         let poll = Pin::new(&mut stream).poll_read(&mut cx, &mut read_buf);
         assert!(matches!(poll, Poll::Pending));
         assert!(stream.registration.is_some());
+    }
+
+    #[test]
+    fn connect_waiter_rearms_existing_registration_with_unchanged_interest() {
+        let listener = TcpListener::bind("127.0.0.1:0").expect("bind listener");
+        let addr = listener.local_addr().expect("local addr");
+        let client = net::TcpStream::connect(addr).expect("connect");
+        let (_server, _) = listener.accept().expect("accept");
+        client.set_nonblocking(true).expect("nonblocking");
+
+        let reactor = CountingReactor::new();
+        let driver = IoDriverHandle::new(reactor.clone());
+        let registration = driver
+            .register(&client, Interest::WRITABLE, noop_waker())
+            .expect("register");
+        let mut registration = Some(registration);
+
+        let waker = noop_waker();
+        let cx = Context::from_waker(&waker);
+
+        rearm_connect_registration(&mut registration, &cx).expect("re-arm once");
+        rearm_connect_registration(&mut registration, &cx).expect("re-arm twice");
+
+        assert_eq!(
+            reactor.modify_calls(),
+            2,
+            "connect waiter must re-arm on every poll, even when interest is unchanged"
+        );
+        assert!(registration.is_some(), "registration should remain active");
+    }
+
+    #[test]
+    fn connect_waiter_clears_registration_when_driver_drops() {
+        let listener = TcpListener::bind("127.0.0.1:0").expect("bind listener");
+        let addr = listener.local_addr().expect("local addr");
+        let client = net::TcpStream::connect(addr).expect("connect");
+        let (_server, _) = listener.accept().expect("accept");
+        client.set_nonblocking(true).expect("nonblocking");
+
+        let reactor = CountingReactor::new();
+        let driver = IoDriverHandle::new(reactor);
+        let registration = driver
+            .register(&client, Interest::WRITABLE, noop_waker())
+            .expect("register");
+        let mut registration = Some(registration);
+        drop(driver);
+
+        let waker = noop_waker();
+        let cx = Context::from_waker(&waker);
+        rearm_connect_registration(&mut registration, &cx).expect("re-arm with dropped driver");
+
+        assert!(
+            registration.is_none(),
+            "stale connect registration should be cleared when driver is gone"
+        );
     }
 }
