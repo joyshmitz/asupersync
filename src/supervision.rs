@@ -82,6 +82,10 @@ pub enum SupervisionStrategy {
 /// Restarts are rate-limited using a sliding window: if more than
 /// `max_restarts` occur within `window`, the restart budget is
 /// exhausted and the actor stops permanently.
+///
+/// Restarts are also **budget-aware**: each restart attempt consumes
+/// `restart_cost` from the parent region's cost quota, and restarts
+/// are refused if the remaining time or poll budget is insufficient.
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub struct RestartConfig {
     /// Maximum number of restarts allowed within the time window.
@@ -96,6 +100,30 @@ pub struct RestartConfig {
 
     /// Backoff strategy between restart attempts.
     pub backoff: BackoffStrategy,
+
+    /// Cost consumed from the parent budget per restart attempt.
+    ///
+    /// Each restart deducts this amount from the region's cost quota.
+    /// If the remaining cost quota is less than this value, the restart
+    /// is refused and the actor stops.
+    ///
+    /// Set to 0 (default) to disable cost-based restart limiting.
+    pub restart_cost: u64,
+
+    /// Minimum remaining time (relative to budget deadline) to allow a restart.
+    ///
+    /// If the budget deadline is closer than this duration, restarts are
+    /// refused on the grounds that there isn't enough time for the child
+    /// to do useful work. Uses virtual time for determinism.
+    ///
+    /// `None` (default) means no minimum-time constraint.
+    pub min_remaining_for_restart: Option<Duration>,
+
+    /// Minimum poll quota remaining to allow a restart.
+    ///
+    /// If fewer than this many polls remain in the budget, restarts are
+    /// refused. Set to 0 (default) to disable poll-based restart limiting.
+    pub min_polls_for_restart: u32,
 }
 
 impl Default for RestartConfig {
@@ -104,6 +132,9 @@ impl Default for RestartConfig {
             max_restarts: 3,
             window: Duration::from_secs(60),
             backoff: BackoffStrategy::default(),
+            restart_cost: 0,
+            min_remaining_for_restart: None,
+            min_polls_for_restart: 0,
         }
     }
 }
@@ -116,6 +147,9 @@ impl RestartConfig {
             max_restarts,
             window,
             backoff: BackoffStrategy::default(),
+            restart_cost: 0,
+            min_remaining_for_restart: None,
+            min_polls_for_restart: 0,
         }
     }
 
@@ -123,6 +157,27 @@ impl RestartConfig {
     #[must_use]
     pub fn with_backoff(mut self, backoff: BackoffStrategy) -> Self {
         self.backoff = backoff;
+        self
+    }
+
+    /// Set the cost consumed per restart attempt.
+    #[must_use]
+    pub fn with_restart_cost(mut self, cost: u64) -> Self {
+        self.restart_cost = cost;
+        self
+    }
+
+    /// Set the minimum remaining time required to allow a restart.
+    #[must_use]
+    pub fn with_min_remaining(mut self, min: Duration) -> Self {
+        self.min_remaining_for_restart = Some(min);
+        self
+    }
+
+    /// Set the minimum poll quota required to allow a restart.
+    #[must_use]
+    pub fn with_min_polls(mut self, min_polls: u32) -> Self {
+        self.min_polls_for_restart = min_polls;
         self
     }
 }
@@ -572,6 +627,7 @@ pub struct SupervisorBuilder {
     name: String,
     budget: Option<Budget>,
     tie_break: StartTieBreak,
+    restart_policy: RestartPolicy,
     children: Vec<ChildSpec>,
 }
 
@@ -583,6 +639,7 @@ impl SupervisorBuilder {
             name: name.into(),
             budget: None,
             tie_break: StartTieBreak::InsertionOrder,
+            restart_policy: RestartPolicy::OneForOne,
             children: Vec::new(),
         }
     }
@@ -598,6 +655,17 @@ impl SupervisorBuilder {
     #[must_use]
     pub fn with_tie_break(mut self, tie_break: StartTieBreak) -> Self {
         self.tie_break = tie_break;
+        self
+    }
+
+    /// Set the supervisor-level restart policy (one_for_one / one_for_all / rest_for_one).
+    ///
+    /// This controls which *set of children* are cancelled and restarted when a child fails.
+    /// It is independent from per-child [`SupervisionStrategy`] (Stop/Restart/Escalate), which
+    /// decides whether a given child failure is restartable at all.
+    #[must_use]
+    pub fn with_restart_policy(mut self, restart_policy: RestartPolicy) -> Self {
+        self.restart_policy = restart_policy;
         self
     }
 
@@ -623,10 +691,27 @@ pub struct CompiledSupervisor {
     pub budget: Option<Budget>,
     /// Deterministic tie-break policy used during compilation.
     pub tie_break: StartTieBreak,
+    /// Restart policy applied when a child fails.
+    pub restart_policy: RestartPolicy,
     /// Child specifications (including start factories).
     pub children: Vec<ChildSpec>,
     /// Deterministic start order as indices into `children`.
     pub start_order: Vec<usize>,
+}
+
+/// A deterministic cancel/restart plan for a supervisor after a child failure.
+///
+/// This is a pure, replay-stable computation based on the compiled start order.
+/// Runtime wiring (observing exits, draining losers, applying shutdown budgets)
+/// is layered on top.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct SupervisorRestartPlan {
+    /// Supervisor policy that produced this plan.
+    pub policy: RestartPolicy,
+    /// Children to cancel in order (dependents-first).
+    pub cancel_order: Vec<String>,
+    /// Children to restart in order (dependencies-first).
+    pub restart_order: Vec<String>,
 }
 
 #[derive(Debug, Clone, PartialEq, Eq)]
@@ -722,18 +807,106 @@ impl CompiledSupervisor {
             name: builder.name,
             budget: builder.budget,
             tie_break: builder.tie_break,
+            restart_policy: builder.restart_policy,
             children: builder.children,
             start_order: order,
+        })
+    }
+
+    /// Compute which children should be cancelled/restarted when `failed_child` fails.
+    ///
+    /// Semantics are OTP-style and based on the compiled start order:
+    /// - `OneForOne`: cancel+restart only the failed child.
+    /// - `OneForAll`: cancel all children (reverse start order), then restart all (start order).
+    /// - `RestForOne`: cancel failed child and all children started after it, then restart that suffix.
+    ///
+    /// Notes:
+    /// - This computation is deterministic and does not require any global locks.
+    /// - It does not consult per-child restartability (that is handled by per-child
+    ///   [`SupervisionStrategy`] in the runtime wiring).
+    #[must_use]
+    pub fn restart_plan_for(&self, failed_child: &str) -> Option<SupervisorRestartPlan> {
+        let failed_idx = self
+            .children
+            .iter()
+            .enumerate()
+            .find_map(|(idx, child)| (child.name == failed_child).then_some(idx))?;
+
+        self.restart_plan_for_idx(failed_idx)
+    }
+
+    /// Compute a restart plan for a concrete failure `outcome`.
+    ///
+    /// This enforces the monotone-severity contract:
+    /// - `Ok` / `Cancelled` / `Panicked` outcomes never produce a restart plan.
+    /// - Only `Err` outcomes are candidates for restart, and only when the child's per-child
+    ///   [`SupervisionStrategy`] is `Restart(..)`.
+    ///
+    /// The returned plan is a deterministic cancel+restart ordering (dependents-first cancel,
+    /// dependencies-first restart) that can be wired into the runtime's cancel protocol:
+    /// request cancel for each child in `cancel_order`, fully drain/quiesce, then restart in
+    /// `restart_order`.
+    #[must_use]
+    pub fn restart_plan_for_failure<E>(
+        &self,
+        failed_child: &str,
+        outcome: &Outcome<(), E>,
+    ) -> Option<SupervisorRestartPlan> {
+        let failed_idx = self
+            .children
+            .iter()
+            .enumerate()
+            .find_map(|(idx, child)| (child.name == failed_child).then_some(idx))?;
+
+        // Monotone severity: only errors are candidates for restart.
+        if !matches!(outcome, Outcome::Err(_)) {
+            return None;
+        }
+
+        match self.children[failed_idx].restart {
+            SupervisionStrategy::Restart(_) => self.restart_plan_for_idx(failed_idx),
+            SupervisionStrategy::Stop | SupervisionStrategy::Escalate => None,
+        }
+    }
+
+    #[must_use]
+    fn restart_plan_for_idx(&self, failed_child_idx: usize) -> Option<SupervisorRestartPlan> {
+        let failed_pos = self
+            .start_order
+            .iter()
+            .position(|&idx| idx == failed_child_idx)?;
+
+        let positions: Vec<usize> = match self.restart_policy {
+            RestartPolicy::OneForOne => vec![failed_pos],
+            RestartPolicy::OneForAll => (0..self.start_order.len()).collect(),
+            RestartPolicy::RestForOne => (failed_pos..self.start_order.len()).collect(),
+        };
+
+        let cancel_order = positions
+            .iter()
+            .rev()
+            .map(|&pos| self.children[self.start_order[pos]].name.clone())
+            .collect();
+
+        let restart_order = positions
+            .iter()
+            .map(|&pos| self.children[self.start_order[pos]].name.clone())
+            .collect();
+
+        Some(SupervisorRestartPlan {
+            policy: self.restart_policy,
+            cancel_order,
+            restart_order,
         })
     }
 
     /// Spawns the supervisor as a child region under `parent_region` and starts
     /// all `start_immediately` children in the compiled order.
     ///
-    /// This method is intentionally minimal: it establishes the **region-owned
-    /// structure** and deterministic start ordering. Full restart semantics
-    /// (one_for_one/one_for_all/rest_for_one, budgets, evidence ledgers) are
-    /// layered on top by follow-up beads (bd-3ddsi, bd-1yv7a, bd-35iz1).
+    /// This method establishes the **region-owned structure** and deterministic start ordering.
+    /// Restart semantics are specified by [`RestartPolicy`] and computed by
+    /// [`CompiledSupervisor::restart_plan_for`]; wiring it into a live restart loop is layered
+    /// on top by follow-up beads (bd-1yv7a, bd-35iz1).
     pub fn spawn(
         mut self,
         state: &mut RuntimeState,
@@ -897,6 +1070,255 @@ impl RestartHistory {
     pub fn config(&self) -> &RestartConfig {
         &self.config
     }
+
+    /// Check if a restart is allowed given the current virtual time and budget.
+    ///
+    /// This extends [`can_restart`](Self::can_restart) with budget-awareness:
+    /// - Checks the sliding window restart count (same as `can_restart`)
+    /// - Checks that remaining cost quota can cover `restart_cost`
+    /// - Checks that remaining time exceeds `min_remaining_for_restart`
+    /// - Checks that remaining poll quota exceeds `min_polls_for_restart`
+    ///
+    /// Returns `Ok(())` if the restart is allowed, or `Err(BudgetRefusal)` with
+    /// the reason the restart was denied.
+    pub fn can_restart_with_budget(&self, now: u64, budget: &Budget) -> Result<(), BudgetRefusal> {
+        // First check the standard sliding-window limit
+        if !self.can_restart(now) {
+            return Err(BudgetRefusal::WindowExhausted {
+                max_restarts: self.config.max_restarts,
+                window: self.config.window,
+            });
+        }
+
+        // Check cost quota
+        if self.config.restart_cost > 0 {
+            if let Some(remaining) = budget.cost_quota {
+                if remaining < self.config.restart_cost {
+                    return Err(BudgetRefusal::InsufficientCost {
+                        required: self.config.restart_cost,
+                        remaining,
+                    });
+                }
+            }
+        }
+
+        // Check deadline
+        if let Some(min_remaining) = self.config.min_remaining_for_restart {
+            if let Some(deadline) = budget.deadline {
+                let now_time = crate::types::id::Time::from_nanos(now);
+                let remaining = budget.remaining_time(now_time);
+                match remaining {
+                    None => {
+                        // Deadline already passed
+                        return Err(BudgetRefusal::DeadlineTooClose {
+                            min_required: min_remaining,
+                            remaining: Duration::ZERO,
+                        });
+                    }
+                    Some(rem) if rem < min_remaining => {
+                        return Err(BudgetRefusal::DeadlineTooClose {
+                            min_required: min_remaining,
+                            remaining: rem,
+                        });
+                    }
+                    _ => {} // enough time remaining
+                }
+                // Suppress unused variable warning - deadline is used for the check above
+                let _ = deadline;
+            }
+        }
+
+        // Check poll quota
+        if self.config.min_polls_for_restart > 0
+            && budget.poll_quota < self.config.min_polls_for_restart
+        {
+            return Err(BudgetRefusal::InsufficientPolls {
+                min_required: self.config.min_polls_for_restart,
+                remaining: budget.poll_quota,
+            });
+        }
+
+        Ok(())
+    }
+
+    /// Compute the restart intensity (restarts per second) over the window.
+    ///
+    /// Returns 0.0 if no restarts have occurred or if the window is zero.
+    #[must_use]
+    pub fn intensity(&self, now: u64) -> f64 {
+        let count = self.recent_restart_count(now);
+        if count == 0 {
+            return 0.0;
+        }
+        let window_secs = self.config.window.as_secs_f64();
+        if window_secs <= 0.0 {
+            return 0.0;
+        }
+        #[allow(clippy::cast_precision_loss)]
+        let intensity = count as f64 / window_secs;
+        intensity
+    }
+}
+
+/// Reason a restart was refused due to budget constraints.
+#[derive(Debug, Clone, PartialEq)]
+pub enum BudgetRefusal {
+    /// The sliding-window restart count was exhausted.
+    WindowExhausted {
+        /// Maximum restarts allowed.
+        max_restarts: u32,
+        /// Time window.
+        window: Duration,
+    },
+    /// Remaining cost quota is insufficient for the restart cost.
+    InsufficientCost {
+        /// Cost required per restart.
+        required: u64,
+        /// Remaining cost quota.
+        remaining: u64,
+    },
+    /// Remaining time until deadline is less than the minimum required.
+    DeadlineTooClose {
+        /// Minimum remaining time required.
+        min_required: Duration,
+        /// Actual remaining time.
+        remaining: Duration,
+    },
+    /// Remaining poll quota is below the minimum required.
+    InsufficientPolls {
+        /// Minimum polls required.
+        min_required: u32,
+        /// Remaining poll quota.
+        remaining: u32,
+    },
+}
+
+impl Eq for BudgetRefusal {}
+
+impl std::fmt::Display for BudgetRefusal {
+    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        match self {
+            Self::WindowExhausted {
+                max_restarts,
+                window,
+            } => write!(
+                f,
+                "restart window exhausted: {max_restarts} restarts in {window:?}"
+            ),
+            Self::InsufficientCost {
+                required,
+                remaining,
+            } => write!(
+                f,
+                "insufficient cost budget: need {required}, have {remaining}"
+            ),
+            Self::DeadlineTooClose {
+                min_required,
+                remaining,
+            } => write!(
+                f,
+                "deadline too close: need {min_required:?} remaining, have {remaining:?}"
+            ),
+            Self::InsufficientPolls {
+                min_required,
+                remaining,
+            } => write!(
+                f,
+                "insufficient poll budget: need {min_required}, have {remaining}"
+            ),
+        }
+    }
+}
+
+impl std::error::Error for BudgetRefusal {}
+
+/// Deterministic restart intensity window.
+///
+/// Tracks restart rate over a configurable sliding window using virtual
+/// timestamps. Computes intensity as restarts-per-second and compares
+/// against configurable thresholds to detect restart storms.
+///
+/// All operations are deterministic and use virtual time (nanosecond u64),
+/// making them safe for lab-runtime tests.
+#[derive(Debug, Clone)]
+pub struct RestartIntensityWindow {
+    /// Restart timestamps within the observation window.
+    timestamps: Vec<u64>,
+    /// Observation window duration.
+    window: Duration,
+    /// Threshold intensity (restarts/second) above which a storm is detected.
+    storm_threshold: f64,
+}
+
+impl RestartIntensityWindow {
+    /// Create a new intensity window.
+    ///
+    /// # Arguments
+    ///
+    /// * `window` - Duration of the sliding observation window
+    /// * `storm_threshold` - Restarts per second above which a storm is flagged
+    #[must_use]
+    pub fn new(window: Duration, storm_threshold: f64) -> Self {
+        Self {
+            timestamps: Vec::new(),
+            window,
+            storm_threshold,
+        }
+    }
+
+    /// Record a restart at the given virtual time and prune old entries.
+    pub fn record(&mut self, now: u64) {
+        let window_nanos = self.window.as_nanos() as u64;
+        let cutoff = now.saturating_sub(window_nanos);
+        self.timestamps.retain(|&t| t >= cutoff);
+        self.timestamps.push(now);
+    }
+
+    /// Compute the current restart intensity (restarts per second).
+    ///
+    /// Returns 0.0 if no restarts have been recorded in the window.
+    #[must_use]
+    pub fn intensity(&self, now: u64) -> f64 {
+        let window_nanos = self.window.as_nanos() as u64;
+        let cutoff = now.saturating_sub(window_nanos);
+        let count = self.timestamps.iter().filter(|&&t| t >= cutoff).count();
+        if count == 0 {
+            return 0.0;
+        }
+        let window_secs = self.window.as_secs_f64();
+        if window_secs <= 0.0 {
+            return 0.0;
+        }
+        #[allow(clippy::cast_precision_loss)]
+        let intensity = count as f64 / window_secs;
+        intensity
+    }
+
+    /// Returns `true` if the current intensity exceeds the storm threshold.
+    #[must_use]
+    pub fn is_storm(&self, now: u64) -> bool {
+        self.intensity(now) > self.storm_threshold
+    }
+
+    /// Number of restarts within the current window.
+    #[must_use]
+    pub fn count(&self, now: u64) -> usize {
+        let window_nanos = self.window.as_nanos() as u64;
+        let cutoff = now.saturating_sub(window_nanos);
+        self.timestamps.iter().filter(|&&t| t >= cutoff).count()
+    }
+
+    /// The configured storm threshold.
+    #[must_use]
+    pub fn storm_threshold(&self) -> f64 {
+        self.storm_threshold
+    }
+
+    /// The configured observation window.
+    #[must_use]
+    pub fn window(&self) -> Duration {
+        self.window
+    }
 }
 
 /// Decision made by the supervision system.
@@ -951,6 +1373,8 @@ pub enum StopReason {
         /// The window duration.
         window: Duration,
     },
+    /// Stopped because a budget constraint prevented restart.
+    BudgetRefused(BudgetRefusal),
     /// Stopped due to cancellation.
     Cancelled(CancelReason),
     /// Stopped due to panic.
@@ -1037,6 +1461,16 @@ pub enum SupervisionEvent {
         /// The parent region to escalate to.
         to_region: Option<RegionId>,
     },
+
+    /// A restart was refused due to budget constraints.
+    BudgetRefusedRestart {
+        /// The actor whose restart was refused.
+        task_id: TaskId,
+        /// The region containing the actor.
+        region_id: RegionId,
+        /// The reason the budget refused the restart.
+        refusal: BudgetRefusal,
+    },
 }
 
 /// Supervisor for managing actor restarts.
@@ -1069,6 +1503,9 @@ impl Supervisor {
     /// Decide what to do when an actor fails.
     ///
     /// Returns the supervision decision and optionally records a restart.
+    /// This method checks only the sliding-window restart count; use
+    /// [`on_failure_with_budget`](Self::on_failure_with_budget) for
+    /// budget-aware decisions.
     ///
     /// # Arguments
     ///
@@ -1084,6 +1521,36 @@ impl Supervisor {
         parent_region_id: Option<RegionId>,
         outcome: Outcome<(), ()>,
         now: u64,
+    ) -> SupervisionDecision {
+        self.on_failure_with_budget(task_id, region_id, parent_region_id, outcome, now, None)
+    }
+
+    /// Decide what to do when an actor fails, with budget awareness.
+    ///
+    /// Extends [`on_failure`](Self::on_failure) by checking the region's budget
+    /// before allowing a restart:
+    /// - Verifies cost quota can cover `restart_cost`
+    /// - Verifies remaining time exceeds `min_remaining_for_restart`
+    /// - Verifies poll quota exceeds `min_polls_for_restart`
+    ///
+    /// If the budget is `None`, only the sliding-window check is performed.
+    ///
+    /// # Arguments
+    ///
+    /// * `task_id` - The failing actor's task ID
+    /// * `region_id` - The region containing the actor
+    /// * `parent_region_id` - The parent region (for escalation)
+    /// * `outcome` - The failure outcome
+    /// * `now` - Current virtual time (nanoseconds)
+    /// * `budget` - Optional budget to check constraints against
+    pub fn on_failure_with_budget(
+        &mut self,
+        task_id: TaskId,
+        region_id: RegionId,
+        parent_region_id: Option<RegionId>,
+        outcome: Outcome<(), ()>,
+        now: u64,
+        budget: Option<&Budget>,
     ) -> SupervisionDecision {
         // Check if outcome is severe enough that supervision cannot help
         if matches!(outcome, Outcome::Panicked(_)) {
@@ -1104,26 +1571,45 @@ impl Supervisor {
             SupervisionStrategy::Restart(config) => {
                 let history = self.history.as_mut().expect("history exists for Restart");
 
-                if history.can_restart(now) {
-                    let attempt = history.recent_restart_count(now) as u32 + 1;
-                    let delay = history.next_delay(now);
-                    history.record_restart(now);
-
-                    SupervisionDecision::Restart {
-                        task_id,
-                        region_id,
-                        attempt,
-                        delay,
+                // Check budget constraints if a budget is provided
+                if let Some(budget) = budget {
+                    if let Err(refusal) = history.can_restart_with_budget(now, budget) {
+                        return match refusal {
+                            BudgetRefusal::WindowExhausted { .. } => SupervisionDecision::Stop {
+                                task_id,
+                                region_id,
+                                reason: StopReason::RestartBudgetExhausted {
+                                    total_restarts: config.max_restarts,
+                                    window: config.window,
+                                },
+                            },
+                            _ => SupervisionDecision::Stop {
+                                task_id,
+                                region_id,
+                                reason: StopReason::BudgetRefused(refusal),
+                            },
+                        };
                     }
-                } else {
-                    SupervisionDecision::Stop {
+                } else if !history.can_restart(now) {
+                    return SupervisionDecision::Stop {
                         task_id,
                         region_id,
                         reason: StopReason::RestartBudgetExhausted {
                             total_restarts: config.max_restarts,
                             window: config.window,
                         },
-                    }
+                    };
+                }
+
+                let attempt = history.recent_restart_count(now) as u32 + 1;
+                let delay = history.next_delay(now);
+                history.record_restart(now);
+
+                SupervisionDecision::Restart {
+                    task_id,
+                    region_id,
+                    attempt,
+                    delay,
                 }
             }
 
@@ -1672,6 +2158,159 @@ mod tests {
     }
 
     #[test]
+    fn compiled_supervisor_restart_plan_one_for_one() {
+        init_test("compiled_supervisor_restart_plan_one_for_one");
+
+        let builder = SupervisorBuilder::new("sup")
+            .with_restart_policy(RestartPolicy::OneForOne)
+            .child(ChildSpec::new("a", noop_start))
+            .child(ChildSpec::new("b", noop_start).depends_on("a"))
+            .child(ChildSpec::new("c", noop_start).depends_on("b"))
+            .child(ChildSpec::new("d", noop_start).depends_on("c"));
+
+        let compiled = builder.compile().expect("compile");
+        let plan = compiled.restart_plan_for("b").expect("plan");
+
+        assert_eq!(plan.policy, RestartPolicy::OneForOne);
+        assert_eq!(plan.cancel_order, vec!["b".to_string()]);
+        assert_eq!(plan.restart_order, vec!["b".to_string()]);
+
+        crate::test_complete!("compiled_supervisor_restart_plan_one_for_one");
+    }
+
+    #[test]
+    fn compiled_supervisor_restart_plan_one_for_all() {
+        init_test("compiled_supervisor_restart_plan_one_for_all");
+
+        let builder = SupervisorBuilder::new("sup")
+            .with_restart_policy(RestartPolicy::OneForAll)
+            .child(ChildSpec::new("a", noop_start))
+            .child(ChildSpec::new("b", noop_start).depends_on("a"))
+            .child(ChildSpec::new("c", noop_start).depends_on("b"))
+            .child(ChildSpec::new("d", noop_start).depends_on("c"));
+
+        let compiled = builder.compile().expect("compile");
+        let plan = compiled.restart_plan_for("b").expect("plan");
+
+        assert_eq!(plan.policy, RestartPolicy::OneForAll);
+        assert_eq!(
+            plan.cancel_order,
+            vec![
+                "d".to_string(),
+                "c".to_string(),
+                "b".to_string(),
+                "a".to_string()
+            ]
+        );
+        assert_eq!(
+            plan.restart_order,
+            vec![
+                "a".to_string(),
+                "b".to_string(),
+                "c".to_string(),
+                "d".to_string()
+            ]
+        );
+
+        crate::test_complete!("compiled_supervisor_restart_plan_one_for_all");
+    }
+
+    #[test]
+    fn compiled_supervisor_restart_plan_rest_for_one() {
+        init_test("compiled_supervisor_restart_plan_rest_for_one");
+
+        let builder = SupervisorBuilder::new("sup")
+            .with_restart_policy(RestartPolicy::RestForOne)
+            .child(ChildSpec::new("a", noop_start))
+            .child(ChildSpec::new("b", noop_start).depends_on("a"))
+            .child(ChildSpec::new("c", noop_start).depends_on("b"))
+            .child(ChildSpec::new("d", noop_start).depends_on("c"));
+
+        let compiled = builder.compile().expect("compile");
+        let plan = compiled.restart_plan_for("b").expect("plan");
+
+        assert_eq!(plan.policy, RestartPolicy::RestForOne);
+        assert_eq!(
+            plan.cancel_order,
+            vec!["d".to_string(), "c".to_string(), "b".to_string()]
+        );
+        assert_eq!(
+            plan.restart_order,
+            vec!["b".to_string(), "c".to_string(), "d".to_string()]
+        );
+
+        crate::test_complete!("compiled_supervisor_restart_plan_rest_for_one");
+    }
+
+    #[test]
+    fn compiled_supervisor_restart_plan_unknown_child_none() {
+        init_test("compiled_supervisor_restart_plan_unknown_child_none");
+
+        let builder = SupervisorBuilder::new("sup")
+            .with_restart_policy(RestartPolicy::OneForAll)
+            .child(ChildSpec::new("a", noop_start))
+            .child(ChildSpec::new("b", noop_start).depends_on("a"));
+
+        let compiled = builder.compile().expect("compile");
+        assert!(compiled.restart_plan_for("zzz").is_none());
+
+        crate::test_complete!("compiled_supervisor_restart_plan_unknown_child_none");
+    }
+
+    #[test]
+    fn compiled_supervisor_restart_plan_for_failure_monotone_severity() {
+        init_test("compiled_supervisor_restart_plan_for_failure_monotone_severity");
+
+        let builder = SupervisorBuilder::new("sup")
+            .with_restart_policy(RestartPolicy::OneForAll)
+            .child(ChildSpec::new("a", noop_start))
+            .child(
+                ChildSpec::new("b", noop_start)
+                    .depends_on("a")
+                    .with_restart(SupervisionStrategy::Restart(RestartConfig::default())),
+            )
+            .child(ChildSpec::new("c", noop_start).depends_on("b"));
+
+        let compiled = builder.compile().expect("compile");
+
+        let ok: Outcome<(), ()> = Outcome::Ok(());
+        let cancelled: Outcome<(), ()> = Outcome::Cancelled(CancelReason::user("cancelled"));
+        let panicked: Outcome<(), ()> = Outcome::Panicked(crate::types::PanicPayload::new("panic"));
+        let err: Outcome<(), ()> = Outcome::Err(());
+
+        assert!(compiled.restart_plan_for_failure("b", &ok).is_none());
+        assert!(compiled.restart_plan_for_failure("b", &cancelled).is_none());
+        assert!(compiled.restart_plan_for_failure("b", &panicked).is_none());
+
+        let plan = compiled
+            .restart_plan_for_failure("b", &err)
+            .expect("restart plan");
+        assert_eq!(plan.policy, RestartPolicy::OneForAll);
+
+        crate::test_complete!("compiled_supervisor_restart_plan_for_failure_monotone_severity");
+    }
+
+    #[test]
+    fn compiled_supervisor_restart_plan_for_failure_requires_restart_strategy() {
+        init_test("compiled_supervisor_restart_plan_for_failure_requires_restart_strategy");
+
+        let builder = SupervisorBuilder::new("sup")
+            .with_restart_policy(RestartPolicy::OneForOne)
+            .child(ChildSpec::new("a", noop_start))
+            .child(ChildSpec::new("b", noop_start).depends_on("a"));
+
+        let compiled = builder.compile().expect("compile");
+        let err: Outcome<(), ()> = Outcome::Err(());
+
+        // Default child strategy is Stop: no restart plan produced.
+        assert!(compiled.restart_plan_for_failure("b", &err).is_none());
+
+        crate::test_complete!(
+            "compiled_supervisor_restart_plan_for_failure_requires_restart_strategy"
+        );
+    }
+
+    #[test]
     fn restart_policy_equality() {
         init_test("restart_policy_equality");
 
@@ -1696,5 +2335,479 @@ mod tests {
         assert_ne!(stop, reset);
 
         crate::test_complete!("escalation_policy_variants");
+    }
+
+    // ---- Tests for budget-aware restart decisions (bd-1yv7a) ----
+
+    #[test]
+    fn restart_config_budget_fields_default_to_disabled() {
+        init_test("restart_config_budget_fields_default");
+
+        let config = RestartConfig::default();
+        assert_eq!(config.restart_cost, 0);
+        assert_eq!(config.min_remaining_for_restart, None);
+        assert_eq!(config.min_polls_for_restart, 0);
+
+        crate::test_complete!("restart_config_budget_fields_default");
+    }
+
+    #[test]
+    fn restart_config_budget_builders() {
+        init_test("restart_config_budget_builders");
+
+        let config = RestartConfig::new(5, Duration::from_secs(30))
+            .with_restart_cost(100)
+            .with_min_remaining(Duration::from_secs(5))
+            .with_min_polls(50);
+
+        assert_eq!(config.restart_cost, 100);
+        assert_eq!(
+            config.min_remaining_for_restart,
+            Some(Duration::from_secs(5))
+        );
+        assert_eq!(config.min_polls_for_restart, 50);
+
+        crate::test_complete!("restart_config_budget_builders");
+    }
+
+    #[test]
+    fn budget_aware_restart_allowed_with_sufficient_budget() {
+        init_test("budget_aware_restart_sufficient");
+
+        let config = RestartConfig::new(3, Duration::from_secs(60))
+            .with_restart_cost(10)
+            .with_min_remaining(Duration::from_secs(5))
+            .with_min_polls(100);
+
+        let history = RestartHistory::new(config);
+
+        // Budget with plenty of resources
+        let budget = Budget::new()
+            .with_deadline(crate::types::id::Time::from_secs(60))
+            .with_cost_quota(1000)
+            .with_poll_quota(5000);
+
+        // At t=0, should be allowed
+        assert!(history.can_restart_with_budget(0, &budget).is_ok());
+
+        crate::test_complete!("budget_aware_restart_sufficient");
+    }
+
+    #[test]
+    fn budget_aware_restart_refused_insufficient_cost() {
+        init_test("budget_aware_restart_insufficient_cost");
+
+        let config = RestartConfig::new(3, Duration::from_secs(60)).with_restart_cost(100);
+
+        let history = RestartHistory::new(config);
+
+        // Budget with insufficient cost
+        let budget = Budget::new().with_cost_quota(50);
+
+        let result = history.can_restart_with_budget(0, &budget);
+        assert!(matches!(
+            result,
+            Err(BudgetRefusal::InsufficientCost {
+                required: 100,
+                remaining: 50
+            })
+        ));
+
+        crate::test_complete!("budget_aware_restart_insufficient_cost");
+    }
+
+    #[test]
+    fn budget_aware_restart_refused_deadline_too_close() {
+        init_test("budget_aware_restart_deadline_close");
+
+        let config = RestartConfig::new(3, Duration::from_secs(60))
+            .with_min_remaining(Duration::from_secs(10));
+
+        let history = RestartHistory::new(config);
+
+        // Budget with deadline 5 seconds from now, but we need 10 seconds
+        let budget = Budget::with_deadline_secs(15); // deadline at t=15s
+
+        // At t=12s (3 seconds remaining, need 10)
+        let now_ns = 12_000_000_000u64;
+        let result = history.can_restart_with_budget(now_ns, &budget);
+        assert!(matches!(
+            result,
+            Err(BudgetRefusal::DeadlineTooClose { .. })
+        ));
+
+        crate::test_complete!("budget_aware_restart_deadline_close");
+    }
+
+    #[test]
+    fn budget_aware_restart_refused_insufficient_polls() {
+        init_test("budget_aware_restart_insufficient_polls");
+
+        let config = RestartConfig::new(3, Duration::from_secs(60)).with_min_polls(500);
+
+        let history = RestartHistory::new(config);
+
+        // Budget with insufficient polls
+        let budget = Budget::new().with_poll_quota(100);
+
+        let result = history.can_restart_with_budget(0, &budget);
+        assert!(matches!(
+            result,
+            Err(BudgetRefusal::InsufficientPolls {
+                min_required: 500,
+                remaining: 100
+            })
+        ));
+
+        crate::test_complete!("budget_aware_restart_insufficient_polls");
+    }
+
+    #[test]
+    fn budget_aware_restart_allowed_no_cost_quota_set() {
+        init_test("budget_aware_restart_no_cost_quota");
+
+        let config = RestartConfig::new(3, Duration::from_secs(60)).with_restart_cost(100);
+
+        let history = RestartHistory::new(config);
+
+        // Budget with no cost quota (unlimited)
+        let budget = Budget::INFINITE;
+
+        // Should succeed since no cost quota = unlimited
+        assert!(history.can_restart_with_budget(0, &budget).is_ok());
+
+        crate::test_complete!("budget_aware_restart_no_cost_quota");
+    }
+
+    #[test]
+    fn budget_aware_restart_allowed_no_deadline() {
+        init_test("budget_aware_restart_no_deadline");
+
+        let config = RestartConfig::new(3, Duration::from_secs(60))
+            .with_min_remaining(Duration::from_secs(10));
+
+        let history = RestartHistory::new(config);
+
+        // Budget with no deadline
+        let budget = Budget::INFINITE;
+
+        // Should succeed since no deadline = unlimited time
+        assert!(history.can_restart_with_budget(0, &budget).is_ok());
+
+        crate::test_complete!("budget_aware_restart_no_deadline");
+    }
+
+    #[test]
+    fn supervisor_on_failure_with_budget_refuses_restart() {
+        init_test("supervisor_on_failure_with_budget_refuses");
+
+        let config = RestartConfig::new(10, Duration::from_secs(60)).with_restart_cost(100);
+
+        let mut supervisor = Supervisor::new(SupervisionStrategy::Restart(config));
+
+        // Budget with insufficient cost
+        let budget = Budget::new().with_cost_quota(50);
+
+        let decision = supervisor.on_failure_with_budget(
+            test_task_id(),
+            test_region_id(),
+            None,
+            Outcome::Cancelled(CancelReason::user("test")),
+            0,
+            Some(&budget),
+        );
+
+        assert!(matches!(
+            decision,
+            SupervisionDecision::Stop {
+                reason: StopReason::BudgetRefused(BudgetRefusal::InsufficientCost { .. }),
+                ..
+            }
+        ));
+
+        crate::test_complete!("supervisor_on_failure_with_budget_refuses");
+    }
+
+    #[test]
+    fn supervisor_on_failure_with_budget_allows_restart() {
+        init_test("supervisor_on_failure_with_budget_allows");
+
+        let config = RestartConfig::new(3, Duration::from_secs(60)).with_restart_cost(10);
+
+        let mut supervisor = Supervisor::new(SupervisionStrategy::Restart(config));
+
+        // Budget with sufficient resources
+        let budget = Budget::new().with_cost_quota(1000);
+
+        let decision = supervisor.on_failure_with_budget(
+            test_task_id(),
+            test_region_id(),
+            None,
+            Outcome::Cancelled(CancelReason::user("test")),
+            0,
+            Some(&budget),
+        );
+
+        assert!(matches!(
+            decision,
+            SupervisionDecision::Restart { attempt: 1, .. }
+        ));
+
+        crate::test_complete!("supervisor_on_failure_with_budget_allows");
+    }
+
+    #[test]
+    fn supervisor_on_failure_without_budget_uses_window_only() {
+        init_test("supervisor_on_failure_without_budget");
+
+        let config = RestartConfig::new(2, Duration::from_secs(60)).with_restart_cost(10);
+
+        let mut supervisor = Supervisor::new(SupervisionStrategy::Restart(config));
+
+        // Two restarts allowed without budget checks
+        let d1 = supervisor.on_failure(
+            test_task_id(),
+            test_region_id(),
+            None,
+            Outcome::Cancelled(CancelReason::user("test")),
+            0,
+        );
+        assert!(matches!(
+            d1,
+            SupervisionDecision::Restart { attempt: 1, .. }
+        ));
+
+        let d2 = supervisor.on_failure(
+            test_task_id(),
+            test_region_id(),
+            None,
+            Outcome::Cancelled(CancelReason::user("test")),
+            1_000_000_000,
+        );
+        assert!(matches!(
+            d2,
+            SupervisionDecision::Restart { attempt: 2, .. }
+        ));
+
+        // Third should be exhausted
+        let d3 = supervisor.on_failure(
+            test_task_id(),
+            test_region_id(),
+            None,
+            Outcome::Cancelled(CancelReason::user("test")),
+            2_000_000_000,
+        );
+        assert!(matches!(
+            d3,
+            SupervisionDecision::Stop {
+                reason: StopReason::RestartBudgetExhausted { .. },
+                ..
+            }
+        ));
+
+        crate::test_complete!("supervisor_on_failure_without_budget");
+    }
+
+    #[test]
+    fn restart_intensity_basic() {
+        init_test("restart_intensity_basic");
+
+        let config = RestartConfig::new(10, Duration::from_secs(10));
+        let mut history = RestartHistory::new(config);
+
+        // No restarts = zero intensity
+        assert!(history.intensity(0).abs() < f64::EPSILON);
+
+        // 3 restarts in 10-second window = 0.3 restarts/second
+        history.record_restart(1_000_000_000); // 1s
+        history.record_restart(2_000_000_000); // 2s
+        history.record_restart(3_000_000_000); // 3s
+
+        let intensity = history.intensity(5_000_000_000);
+        assert!((intensity - 0.3).abs() < 0.01);
+
+        crate::test_complete!("restart_intensity_basic");
+    }
+
+    // ---- Tests for RestartIntensityWindow ----
+
+    #[test]
+    fn intensity_window_basic() {
+        init_test("intensity_window_basic");
+
+        let mut window = RestartIntensityWindow::new(Duration::from_secs(10), 1.0);
+
+        // No restarts
+        assert_eq!(window.count(0), 0);
+        assert!(window.intensity(0).abs() < f64::EPSILON);
+        assert!(!window.is_storm(0));
+
+        // Record some restarts
+        window.record(1_000_000_000); // 1s
+        window.record(2_000_000_000); // 2s
+        window.record(3_000_000_000); // 3s
+
+        assert_eq!(window.count(5_000_000_000), 3);
+        let intensity = window.intensity(5_000_000_000);
+        assert!((intensity - 0.3).abs() < 0.01); // 3 in 10s
+
+        crate::test_complete!("intensity_window_basic");
+    }
+
+    #[test]
+    fn intensity_window_storm_detection() {
+        init_test("intensity_window_storm_detection");
+
+        // Storm threshold: 2 restarts/second in a 5-second window
+        let mut window = RestartIntensityWindow::new(Duration::from_secs(5), 2.0);
+
+        // 5 restarts in first second
+        for i in 0..5 {
+            window.record(i * 200_000_000); // every 200ms
+        }
+
+        // 5 restarts in 5s = 1.0/s, below threshold
+        assert!(!window.is_storm(1_000_000_000));
+
+        // Add more restarts to exceed threshold
+        for i in 0..10 {
+            window.record(1_000_000_000 + i * 100_000_000); // every 100ms
+        }
+
+        // Now 15 restarts in 5s window = 3.0/s, above 2.0 threshold
+        let now = 2_000_000_000;
+        assert!(window.is_storm(now));
+
+        crate::test_complete!("intensity_window_storm_detection");
+    }
+
+    #[test]
+    fn intensity_window_prunes_old_entries() {
+        init_test("intensity_window_prunes");
+
+        let mut window = RestartIntensityWindow::new(Duration::from_secs(5), 1.0);
+
+        // Record restarts at t=0s, 1s, 2s
+        window.record(0);
+        window.record(1_000_000_000);
+        window.record(2_000_000_000);
+
+        assert_eq!(window.count(3_000_000_000), 3);
+
+        // At t=10s, old restarts should have expired
+        // Record one more to trigger pruning
+        window.record(10_000_000_000);
+        assert_eq!(window.count(10_000_000_000), 1);
+
+        crate::test_complete!("intensity_window_prunes");
+    }
+
+    #[test]
+    fn budget_refusal_display() {
+        init_test("budget_refusal_display");
+
+        let refusals = vec![
+            BudgetRefusal::WindowExhausted {
+                max_restarts: 3,
+                window: Duration::from_secs(60),
+            },
+            BudgetRefusal::InsufficientCost {
+                required: 100,
+                remaining: 50,
+            },
+            BudgetRefusal::DeadlineTooClose {
+                min_required: Duration::from_secs(10),
+                remaining: Duration::from_secs(3),
+            },
+            BudgetRefusal::InsufficientPolls {
+                min_required: 500,
+                remaining: 100,
+            },
+        ];
+
+        for refusal in &refusals {
+            let s = format!("{refusal}");
+            assert!(!s.is_empty());
+        }
+
+        crate::test_complete!("budget_refusal_display");
+    }
+
+    #[test]
+    fn deadline_already_passed_refuses_restart() {
+        init_test("deadline_already_passed_refuses_restart");
+
+        let config = RestartConfig::new(3, Duration::from_secs(60))
+            .with_min_remaining(Duration::from_secs(1));
+
+        let history = RestartHistory::new(config);
+
+        // Budget with deadline already in the past
+        let budget = Budget::with_deadline_secs(5); // deadline at t=5s
+
+        // At t=10s, deadline has passed
+        let result = history.can_restart_with_budget(10_000_000_000, &budget);
+        assert!(matches!(
+            result,
+            Err(BudgetRefusal::DeadlineTooClose {
+                remaining: Duration::ZERO,
+                ..
+            })
+        ));
+
+        crate::test_complete!("deadline_already_passed_refuses_restart");
+    }
+
+    #[test]
+    fn budget_aware_checks_combined() {
+        init_test("budget_aware_checks_combined");
+
+        // Config requiring all budget constraints
+        let config = RestartConfig::new(5, Duration::from_secs(60))
+            .with_restart_cost(50)
+            .with_min_remaining(Duration::from_secs(10))
+            .with_min_polls(200);
+
+        let history = RestartHistory::new(config);
+
+        // Budget that passes all checks
+        let good_budget = Budget::new()
+            .with_deadline(crate::types::id::Time::from_secs(60))
+            .with_cost_quota(500)
+            .with_poll_quota(1000);
+        assert!(history.can_restart_with_budget(0, &good_budget).is_ok());
+
+        // Budget that fails on cost
+        let bad_cost = Budget::new()
+            .with_deadline(crate::types::id::Time::from_secs(60))
+            .with_cost_quota(10)
+            .with_poll_quota(1000);
+        assert!(matches!(
+            history.can_restart_with_budget(0, &bad_cost),
+            Err(BudgetRefusal::InsufficientCost { .. })
+        ));
+
+        // Budget that fails on deadline
+        let bad_deadline = Budget::new()
+            .with_deadline(crate::types::id::Time::from_secs(5))
+            .with_cost_quota(500)
+            .with_poll_quota(1000);
+        // At t=0, 5 seconds remaining but we need 10
+        assert!(matches!(
+            history.can_restart_with_budget(0, &bad_deadline),
+            Err(BudgetRefusal::DeadlineTooClose { .. })
+        ));
+
+        // Budget that fails on polls
+        let bad_polls = Budget::new()
+            .with_deadline(crate::types::id::Time::from_secs(60))
+            .with_cost_quota(500)
+            .with_poll_quota(50);
+        assert!(matches!(
+            history.can_restart_with_budget(0, &bad_polls),
+            Err(BudgetRefusal::InsufficientPolls { .. })
+        ));
+
+        crate::test_complete!("budget_aware_checks_combined");
     }
 }
