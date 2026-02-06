@@ -44,7 +44,8 @@
 //!
 //! bd-2md12 | Parent: bd-qbcnu
 
-use crate::trace::canonicalize::TraceEventKey;
+use crate::trace::canonicalize::{canonicalize, trace_event_key, trace_fingerprint, TraceEventKey};
+use crate::trace::event::TraceEvent;
 use crate::trace::replay::ReplayEvent;
 use crate::trace::scoring::EvidenceEntry;
 use crate::types::{CancelKind, RegionId, TaskId, Time};
@@ -411,6 +412,29 @@ impl CrashPackBuilder {
     #[must_use]
     pub fn event_count(mut self, count: u64) -> Self {
         self.event_count = count;
+        self
+    }
+
+    /// Populate canonical prefix, fingerprint, and event count from raw trace events.
+    ///
+    /// This is the primary integration point for the canonicalization pipeline.
+    /// It calls [`canonicalize()`] to compute the Foata normal form, extracts
+    /// [`TraceEventKey`] layers for the canonical prefix, and computes a
+    /// deterministic fingerprint via [`trace_fingerprint()`].
+    ///
+    /// Two different schedules that are equivalent modulo commutations of
+    /// independent events will produce the same fingerprint and the same
+    /// canonical prefix.
+    #[must_use]
+    pub fn from_trace(mut self, events: &[TraceEvent]) -> Self {
+        let foata = canonicalize(events);
+        self.canonical_prefix = foata
+            .layers()
+            .iter()
+            .map(|layer| layer.iter().map(trace_event_key).collect())
+            .collect();
+        self.fingerprint = trace_fingerprint(events);
+        self.event_count = events.len() as u64;
         self
     }
 
@@ -836,5 +860,220 @@ mod tests {
         assert_eq!(snap.context.as_deref(), Some("parent region R0"));
 
         crate::test_complete!("supervision_snapshot_with_context");
+    }
+
+    // =================================================================
+    // Canonicalization pipeline integration (bd-zfxio)
+    // =================================================================
+
+    #[test]
+    fn from_trace_populates_fields() {
+        init_test("from_trace_populates_fields");
+
+        let events = [
+            TraceEvent::spawn(1, Time::ZERO, tid(1), rid(1)),
+            TraceEvent::spawn(2, Time::ZERO, tid(2), rid(2)),
+            TraceEvent::complete(3, Time::ZERO, tid(1), rid(1)),
+        ];
+
+        let pack = CrashPack::builder(sample_config())
+            .failure(sample_failure())
+            .from_trace(&events)
+            .build();
+
+        assert_eq!(pack.manifest.event_count, 3);
+        assert_ne!(pack.manifest.fingerprint, 0);
+        assert!(!pack.canonical_prefix.is_empty());
+
+        crate::test_complete!("from_trace_populates_fields");
+    }
+
+    #[test]
+    fn from_trace_equivalent_traces_same_fingerprint() {
+        init_test("from_trace_equivalent_traces_same_fingerprint");
+
+        // Two schedules that differ only in the order of independent events.
+        // spawn(T1,R1) and spawn(T2,R2) are independent — swapping them
+        // produces the same equivalence class.
+        let trace_a = [
+            TraceEvent::spawn(1, Time::ZERO, tid(1), rid(1)),
+            TraceEvent::spawn(2, Time::ZERO, tid(2), rid(2)),
+        ];
+        let trace_b = [
+            TraceEvent::spawn(1, Time::ZERO, tid(2), rid(2)),
+            TraceEvent::spawn(2, Time::ZERO, tid(1), rid(1)),
+        ];
+
+        let pack_a = CrashPack::builder(sample_config())
+            .failure(sample_failure())
+            .from_trace(&trace_a)
+            .build();
+        let pack_b = CrashPack::builder(sample_config())
+            .failure(sample_failure())
+            .from_trace(&trace_b)
+            .build();
+
+        assert_eq!(pack_a.fingerprint(), pack_b.fingerprint());
+        assert_eq!(pack_a.canonical_prefix, pack_b.canonical_prefix);
+        assert_eq!(pack_a, pack_b);
+
+        crate::test_complete!("from_trace_equivalent_traces_same_fingerprint");
+    }
+
+    #[test]
+    fn from_trace_different_dependent_traces_different_fingerprint() {
+        init_test("from_trace_different_dependent_traces_different_fingerprint");
+
+        // Same-task events in different orders produce genuinely different
+        // causal structures (spawn→complete vs complete→spawn).
+        let trace_a = [
+            TraceEvent::spawn(1, Time::ZERO, tid(1), rid(1)),
+            TraceEvent::complete(2, Time::ZERO, tid(1), rid(1)),
+        ];
+        let trace_b = [
+            TraceEvent::complete(1, Time::ZERO, tid(1), rid(1)),
+            TraceEvent::spawn(2, Time::ZERO, tid(1), rid(1)),
+        ];
+
+        let pack_a = CrashPack::builder(sample_config())
+            .failure(sample_failure())
+            .from_trace(&trace_a)
+            .build();
+        let pack_b = CrashPack::builder(sample_config())
+            .failure(sample_failure())
+            .from_trace(&trace_b)
+            .build();
+
+        assert_ne!(pack_a.fingerprint(), pack_b.fingerprint());
+        assert_ne!(pack_a, pack_b);
+
+        crate::test_complete!("from_trace_different_dependent_traces_different_fingerprint");
+    }
+
+    #[test]
+    fn from_trace_canonical_prefix_matches_foata_layers() {
+        init_test("from_trace_canonical_prefix_matches_foata_layers");
+
+        use crate::trace::canonicalize::{canonicalize, trace_event_key};
+
+        let events = [
+            TraceEvent::spawn(1, Time::ZERO, tid(1), rid(1)),
+            TraceEvent::spawn(2, Time::ZERO, tid(2), rid(2)),
+            TraceEvent::complete(3, Time::ZERO, tid(1), rid(1)),
+            TraceEvent::complete(4, Time::ZERO, tid(2), rid(2)),
+        ];
+
+        let pack = CrashPack::builder(CrashPackConfig::default())
+            .failure(sample_failure())
+            .from_trace(&events)
+            .build();
+
+        // Independently compute Foata layers and compare.
+        let foata = canonicalize(&events);
+        let expected_prefix: Vec<Vec<TraceEventKey>> = foata
+            .layers()
+            .iter()
+            .map(|layer| layer.iter().map(trace_event_key).collect())
+            .collect();
+
+        assert_eq!(pack.canonical_prefix, expected_prefix);
+
+        crate::test_complete!("from_trace_canonical_prefix_matches_foata_layers");
+    }
+
+    #[test]
+    fn from_trace_empty_trace() {
+        init_test("from_trace_empty_trace");
+
+        let pack = CrashPack::builder(CrashPackConfig::default())
+            .failure(sample_failure())
+            .from_trace(&[])
+            .build();
+
+        assert!(pack.canonical_prefix.is_empty());
+        assert_eq!(pack.manifest.event_count, 0);
+
+        crate::test_complete!("from_trace_empty_trace");
+    }
+
+    #[test]
+    fn from_trace_three_independent_all_permutations() {
+        init_test("from_trace_three_independent_all_permutations");
+
+        // Three independent events in all 6 permutations must produce
+        // identical crash packs (same fingerprint, same canonical prefix).
+        let e1 = TraceEvent::spawn(1, Time::ZERO, tid(1), rid(1));
+        let e2 = TraceEvent::spawn(2, Time::ZERO, tid(2), rid(2));
+        let e3 = TraceEvent::spawn(3, Time::ZERO, tid(3), rid(3));
+
+        let perms: Vec<Vec<TraceEvent>> = vec![
+            vec![e1.clone(), e2.clone(), e3.clone()],
+            vec![e1.clone(), e3.clone(), e2.clone()],
+            vec![e2.clone(), e1.clone(), e3.clone()],
+            vec![e2.clone(), e3.clone(), e1.clone()],
+            vec![e3.clone(), e1.clone(), e2.clone()],
+            vec![e3, e2, e1],
+        ];
+
+        let reference = CrashPack::builder(CrashPackConfig::default())
+            .failure(sample_failure())
+            .from_trace(&perms[0])
+            .build();
+
+        for (i, perm) in perms.iter().enumerate().skip(1) {
+            let pack = CrashPack::builder(CrashPackConfig::default())
+                .failure(sample_failure())
+                .from_trace(perm)
+                .build();
+            assert_eq!(
+                pack.fingerprint(),
+                reference.fingerprint(),
+                "permutation {i} has different fingerprint"
+            );
+            assert_eq!(
+                pack.canonical_prefix, reference.canonical_prefix,
+                "permutation {i} has different canonical prefix"
+            );
+        }
+
+        crate::test_complete!("from_trace_three_independent_all_permutations");
+    }
+
+    #[test]
+    fn from_trace_diamond_dependency() {
+        init_test("from_trace_diamond_dependency");
+
+        // Region create → two independent spawns → two independent completes.
+        // Swapping the independent pairs must produce the same crash pack.
+        let trace_a = [
+            TraceEvent::region_created(1, Time::ZERO, rid(1), None),
+            TraceEvent::spawn(2, Time::ZERO, tid(1), rid(1)),
+            TraceEvent::spawn(3, Time::ZERO, tid(2), rid(1)),
+            TraceEvent::complete(4, Time::ZERO, tid(1), rid(1)),
+            TraceEvent::complete(5, Time::ZERO, tid(2), rid(1)),
+        ];
+        let trace_b = [
+            TraceEvent::region_created(1, Time::ZERO, rid(1), None),
+            TraceEvent::spawn(2, Time::ZERO, tid(2), rid(1)),
+            TraceEvent::spawn(3, Time::ZERO, tid(1), rid(1)),
+            TraceEvent::complete(4, Time::ZERO, tid(2), rid(1)),
+            TraceEvent::complete(5, Time::ZERO, tid(1), rid(1)),
+        ];
+
+        let pack_a = CrashPack::builder(sample_config())
+            .failure(sample_failure())
+            .from_trace(&trace_a)
+            .build();
+        let pack_b = CrashPack::builder(sample_config())
+            .failure(sample_failure())
+            .from_trace(&trace_b)
+            .build();
+
+        assert_eq!(pack_a.fingerprint(), pack_b.fingerprint());
+        assert_eq!(pack_a.canonical_prefix, pack_b.canonical_prefix);
+        // 3 layers: region_create | spawn×2 | complete×2
+        assert_eq!(pack_a.canonical_prefix.len(), 3);
+
+        crate::test_complete!("from_trace_diamond_dependency");
     }
 }
