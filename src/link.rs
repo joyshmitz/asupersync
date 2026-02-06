@@ -34,7 +34,75 @@ use std::collections::BTreeMap;
 use std::sync::atomic::{AtomicU64, Ordering};
 
 use crate::monitor::DownReason;
+use crate::types::cancel::{CancelKind, CancelReason};
 use crate::types::{RegionId, TaskId, Time};
+
+// ============================================================================
+// ExitPolicy — per-link exit signal handling
+// ============================================================================
+
+/// Policy controlling how exit signals are handled on one side of a link.
+///
+/// Each side of a bidirectional link can independently choose its exit policy.
+/// The policy is local to the link — it does not affect the link partner's
+/// behavior, nor does it change global task behavior.
+///
+/// # Bead
+///
+/// bd-khkw7 | Parent: bd-pr46z
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Hash, Default)]
+pub enum ExitPolicy {
+    /// Propagate the exit signal, terminating the linked task.
+    ///
+    /// This is the default OTP-style behavior: when a linked process
+    /// terminates abnormally, its partner is also terminated.
+    #[default]
+    Propagate,
+
+    /// Trap the exit signal, converting it into a `SystemMsg::Exit` message.
+    ///
+    /// The receiving task stays alive and receives the exit as an info message
+    /// through `handle_info`. This is analogous to OTP's
+    /// `process_flag(trap_exit, true)`, but scoped to a specific link.
+    Trap,
+
+    /// Silently ignore the exit signal. No message, no termination.
+    ///
+    /// This is discouraged — explicit is better than silent. Use only when
+    /// the receiving task genuinely does not care about its partner's fate
+    /// (e.g., fire-and-forget background work).
+    Ignore,
+}
+
+impl ExitPolicy {
+    /// Returns `true` if this policy will propagate exit signals.
+    #[must_use]
+    pub fn is_propagate(self) -> bool {
+        matches!(self, Self::Propagate)
+    }
+
+    /// Returns `true` if this policy will trap exit signals as messages.
+    #[must_use]
+    pub fn is_trap(self) -> bool {
+        matches!(self, Self::Trap)
+    }
+
+    /// Returns `true` if this policy will silently ignore exit signals.
+    #[must_use]
+    pub fn is_ignore(self) -> bool {
+        matches!(self, Self::Ignore)
+    }
+}
+
+impl std::fmt::Display for ExitPolicy {
+    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        match self {
+            Self::Propagate => write!(f, "propagate"),
+            Self::Trap => write!(f, "trap"),
+            Self::Ignore => write!(f, "ignore"),
+        }
+    }
+}
 
 /// Monotonic counter for generating unique [`LinkRef`] values.
 static LINK_COUNTER: AtomicU64 = AtomicU64::new(1);
@@ -94,6 +162,114 @@ pub struct ExitSignal {
 }
 
 // ============================================================================
+// LinkExitAction (bd-khkw7)
+// ============================================================================
+
+/// Deterministic action derived from a linked peer's abnormal exit.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub enum LinkExitAction {
+    /// Cancel the receiver due to a linked exit.
+    CancelPeer {
+        /// The receiver of the cancellation.
+        to: TaskId,
+        /// Cancellation reason (may carry a cause chain).
+        reason: CancelReason,
+        /// Link identity that triggered this action.
+        link_ref: LinkRef,
+    },
+
+    /// Deliver the exit as an explicit message (trap-exit).
+    DeliverExit {
+        /// The receiver of the exit signal.
+        to: TaskId,
+        /// Exit signal payload.
+        signal: ExitSignal,
+    },
+
+    /// Explicitly suppressed by policy.
+    Ignored {
+        /// The receiver where the exit would have been delivered/cancelled.
+        to: TaskId,
+        /// Link identity.
+        link_ref: LinkRef,
+    },
+}
+
+/// Deterministic batch of link-exit actions.
+///
+/// Ordering is by `(exit_vt, source_tid, target_tid, link_ref_id, kind)` where
+/// `kind` is a stable discriminator to make ordering deterministic when keys
+/// otherwise tie.
+#[derive(Debug)]
+pub struct LinkExitBatch {
+    entries: Vec<LinkExitBatchEntry>,
+}
+
+#[derive(Debug, Clone)]
+struct LinkExitBatchEntry {
+    exit_vt: Time,
+    from: TaskId,
+    to: TaskId,
+    link_ref: LinkRef,
+    action: LinkExitAction,
+}
+
+impl LinkExitBatch {
+    /// Creates an empty batch.
+    #[must_use]
+    pub fn new() -> Self {
+        Self {
+            entries: Vec::new(),
+        }
+    }
+
+    fn push(
+        &mut self,
+        exit_vt: Time,
+        from: TaskId,
+        to: TaskId,
+        link_ref: LinkRef,
+        action: LinkExitAction,
+    ) {
+        self.entries.push(LinkExitBatchEntry {
+            exit_vt,
+            from,
+            to,
+            link_ref,
+            action,
+        });
+    }
+
+    /// Sorts the batch into deterministic delivery order.
+    #[must_use]
+    pub fn into_sorted(mut self) -> Vec<LinkExitAction> {
+        self.entries.sort_by(|a, b| {
+            a.exit_vt
+                .cmp(&b.exit_vt)
+                .then_with(|| a.from.cmp(&b.from))
+                .then_with(|| a.to.cmp(&b.to))
+                .then_with(|| a.link_ref.cmp(&b.link_ref))
+                .then_with(|| action_kind_rank(&a.action).cmp(&action_kind_rank(&b.action)))
+        });
+        self.entries.into_iter().map(|e| e.action).collect()
+    }
+}
+
+impl Default for LinkExitBatch {
+    fn default() -> Self {
+        Self::new()
+    }
+}
+
+fn action_kind_rank(a: &LinkExitAction) -> u8 {
+    match a {
+        LinkExitAction::CancelPeer { .. } => 0,
+        LinkExitAction::DeliverExit { .. } => 1,
+        LinkExitAction::Ignored { .. } => 2,
+    }
+}
+
+// ============================================================================
 // LinkRecord (internal)
 // ============================================================================
 
@@ -105,10 +281,14 @@ struct LinkRecord {
     task_a: TaskId,
     /// Region owning task_a (for region-close cleanup).
     region_a: RegionId,
+    /// Exit policy for task_a (controls what happens to task_a when task_b exits).
+    policy_a: ExitPolicy,
     /// The other side of the link.
     task_b: TaskId,
     /// Region owning task_b (for region-close cleanup).
     region_b: RegionId,
+    /// Exit policy for task_b (controls what happens to task_b when task_a exits).
+    policy_b: ExitPolicy,
 }
 
 // ============================================================================
@@ -148,7 +328,8 @@ impl LinkSet {
         }
     }
 
-    /// Establishes a bidirectional link between two tasks.
+    /// Establishes a bidirectional link between two tasks with default
+    /// [`ExitPolicy::Propagate`] on both sides.
     ///
     /// Returns a [`LinkRef`] that uniquely identifies this link relationship.
     /// The same pair can be linked multiple times; each call returns a distinct
@@ -160,13 +341,48 @@ impl LinkSet {
         task_b: TaskId,
         region_b: RegionId,
     ) -> LinkRef {
+        self.establish_with_policy(
+            task_a,
+            region_a,
+            ExitPolicy::Propagate,
+            task_b,
+            region_b,
+            ExitPolicy::Propagate,
+        )
+    }
+
+    /// Establishes a bidirectional link with per-side exit policies.
+    ///
+    /// `policy_a` controls what happens to task_a when task_b terminates
+    /// abnormally (and vice versa for `policy_b`).
+    ///
+    /// # Example
+    ///
+    /// ```ignore
+    /// // Supervisor traps exits from worker, but worker propagates from supervisor
+    /// links.establish_with_policy(
+    ///     supervisor, r1, ExitPolicy::Trap,   // supervisor traps worker exits
+    ///     worker,     r1, ExitPolicy::Propagate, // worker dies if supervisor dies
+    /// );
+    /// ```
+    pub fn establish_with_policy(
+        &mut self,
+        task_a: TaskId,
+        region_a: RegionId,
+        policy_a: ExitPolicy,
+        task_b: TaskId,
+        region_b: RegionId,
+        policy_b: ExitPolicy,
+    ) -> LinkRef {
         let link_ref = LinkRef::new();
         let record = LinkRecord {
             link_ref,
             task_a,
             region_a,
+            policy_a,
             task_b,
             region_b,
+            policy_b,
         };
 
         self.records.insert(link_ref, record);
@@ -307,6 +523,64 @@ impl LinkSet {
         } else {
             None
         }
+    }
+
+    /// Returns the exit policy for a task on the given link.
+    ///
+    /// The exit policy determines what happens to `task` when its link
+    /// partner terminates abnormally. Returns `None` if the link or task
+    /// is not found.
+    #[must_use]
+    pub fn exit_policy_for(&self, link_ref: LinkRef, task: TaskId) -> Option<ExitPolicy> {
+        let rec = self.records.get(&link_ref)?;
+        if rec.task_a == task {
+            Some(rec.policy_a)
+        } else if rec.task_b == task {
+            Some(rec.policy_b)
+        } else {
+            None
+        }
+    }
+
+    /// Updates the exit policy for a task on the given link.
+    ///
+    /// Returns `true` if the link and task were found and the policy was updated.
+    pub fn set_exit_policy(&mut self, link_ref: LinkRef, task: TaskId, policy: ExitPolicy) -> bool {
+        let Some(rec) = self.records.get_mut(&link_ref) else {
+            return false;
+        };
+        if rec.task_a == task {
+            rec.policy_a = policy;
+            true
+        } else if rec.task_b == task {
+            rec.policy_b = policy;
+            true
+        } else {
+            false
+        }
+    }
+
+    /// Returns all link partners of a task with their exit policies.
+    ///
+    /// For each link involving `task`, returns `(LinkRef, peer_TaskId, ExitPolicy)`.
+    /// The `ExitPolicy` is the policy for `task` (i.e., what happens to `task`
+    /// when `peer` terminates abnormally).
+    #[must_use]
+    pub fn peers_with_policy(&self, task: TaskId) -> Vec<(LinkRef, TaskId, ExitPolicy)> {
+        let Some(refs) = self.task_index.get(&task) else {
+            return Vec::new();
+        };
+        refs.iter()
+            .filter_map(|lref| {
+                let rec = self.records.get(lref)?;
+                let (peer, policy) = if rec.task_a == task {
+                    (rec.task_b, rec.policy_a)
+                } else {
+                    (rec.task_a, rec.policy_b)
+                };
+                Some((*lref, peer, policy))
+            })
+            .collect()
     }
 
     // -- private helpers --
@@ -1052,5 +1326,268 @@ mod tests {
         // Cleanup everything
         set.remove_task(server);
         assert!(set.is_empty());
+    }
+
+    // ── ExitPolicy (bd-khkw7) ────────────────────────────────────────
+
+    #[test]
+    fn exit_policy_default_is_propagate() {
+        assert_eq!(ExitPolicy::default(), ExitPolicy::Propagate);
+    }
+
+    #[test]
+    fn exit_policy_predicates() {
+        assert!(ExitPolicy::Propagate.is_propagate());
+        assert!(!ExitPolicy::Propagate.is_trap());
+        assert!(!ExitPolicy::Propagate.is_ignore());
+
+        assert!(!ExitPolicy::Trap.is_propagate());
+        assert!(ExitPolicy::Trap.is_trap());
+        assert!(!ExitPolicy::Trap.is_ignore());
+
+        assert!(!ExitPolicy::Ignore.is_propagate());
+        assert!(!ExitPolicy::Ignore.is_trap());
+        assert!(ExitPolicy::Ignore.is_ignore());
+    }
+
+    #[test]
+    fn exit_policy_display() {
+        assert_eq!(format!("{}", ExitPolicy::Propagate), "propagate");
+        assert_eq!(format!("{}", ExitPolicy::Trap), "trap");
+        assert_eq!(format!("{}", ExitPolicy::Ignore), "ignore");
+    }
+
+    #[test]
+    fn establish_defaults_to_propagate_policy() {
+        let mut set = LinkSet::new();
+        let t1 = test_task_id(1, 0);
+        let t2 = test_task_id(2, 0);
+        let r1 = test_region_id(0, 0);
+
+        let lref = set.establish(t1, r1, t2, r1);
+        assert_eq!(set.exit_policy_for(lref, t1), Some(ExitPolicy::Propagate));
+        assert_eq!(set.exit_policy_for(lref, t2), Some(ExitPolicy::Propagate));
+    }
+
+    #[test]
+    fn establish_with_asymmetric_policy() {
+        let mut set = LinkSet::new();
+        let supervisor = test_task_id(1, 0);
+        let worker = test_task_id(2, 0);
+        let r1 = test_region_id(0, 0);
+
+        // Supervisor traps exits; worker propagates
+        let lref = set.establish_with_policy(
+            supervisor,
+            r1,
+            ExitPolicy::Trap,
+            worker,
+            r1,
+            ExitPolicy::Propagate,
+        );
+
+        assert_eq!(
+            set.exit_policy_for(lref, supervisor),
+            Some(ExitPolicy::Trap)
+        );
+        assert_eq!(
+            set.exit_policy_for(lref, worker),
+            Some(ExitPolicy::Propagate)
+        );
+    }
+
+    #[test]
+    fn exit_policy_for_unknown_task_returns_none() {
+        let mut set = LinkSet::new();
+        let t1 = test_task_id(1, 0);
+        let t2 = test_task_id(2, 0);
+        let r1 = test_region_id(0, 0);
+
+        let lref = set.establish(t1, r1, t2, r1);
+        assert_eq!(set.exit_policy_for(lref, test_task_id(99, 0)), None);
+    }
+
+    #[test]
+    fn exit_policy_for_unknown_link_returns_none() {
+        let set = LinkSet::new();
+        assert_eq!(
+            set.exit_policy_for(LinkRef::from_raw(999), test_task_id(1, 0)),
+            None
+        );
+    }
+
+    #[test]
+    fn set_exit_policy_updates_policy() {
+        let mut set = LinkSet::new();
+        let t1 = test_task_id(1, 0);
+        let t2 = test_task_id(2, 0);
+        let r1 = test_region_id(0, 0);
+
+        let lref = set.establish(t1, r1, t2, r1);
+
+        // Change t1 from Propagate to Trap
+        assert!(set.set_exit_policy(lref, t1, ExitPolicy::Trap));
+        assert_eq!(set.exit_policy_for(lref, t1), Some(ExitPolicy::Trap));
+        // t2 unchanged
+        assert_eq!(set.exit_policy_for(lref, t2), Some(ExitPolicy::Propagate));
+    }
+
+    #[test]
+    fn set_exit_policy_unknown_link_returns_false() {
+        let mut set = LinkSet::new();
+        assert!(!set.set_exit_policy(LinkRef::from_raw(999), test_task_id(1, 0), ExitPolicy::Trap));
+    }
+
+    #[test]
+    fn peers_with_policy_returns_correct_policies() {
+        let mut set = LinkSet::new();
+        let supervisor = test_task_id(1, 0);
+        let worker_a = test_task_id(2, 0);
+        let worker_b = test_task_id(3, 0);
+        let r1 = test_region_id(0, 0);
+
+        // Supervisor traps exits from both workers
+        set.establish_with_policy(
+            supervisor,
+            r1,
+            ExitPolicy::Trap,
+            worker_a,
+            r1,
+            ExitPolicy::Propagate,
+        );
+        set.establish_with_policy(
+            supervisor,
+            r1,
+            ExitPolicy::Trap,
+            worker_b,
+            r1,
+            ExitPolicy::Propagate,
+        );
+
+        // From supervisor's perspective: both links have Trap policy
+        let peers = set.peers_with_policy(supervisor);
+        assert_eq!(peers.len(), 2);
+        for (_lref, _peer, policy) in &peers {
+            assert_eq!(*policy, ExitPolicy::Trap);
+        }
+
+        // From worker_a's perspective: Propagate policy
+        let peers_a = set.peers_with_policy(worker_a);
+        assert_eq!(peers_a.len(), 1);
+        assert_eq!(peers_a[0].2, ExitPolicy::Propagate);
+    }
+
+    #[test]
+    fn peers_with_policy_empty_for_unknown_task() {
+        let set = LinkSet::new();
+        assert!(set.peers_with_policy(test_task_id(99, 0)).is_empty());
+    }
+
+    /// Conformance: trap-exit policy survives through link lifecycle until
+    /// unlink or cleanup.
+    #[test]
+    fn conformance_trap_exit_policy_lifecycle() {
+        let mut set = LinkSet::new();
+        let r1 = test_region_id(0, 0);
+        let server = test_task_id(1, 0);
+        let worker = test_task_id(2, 0);
+
+        // Establish with Trap on server side
+        let lref = set.establish_with_policy(
+            server,
+            r1,
+            ExitPolicy::Trap,
+            worker,
+            r1,
+            ExitPolicy::Propagate,
+        );
+
+        // Worker crashes: server should trap, not propagate
+        let peers_of_worker = set.peers_with_policy(worker);
+        assert_eq!(peers_of_worker.len(), 1);
+        // This is worker's policy (what happens to worker when server dies) = Propagate
+        assert_eq!(peers_of_worker[0].2, ExitPolicy::Propagate);
+
+        // From server's perspective when worker dies:
+        let server_peers = set.peers_with_policy(server);
+        assert_eq!(server_peers.len(), 1);
+        assert_eq!(server_peers[0].1, worker); // peer is worker
+        assert_eq!(server_peers[0].2, ExitPolicy::Trap); // server traps
+
+        // Policy-aware exit signal generation:
+        let failure_vt = Time::from_nanos(1000);
+        let reason = DownReason::Error("worker crashed".into());
+        let mut propagated = ExitBatch::new();
+        let mut trapped: Vec<(TaskId, ExitSignal)> = Vec::new();
+
+        // For each peer of the crashing worker, check their policy
+        for (link, peer) in set.peers_of(worker) {
+            let policy = set.exit_policy_for(link, peer).unwrap();
+            let signal = ExitSignal {
+                from: worker,
+                reason: reason.clone(),
+                link_ref: link,
+            };
+            match policy {
+                ExitPolicy::Propagate => propagated.push(failure_vt, signal),
+                ExitPolicy::Trap => trapped.push((peer, signal)),
+                ExitPolicy::Ignore => {} // silently dropped
+            }
+        }
+
+        // Server has Trap policy, so no propagated signals
+        assert!(propagated.is_empty());
+        // Instead, server receives a trapped exit message
+        assert_eq!(trapped.len(), 1);
+        assert_eq!(trapped[0].0, server);
+        assert_eq!(trapped[0].1.from, worker);
+
+        // Cleanup
+        set.remove_task(worker);
+        assert!(set.peers_of(server).is_empty());
+    }
+
+    /// Conformance: ignore policy silently drops exit signals.
+    #[test]
+    fn conformance_ignore_policy_drops_signal() {
+        let mut set = LinkSet::new();
+        let r1 = test_region_id(0, 0);
+        let watcher = test_task_id(1, 0);
+        let background = test_task_id(2, 0);
+
+        let lref = set.establish_with_policy(
+            watcher,
+            r1,
+            ExitPolicy::Ignore,
+            background,
+            r1,
+            ExitPolicy::Propagate,
+        );
+
+        assert_eq!(set.exit_policy_for(lref, watcher), Some(ExitPolicy::Ignore));
+
+        // Background task dies: watcher ignores it
+        let peers_of_bg = set.peers_of(background);
+        assert_eq!(peers_of_bg.len(), 1);
+
+        let policy = set.exit_policy_for(peers_of_bg[0].0, watcher).unwrap();
+        assert!(policy.is_ignore());
+    }
+
+    /// Conformance: region cleanup removes links with custom policies.
+    #[test]
+    fn conformance_region_cleanup_with_policies() {
+        let mut set = LinkSet::new();
+        let r1 = test_region_id(1, 0);
+        let t1 = test_task_id(1, 0);
+        let t2 = test_task_id(2, 0);
+
+        set.establish_with_policy(t1, r1, ExitPolicy::Trap, t2, r1, ExitPolicy::Ignore);
+
+        assert_eq!(set.len(), 1);
+        set.cleanup_region(r1);
+        assert!(set.is_empty());
+        assert!(set.peers_with_policy(t1).is_empty());
+        assert!(set.peers_with_policy(t2).is_empty());
     }
 }
