@@ -677,9 +677,7 @@ impl CrashPackWriter for MemoryCrashPackWriter {
         let json = serde_json::to_string_pretty(pack)
             .map_err(|e| CrashPackWriteError::Serialize(e.to_string()))?;
 
-        let artifact_id = ArtifactId {
-            path: filename,
-        };
+        let artifact_id = ArtifactId { path: filename };
         self.packs
             .lock()
             .expect("lock poisoned")
@@ -1266,5 +1264,230 @@ mod tests {
         assert_eq!(pack_a.canonical_prefix.len(), 3);
 
         crate::test_complete!("from_trace_diamond_dependency");
+    }
+
+    // =================================================================
+    // Artifact Writer Capability (bd-1skcu)
+    // =================================================================
+
+    #[test]
+    fn artifact_filename_is_deterministic() {
+        init_test("artifact_filename_is_deterministic");
+
+        let pack = CrashPack::builder(CrashPackConfig {
+            seed: 42,
+            ..Default::default()
+        })
+        .failure(sample_failure())
+        .fingerprint(0xCAFE_BABE)
+        .build();
+
+        let name1 = artifact_filename(&pack);
+        let name2 = artifact_filename(&pack);
+        assert_eq!(name1, name2);
+        assert_eq!(name1, "crashpack-000000000000002a-00000000cafebabe-v1.json");
+
+        crate::test_complete!("artifact_filename_is_deterministic");
+    }
+
+    #[test]
+    fn artifact_filename_varies_by_seed_and_fingerprint() {
+        init_test("artifact_filename_varies_by_seed_and_fingerprint");
+
+        let pack_a = CrashPack::builder(CrashPackConfig {
+            seed: 1,
+            ..Default::default()
+        })
+        .failure(sample_failure())
+        .fingerprint(0xAAAA)
+        .build();
+
+        let pack_b = CrashPack::builder(CrashPackConfig {
+            seed: 2,
+            ..Default::default()
+        })
+        .failure(sample_failure())
+        .fingerprint(0xBBBB)
+        .build();
+
+        assert_ne!(artifact_filename(&pack_a), artifact_filename(&pack_b));
+
+        crate::test_complete!("artifact_filename_varies_by_seed_and_fingerprint");
+    }
+
+    #[test]
+    fn memory_writer_collects_packs() {
+        init_test("memory_writer_collects_packs");
+
+        let writer = MemoryCrashPackWriter::new();
+        assert_eq!(writer.count(), 0);
+        assert!(!writer.is_persistent());
+        assert_eq!(writer.name(), "memory");
+
+        let pack = CrashPack::builder(sample_config())
+            .failure(sample_failure())
+            .fingerprint(0x1234)
+            .build();
+
+        let artifact = writer.write(&pack).unwrap();
+        assert_eq!(writer.count(), 1);
+        assert!(artifact.path().contains("crashpack-"));
+        assert!(artifact.path().contains("1234"));
+
+        // Write a second pack
+        let pack2 = CrashPack::builder(CrashPackConfig {
+            seed: 99,
+            ..Default::default()
+        })
+        .failure(sample_failure())
+        .fingerprint(0x5678)
+        .build();
+
+        let artifact2 = writer.write(&pack2).unwrap();
+        assert_eq!(writer.count(), 2);
+        assert_ne!(artifact.path(), artifact2.path());
+
+        crate::test_complete!("memory_writer_collects_packs");
+    }
+
+    #[test]
+    fn memory_writer_produces_valid_json() {
+        init_test("memory_writer_produces_valid_json");
+
+        let writer = MemoryCrashPackWriter::new();
+        let pack = CrashPack::builder(sample_config())
+            .failure(sample_failure())
+            .fingerprint(0xDEAD)
+            .event_count(42)
+            .oracle_violations(vec!["inv-1".into()])
+            .build();
+
+        writer.write(&pack).unwrap();
+        let written = writer.written();
+        assert_eq!(written.len(), 1);
+
+        let json = &written[0].1;
+        // Must be valid JSON
+        let parsed: serde_json::Value = serde_json::from_str(json).unwrap();
+        assert_eq!(parsed["manifest"]["config"]["seed"], 42);
+        assert_eq!(parsed["manifest"]["fingerprint"], 0xDEAD_u64);
+        assert_eq!(parsed["manifest"]["event_count"], 42);
+        assert_eq!(parsed["oracle_violations"][0], "inv-1");
+
+        crate::test_complete!("memory_writer_produces_valid_json");
+    }
+
+    #[test]
+    fn file_writer_writes_to_disk() {
+        init_test("file_writer_writes_to_disk");
+
+        let dir = std::env::temp_dir().join("asupersync_test_crashpack");
+        let _ = std::fs::create_dir_all(&dir);
+
+        let writer = FileCrashPackWriter::new(dir.clone());
+        assert!(writer.is_persistent());
+        assert_eq!(writer.name(), "file");
+        assert_eq!(writer.base_dir(), dir.as_path());
+
+        let pack = CrashPack::builder(CrashPackConfig {
+            seed: 7,
+            ..Default::default()
+        })
+        .failure(sample_failure())
+        .fingerprint(0xBEEF)
+        .build();
+
+        let artifact = writer.write(&pack).unwrap();
+        let expected_name = artifact_filename(&pack);
+
+        // Artifact path should contain the deterministic filename
+        assert!(artifact.path().contains(&expected_name));
+
+        // File should exist and contain valid JSON
+        let contents = std::fs::read_to_string(artifact.path()).unwrap();
+        let parsed: serde_json::Value = serde_json::from_str(&contents).unwrap();
+        assert_eq!(parsed["manifest"]["config"]["seed"], 7);
+
+        // Cleanup
+        let _ = std::fs::remove_file(artifact.path());
+        let _ = std::fs::remove_dir(&dir);
+
+        crate::test_complete!("file_writer_writes_to_disk");
+    }
+
+    #[test]
+    fn file_writer_fails_on_missing_dir() {
+        init_test("file_writer_fails_on_missing_dir");
+
+        let writer = FileCrashPackWriter::new(
+            std::path::PathBuf::from("/nonexistent/crashpack/dir"),
+        );
+
+        let pack = CrashPack::builder(CrashPackConfig::default())
+            .failure(sample_failure())
+            .build();
+
+        let result = writer.write(&pack);
+        assert!(result.is_err());
+
+        crate::test_complete!("file_writer_fails_on_missing_dir");
+    }
+
+    #[test]
+    fn artifact_id_display() {
+        init_test("artifact_id_display");
+
+        let id = ArtifactId {
+            path: "some/path.json".to_string(),
+        };
+        assert_eq!(format!("{id}"), "some/path.json");
+        assert_eq!(id.path(), "some/path.json");
+
+        crate::test_complete!("artifact_id_display");
+    }
+
+    #[test]
+    fn conformance_no_ambient_writes() {
+        init_test("conformance_no_ambient_writes");
+
+        // The CrashPack::builder().build() path never touches the filesystem.
+        // Writing requires an explicit CrashPackWriter.
+        let pack = CrashPack::builder(sample_config())
+            .failure(sample_failure())
+            .build();
+
+        // pack exists in memory - no writer means no writes
+        assert_eq!(pack.seed(), 42);
+
+        // Only a writer can persist
+        let writer = MemoryCrashPackWriter::new();
+        assert_eq!(writer.count(), 0);
+        writer.write(&pack).unwrap();
+        assert_eq!(writer.count(), 1);
+
+        crate::test_complete!("conformance_no_ambient_writes");
+    }
+
+    #[test]
+    fn conformance_same_pack_same_artifact_path() {
+        init_test("conformance_same_pack_same_artifact_path");
+
+        let writer = MemoryCrashPackWriter::new();
+
+        let pack = CrashPack::builder(CrashPackConfig {
+            seed: 100,
+            ..Default::default()
+        })
+        .failure(sample_failure())
+        .fingerprint(0xFACE)
+        .build();
+
+        let id1 = writer.write(&pack).unwrap();
+        let id2 = writer.write(&pack).unwrap();
+
+        // Same pack produces same artifact path (deterministic naming)
+        assert_eq!(id1.path(), id2.path());
+
+        crate::test_complete!("conformance_same_pack_same_artifact_path");
     }
 }
