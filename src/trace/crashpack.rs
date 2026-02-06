@@ -804,9 +804,9 @@ impl ReplayCommand {
             });
         }
 
-        if let Some(ref path) = artifact_path {
+        if let Some(path) = artifact_path {
             args.push("--crashpack".to_string());
-            args.push((*path).to_string());
+            args.push(path.to_string());
         }
 
         let command_line = build_command_line("cargo", &args, &env);
@@ -2202,6 +2202,238 @@ mod tests {
         assert!(err.to_string().contains("99"));
 
         crate::test_complete!("conformance_validation_error_is_std_error");
+    }
+
+    // =================================================================
+    // Replay Command Contract Tests (bd-1teda)
+    // =================================================================
+
+    #[test]
+    fn replay_command_from_config_basic() {
+        init_test("replay_command_from_config_basic");
+
+        let config = CrashPackConfig {
+            seed: 42,
+            config_hash: 0xDEAD,
+            worker_count: 4,
+            max_steps: Some(1000),
+            commit_hash: Some("abc123".to_string()),
+        };
+
+        let cmd = ReplayCommand::from_config(&config, None);
+        assert_eq!(cmd.program, "cargo");
+        assert!(cmd.args.contains(&"--seed".to_string()));
+        assert!(cmd.args.contains(&"42".to_string()));
+        assert!(!cmd.env.is_empty());
+        assert!(cmd.command_line.contains("cargo"));
+        assert!(cmd.command_line.contains("--seed"));
+        assert!(cmd.command_line.contains("42"));
+        assert!(cmd.command_line.contains("ASUPERSYNC_WORKERS=4"));
+
+        crate::test_complete!("replay_command_from_config_basic");
+    }
+
+    #[test]
+    fn replay_command_from_config_with_artifact() {
+        init_test("replay_command_from_config_with_artifact");
+
+        let config = CrashPackConfig {
+            seed: 99,
+            worker_count: 2,
+            ..Default::default()
+        };
+
+        let cmd = ReplayCommand::from_config(&config, Some("crashes/pack.json"));
+        assert!(cmd.args.contains(&"--crashpack".to_string()));
+        assert!(cmd.args.contains(&"crashes/pack.json".to_string()));
+        assert!(cmd.command_line.contains("--crashpack"));
+        assert!(cmd.command_line.contains("crashes/pack.json"));
+
+        crate::test_complete!("replay_command_from_config_with_artifact");
+    }
+
+    #[test]
+    fn replay_command_cli_mode() {
+        init_test("replay_command_cli_mode");
+
+        let config = CrashPackConfig {
+            seed: 7,
+            worker_count: 8,
+            max_steps: Some(500),
+            ..Default::default()
+        };
+
+        let cmd = ReplayCommand::from_config_cli(&config, "crashpack.json");
+        assert_eq!(cmd.program, "asupersync");
+        assert!(cmd.args.contains(&"trace".to_string()));
+        assert!(cmd.args.contains(&"replay".to_string()));
+        assert!(cmd.args.contains(&"--seed".to_string()));
+        assert!(cmd.args.contains(&"7".to_string()));
+        assert!(cmd.args.contains(&"--workers".to_string()));
+        assert!(cmd.args.contains(&"8".to_string()));
+        assert!(cmd.args.contains(&"--max-steps".to_string()));
+        assert!(cmd.args.contains(&"500".to_string()));
+        assert!(cmd.args.contains(&"crashpack.json".to_string()));
+        assert!(cmd.env.is_empty());
+        assert_eq!(
+            cmd.command_line,
+            "asupersync trace replay --seed 7 --workers 8 --max-steps 500 crashpack.json"
+        );
+
+        crate::test_complete!("replay_command_cli_mode");
+    }
+
+    #[test]
+    fn replay_command_display() {
+        init_test("replay_command_display");
+
+        let cmd = ReplayCommand::from_config_cli(
+            &CrashPackConfig {
+                seed: 1,
+                worker_count: 1,
+                ..Default::default()
+            },
+            "test.json",
+        );
+
+        let displayed = format!("{cmd}");
+        assert_eq!(displayed, cmd.command_line);
+
+        crate::test_complete!("replay_command_display");
+    }
+
+    #[test]
+    fn replay_command_serde_round_trip() {
+        init_test("replay_command_serde_round_trip");
+
+        let cmd = ReplayCommand::from_config(
+            &CrashPackConfig {
+                seed: 42,
+                worker_count: 4,
+                max_steps: Some(1000),
+                ..Default::default()
+            },
+            Some("pack.json"),
+        );
+
+        let json = serde_json::to_string_pretty(&cmd).unwrap();
+        let parsed: ReplayCommand = serde_json::from_str(&json).unwrap();
+        assert_eq!(parsed, cmd);
+
+        crate::test_complete!("replay_command_serde_round_trip");
+    }
+
+    #[test]
+    fn replay_command_in_crash_pack() {
+        init_test("replay_command_in_crash_pack");
+
+        let config = sample_config();
+        let replay_cmd = ReplayCommand::from_config(&config, Some("crashes/test.json"));
+
+        let pack = CrashPack::builder(config)
+            .failure(sample_failure())
+            .fingerprint(0xCAFE)
+            .replay(replay_cmd.clone())
+            .build();
+
+        assert_eq!(pack.replay.as_ref(), Some(&replay_cmd));
+
+        // Appears in JSON
+        let writer = MemoryCrashPackWriter::new();
+        writer.write(&pack).unwrap();
+        let json_str = &writer.written()[0].1;
+        let parsed: serde_json::Value = serde_json::from_str(json_str).unwrap();
+        assert!(parsed["replay"]["program"].as_str().is_some());
+        assert!(parsed["replay"]["command_line"]
+            .as_str()
+            .unwrap()
+            .contains("--seed"));
+
+        crate::test_complete!("replay_command_in_crash_pack");
+    }
+
+    #[test]
+    fn replay_command_absent_by_default() {
+        init_test("replay_command_absent_by_default");
+
+        let pack = CrashPack::builder(CrashPackConfig::default())
+            .failure(sample_failure())
+            .build();
+
+        assert!(pack.replay.is_none());
+
+        // replay field should be absent from JSON
+        let writer = MemoryCrashPackWriter::new();
+        writer.write(&pack).unwrap();
+        let json_str = &writer.written()[0].1;
+        assert!(!json_str.contains("\"replay\""));
+
+        crate::test_complete!("replay_command_absent_by_default");
+    }
+
+    #[test]
+    fn replay_command_convenience_method() {
+        init_test("replay_command_convenience_method");
+
+        let pack = CrashPack::builder(CrashPackConfig {
+            seed: 77,
+            worker_count: 2,
+            ..Default::default()
+        })
+        .failure(sample_failure())
+        .build();
+
+        let cmd = pack.replay_command(Some("output.json"));
+        assert!(cmd.command_line.contains("--seed"));
+        assert!(cmd.command_line.contains("77"));
+        assert!(cmd.command_line.contains("output.json"));
+
+        crate::test_complete!("replay_command_convenience_method");
+    }
+
+    #[test]
+    fn replay_command_max_steps_included_when_set() {
+        init_test("replay_command_max_steps_included_when_set");
+
+        let with_steps = ReplayCommand::from_config(
+            &CrashPackConfig {
+                seed: 1,
+                max_steps: Some(999),
+                ..Default::default()
+            },
+            None,
+        );
+        assert!(with_steps.command_line.contains("ASUPERSYNC_MAX_STEPS=999"));
+
+        let without_steps = ReplayCommand::from_config(
+            &CrashPackConfig {
+                seed: 1,
+                max_steps: None,
+                ..Default::default()
+            },
+            None,
+        );
+        assert!(!without_steps.command_line.contains("ASUPERSYNC_MAX_STEPS"));
+
+        crate::test_complete!("replay_command_max_steps_included_when_set");
+    }
+
+    #[test]
+    fn shell_escape_handles_special_chars() {
+        init_test("shell_escape_handles_special_chars");
+
+        // Safe strings pass through
+        assert_eq!(shell_escape("hello"), "hello");
+        assert_eq!(shell_escape("path/to/file.json"), "path/to/file.json");
+        assert_eq!(shell_escape("42"), "42");
+
+        // Strings with spaces get quoted
+        assert_eq!(shell_escape("hello world"), "'hello world'");
+
+        // Empty string
+        assert_eq!(shell_escape(""), "''");
+
+        crate::test_complete!("shell_escape_handles_special_chars");
     }
 
     // =================================================================
