@@ -1553,72 +1553,88 @@ impl Supervisor {
         now: u64,
         budget: Option<&Budget>,
     ) -> SupervisionDecision {
-        // Check if outcome is severe enough that supervision cannot help
-        if matches!(outcome, Outcome::Panicked(_)) {
-            return SupervisionDecision::Stop {
+        // SPORK monotone severity contract:
+        // - Panics are never restartable.
+        // - Cancellation is an external directive; it is not restartable.
+        // - Only `Err` is eligible for `Restart(..)` and `Escalate`.
+        match outcome {
+            Outcome::Ok(()) => SupervisionDecision::Stop {
+                task_id,
+                region_id,
+                // `on_failure*` should not be called for Ok outcomes; stop is the safest
+                // deterministic fallback.
+                reason: StopReason::ExplicitStop,
+            },
+            Outcome::Cancelled(reason) => SupervisionDecision::Stop {
+                task_id,
+                region_id,
+                reason: StopReason::Cancelled(reason),
+            },
+            Outcome::Panicked(_) => SupervisionDecision::Stop {
                 task_id,
                 region_id,
                 reason: StopReason::Panicked,
-            };
-        }
-
-        match &mut self.strategy {
-            SupervisionStrategy::Stop => SupervisionDecision::Stop {
-                task_id,
-                region_id,
-                reason: StopReason::ExplicitStop,
             },
+            Outcome::Err(()) => match &mut self.strategy {
+                SupervisionStrategy::Stop => SupervisionDecision::Stop {
+                    task_id,
+                    region_id,
+                    reason: StopReason::ExplicitStop,
+                },
 
-            SupervisionStrategy::Restart(config) => {
-                let history = self.history.as_mut().expect("history exists for Restart");
+                SupervisionStrategy::Restart(config) => {
+                    let history = self.history.as_mut().expect("history exists for Restart");
 
-                // Check budget constraints if a budget is provided
-                if let Some(budget) = budget {
-                    if let Err(refusal) = history.can_restart_with_budget(now, budget) {
-                        return match refusal {
-                            BudgetRefusal::WindowExhausted { .. } => SupervisionDecision::Stop {
-                                task_id,
-                                region_id,
-                                reason: StopReason::RestartBudgetExhausted {
-                                    total_restarts: config.max_restarts,
-                                    window: config.window,
+                    // Check budget constraints if a budget is provided
+                    if let Some(budget) = budget {
+                        if let Err(refusal) = history.can_restart_with_budget(now, budget) {
+                            return match refusal {
+                                BudgetRefusal::WindowExhausted { .. } => {
+                                    SupervisionDecision::Stop {
+                                        task_id,
+                                        region_id,
+                                        reason: StopReason::RestartBudgetExhausted {
+                                            total_restarts: config.max_restarts,
+                                            window: config.window,
+                                        },
+                                    }
+                                }
+                                _ => SupervisionDecision::Stop {
+                                    task_id,
+                                    region_id,
+                                    reason: StopReason::BudgetRefused(refusal),
                                 },
-                            },
-                            _ => SupervisionDecision::Stop {
-                                task_id,
-                                region_id,
-                                reason: StopReason::BudgetRefused(refusal),
+                            };
+                        }
+                    } else if !history.can_restart(now) {
+                        return SupervisionDecision::Stop {
+                            task_id,
+                            region_id,
+                            reason: StopReason::RestartBudgetExhausted {
+                                total_restarts: config.max_restarts,
+                                window: config.window,
                             },
                         };
                     }
-                } else if !history.can_restart(now) {
-                    return SupervisionDecision::Stop {
+
+                    let attempt = history.recent_restart_count(now) as u32 + 1;
+                    let delay = history.next_delay(now);
+                    history.record_restart(now);
+
+                    SupervisionDecision::Restart {
                         task_id,
                         region_id,
-                        reason: StopReason::RestartBudgetExhausted {
-                            total_restarts: config.max_restarts,
-                            window: config.window,
-                        },
-                    };
+                        attempt,
+                        delay,
+                    }
                 }
 
-                let attempt = history.recent_restart_count(now) as u32 + 1;
-                let delay = history.next_delay(now);
-                history.record_restart(now);
-
-                SupervisionDecision::Restart {
+                SupervisionStrategy::Escalate => SupervisionDecision::Escalate {
                     task_id,
                     region_id,
-                    attempt,
-                    delay,
-                }
-            }
-
-            SupervisionStrategy::Escalate => SupervisionDecision::Escalate {
-                task_id,
-                region_id,
-                parent_region_id,
-                outcome,
+                    parent_region_id,
+                    outcome: Outcome::Err(()),
+                },
             },
         }
     }
@@ -2041,7 +2057,7 @@ mod tests {
         assert!(matches!(
             decision,
             SupervisionDecision::Stop {
-                reason: StopReason::ExplicitStop,
+                reason: StopReason::Cancelled(_),
                 ..
             }
         ));
@@ -2056,26 +2072,21 @@ mod tests {
         let config = RestartConfig::new(3, Duration::from_secs(60));
         let mut supervisor = Supervisor::new(SupervisionStrategy::Restart(config));
 
-        // First failure should trigger restart
-        let decision = supervisor.on_failure(
-            test_task_id(),
-            test_region_id(),
-            None,
-            Outcome::Cancelled(CancelReason::user("test")),
-            0,
-        );
+        // First error should trigger restart
+        let decision =
+            supervisor.on_failure(test_task_id(), test_region_id(), None, Outcome::Err(()), 0);
 
         assert!(matches!(
             decision,
             SupervisionDecision::Restart { attempt: 1, .. }
         ));
 
-        // Second failure should also restart
+        // Second error should also restart
         let decision = supervisor.on_failure(
             test_task_id(),
             test_region_id(),
             None,
-            Outcome::Cancelled(CancelReason::user("test")),
+            Outcome::Err(()),
             1_000_000_000, // 1 second later
         );
 
@@ -2088,6 +2099,32 @@ mod tests {
     }
 
     #[test]
+    fn restart_strategy_does_not_restart_cancelled() {
+        init_test("restart_strategy_does_not_restart_cancelled");
+
+        let config = RestartConfig::new(3, Duration::from_secs(60));
+        let mut supervisor = Supervisor::new(SupervisionStrategy::Restart(config));
+
+        let decision = supervisor.on_failure(
+            test_task_id(),
+            test_region_id(),
+            None,
+            Outcome::Cancelled(CancelReason::user("test")),
+            0,
+        );
+
+        assert!(matches!(
+            decision,
+            SupervisionDecision::Stop {
+                reason: StopReason::Cancelled(_),
+                ..
+            }
+        ));
+
+        crate::test_complete!("restart_strategy_does_not_restart_cancelled");
+    }
+
+    #[test]
     fn restart_budget_exhaustion() {
         init_test("restart_budget_exhaustion");
 
@@ -2095,18 +2132,12 @@ mod tests {
         let mut supervisor = Supervisor::new(SupervisionStrategy::Restart(config));
 
         // Two restarts allowed
+        supervisor.on_failure(test_task_id(), test_region_id(), None, Outcome::Err(()), 0);
         supervisor.on_failure(
             test_task_id(),
             test_region_id(),
             None,
-            Outcome::Cancelled(CancelReason::user("test")),
-            0,
-        );
-        supervisor.on_failure(
-            test_task_id(),
-            test_region_id(),
-            None,
-            Outcome::Cancelled(CancelReason::user("test")),
+            Outcome::Err(()),
             1_000_000_000,
         );
 
@@ -2115,7 +2146,7 @@ mod tests {
             test_task_id(),
             test_region_id(),
             None,
-            Outcome::Cancelled(CancelReason::user("test")),
+            Outcome::Err(()),
             2_000_000_000,
         );
 
@@ -2138,18 +2169,12 @@ mod tests {
         let mut supervisor = Supervisor::new(SupervisionStrategy::Restart(config));
 
         // Two restarts within window
+        supervisor.on_failure(test_task_id(), test_region_id(), None, Outcome::Err(()), 0);
         supervisor.on_failure(
             test_task_id(),
             test_region_id(),
             None,
-            Outcome::Cancelled(CancelReason::user("test")),
-            0,
-        );
-        supervisor.on_failure(
-            test_task_id(),
-            test_region_id(),
-            None,
-            Outcome::Cancelled(CancelReason::user("test")),
+            Outcome::Err(()),
             500_000_000, // 0.5 seconds
         );
 
@@ -2158,7 +2183,7 @@ mod tests {
             test_task_id(),
             test_region_id(),
             None,
-            Outcome::Cancelled(CancelReason::user("test")),
+            Outcome::Err(()),
             2_000_000_000, // 2 seconds later - both old restarts outside window
         );
 
@@ -2181,7 +2206,7 @@ mod tests {
             test_task_id(),
             test_region_id(),
             Some(parent),
-            Outcome::Cancelled(CancelReason::user("test")),
+            Outcome::Err(()),
             0,
         );
 
@@ -2194,6 +2219,32 @@ mod tests {
         ));
 
         crate::test_complete!("escalate_strategy_escalates");
+    }
+
+    #[test]
+    fn escalate_strategy_does_not_escalate_cancelled() {
+        init_test("escalate_strategy_does_not_escalate_cancelled");
+
+        let mut supervisor = Supervisor::new(SupervisionStrategy::Escalate);
+        let parent = RegionId::from_arena(ArenaIndex::new(0, 99));
+
+        let decision = supervisor.on_failure(
+            test_task_id(),
+            test_region_id(),
+            Some(parent),
+            Outcome::Cancelled(CancelReason::user("test")),
+            0,
+        );
+
+        assert!(matches!(
+            decision,
+            SupervisionDecision::Stop {
+                reason: StopReason::Cancelled(_),
+                ..
+            }
+        ));
+
+        crate::test_complete!("escalate_strategy_does_not_escalate_cancelled");
     }
 
     #[test]
@@ -2854,7 +2905,7 @@ mod tests {
             test_task_id(),
             test_region_id(),
             None,
-            Outcome::Cancelled(CancelReason::user("test")),
+            Outcome::Err(()),
             0,
             Some(&budget),
         );
@@ -2885,7 +2936,7 @@ mod tests {
             test_task_id(),
             test_region_id(),
             None,
-            Outcome::Cancelled(CancelReason::user("test")),
+            Outcome::Err(()),
             0,
             Some(&budget),
         );
@@ -2907,13 +2958,7 @@ mod tests {
         let mut supervisor = Supervisor::new(SupervisionStrategy::Restart(config));
 
         // Two restarts allowed without budget checks
-        let d1 = supervisor.on_failure(
-            test_task_id(),
-            test_region_id(),
-            None,
-            Outcome::Cancelled(CancelReason::user("test")),
-            0,
-        );
+        let d1 = supervisor.on_failure(test_task_id(), test_region_id(), None, Outcome::Err(()), 0);
         assert!(matches!(
             d1,
             SupervisionDecision::Restart { attempt: 1, .. }
@@ -2923,7 +2968,7 @@ mod tests {
             test_task_id(),
             test_region_id(),
             None,
-            Outcome::Cancelled(CancelReason::user("test")),
+            Outcome::Err(()),
             1_000_000_000,
         );
         assert!(matches!(
@@ -2936,7 +2981,7 @@ mod tests {
             test_task_id(),
             test_region_id(),
             None,
-            Outcome::Cancelled(CancelReason::user("test")),
+            Outcome::Err(()),
             2_000_000_000,
         );
         assert!(matches!(
@@ -3565,5 +3610,941 @@ mod tests {
         assert_ne!(d1, d3);
 
         crate::test_complete!("down_equality");
+    }
+
+    // ---------------------------------------------------------------
+    // Supervisor Conformance Suite (bd-1zpsd)
+    //
+    // Deterministic tests covering:
+    // - Each restart policy with full decision chains
+    // - Budget exhaustion behavior
+    // - Escalation propagation
+    // - Monotone severity enforcement
+    // - Spawn integration with dependency ordering
+    // ---------------------------------------------------------------
+
+    /// Table-driven test: all `Outcome` variants crossed with all supervision
+    /// strategies. Asserts the SPORK monotone-severity contract:
+    /// - `Panicked` always stops.
+    /// - `Cancelled` always stops (external directive; never restartable).
+    /// - Only `Err` may restart (under `Restart`) or escalate (under `Escalate`).
+    /// - `Ok` should not be routed into `on_failure`; we treat it as `Stop(ExplicitStop)`
+    ///   as a deterministic fallback.
+    #[test]
+    fn conformance_monotone_severity_cross_product() {
+        init_test("conformance_monotone_severity_cross_product");
+
+        let outcomes: Vec<(&str, Outcome<(), ()>)> = vec![
+            ("Ok", Outcome::Ok(())),
+            ("Err", Outcome::Err(())),
+            ("Cancelled", Outcome::Cancelled(CancelReason::user("test"))),
+            (
+                "Panicked",
+                Outcome::Panicked(PanicPayload::new("test panic")),
+            ),
+        ];
+
+        let strategies: Vec<(&str, SupervisionStrategy)> = vec![
+            ("Stop", SupervisionStrategy::Stop),
+            (
+                "Restart",
+                SupervisionStrategy::Restart(RestartConfig::new(10, Duration::from_secs(60))),
+            ),
+            ("Escalate", SupervisionStrategy::Escalate),
+        ];
+
+        let parent = RegionId::from_arena(ArenaIndex::new(0, 99));
+
+        for (outcome_name, outcome) in &outcomes {
+            for (strategy_name, strategy) in &strategies {
+                let mut supervisor = Supervisor::new(strategy.clone());
+                let decision = supervisor.on_failure(
+                    test_task_id(),
+                    test_region_id(),
+                    Some(parent),
+                    outcome.clone(),
+                    0,
+                );
+
+                match (outcome_name, strategy_name) {
+                    // Panicked always stops, regardless of strategy
+                    (&"Panicked", _) => {
+                        assert!(
+                            matches!(
+                                decision,
+                                SupervisionDecision::Stop {
+                                    reason: StopReason::Panicked,
+                                    ..
+                                }
+                            ),
+                            "Panicked + {strategy_name} should Stop(Panicked)"
+                        );
+                    }
+                    // Cancelled always stops, regardless of strategy
+                    (&"Cancelled", _) => {
+                        assert!(
+                            matches!(
+                                decision,
+                                SupervisionDecision::Stop {
+                                    reason: StopReason::Cancelled(_),
+                                    ..
+                                }
+                            ),
+                            "Cancelled + {strategy_name} should Stop(Cancelled)"
+                        );
+                    }
+                    // Stop strategy always stops
+                    (_, &"Stop") => {
+                        assert!(
+                            matches!(
+                                decision,
+                                SupervisionDecision::Stop {
+                                    reason: StopReason::ExplicitStop,
+                                    ..
+                                }
+                            ),
+                            "{outcome_name} + Stop should Stop(ExplicitStop)"
+                        );
+                    }
+                    // Escalate strategy escalates only on Err (Panicked/Cancelled handled above)
+                    (&"Err", &"Escalate") => {
+                        assert!(
+                            matches!(decision, SupervisionDecision::Escalate { .. }),
+                            "Err + Escalate should Escalate"
+                        );
+                    }
+                    // Restart strategy restarts only on Err (Panicked/Cancelled handled above)
+                    (&"Err", &"Restart") => {
+                        assert!(
+                            matches!(decision, SupervisionDecision::Restart { attempt: 1, .. }),
+                            "Err + Restart should Restart(attempt=1)"
+                        );
+                    }
+                    // Ok is a fallback (should not be treated as failure)
+                    (&"Ok", &"Escalate") => {
+                        assert!(
+                            matches!(
+                                decision,
+                                SupervisionDecision::Stop {
+                                    reason: StopReason::ExplicitStop,
+                                    ..
+                                }
+                            ),
+                            "Ok + {strategy_name} should Stop(ExplicitStop) (fallback)"
+                        );
+                    }
+                    (&"Ok", &"Restart") => {
+                        assert!(
+                            matches!(
+                                decision,
+                                SupervisionDecision::Stop {
+                                    reason: StopReason::ExplicitStop,
+                                    ..
+                                }
+                            ),
+                            "Ok + {strategy_name} should Stop(ExplicitStop) (fallback)"
+                        );
+                    }
+                    _ => unreachable!(),
+                }
+            }
+        }
+
+        crate::test_complete!("conformance_monotone_severity_cross_product");
+    }
+
+    /// Conformance: OneForOne only cancels and restarts the failed child.
+    /// Other children in the topology are untouched.
+    #[test]
+    fn conformance_one_for_one_isolates_failed_child() {
+        init_test("conformance_one_for_one_isolates_failed_child");
+
+        let builder = SupervisorBuilder::new("sup")
+            .with_restart_policy(RestartPolicy::OneForOne)
+            .child(
+                ChildSpec::new("db", noop_start)
+                    .with_restart(SupervisionStrategy::Restart(RestartConfig::default())),
+            )
+            .child(
+                ChildSpec::new("cache", noop_start)
+                    .depends_on("db")
+                    .with_restart(SupervisionStrategy::Restart(RestartConfig::default())),
+            )
+            .child(
+                ChildSpec::new("web", noop_start)
+                    .depends_on("cache")
+                    .with_restart(SupervisionStrategy::Restart(RestartConfig::default())),
+            );
+
+        let compiled = builder.compile().expect("compile");
+
+        // Fail "cache" — only "cache" should appear in the plan
+        let err: Outcome<(), ()> = Outcome::Err(());
+        let plan = compiled
+            .restart_plan_for_failure("cache", &err)
+            .expect("restart plan");
+
+        assert_eq!(plan.policy, RestartPolicy::OneForOne);
+        assert_eq!(plan.cancel_order, vec!["cache"]);
+        assert_eq!(plan.restart_order, vec!["cache"]);
+
+        // Fail "db" — only "db"
+        let plan = compiled
+            .restart_plan_for_failure("db", &err)
+            .expect("restart plan");
+        assert_eq!(plan.cancel_order, vec!["db"]);
+        assert_eq!(plan.restart_order, vec!["db"]);
+
+        // Fail "web" — only "web"
+        let plan = compiled
+            .restart_plan_for_failure("web", &err)
+            .expect("restart plan");
+        assert_eq!(plan.cancel_order, vec!["web"]);
+        assert_eq!(plan.restart_order, vec!["web"]);
+
+        crate::test_complete!("conformance_one_for_one_isolates_failed_child");
+    }
+
+    /// Conformance: OneForAll cancels all children in reverse start order and
+    /// restarts all in start order, regardless of which child failed.
+    #[test]
+    fn conformance_one_for_all_restarts_all_children() {
+        init_test("conformance_one_for_all_restarts_all_children");
+
+        let builder = SupervisorBuilder::new("sup")
+            .with_restart_policy(RestartPolicy::OneForAll)
+            .child(
+                ChildSpec::new("a", noop_start)
+                    .with_restart(SupervisionStrategy::Restart(RestartConfig::default())),
+            )
+            .child(
+                ChildSpec::new("b", noop_start)
+                    .depends_on("a")
+                    .with_restart(SupervisionStrategy::Restart(RestartConfig::default())),
+            )
+            .child(
+                ChildSpec::new("c", noop_start)
+                    .depends_on("b")
+                    .with_restart(SupervisionStrategy::Restart(RestartConfig::default())),
+            );
+
+        let compiled = builder.compile().expect("compile");
+        let err: Outcome<(), ()> = Outcome::Err(());
+
+        // Fail any child — ALL children are in the plan
+        for failed in &["a", "b", "c"] {
+            let plan = compiled
+                .restart_plan_for_failure(failed, &err)
+                .expect("restart plan");
+
+            assert_eq!(plan.policy, RestartPolicy::OneForAll);
+            // Cancel: reverse start order (c, b, a)
+            assert_eq!(plan.cancel_order, vec!["c", "b", "a"]);
+            // Restart: start order (a, b, c)
+            assert_eq!(plan.restart_order, vec!["a", "b", "c"]);
+        }
+
+        crate::test_complete!("conformance_one_for_all_restarts_all_children");
+    }
+
+    /// Conformance: RestForOne cancels the failed child and all children started
+    /// after it, then restarts that suffix in start order.
+    #[test]
+    fn conformance_rest_for_one_restarts_suffix() {
+        init_test("conformance_rest_for_one_restarts_suffix");
+
+        let builder = SupervisorBuilder::new("sup")
+            .with_restart_policy(RestartPolicy::RestForOne)
+            .child(
+                ChildSpec::new("a", noop_start)
+                    .with_restart(SupervisionStrategy::Restart(RestartConfig::default())),
+            )
+            .child(
+                ChildSpec::new("b", noop_start)
+                    .depends_on("a")
+                    .with_restart(SupervisionStrategy::Restart(RestartConfig::default())),
+            )
+            .child(
+                ChildSpec::new("c", noop_start)
+                    .depends_on("b")
+                    .with_restart(SupervisionStrategy::Restart(RestartConfig::default())),
+            )
+            .child(
+                ChildSpec::new("d", noop_start)
+                    .depends_on("c")
+                    .with_restart(SupervisionStrategy::Restart(RestartConfig::default())),
+            );
+
+        let compiled = builder.compile().expect("compile");
+        let err: Outcome<(), ()> = Outcome::Err(());
+
+        // Fail "b" — b, c, d are in the plan (suffix from b)
+        let plan = compiled
+            .restart_plan_for_failure("b", &err)
+            .expect("restart plan");
+        assert_eq!(plan.policy, RestartPolicy::RestForOne);
+        assert_eq!(plan.cancel_order, vec!["d", "c", "b"]); // reverse start order
+        assert_eq!(plan.restart_order, vec!["b", "c", "d"]); // start order
+
+        // Fail "a" — all children (a is first)
+        let plan = compiled
+            .restart_plan_for_failure("a", &err)
+            .expect("restart plan");
+        assert_eq!(plan.cancel_order, vec!["d", "c", "b", "a"]);
+        assert_eq!(plan.restart_order, vec!["a", "b", "c", "d"]);
+
+        // Fail "d" — only d (last child, no suffix after it)
+        let plan = compiled
+            .restart_plan_for_failure("d", &err)
+            .expect("restart plan");
+        assert_eq!(plan.cancel_order, vec!["d"]);
+        assert_eq!(plan.restart_order, vec!["d"]);
+
+        crate::test_complete!("conformance_rest_for_one_restarts_suffix");
+    }
+
+    /// Conformance: escalation with no parent region (root-level supervisor).
+    /// The decision should still be Escalate with parent_region_id = None.
+    #[test]
+    fn conformance_escalation_without_parent_region() {
+        init_test("conformance_escalation_without_parent_region");
+
+        let mut supervisor = Supervisor::new(SupervisionStrategy::Escalate);
+
+        let decision = supervisor.on_failure(
+            test_task_id(),
+            test_region_id(),
+            None, // no parent
+            Outcome::Err(()),
+            0,
+        );
+
+        match decision {
+            SupervisionDecision::Escalate {
+                parent_region_id,
+                task_id: tid,
+                region_id: rid,
+                ..
+            } => {
+                assert!(parent_region_id.is_none(), "root escalation has no parent");
+                assert_eq!(tid, test_task_id());
+                assert_eq!(rid, test_region_id());
+            }
+            other => panic!("expected Escalate, got {other:?}"),
+        }
+
+        crate::test_complete!("conformance_escalation_without_parent_region");
+    }
+
+    /// Conformance: after budget exhaustion, subsequent on_failure calls also
+    /// return Stop (the supervisor doesn't magically recover restart ability).
+    #[test]
+    fn conformance_budget_exhaustion_idempotent_stop() {
+        init_test("conformance_budget_exhaustion_idempotent_stop");
+
+        let config = RestartConfig::new(1, Duration::from_secs(60));
+        let mut supervisor = Supervisor::new(SupervisionStrategy::Restart(config));
+
+        // First failure: restarts
+        let d1 = supervisor.on_failure(test_task_id(), test_region_id(), None, Outcome::Err(()), 0);
+        assert!(matches!(
+            d1,
+            SupervisionDecision::Restart { attempt: 1, .. }
+        ));
+
+        // Second failure: budget exhausted → stop
+        let d2 = supervisor.on_failure(
+            test_task_id(),
+            test_region_id(),
+            None,
+            Outcome::Err(()),
+            1_000_000_000,
+        );
+        assert!(matches!(
+            d2,
+            SupervisionDecision::Stop {
+                reason: StopReason::RestartBudgetExhausted { .. },
+                ..
+            }
+        ));
+
+        // Third failure: still stop (exhaustion is sticky within window)
+        let d3 = supervisor.on_failure(
+            test_task_id(),
+            test_region_id(),
+            None,
+            Outcome::Err(()),
+            2_000_000_000,
+        );
+        assert!(matches!(
+            d3,
+            SupervisionDecision::Stop {
+                reason: StopReason::RestartBudgetExhausted { .. },
+                ..
+            }
+        ));
+
+        crate::test_complete!("conformance_budget_exhaustion_idempotent_stop");
+    }
+
+    /// Conformance: budget refusal priority — window exhaustion is checked before
+    /// per-constraint budget checks when no budget is provided.
+    #[test]
+    fn conformance_budget_refusal_checks_window_first() {
+        init_test("conformance_budget_refusal_checks_window_first");
+
+        let config = RestartConfig::new(1, Duration::from_secs(60))
+            .with_restart_cost(100)
+            .with_min_polls(500);
+
+        let mut history = RestartHistory::new(config);
+
+        // Exhaust the window
+        history.record_restart(0);
+
+        // Budget that would also fail on cost and polls
+        let bad_budget = Budget::new().with_cost_quota(10).with_poll_quota(50);
+
+        // Window exhaustion is checked first
+        let result = history.can_restart_with_budget(1_000_000_000, &bad_budget);
+        assert!(
+            matches!(result, Err(BudgetRefusal::WindowExhausted { .. })),
+            "window exhaustion should be checked before budget constraints"
+        );
+
+        crate::test_complete!("conformance_budget_refusal_checks_window_first");
+    }
+
+    /// Conformance: restart exactly at window boundary — restarts that fall
+    /// exactly on the boundary of the sliding window are correctly counted or
+    /// expired.
+    #[test]
+    fn conformance_restart_window_boundary_exact() {
+        init_test("conformance_restart_window_boundary_exact");
+
+        // Window of exactly 10 seconds, max 2 restarts
+        let config = RestartConfig::new(2, Duration::from_secs(10));
+        let mut history = RestartHistory::new(config);
+
+        // Record restarts at t=0 and t=1s
+        history.record_restart(0);
+        history.record_restart(1_000_000_000);
+
+        // At t=9.999s: both restarts still in window → cannot restart
+        assert!(!history.can_restart(9_999_999_999));
+
+        // At t=10s (exactly): the restart at t=0 is at the boundary
+        // cutoff = 10_000_000_000 - 10_000_000_000 = 0
+        // restart at t=0: 0 >= 0 → still counted
+        // restart at t=1s: 1_000_000_000 >= 0 → still counted
+        // → 2 restarts, cannot restart
+        assert!(!history.can_restart(10_000_000_000));
+
+        // At t=10.000000001s: restart at t=0 just expired
+        // cutoff = 10_000_000_001 - 10_000_000_000 = 1
+        // restart at t=0: 0 >= 1 → false, expired
+        // restart at t=1s: 1_000_000_000 >= 1 → still counted
+        // → 1 restart, can restart again
+        assert!(history.can_restart(10_000_000_001));
+
+        crate::test_complete!("conformance_restart_window_boundary_exact");
+    }
+
+    /// Conformance: supervision decision carries correct identifying fields.
+    /// The task_id, region_id, and attempt numbers in the returned
+    /// SupervisionDecision must exactly match the inputs and internal state.
+    #[test]
+    fn conformance_decision_carries_correct_ids() {
+        init_test("conformance_decision_carries_correct_ids");
+
+        let task = TaskId::from_arena(ArenaIndex::new(42, 7));
+        let region = RegionId::from_arena(ArenaIndex::new(10, 3));
+        let parent = RegionId::from_arena(ArenaIndex::new(0, 1));
+
+        // Stop strategy
+        {
+            let mut sup = Supervisor::new(SupervisionStrategy::Stop);
+            let decision = sup.on_failure(task, region, Some(parent), Outcome::Err(()), 0);
+            match decision {
+                SupervisionDecision::Stop {
+                    task_id: tid,
+                    region_id: rid,
+                    reason,
+                } => {
+                    assert_eq!(tid, task);
+                    assert_eq!(rid, region);
+                    assert_eq!(reason, StopReason::ExplicitStop);
+                }
+                other => panic!("expected Stop, got {other:?}"),
+            }
+        }
+
+        // Restart strategy — verify attempt counter increments
+        {
+            let config = RestartConfig::new(5, Duration::from_secs(60));
+            let mut sup = Supervisor::new(SupervisionStrategy::Restart(config));
+
+            for expected_attempt in 1..=3u32 {
+                let decision = sup.on_failure(
+                    task,
+                    region,
+                    Some(parent),
+                    Outcome::Err(()),
+                    u64::from(expected_attempt - 1) * 1_000_000_000,
+                );
+                match decision {
+                    SupervisionDecision::Restart {
+                        task_id: tid,
+                        region_id: rid,
+                        attempt,
+                        ..
+                    } => {
+                        assert_eq!(tid, task);
+                        assert_eq!(rid, region);
+                        assert_eq!(attempt, expected_attempt);
+                    }
+                    other => panic!("expected Restart attempt={expected_attempt}, got {other:?}"),
+                }
+            }
+        }
+
+        // Escalate strategy
+        {
+            let mut sup = Supervisor::new(SupervisionStrategy::Escalate);
+            let decision = sup.on_failure(task, region, Some(parent), Outcome::Err(()), 0);
+            match decision {
+                SupervisionDecision::Escalate {
+                    task_id: tid,
+                    region_id: rid,
+                    parent_region_id,
+                    ..
+                } => {
+                    assert_eq!(tid, task);
+                    assert_eq!(rid, region);
+                    assert_eq!(parent_region_id, Some(parent));
+                }
+                other => panic!("expected Escalate, got {other:?}"),
+            }
+        }
+
+        crate::test_complete!("conformance_decision_carries_correct_ids");
+    }
+
+    /// Conformance: restart delay in the decision matches the backoff
+    /// calculation for the correct attempt number.
+    #[test]
+    fn conformance_restart_delay_matches_backoff() {
+        init_test("conformance_restart_delay_matches_backoff");
+
+        let config = RestartConfig::new(5, Duration::from_secs(60)).with_backoff(
+            BackoffStrategy::Exponential {
+                initial: Duration::from_millis(100),
+                max: Duration::from_secs(10),
+                multiplier: 2.0,
+            },
+        );
+
+        let mut supervisor = Supervisor::new(SupervisionStrategy::Restart(config.clone()));
+
+        // Attempt 1: delay should be for attempt index 0 = 100ms
+        let d1 = supervisor.on_failure(test_task_id(), test_region_id(), None, Outcome::Err(()), 0);
+        match d1 {
+            SupervisionDecision::Restart { delay, attempt, .. } => {
+                assert_eq!(attempt, 1);
+                assert_eq!(delay, config.backoff.delay_for_attempt(0));
+            }
+            other => panic!("expected Restart, got {other:?}"),
+        }
+
+        // Attempt 2: delay should be for attempt index 1 = 200ms
+        let d2 = supervisor.on_failure(
+            test_task_id(),
+            test_region_id(),
+            None,
+            Outcome::Err(()),
+            1_000_000_000,
+        );
+        match d2 {
+            SupervisionDecision::Restart { delay, attempt, .. } => {
+                assert_eq!(attempt, 2);
+                assert_eq!(delay, config.backoff.delay_for_attempt(1));
+            }
+            other => panic!("expected Restart, got {other:?}"),
+        }
+
+        // Attempt 3: delay should be for attempt index 2 = 400ms
+        let d3 = supervisor.on_failure(
+            test_task_id(),
+            test_region_id(),
+            None,
+            Outcome::Err(()),
+            2_000_000_000,
+        );
+        match d3 {
+            SupervisionDecision::Restart { delay, attempt, .. } => {
+                assert_eq!(attempt, 3);
+                assert_eq!(delay, config.backoff.delay_for_attempt(2));
+            }
+            other => panic!("expected Restart, got {other:?}"),
+        }
+
+        crate::test_complete!("conformance_restart_delay_matches_backoff");
+    }
+
+    /// Conformance: spawn starts children in dependency order and
+    /// skips non-start_immediately children.
+    #[test]
+    fn conformance_spawn_dependency_ordered_start() {
+        init_test("conformance_spawn_dependency_ordered_start");
+
+        let log = Arc::new(Mutex::new(Vec::new()));
+
+        let builder = SupervisorBuilder::new("sup")
+            .child(ChildSpec::new(
+                "db",
+                LoggingStart {
+                    name: "db",
+                    log: Arc::clone(&log),
+                },
+            ))
+            .child(
+                ChildSpec::new(
+                    "cache",
+                    LoggingStart {
+                        name: "cache",
+                        log: Arc::clone(&log),
+                    },
+                )
+                .depends_on("db"),
+            )
+            .child(
+                ChildSpec::new(
+                    "web",
+                    LoggingStart {
+                        name: "web",
+                        log: Arc::clone(&log),
+                    },
+                )
+                .depends_on("cache"),
+            )
+            .child(
+                ChildSpec::new(
+                    "deferred",
+                    LoggingStart {
+                        name: "deferred",
+                        log: Arc::clone(&log),
+                    },
+                )
+                .depends_on("db")
+                .with_start_immediately(false),
+            );
+
+        let compiled = builder.compile().expect("compile");
+
+        // Verify start order: db, cache, web (deferred is skipped)
+        assert_eq!(compiled.start_order.len(), 4);
+        assert_eq!(compiled.children[compiled.start_order[0]].name, "db");
+        assert_eq!(compiled.children[compiled.start_order[1]].name, "cache");
+
+        // Spawn with a minimal RuntimeState
+        let mut state = RuntimeState::new();
+        let parent = state.create_root_region(Budget::INFINITE);
+        let cx: crate::cx::Cx = crate::cx::Cx::for_testing();
+        let handle = compiled
+            .spawn(&mut state, &cx, parent, Budget::INFINITE)
+            .expect("spawn");
+
+        // Verify logged start order
+        let started: Vec<String> = log.lock().expect("poisoned").clone();
+        assert_eq!(started, vec!["db", "cache", "web"]);
+
+        // deferred should not be started
+        assert!(!started.contains(&"deferred".to_string()));
+
+        // Supervisor handle has 3 started children (not deferred)
+        assert_eq!(handle.started.len(), 3);
+        assert_eq!(handle.started[0].name, "db");
+        assert_eq!(handle.started[1].name, "cache");
+        assert_eq!(handle.started[2].name, "web");
+
+        crate::test_complete!("conformance_spawn_dependency_ordered_start");
+    }
+
+    /// Conformance: non-required child start failure doesn't fail the supervisor.
+    /// Required child failure does fail the supervisor.
+    #[test]
+    fn conformance_spawn_required_vs_optional_child_failure() {
+        init_test("conformance_spawn_required_vs_optional_child_failure");
+
+        #[allow(clippy::unnecessary_wraps)]
+        fn failing_start(
+            _scope: &crate::cx::Scope<'static, crate::types::policy::FailFast>,
+            _state: &mut RuntimeState,
+            _cx: &crate::cx::Cx,
+        ) -> Result<TaskId, SpawnError> {
+            Err(SpawnError::RegionClosed(test_region_id()))
+        }
+
+        // Optional child failure: supervisor succeeds
+        {
+            let builder = SupervisorBuilder::new("sup")
+                .child(ChildSpec::new("ok_child", noop_start))
+                .child(
+                    ChildSpec::new("optional_fail", failing_start)
+                        .with_required(false)
+                        .depends_on("ok_child"),
+                );
+
+            let compiled = builder.compile().expect("compile");
+            let mut state = RuntimeState::new();
+            let parent = state.create_root_region(Budget::INFINITE);
+            let cx: crate::cx::Cx = crate::cx::Cx::for_testing();
+            let result = compiled.spawn(&mut state, &cx, parent, Budget::INFINITE);
+            assert!(
+                result.is_ok(),
+                "optional child failure should not fail supervisor"
+            );
+        }
+
+        // Required child failure: supervisor fails
+        {
+            let builder = SupervisorBuilder::new("sup")
+                .child(ChildSpec::new("ok_child", noop_start))
+                .child(
+                    ChildSpec::new("required_fail", failing_start)
+                        .with_required(true)
+                        .depends_on("ok_child"),
+                );
+
+            let compiled = builder.compile().expect("compile");
+            let mut state = RuntimeState::new();
+            let parent = state.create_root_region(Budget::INFINITE);
+            let cx: crate::cx::Cx = crate::cx::Cx::for_testing();
+            let result = compiled.spawn(&mut state, &cx, parent, Budget::INFINITE);
+            assert!(
+                result.is_err(),
+                "required child failure should fail supervisor"
+            );
+            match result.unwrap_err() {
+                SupervisorSpawnError::ChildStartFailed { child, .. } => {
+                    assert_eq!(child, "required_fail");
+                }
+                other => panic!("expected ChildStartFailed, got {other:?}"),
+            }
+        }
+
+        crate::test_complete!("conformance_spawn_required_vs_optional_child_failure");
+    }
+
+    /// Conformance: CompiledSupervisor::restart_plan_for_failure returns
+    /// None when the child has Stop strategy (even on Err outcome), and
+    /// returns a plan when the child has Restart strategy on Err.
+    /// Covers the interplay between per-child strategy and supervisor-level
+    /// restart policy.
+    #[test]
+    fn conformance_per_child_strategy_vs_supervisor_policy() {
+        init_test("conformance_per_child_strategy_vs_supervisor_policy");
+
+        let builder = SupervisorBuilder::new("sup")
+            .with_restart_policy(RestartPolicy::OneForAll)
+            .child(
+                ChildSpec::new("restartable", noop_start)
+                    .with_restart(SupervisionStrategy::Restart(RestartConfig::default())),
+            )
+            .child(
+                ChildSpec::new("stopper", noop_start)
+                    .depends_on("restartable")
+                    .with_restart(SupervisionStrategy::Stop),
+            )
+            .child(
+                ChildSpec::new("escalator", noop_start)
+                    .depends_on("restartable")
+                    .with_restart(SupervisionStrategy::Escalate),
+            );
+
+        let compiled = builder.compile().expect("compile");
+        let err: Outcome<(), ()> = Outcome::Err(());
+
+        // restartable child with Err: plan exists (restart strategy)
+        assert!(compiled
+            .restart_plan_for_failure("restartable", &err)
+            .is_some());
+
+        // stopper child with Err: no plan (stop strategy)
+        assert!(compiled.restart_plan_for_failure("stopper", &err).is_none());
+
+        // escalator child with Err: no plan (escalate strategy, not restart)
+        assert!(compiled
+            .restart_plan_for_failure("escalator", &err)
+            .is_none());
+
+        crate::test_complete!("conformance_per_child_strategy_vs_supervisor_policy");
+    }
+
+    /// Conformance: after the restart window expires, the supervisor can
+    /// restart again — demonstrating recovery from budget exhaustion.
+    #[test]
+    fn conformance_window_expiry_restores_restart_ability() {
+        init_test("conformance_window_expiry_restores_restart_ability");
+
+        // 1 restart allowed in a 5-second window
+        let config = RestartConfig::new(1, Duration::from_secs(5));
+        let mut supervisor = Supervisor::new(SupervisionStrategy::Restart(config));
+
+        // First failure at t=0: restart
+        let d1 = supervisor.on_failure(test_task_id(), test_region_id(), None, Outcome::Err(()), 0);
+        assert!(matches!(
+            d1,
+            SupervisionDecision::Restart { attempt: 1, .. }
+        ));
+
+        // Second failure at t=1s: exhausted
+        let d2 = supervisor.on_failure(
+            test_task_id(),
+            test_region_id(),
+            None,
+            Outcome::Err(()),
+            1_000_000_000,
+        );
+        assert!(matches!(
+            d2,
+            SupervisionDecision::Stop {
+                reason: StopReason::RestartBudgetExhausted { .. },
+                ..
+            }
+        ));
+
+        // Third failure at t=6s: window expired, can restart again
+        let d3 = supervisor.on_failure(
+            test_task_id(),
+            test_region_id(),
+            None,
+            Outcome::Err(()),
+            6_000_000_000,
+        );
+        assert!(
+            matches!(d3, SupervisionDecision::Restart { attempt: 1, .. }),
+            "window expiry should restore restart ability"
+        );
+
+        crate::test_complete!("conformance_window_expiry_restores_restart_ability");
+    }
+
+    /// Conformance: RestartIntensityWindow storm detection threshold is exact.
+    /// At exactly the threshold intensity, is_storm returns false; above
+    /// the threshold it returns true.
+    #[test]
+    fn conformance_intensity_storm_threshold_boundary() {
+        init_test("conformance_intensity_storm_threshold_boundary");
+
+        // Threshold: 2.0 restarts/second in a 10-second window
+        // → 20 restarts at threshold
+        let mut window = RestartIntensityWindow::new(Duration::from_secs(10), 2.0);
+
+        // Record exactly 20 restarts within the 10s window
+        for i in 0u64..20 {
+            window.record(i * 500_000_000); // every 0.5s
+        }
+
+        let now = 10_000_000_000; // t=10s
+        let intensity = window.intensity(now);
+        assert!(
+            (intensity - 2.0).abs() < 0.01,
+            "20 restarts in 10s should be ~2.0/s"
+        );
+        // At exactly the threshold: not a storm (uses > not >=)
+        assert!(!window.is_storm(now));
+
+        // One more restart pushes above threshold
+        window.record(10_000_000_000);
+        assert!(window.is_storm(10_000_000_000));
+
+        crate::test_complete!("conformance_intensity_storm_threshold_boundary");
+    }
+
+    /// Conformance: compile detects duplicate child names.
+    #[test]
+    fn conformance_compile_rejects_duplicate_names() {
+        init_test("conformance_compile_rejects_duplicate_names");
+
+        let builder = SupervisorBuilder::new("sup")
+            .child(ChildSpec::new("worker", noop_start))
+            .child(ChildSpec::new("worker", noop_start));
+
+        let result = builder.compile();
+        assert!(matches!(
+            result,
+            Err(SupervisorCompileError::DuplicateChildName(ref name)) if name == "worker"
+        ));
+
+        crate::test_complete!("conformance_compile_rejects_duplicate_names");
+    }
+
+    /// Conformance: compile detects unknown dependency references.
+    #[test]
+    fn conformance_compile_rejects_unknown_dependency() {
+        init_test("conformance_compile_rejects_unknown_dependency");
+
+        let builder = SupervisorBuilder::new("sup")
+            .child(ChildSpec::new("a", noop_start).depends_on("nonexistent"));
+
+        let result = builder.compile();
+        assert!(matches!(
+            result,
+            Err(SupervisorCompileError::UnknownDependency { ref child, ref depends_on })
+                if child == "a" && depends_on == "nonexistent"
+        ));
+
+        crate::test_complete!("conformance_compile_rejects_unknown_dependency");
+    }
+
+    /// Conformance: compile detects dependency cycles.
+    #[test]
+    fn conformance_compile_rejects_cycles() {
+        init_test("conformance_compile_rejects_cycles");
+
+        let builder = SupervisorBuilder::new("sup")
+            .child(ChildSpec::new("a", noop_start).depends_on("c"))
+            .child(ChildSpec::new("b", noop_start).depends_on("a"))
+            .child(ChildSpec::new("c", noop_start).depends_on("b"));
+
+        let result = builder.compile();
+        match result {
+            Err(SupervisorCompileError::CycleDetected { remaining }) => {
+                // All three are in the cycle
+                assert_eq!(remaining.len(), 3);
+                assert!(remaining.contains(&"a".to_string()));
+                assert!(remaining.contains(&"b".to_string()));
+                assert!(remaining.contains(&"c".to_string()));
+            }
+            other => panic!("expected CycleDetected, got {other:?}"),
+        }
+
+        crate::test_complete!("conformance_compile_rejects_cycles");
+    }
+
+    /// Conformance: NameLex tie-break produces alphabetical start order
+    /// for children with no inter-dependencies.
+    #[test]
+    fn conformance_name_lex_tie_break() {
+        init_test("conformance_name_lex_tie_break");
+
+        let builder = SupervisorBuilder::new("sup")
+            .with_tie_break(StartTieBreak::NameLex)
+            .child(ChildSpec::new("zulu", noop_start))
+            .child(ChildSpec::new("alpha", noop_start))
+            .child(ChildSpec::new("mike", noop_start));
+
+        let compiled = builder.compile().expect("compile");
+
+        let names: Vec<&str> = compiled
+            .start_order
+            .iter()
+            .map(|&idx| compiled.children[idx].name.as_str())
+            .collect();
+
+        assert_eq!(names, vec!["alpha", "mike", "zulu"]);
+
+        crate::test_complete!("conformance_name_lex_tie_break");
     }
 }
