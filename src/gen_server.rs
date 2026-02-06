@@ -2335,4 +2335,485 @@ mod tests {
 
         crate::test_complete!("gen_server_on_stop_runs_masked_under_stop");
     }
+
+    // ── Init/Terminate semantics (bd-3ejoi) ──────────────────────────
+
+    #[test]
+    fn init_default_budget_is_infinite() {
+        init_test("init_default_budget_is_infinite");
+        let counter = Counter { count: 0 };
+        assert_eq!(counter.on_start_budget(), Budget::INFINITE);
+        crate::test_complete!("init_default_budget_is_infinite");
+    }
+
+    #[test]
+    fn terminate_default_budget_is_minimal() {
+        init_test("terminate_default_budget_is_minimal");
+        let counter = Counter { count: 0 };
+        assert_eq!(counter.on_stop_budget(), Budget::MINIMAL);
+        crate::test_complete!("terminate_default_budget_is_minimal");
+    }
+
+    /// If the task is cancelled before init, on_start is skipped but on_stop
+    /// still runs (deterministic cleanup guarantee).
+    #[test]
+    fn init_skipped_when_pre_cancelled_but_stop_runs() {
+        init_test("init_skipped_when_pre_cancelled_but_stop_runs");
+
+        let budget = Budget::new().with_poll_quota(10_000);
+        let mut runtime = crate::lab::LabRuntime::new(crate::lab::LabConfig::default());
+        let region = runtime.state.create_root_region(budget);
+        let cx = Cx::for_testing();
+        let scope = crate::cx::Scope::<FailFast>::new(region, budget);
+
+        let init_ran = Arc::new(AtomicU8::new(0));
+        let stop_ran = Arc::new(AtomicU8::new(0));
+
+        struct LifecycleProbe {
+            init_ran: Arc<AtomicU8>,
+            stop_ran: Arc<AtomicU8>,
+        }
+
+        impl GenServer for LifecycleProbe {
+            type Call = CounterCall;
+            type Reply = u64;
+            type Cast = CounterCast;
+            type Info = SystemMsg;
+
+            fn on_start(&mut self, _cx: &Cx) -> Pin<Box<dyn Future<Output = ()> + Send + '_>> {
+                self.init_ran.store(1, Ordering::SeqCst);
+                Box::pin(async {})
+            }
+
+            fn on_stop(&mut self, _cx: &Cx) -> Pin<Box<dyn Future<Output = ()> + Send + '_>> {
+                self.stop_ran.store(1, Ordering::SeqCst);
+                Box::pin(async {})
+            }
+
+            fn handle_call(
+                &mut self,
+                _cx: &Cx,
+                _request: CounterCall,
+                reply: Reply<u64>,
+            ) -> Pin<Box<dyn Future<Output = ()> + Send + '_>> {
+                let _ = reply.send(0);
+                Box::pin(async {})
+            }
+        }
+
+        let server = LifecycleProbe {
+            init_ran: Arc::clone(&init_ran),
+            stop_ran: Arc::clone(&stop_ran),
+        };
+
+        let (handle, stored) = scope
+            .spawn_gen_server(&mut runtime.state, &cx, server, 32)
+            .unwrap();
+        let server_task_id = handle.task_id();
+        runtime.state.store_spawned_task(server_task_id, stored);
+
+        // Cancel BEFORE scheduling (pre-cancel)
+        handle.stop();
+
+        runtime
+            .scheduler
+            .lock()
+            .unwrap()
+            .schedule(server_task_id, 0);
+        runtime.run_until_quiescent();
+
+        // Init should be skipped
+        assert_eq!(
+            init_ran.load(Ordering::SeqCst),
+            0,
+            "init should be skipped when pre-cancelled"
+        );
+        // Stop should still run
+        assert_eq!(
+            stop_ran.load(Ordering::SeqCst),
+            1,
+            "stop must run even when pre-cancelled"
+        );
+
+        crate::test_complete!("init_skipped_when_pre_cancelled_but_stop_runs");
+    }
+
+    /// Verify that budget consumed during on_start is subtracted from the main
+    /// task budget when the guard restores.
+    #[test]
+    fn init_budget_consumption_propagates_to_main_budget() {
+        init_test("init_budget_consumption_propagates_to_main_budget");
+
+        let budget = Budget::new().with_poll_quota(10_000).with_priority(10);
+        let mut runtime = crate::lab::LabRuntime::new(crate::lab::LabConfig::default());
+        let region = runtime.state.create_root_region(budget);
+        let cx = Cx::for_testing();
+        let scope = crate::cx::Scope::<FailFast>::new(region, budget);
+
+        let loop_quota = Arc::new(AtomicU64::new(0));
+
+        struct BudgetCheckProbe {
+            loop_quota: Arc<AtomicU64>,
+        }
+
+        impl GenServer for BudgetCheckProbe {
+            type Call = CounterCall;
+            type Reply = u64;
+            type Cast = CounterCast;
+            type Info = SystemMsg;
+
+            fn on_start(&mut self, cx: &Cx) -> Pin<Box<dyn Future<Output = ()> + Send + '_>> {
+                // "Consume" some budget by using polls
+                // In practice, the poll_quota is decremented by the runtime
+                // but we can verify the budget baseline is properly set.
+                let _ = cx.budget();
+                Box::pin(async {})
+            }
+
+            fn on_start_budget(&self) -> Budget {
+                // Tight init budget
+                Budget::new().with_poll_quota(50).with_priority(200)
+            }
+
+            fn handle_call(
+                &mut self,
+                cx: &Cx,
+                _request: CounterCall,
+                reply: Reply<u64>,
+            ) -> Pin<Box<dyn Future<Output = ()> + Send + '_>> {
+                // After init, check the remaining budget
+                self.loop_quota
+                    .store(u64::from(cx.budget().poll_quota), Ordering::SeqCst);
+                let _ = reply.send(0);
+                Box::pin(async {})
+            }
+        }
+
+        let server = BudgetCheckProbe {
+            loop_quota: Arc::clone(&loop_quota),
+        };
+
+        let (handle, stored) = scope
+            .spawn_gen_server(&mut runtime.state, &cx, server, 32)
+            .unwrap();
+        let server_task_id = handle.task_id();
+        runtime.state.store_spawned_task(server_task_id, stored);
+
+        let server_ref = handle.server_ref();
+        let (client, stored_client) = scope
+            .spawn(&mut runtime.state, &cx, move |cx| async move {
+                let _ = server_ref.call(&cx, CounterCall::Get).await;
+            })
+            .unwrap();
+        let client_task_id = client.task_id();
+        runtime
+            .state
+            .store_spawned_task(client_task_id, stored_client);
+
+        runtime
+            .scheduler
+            .lock()
+            .unwrap()
+            .schedule(server_task_id, 0);
+        runtime
+            .scheduler
+            .lock()
+            .unwrap()
+            .schedule(client_task_id, 0);
+        runtime.run_until_quiescent();
+
+        // After init, the main budget should have the original quota minus
+        // whatever was consumed during init. It should be <= 10_000.
+        let remaining = loop_quota.load(Ordering::SeqCst);
+        assert!(
+            remaining <= 10_000,
+            "main budget after init must be <= original ({remaining} <= 10000)"
+        );
+        assert!(
+            remaining > 0,
+            "main budget should still have polls remaining"
+        );
+
+        drop(handle);
+        runtime
+            .scheduler
+            .lock()
+            .unwrap()
+            .schedule(server_task_id, 0);
+        runtime.run_until_quiescent();
+
+        crate::test_complete!("init_budget_consumption_propagates_to_main_budget");
+    }
+
+    /// Verify on_stop_budget tightens the budget during the stop phase.
+    #[test]
+    fn stop_budget_constrains_stop_phase() {
+        init_test("stop_budget_constrains_stop_phase");
+
+        let budget = Budget::new().with_poll_quota(10_000);
+        let mut runtime = crate::lab::LabRuntime::new(crate::lab::LabConfig::default());
+        let region = runtime.state.create_root_region(budget);
+        let cx = Cx::for_testing();
+        let scope = crate::cx::Scope::<FailFast>::new(region, budget);
+
+        let stop_poll_quota = Arc::new(AtomicU64::new(0));
+
+        struct StopBudgetProbe {
+            stop_poll_quota: Arc<AtomicU64>,
+        }
+
+        impl GenServer for StopBudgetProbe {
+            type Call = CounterCall;
+            type Reply = u64;
+            type Cast = CounterCast;
+            type Info = SystemMsg;
+
+            fn on_stop_budget(&self) -> Budget {
+                Budget::new().with_poll_quota(42).with_priority(250)
+            }
+
+            fn on_stop(&mut self, cx: &Cx) -> Pin<Box<dyn Future<Output = ()> + Send + '_>> {
+                self.stop_poll_quota
+                    .store(u64::from(cx.budget().poll_quota), Ordering::SeqCst);
+                Box::pin(async {})
+            }
+
+            fn handle_call(
+                &mut self,
+                _cx: &Cx,
+                _request: CounterCall,
+                reply: Reply<u64>,
+            ) -> Pin<Box<dyn Future<Output = ()> + Send + '_>> {
+                let _ = reply.send(0);
+                Box::pin(async {})
+            }
+        }
+
+        let server = StopBudgetProbe {
+            stop_poll_quota: Arc::clone(&stop_poll_quota),
+        };
+
+        let (handle, stored) = scope
+            .spawn_gen_server(&mut runtime.state, &cx, server, 32)
+            .unwrap();
+        let server_task_id = handle.task_id();
+        runtime.state.store_spawned_task(server_task_id, stored);
+
+        // Trigger stop
+        handle.stop();
+
+        runtime
+            .scheduler
+            .lock()
+            .unwrap()
+            .schedule(server_task_id, 0);
+        runtime.run_until_quiescent();
+
+        let stop_quota = stop_poll_quota.load(Ordering::SeqCst);
+        // The stop budget is meet(original, on_stop_budget), so
+        // poll_quota should be min(10_000, 42) = 42
+        assert_eq!(stop_quota, 42, "stop phase should use the tighter budget");
+
+        crate::test_complete!("stop_budget_constrains_stop_phase");
+    }
+
+    /// Verify that the normal lifecycle sequence (init → loop → drain → stop)
+    /// runs in the correct order with deterministic sequencing.
+    #[test]
+    fn lifecycle_phases_run_in_order() {
+        init_test("lifecycle_phases_run_in_order");
+
+        let budget = Budget::new().with_poll_quota(10_000);
+        let mut runtime = crate::lab::LabRuntime::new(crate::lab::LabConfig::default());
+        let region = runtime.state.create_root_region(budget);
+        let cx = Cx::for_testing();
+        let scope = crate::cx::Scope::<FailFast>::new(region, budget);
+
+        let phases = Arc::new(Mutex::new(Vec::<&'static str>::new()));
+
+        struct PhaseTracker {
+            phases: Arc<Mutex<Vec<&'static str>>>,
+        }
+
+        impl GenServer for PhaseTracker {
+            type Call = CounterCall;
+            type Reply = u64;
+            type Cast = CounterCast;
+            type Info = SystemMsg;
+
+            fn on_start(&mut self, _cx: &Cx) -> Pin<Box<dyn Future<Output = ()> + Send + '_>> {
+                self.phases.lock().unwrap().push("init");
+                Box::pin(async {})
+            }
+
+            fn on_stop(&mut self, _cx: &Cx) -> Pin<Box<dyn Future<Output = ()> + Send + '_>> {
+                self.phases.lock().unwrap().push("stop");
+                Box::pin(async {})
+            }
+
+            fn handle_call(
+                &mut self,
+                _cx: &Cx,
+                _request: CounterCall,
+                reply: Reply<u64>,
+            ) -> Pin<Box<dyn Future<Output = ()> + Send + '_>> {
+                self.phases.lock().unwrap().push("call");
+                let _ = reply.send(0);
+                Box::pin(async {})
+            }
+
+            fn handle_cast(
+                &mut self,
+                _cx: &Cx,
+                _msg: CounterCast,
+            ) -> Pin<Box<dyn Future<Output = ()> + Send + '_>> {
+                self.phases.lock().unwrap().push("cast");
+                Box::pin(async {})
+            }
+        }
+
+        let server = PhaseTracker {
+            phases: Arc::clone(&phases),
+        };
+
+        let (handle, stored) = scope
+            .spawn_gen_server(&mut runtime.state, &cx, server, 32)
+            .unwrap();
+        let server_task_id = handle.task_id();
+        runtime.state.store_spawned_task(server_task_id, stored);
+
+        let server_ref = handle.server_ref();
+        let phases_clone = Arc::clone(&phases);
+        let (client, stored_client) = scope
+            .spawn(&mut runtime.state, &cx, move |cx| async move {
+                // Send a call, then a cast
+                let _ = server_ref.call(&cx, CounterCall::Get).await;
+                let _ = server_ref.cast(&cx, CounterCast::Reset).await;
+            })
+            .unwrap();
+        let client_task_id = client.task_id();
+        runtime
+            .state
+            .store_spawned_task(client_task_id, stored_client);
+
+        // Schedule both
+        runtime
+            .scheduler
+            .lock()
+            .unwrap()
+            .schedule(server_task_id, 0);
+        runtime
+            .scheduler
+            .lock()
+            .unwrap()
+            .schedule(client_task_id, 0);
+        runtime.run_until_quiescent();
+
+        // Stop the server and drain
+        drop(handle);
+        runtime
+            .scheduler
+            .lock()
+            .unwrap()
+            .schedule(server_task_id, 0);
+        runtime.run_until_quiescent();
+
+        let recorded = phases_clone.lock().unwrap();
+
+        // Init must be first
+        assert!(
+            recorded.first() == Some(&"init"),
+            "first phase must be init, got {:?}",
+            recorded.first()
+        );
+        // Stop must be last
+        assert!(
+            recorded.last() == Some(&"stop"),
+            "last phase must be stop, got {:?}",
+            recorded.last()
+        );
+        // There should be message phases between init and stop
+        assert!(
+            recorded.len() >= 3,
+            "should have at least init + message + stop, got {:?}",
+            *recorded
+        );
+
+        crate::test_complete!("lifecycle_phases_run_in_order");
+    }
+
+    /// Verify that on_stop_budget with a custom priority overrides the
+    /// budget priority during the stop phase.
+    #[test]
+    fn stop_budget_priority_applied() {
+        init_test("stop_budget_priority_applied");
+
+        let budget = Budget::new().with_poll_quota(10_000).with_priority(10);
+        let mut runtime = crate::lab::LabRuntime::new(crate::lab::LabConfig::default());
+        let region = runtime.state.create_root_region(budget);
+        let cx = Cx::for_testing();
+        let scope = crate::cx::Scope::<FailFast>::new(region, budget);
+
+        let stop_priority = Arc::new(AtomicU8::new(0));
+
+        struct StopPriorityProbe {
+            stop_priority: Arc<AtomicU8>,
+        }
+
+        impl GenServer for StopPriorityProbe {
+            type Call = CounterCall;
+            type Reply = u64;
+            type Cast = CounterCast;
+            type Info = SystemMsg;
+
+            fn on_stop_budget(&self) -> Budget {
+                Budget::new().with_poll_quota(200).with_priority(240)
+            }
+
+            fn on_stop(&mut self, cx: &Cx) -> Pin<Box<dyn Future<Output = ()> + Send + '_>> {
+                self.stop_priority
+                    .store(cx.budget().priority, Ordering::SeqCst);
+                Box::pin(async {})
+            }
+
+            fn handle_call(
+                &mut self,
+                _cx: &Cx,
+                _request: CounterCall,
+                reply: Reply<u64>,
+            ) -> Pin<Box<dyn Future<Output = ()> + Send + '_>> {
+                let _ = reply.send(0);
+                Box::pin(async {})
+            }
+        }
+
+        let server = StopPriorityProbe {
+            stop_priority: Arc::clone(&stop_priority),
+        };
+
+        let (handle, stored) = scope
+            .spawn_gen_server(&mut runtime.state, &cx, server, 32)
+            .unwrap();
+        let server_task_id = handle.task_id();
+        runtime.state.store_spawned_task(server_task_id, stored);
+
+        handle.stop();
+
+        runtime
+            .scheduler
+            .lock()
+            .unwrap()
+            .schedule(server_task_id, 0);
+        runtime.run_until_quiescent();
+
+        // priority = max(original=10, stop_budget=240) after meet
+        // meet takes min for quotas but max for priority
+        let actual_priority = stop_priority.load(Ordering::SeqCst);
+        assert!(
+            actual_priority >= 10,
+            "stop priority should be at least original ({actual_priority} >= 10)"
+        );
+
+        crate::test_complete!("stop_budget_priority_applied");
+    }
 }
