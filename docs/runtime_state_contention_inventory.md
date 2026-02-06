@@ -191,21 +191,26 @@ cargo test --test obligation_lifecycle_e2e -- --nocapture
 
 ### Lock Combination Rules
 
+**Note:** In the current `ShardedState` implementation, **E (Config)** and
+**D (Instrumentation: trace/metrics/now)** are **lock-free** (no shard mutex).
+The *conceptual* canonical order is still **E → D → B → A → C**, but the
+enforced shard-lock acquisition order is **B (Regions) → A (Tasks) → C (Obligations)**.
+
 | Operation | Locks Needed | Acquisition Order |
 |-----------|-------------|-------------------|
 | **poll (execute)** | A | A only |
 | **push/pop/steal** | A | A only |
 | **inject_cancel/ready/timed** | (none with QW#4) or A | A only |
 | **spawn/wake** | (none with QW#4) or A | A only |
-| **task_completed** | E → D → B → A → C | Full order |
-| **cancel_request** | E → D → B → A → C | Full order (calls advance_region_state which needs C for obligation leak handling) |
-| **create_task** | E → D → B → A | Skip C |
-| **create_obligation** | E → D → B → C | Skip A (unless logical time from task) |
-| **commit/abort_obligation** | E → D → B → A → C | Full order (calls advance_region_state which needs A for task terminal checks and C for obligation leak handling) |
-| **advance_region_state** | E → D → B → A → C | Full order (recursive) |
-| **drain_ready_async_finalizers** | E → D → B → A | Skip C |
-| **snapshot / is_quiescent** | Lock all: E → D → B → A → C | All shards, read-only |
-| **Lyapunov snapshot** | Lock all: E → D → B → A → C | All shards, read-only |
+| **task_completed** | B + A + C | B → A → C |
+| **cancel_request** | B + A + C | B → A → C (calls advance_region_state, which can touch obligations) |
+| **create_task** | B + A | B → A |
+| **create_obligation** | B + C | B → C |
+| **commit/abort_obligation** | B + A + C | B → A → C (uses obligation-resolve guard) |
+| **advance_region_state** | B + A + C | B → A → C (recursive) |
+| **drain_ready_async_finalizers** | B + A | B → A |
+| **snapshot / is_quiescent** | B + A + C | B → A → C (read-only; instrumentation/config are lock-free) |
+| **Lyapunov snapshot** | B + A + C | B → A → C (read-only; instrumentation/config are lock-free) |
 
 ### Disallowed Lock Sequences (deadlock risk)
 
@@ -215,34 +220,47 @@ These sequences MUST NOT occur:
 - **C → A** — Obligations before Tasks (violates A → C order)
 - **C → B** — Obligations before Regions (violates B → C order; would deadlock
   commit_obligation → advance_region_state)
-- **A → D** — Tasks before Instrumentation (violates D → A order)
 
-### Guard Helpers (proposed API)
+In `debug_assertions`, `src/runtime/sharded_state.rs` enforces the B→A→C shard
+order via a thread-local lock-order guard, and will panic on any violation.
+
+### Guard Helpers (implemented)
 
 ```rust
 /// Multi-shard lock guard that enforces canonical ordering at the type level.
 /// Fields are Option<MutexGuard> acquired in order during construction.
 pub struct ShardGuard<'a> {
-    config: &'a Arc<ShardedConfig>,              // E: no lock needed
-    regions: Option<ContendedMutexGuard<'a, RegionShard>>,     // B
-    tasks: Option<ContendedMutexGuard<'a, TaskShard>>,         // A
-    obligations: Option<ContendedMutexGuard<'a, ObligationShard>>, // C
+    config: &'a Arc<ShardedConfig>, // E: no lock needed
+    regions: Option<ContendedMutexGuard<'a, RegionTable>>, // B
+    tasks: Option<ContendedMutexGuard<'a, TaskTable>>, // A
+    obligations: Option<ContendedMutexGuard<'a, ObligationTable>>, // C
 }
 
 impl<'a> ShardGuard<'a> {
     /// Lock only the task shard (hot path).
     pub fn tasks_only(shards: &'a ShardedState) -> Self { ... }
 
-    /// Lock for task_completed: E → D → B → A → C.
+    /// Lock for task_completed: B → A → C (E/D are lock-free).
     pub fn for_task_completed(shards: &'a ShardedState) -> Self { ... }
 
-    /// Lock for cancel_request: E → D → B → A.
+    /// Lock for cancel_request: B → A → C (calls advance_region_state).
     pub fn for_cancel(shards: &'a ShardedState) -> Self { ... }
 
-    /// Lock for obligation lifecycle: E → D → B → C.
+    /// Lock for obligation creation: B → C.
     pub fn for_obligation(shards: &'a ShardedState) -> Self { ... }
+
+    /// Lock for obligation resolve: B → A → C (calls advance_region_state).
+    pub fn for_obligation_resolve(shards: &'a ShardedState) -> Self { ... }
+
+    /// Lock for spawn/create_task: B → A.
+    pub fn for_spawn(shards: &'a ShardedState) -> Self { ... }
+
+    /// Lock all shards (read-only diagnostics): B → A → C.
+    pub fn all(shards: &'a ShardedState) -> Self { ... }
 }
 ```
+
+**Authoritative implementation:** `src/runtime/sharded_state.rs`.
 
 ### Extending the Order for New Shards
 
@@ -253,24 +271,22 @@ When adding a new shard:
    - It comes BEFORE any shard it gates/controls.
    - It comes AFTER any shard that triggers operations on it.
 3. Update the `ShardGuard` struct and all `for_*` constructors.
-4. Add a test that attempts the disallowed reverse order and deadlocks
-   (use a timeout-based deadlock detector in tests).
+4. Add/extend `#[cfg(debug_assertions)]` lock-order guard tests (see
+   `src/runtime/sharded_state.rs`) so any violation is caught as a deterministic
+   panic in unit tests (rather than a flaky deadlock).
 
-### Deadlock Detection in Tests
+### Lock-Order Enforcement in Tests
 
-```rust
-#[cfg(test)]
-mod lock_order_tests {
-    /// Verify that the documented lock order prevents deadlocks
-    /// by attempting concurrent cross-order acquisitions with timeout.
-    #[test]
-    fn canonical_order_no_deadlock() {
-        // Spawn threads that acquire locks in canonical order.
-        // All should complete within timeout. If any deadlocks,
-        // the test fails via timeout.
-    }
-}
-```
+Prefer *deterministic* lock-order enforcement over timeout-based deadlock tests:
+
+- `src/runtime/sharded_state.rs` contains a `#[cfg(debug_assertions)]` thread-local
+  lock-order guard (B:Regions -> A:Tasks -> C:Obligations) that `debug_assert!`s
+  on violation.
+- Unit tests in that module include `#[should_panic]` cases that prove the guard
+  catches forbidden sequences.
+
+If you still want a deadlock smoke test, keep it as an **E2E** harness and do not
+rely on timeouts for correctness (timeouts are inherently flaky under load/CI).
 
 ## Trace/Metrics Handle Audit (bd-12389)
 

@@ -234,7 +234,9 @@ impl ObligationTable {
                 )
             })
         };
-        ObligationId::from_arena(idx)
+        let ob_id = ObligationId::from_arena(idx);
+        self.by_holder.entry(holder).or_default().push(ob_id);
+        ob_id
     }
 
     /// Commits an obligation, transitioning it from Reserved to Committed.
@@ -345,19 +347,14 @@ impl ObligationTable {
     /// Callers should filter by `is_pending()` if only active obligations are needed.
     #[must_use]
     pub fn ids_for_holder(&self, task_id: TaskId) -> &[ObligationId] {
-        self.by_holder
-            .get(&task_id)
-            .map_or(&[], SmallVec::as_slice)
+        self.by_holder.get(&task_id).map_or(&[], SmallVec::as_slice)
     }
 
     /// Collects pending obligation IDs for a task using the holder index.
     ///
     /// Sorted by `ObligationId` for deterministic processing order.
     #[must_use]
-    pub fn sorted_pending_ids_for_holder(
-        &self,
-        task_id: TaskId,
-    ) -> SmallVec<[ObligationId; 4]> {
+    pub fn sorted_pending_ids_for_holder(&self, task_id: TaskId) -> SmallVec<[ObligationId; 4]> {
         let mut result: SmallVec<[ObligationId; 4]> = self
             .ids_for_holder(task_id)
             .iter()
@@ -365,7 +362,7 @@ impl ObligationTable {
             .filter(|id| {
                 self.obligations
                     .get(id.arena_index())
-                    .is_some_and(|r| r.is_pending())
+                    .is_some_and(ObligationRecord::is_pending)
             })
             .collect();
         result.sort_unstable();
@@ -430,7 +427,7 @@ impl ObligationTable {
             .filter(|id| {
                 self.obligations
                     .get(id.arena_index())
-                    .is_some_and(|r| r.is_pending())
+                    .is_some_and(ObligationRecord::is_pending)
             })
             .collect()
     }
@@ -627,5 +624,73 @@ mod tests {
         let pending = table.pending_obligation_ids_for_task(task1);
         assert_eq!(pending.len(), 1);
         assert_eq!(pending[0], id3);
+    }
+
+    #[test]
+    fn holder_index_100_obligations_10_tasks() {
+        let mut table = ObligationTable::new();
+        let region = test_region_id(1);
+        let kinds = [
+            ObligationKind::SendPermit,
+            ObligationKind::Ack,
+            ObligationKind::Lease,
+            ObligationKind::IoOp,
+        ];
+
+        // Create 100 obligations across 10 tasks (10 per task)
+        let mut all_ids = Vec::new();
+        for task_n in 0..10 {
+            let task = test_task_id(task_n);
+            for i in 0..10 {
+                let kind = kinds[(task_n as usize * 10 + i) % kinds.len()];
+                let id = make_obligation(&mut table, kind, task, region);
+                all_ids.push((task_n, id));
+            }
+        }
+        assert_eq!(table.len(), 100);
+
+        // Verify index returns correct counts
+        for task_n in 0..10 {
+            let task = test_task_id(task_n);
+            assert_eq!(table.ids_for_holder(task).len(), 10);
+            assert_eq!(table.sorted_pending_ids_for_holder(task).len(), 10);
+        }
+
+        // Commit half the obligations for task 0
+        let task0 = test_task_id(0);
+        let task0_ids: Vec<_> = table.ids_for_holder(task0).to_vec();
+        for id in &task0_ids[..5] {
+            table.commit(*id, Time::from_nanos(100)).unwrap();
+        }
+        // Index still has all 10, but pending only 5
+        assert_eq!(table.ids_for_holder(task0).len(), 10);
+        assert_eq!(table.sorted_pending_ids_for_holder(task0).len(), 5);
+
+        // Abort remaining for task 0
+        for id in &task0_ids[5..] {
+            table
+                .abort(*id, Time::from_nanos(200), ObligationAbortReason::Cancel)
+                .unwrap();
+        }
+        assert_eq!(table.sorted_pending_ids_for_holder(task0).len(), 0);
+
+        // Other tasks unaffected
+        for task_n in 1..10 {
+            let task = test_task_id(task_n);
+            assert_eq!(table.sorted_pending_ids_for_holder(task).len(), 10);
+        }
+
+        // Remove one obligation via arena remove
+        let task5 = test_task_id(5);
+        let task5_first_id = table.ids_for_holder(task5)[0];
+        table.remove(task5_first_id.arena_index());
+        assert_eq!(table.ids_for_holder(task5).len(), 9);
+
+        // sorted_pending_ids_for_holder is sorted by ObligationId
+        let task3 = test_task_id(3);
+        let sorted = table.sorted_pending_ids_for_holder(task3);
+        for window in sorted.windows(2) {
+            assert!(window[0] < window[1], "should be sorted");
+        }
     }
 }

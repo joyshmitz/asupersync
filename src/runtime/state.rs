@@ -1002,10 +1002,7 @@ impl RuntimeState {
     }
 
     /// Collect obligation leaks for a specific task holder using the secondary index.
-    fn collect_obligation_leaks_for_holder(
-        &self,
-        task_id: TaskId,
-    ) -> Vec<LeakedObligationInfo> {
+    fn collect_obligation_leaks_for_holder(&self, task_id: TaskId) -> Vec<LeakedObligationInfo> {
         self.obligations
             .ids_for_holder(task_id)
             .iter()
@@ -5780,5 +5777,321 @@ mod tests {
             state.leak_count()
         );
         crate::test_complete!("no_escalation_when_not_configured");
+    }
+
+    // ── bd-2wfti: Cross-entity lock ordering regression tests ──────────
+    //
+    // These tests exercise multi-entity state machine transitions that will
+    // need to hold multiple shard locks (B→A→C) once RuntimeState is migrated
+    // to ShardedState. They serve as safety nets for that migration.
+
+    #[test]
+    #[allow(clippy::too_many_lines)]
+    fn three_level_cascade_with_obligations() {
+        // Verifies: cancel propagation through 3-level region tree with
+        // obligations at each level. Tests the B→A→C lock ordering path
+        // through advance_region_state's cascading parent advancement.
+        init_test("three_level_cascade_with_obligations");
+        let mut state = RuntimeState::new();
+        state.obligation_leak_response = ObligationLeakResponse::Silent;
+        let root = state.create_root_region(Budget::INFINITE);
+        let child = create_child_region(&mut state, root);
+        let grandchild = create_child_region(&mut state, child);
+
+        // Insert tasks at each level
+        let root_task = insert_task(&mut state, root);
+        let child_task = insert_task(&mut state, child);
+        let gc_task = insert_task(&mut state, grandchild);
+
+        // Create obligations at each level
+        let _root_obl = state
+            .create_obligation(ObligationKind::SendPermit, root_task, root, None)
+            .expect("root obl");
+        let child_obl = state
+            .create_obligation(ObligationKind::Ack, child_task, child, None)
+            .expect("child obl");
+        let _gc_obl = state
+            .create_obligation(ObligationKind::IoOp, gc_task, grandchild, None)
+            .expect("gc obl");
+
+        crate::assert_with_log!(
+            state.pending_obligation_count() == 3,
+            "three pending obligations across tree",
+            3usize,
+            state.pending_obligation_count()
+        );
+
+        // Cancel root (propagates to child and grandchild)
+        let tasks_to_schedule = state.cancel_request(root, &CancelReason::user("shutdown"), None);
+        crate::assert_with_log!(
+            tasks_to_schedule.len() == 3,
+            "all three tasks scheduled for cancel",
+            3usize,
+            tasks_to_schedule.len()
+        );
+
+        // Complete leaf-first: grandchild task (gc_obl auto-aborted)
+        state
+            .task_mut(gc_task)
+            .expect("gc_task")
+            .complete(Outcome::Cancelled(CancelReason::parent_cancelled()));
+        let _ = state.task_completed(gc_task);
+
+        // Grandchild region should close (no tasks, no children, no pending obligations)
+        let gc_state = state
+            .regions
+            .get(grandchild.arena_index())
+            .expect("grandchild")
+            .state();
+        crate::assert_with_log!(
+            gc_state == RegionState::Closed,
+            "grandchild closed",
+            RegionState::Closed,
+            gc_state
+        );
+
+        // Child still open (child_task alive with child_obl)
+        let child_state_now = state
+            .regions
+            .get(child.arena_index())
+            .expect("child")
+            .state();
+        let child_still_active = !matches!(child_state_now, RegionState::Closed);
+        crate::assert_with_log!(
+            child_still_active,
+            "child not yet closed",
+            true,
+            child_still_active
+        );
+
+        // Commit child obligation explicitly, then complete child task
+        let _ = state
+            .commit_obligation(child_obl)
+            .expect("commit child obl");
+        state
+            .task_mut(child_task)
+            .expect("child_task")
+            .complete(Outcome::Cancelled(CancelReason::parent_cancelled()));
+        let _ = state.task_completed(child_task);
+
+        // Child region should close (no tasks, no children, obligation committed)
+        let child_state_final = state
+            .regions
+            .get(child.arena_index())
+            .expect("child")
+            .state();
+        crate::assert_with_log!(
+            child_state_final == RegionState::Closed,
+            "child closed after task + obligation resolved",
+            RegionState::Closed,
+            child_state_final
+        );
+
+        // Root still open (root_task alive with root_obl)
+        let root_state_mid = state.regions.get(root.arena_index()).expect("root").state();
+        let root_not_closed = !matches!(root_state_mid, RegionState::Closed);
+        crate::assert_with_log!(
+            root_not_closed,
+            "root not yet closed",
+            true,
+            root_not_closed
+        );
+
+        // Complete root task (root_obl orphaned, auto-aborted via leak detection)
+        state
+            .task_mut(root_task)
+            .expect("root_task")
+            .complete(Outcome::Cancelled(CancelReason::user("shutdown")));
+        let _ = state.task_completed(root_task);
+
+        // Root should close (all children closed, all tasks done, obligations resolved)
+        let root_state_final = state.regions.get(root.arena_index()).expect("root").state();
+        crate::assert_with_log!(
+            root_state_final == RegionState::Closed,
+            "root closed after full cascade",
+            RegionState::Closed,
+            root_state_final
+        );
+
+        // All obligations resolved
+        crate::assert_with_log!(
+            state.pending_obligation_count() == 0,
+            "zero pending obligations after cascade",
+            0usize,
+            state.pending_obligation_count()
+        );
+
+        // Verify trace has events for all three levels
+        let events = state.trace.snapshot();
+        let cancel_events = events
+            .iter()
+            .filter(|e| e.kind == TraceEventKind::CancelRequest)
+            .count();
+        crate::assert_with_log!(
+            cancel_events >= 1,
+            "cancel trace events emitted",
+            true,
+            cancel_events >= 1
+        );
+
+        let abort_events = events
+            .iter()
+            .filter(|e| e.kind == TraceEventKind::ObligationAbort)
+            .count();
+        // gc_obl and root_obl were auto-aborted (child_obl was committed)
+        crate::assert_with_log!(
+            abort_events >= 2,
+            "at least two obligation aborts (gc + root)",
+            true,
+            abort_events >= 2
+        );
+        crate::test_complete!("three_level_cascade_with_obligations");
+    }
+
+    #[test]
+    fn obligation_resolve_advances_draining_region() {
+        // Verifies: resolving the last obligation in a draining region
+        // triggers advance_region_state through the Finalizing path.
+        // This exercises the B→A→C path in for_obligation_resolve.
+        init_test("obligation_resolve_advances_draining_region");
+        let mut state = RuntimeState::new();
+        let region = state.create_root_region(Budget::INFINITE);
+        let task = insert_task(&mut state, region);
+
+        // Create two obligations
+        let obl1 = state
+            .create_obligation(ObligationKind::SendPermit, task, region, None)
+            .expect("obl1");
+        let obl2 = state
+            .create_obligation(ObligationKind::Ack, task, region, None)
+            .expect("obl2");
+
+        // Cancel region → Closing
+        let _ = state.cancel_request(region, &CancelReason::timeout(), None);
+
+        // Complete task (obligations become orphans → auto-aborted only if
+        // task_completed detects them). Let's commit one before completing.
+        let _ = state.commit_obligation(obl1).expect("commit obl1");
+
+        // Abort the second explicitly
+        let _ = state
+            .abort_obligation(obl2, ObligationAbortReason::Cancel)
+            .expect("abort obl2");
+
+        // Now complete the task
+        state
+            .task_mut(task)
+            .expect("task")
+            .complete(Outcome::Cancelled(CancelReason::timeout()));
+        let _ = state.task_completed(task);
+
+        // Region should advance through Finalizing → Closed
+        let region_state = state
+            .regions
+            .get(region.arena_index())
+            .expect("region")
+            .state();
+        crate::assert_with_log!(
+            region_state == RegionState::Closed,
+            "region closed after obligation resolve + task complete",
+            RegionState::Closed,
+            region_state
+        );
+
+        crate::assert_with_log!(
+            state.pending_obligation_count() == 0,
+            "zero pending",
+            0usize,
+            state.pending_obligation_count()
+        );
+        crate::test_complete!("obligation_resolve_advances_draining_region");
+    }
+
+    #[test]
+    fn shardguard_locking_patterns_exercised() {
+        use crate::runtime::sharded_state::ShardedConfig;
+        use crate::runtime::ShardGuard;
+        use crate::runtime::ShardedState;
+
+        // Verifies: ShardGuard factory methods correctly acquire locks
+        // for each cross-entity operation pattern.
+        // This test validates the ShardGuard infrastructure that will be
+        // used when RuntimeState methods are migrated to work with shards.
+        init_test("shardguard_locking_patterns_exercised");
+
+        let trace = TraceBufferHandle::new(1024);
+        let metrics: Arc<dyn MetricsProvider> = Arc::new(TestMetrics::default());
+        let config = ShardedConfig {
+            io_driver: None,
+            timer_driver: None,
+            logical_clock_mode: LogicalClockMode::Lamport,
+            cancel_attribution: CancelAttributionConfig::default(),
+            entropy_source: Arc::new(OsEntropy),
+            blocking_pool: None,
+            obligation_leak_response: ObligationLeakResponse::Log,
+            leak_escalation: None,
+            observability: None,
+        };
+        let shards = ShardedState::new(trace, metrics, config);
+
+        // Verify each guard pattern acquires the correct shards
+        {
+            let guard = ShardGuard::for_spawn(&shards);
+            let has_regions = guard.regions.is_some();
+            let has_tasks = guard.tasks.is_some();
+            let no_obligations = guard.obligations.is_none();
+            drop(guard);
+            crate::assert_with_log!(
+                has_regions && has_tasks && no_obligations,
+                "for_spawn: B+A only",
+                true,
+                has_regions && has_tasks && no_obligations
+            );
+        }
+
+        {
+            let guard = ShardGuard::for_obligation(&shards);
+            let has_regions = guard.regions.is_some();
+            let no_tasks = guard.tasks.is_none();
+            let has_obligations = guard.obligations.is_some();
+            drop(guard);
+            crate::assert_with_log!(
+                has_regions && no_tasks && has_obligations,
+                "for_obligation: B+C only",
+                true,
+                has_regions && no_tasks && has_obligations
+            );
+        }
+
+        {
+            let guard = ShardGuard::for_task_completed(&shards);
+            let all_present =
+                guard.regions.is_some() && guard.tasks.is_some() && guard.obligations.is_some();
+            drop(guard);
+            crate::assert_with_log!(all_present, "for_task_completed: B+A+C", true, all_present);
+        }
+
+        {
+            let guard = ShardGuard::for_cancel(&shards);
+            let all_present =
+                guard.regions.is_some() && guard.tasks.is_some() && guard.obligations.is_some();
+            drop(guard);
+            crate::assert_with_log!(all_present, "for_cancel: B+A+C", true, all_present);
+        }
+
+        {
+            let guard = ShardGuard::for_obligation_resolve(&shards);
+            let all_present =
+                guard.regions.is_some() && guard.tasks.is_some() && guard.obligations.is_some();
+            drop(guard);
+            crate::assert_with_log!(
+                all_present,
+                "for_obligation_resolve: B+A+C",
+                true,
+                all_present
+            );
+        }
+
+        crate::test_complete!("shardguard_locking_patterns_exercised");
     }
 }
