@@ -68,7 +68,115 @@ use crate::cx::Cx;
 use crate::monitor::{DownNotification, DownReason};
 use crate::obligation::graded::{AbortedProof, CommittedProof, SendPermit};
 use crate::runtime::{JoinError, SpawnError};
-use crate::types::{CancelReason, CxInner, Outcome, TaskId, Time};
+use crate::types::{Budget, CancelReason, CxInner, Outcome, TaskId, Time};
+
+// ============================================================================
+// Lifecycle helpers (init/terminate budgets + masking) (bd-3ejoi)
+// ============================================================================
+
+/// Temporarily tightens the current task budget for an async phase.
+///
+/// Budgets in `CxInner` represent remaining budget; to avoid "refunding" budget,
+/// we restore the original budget minus any consumption that occurred while the
+/// phase budget was active.
+struct PhaseBudgetGuard {
+    inner: Arc<std::sync::RwLock<CxInner>>,
+    original_budget: Budget,
+    original_baseline: Budget,
+    phase_baseline: Budget,
+    restore_original: bool,
+}
+
+impl PhaseBudgetGuard {
+    fn enter(cx: &Cx, phase_budget: Budget, restore_original: bool) -> Self {
+        let inner = Arc::clone(&cx.inner);
+        let (original_budget, original_baseline, phase_baseline) = {
+            let mut guard = inner.write().expect("lock poisoned");
+            let original_budget = guard.budget;
+            let original_baseline = guard.budget_baseline;
+            let phase_baseline = original_budget.meet(phase_budget);
+            guard.budget = phase_baseline;
+            guard.budget_baseline = phase_baseline;
+            drop(guard);
+            (original_budget, original_baseline, phase_baseline)
+        };
+        Self {
+            inner,
+            original_budget,
+            original_baseline,
+            phase_baseline,
+            restore_original,
+        }
+    }
+}
+
+impl Drop for PhaseBudgetGuard {
+    fn drop(&mut self) {
+        if !self.restore_original {
+            return;
+        }
+
+        let Ok(mut guard) = self.inner.write() else {
+            return;
+        };
+
+        let phase_remaining = guard.budget;
+        let polls_used = self
+            .phase_baseline
+            .poll_quota
+            .saturating_sub(phase_remaining.poll_quota);
+
+        let cost_used = match (self.phase_baseline.cost_quota, phase_remaining.cost_quota) {
+            (Some(base), Some(rem)) => base.saturating_sub(rem),
+            _ => 0,
+        };
+
+        let restored_cost_quota = self
+            .original_budget
+            .cost_quota
+            .map(|orig| orig.saturating_sub(cost_used));
+
+        guard.budget = Budget {
+            deadline: self.original_budget.deadline,
+            poll_quota: self.original_budget.poll_quota.saturating_sub(polls_used),
+            cost_quota: restored_cost_quota,
+            priority: self.original_budget.priority,
+        };
+        guard.budget_baseline = self.original_baseline;
+    }
+}
+
+/// Async-friendly cancellation mask guard.
+///
+/// `Cx::masked(..)` is synchronous-only; GenServer lifecycle hooks are async.
+struct AsyncMaskGuard {
+    inner: Arc<std::sync::RwLock<CxInner>>,
+}
+
+impl AsyncMaskGuard {
+    fn enter(cx: &Cx) -> Self {
+        let inner = Arc::clone(&cx.inner);
+        {
+            let mut guard = inner.write().expect("lock poisoned");
+            crate::assert_with_log!(
+                guard.mask_depth < crate::types::task_context::MAX_MASK_DEPTH,
+                "mask_depth",
+                guard.mask_depth,
+                guard.mask_depth
+            );
+            guard.mask_depth += 1;
+        }
+        Self { inner }
+    }
+}
+
+impl Drop for AsyncMaskGuard {
+    fn drop(&mut self) {
+        if let Ok(mut guard) = self.inner.write() {
+            guard.mask_depth = guard.mask_depth.saturating_sub(1);
+        }
+    }
+}
 
 // ============================================================================
 // Cast overflow policy
@@ -224,9 +332,25 @@ pub trait GenServer: Send + 'static {
         Box::pin(async {})
     }
 
+    /// Returns the budget used for the init (`on_start`) phase.
+    ///
+    /// This budget is met with the task/region budget and applied only for the
+    /// duration of `on_start`. Budget consumption during `on_start` is preserved
+    /// when restoring the original budget for the message loop.
+    fn on_start_budget(&self) -> Budget {
+        Budget::INFINITE
+    }
+
     /// Called once when the server stops, after the mailbox is drained.
     fn on_stop(&mut self, _cx: &Cx) -> Pin<Box<dyn Future<Output = ()> + Send + '_>> {
         Box::pin(async {})
+    }
+
+    /// Returns the budget used for drain + stop (`on_stop`).
+    ///
+    /// The default is [`Budget::MINIMAL`] for bounded cleanup.
+    fn on_stop_budget(&self) -> Budget {
+        Budget::MINIMAL
     }
 
     /// Returns the overflow policy for cast messages when the mailbox is full.
@@ -931,8 +1055,13 @@ async fn run_gen_server_loop<S: GenServer>(mut server: S, cx: Cx, cell: &GenServ
     cell.state.store(ActorState::Running);
 
     // Phase 1: Initialization
-    cx.trace("gen_server::on_start");
-    server.on_start(&cx).await;
+    if cx.is_cancel_requested() {
+        cx.trace("gen_server::init_skipped_cancelled");
+    } else {
+        cx.trace("gen_server::init");
+        let _budget = PhaseBudgetGuard::enter(&cx, server.on_start_budget(), true);
+        server.on_start(&cx).await;
+    }
 
     // Phase 2: Message loop
     loop {
@@ -961,13 +1090,35 @@ async fn run_gen_server_loop<S: GenServer>(mut server: S, cx: Cx, cell: &GenServ
 
     cell.state.store(ActorState::Stopping);
 
+    // Phase 3+4: Drain + stop hook.
+    //
+    // Drain+on_stop are cleanup phases. We:
+    // - tighten budget to a bounded stop budget
+    // - mask cancellation so cleanup can run deterministically
+    let _budget = PhaseBudgetGuard::enter(&cx, server.on_stop_budget(), false);
+    let _mask = AsyncMaskGuard::enter(&cx);
+
     // Phase 3: Drain remaining messages.
     // Calls during drain: reply with error (caller should not depend on drain).
     // Casts during drain: process normally.
     let drain_limit = cell.mailbox.capacity() as u64;
     let mut drained: u64 = 0;
     while let Ok(envelope) = cell.mailbox.try_recv() {
-        dispatch_envelope(&mut server, &cx, envelope).await;
+        match envelope {
+            Envelope::Call {
+                request: _,
+                reply_permit,
+            } => {
+                let _aborted: AbortedProof<SendPermit> = reply_permit.abort();
+                cx.trace("gen_server::drain_abort_call");
+            }
+            Envelope::Cast { msg } => {
+                server.handle_cast(&cx, msg).await;
+            }
+            Envelope::Info { msg } => {
+                server.handle_info(&cx, msg).await;
+            }
+        }
         drained += 1;
         if drained >= drain_limit {
             break;
@@ -979,7 +1130,7 @@ async fn run_gen_server_loop<S: GenServer>(mut server: S, cx: Cx, cell: &GenServ
     }
 
     // Phase 4: Cleanup
-    cx.trace("gen_server::on_stop");
+    cx.trace("gen_server::terminate");
     server.on_stop(&cx).await;
 
     server
@@ -1173,6 +1324,69 @@ mod tests {
             match msg {
                 CounterCast::Reset => self.count = 0,
             }
+            Box::pin(async {})
+        }
+    }
+
+    #[derive(Clone)]
+    struct StartBudgetProbe {
+        started_priority: Arc<AtomicU8>,
+        loop_priority: Arc<AtomicU8>,
+    }
+
+    impl GenServer for StartBudgetProbe {
+        type Call = CounterCall;
+        type Reply = u8;
+        type Cast = CounterCast;
+        type Info = SystemMsg;
+
+        fn on_start(&mut self, cx: &Cx) -> Pin<Box<dyn Future<Output = ()> + Send + '_>> {
+            self.started_priority
+                .store(cx.budget().priority, Ordering::SeqCst);
+            Box::pin(async {})
+        }
+
+        fn on_start_budget(&self) -> Budget {
+            Budget::new().with_priority(200)
+        }
+
+        fn handle_call(
+            &mut self,
+            cx: &Cx,
+            _request: CounterCall,
+            reply: Reply<u8>,
+        ) -> Pin<Box<dyn Future<Output = ()> + Send + '_>> {
+            self.loop_priority
+                .store(cx.budget().priority, Ordering::SeqCst);
+            let _ = reply.send(cx.budget().priority);
+            Box::pin(async {})
+        }
+    }
+
+    struct StopMaskProbe {
+        stop_checkpoint_ok: Arc<AtomicU8>,
+    }
+
+    impl GenServer for StopMaskProbe {
+        type Call = CounterCall;
+        type Reply = u8;
+        type Cast = CounterCast;
+        type Info = SystemMsg;
+
+        fn handle_call(
+            &mut self,
+            _cx: &Cx,
+            _request: CounterCall,
+            reply: Reply<u8>,
+        ) -> Pin<Box<dyn Future<Output = ()> + Send + '_>> {
+            let _ = reply.send(0);
+            Box::pin(async {})
+        }
+
+        fn on_stop(&mut self, cx: &Cx) -> Pin<Box<dyn Future<Output = ()> + Send + '_>> {
+            let ok = cx.checkpoint().is_ok();
+            self.stop_checkpoint_ok
+                .store(u8::from(ok), Ordering::SeqCst);
             Box::pin(async {})
         }
     }
@@ -2023,5 +2237,102 @@ mod tests {
         let _ = reply.send(42);
 
         crate::test_complete!("reply_debug_format");
+    }
+
+    #[test]
+    fn gen_server_on_start_budget_priority_applied_and_restored() {
+        init_test("gen_server_on_start_budget_priority_applied_and_restored");
+
+        let budget = Budget::new().with_poll_quota(10_000).with_priority(10);
+        let mut runtime = crate::lab::LabRuntime::new(crate::lab::LabConfig::default());
+        let region = runtime.state.create_root_region(budget);
+        let cx = Cx::for_testing();
+        let scope = crate::cx::Scope::<FailFast>::new(region, budget);
+
+        let started_priority = Arc::new(AtomicU8::new(0));
+        let loop_priority = Arc::new(AtomicU8::new(0));
+        let server = StartBudgetProbe {
+            started_priority: Arc::clone(&started_priority),
+            loop_priority: Arc::clone(&loop_priority),
+        };
+
+        let (handle, stored) = scope
+            .spawn_gen_server(&mut runtime.state, &cx, server, 32)
+            .unwrap();
+        let server_task_id = handle.task_id();
+        runtime.state.store_spawned_task(server_task_id, stored);
+
+        let server_ref = handle.server_ref();
+        let (client, stored_client) = scope
+            .spawn(&mut runtime.state, &cx, move |cx| async move {
+                let p = server_ref.call(&cx, CounterCall::Get).await.unwrap();
+                assert_eq!(p, 10);
+            })
+            .unwrap();
+        let client_task_id = client.task_id();
+        runtime
+            .state
+            .store_spawned_task(client_task_id, stored_client);
+
+        runtime
+            .scheduler
+            .lock()
+            .unwrap()
+            .schedule(server_task_id, 0);
+        runtime
+            .scheduler
+            .lock()
+            .unwrap()
+            .schedule(client_task_id, 0);
+        runtime.run_until_quiescent();
+
+        assert_eq!(started_priority.load(Ordering::SeqCst), 200);
+        assert_eq!(loop_priority.load(Ordering::SeqCst), 10);
+
+        drop(handle);
+        runtime
+            .scheduler
+            .lock()
+            .unwrap()
+            .schedule(server_task_id, 0);
+        runtime.run_until_quiescent();
+
+        crate::test_complete!("gen_server_on_start_budget_priority_applied_and_restored");
+    }
+
+    #[test]
+    fn gen_server_on_stop_runs_masked_under_stop() {
+        init_test("gen_server_on_stop_runs_masked_under_stop");
+
+        let budget = Budget::new().with_poll_quota(10_000);
+        let mut runtime = crate::lab::LabRuntime::new(crate::lab::LabConfig::default());
+        let region = runtime.state.create_root_region(budget);
+        let cx = Cx::for_testing();
+        let scope = crate::cx::Scope::<FailFast>::new(region, budget);
+
+        let stop_checkpoint_ok = Arc::new(AtomicU8::new(0));
+        let server = StopMaskProbe {
+            stop_checkpoint_ok: Arc::clone(&stop_checkpoint_ok),
+        };
+
+        let (handle, stored) = scope
+            .spawn_gen_server(&mut runtime.state, &cx, server, 32)
+            .unwrap();
+        let server_task_id = handle.task_id();
+        runtime.state.store_spawned_task(server_task_id, stored);
+
+        // Request stop: sets cancel_requested. on_stop must run masked.
+        handle.stop();
+
+        runtime
+            .scheduler
+            .lock()
+            .unwrap()
+            .schedule(server_task_id, 0);
+        runtime.run_until_quiescent();
+
+        assert_eq!(stop_checkpoint_ok.load(Ordering::SeqCst), 1);
+
+        crate::test_complete!("gen_server_on_stop_runs_masked_under_stop");
     }
 }
