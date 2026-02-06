@@ -1970,97 +1970,139 @@ theorem reserve_preserves_wellformed {Value Error Panic : Type}
   | reserve hTask hRegion hAbsent hUpdate =>
     rename_i t0 task0 region0 k0
     subst hUpdate
+    let newOb : ObligationRecord :=
+      { kind := k0, holder := t0, region := task0.region, state := ObligationState.reserved }
+    let newRegion : Region Value Error Panic :=
+      { region0 with ledger := region0.ledger ++ [o] }
     exact {
       task_region_exists := fun t' task' h => by
         have h' : getTask s t' = some task' := by
           simpa [getTask, setRegion, setObligation] using h
-        exact hWF.task_region_exists t' task' h'
+        obtain ⟨reg, hReg⟩ := hWF.task_region_exists t' task' h'
+        by_cases hRegEq : task'.region = task0.region
+        · refine ⟨newRegion, ?_⟩
+          simp [getRegion, setRegion, setObligation, newOb, newRegion, hRegEq]
+        · refine ⟨reg, ?_⟩
+          simpa [getRegion, setRegion, setObligation, newOb, newRegion, hRegEq] using hReg
       obligation_region_exists := fun o' ob' h => by
         by_cases hEq : o' = o
         · subst hEq
-          refine ⟨{ region with ledger := region.ledger ++ [o] }, ?_⟩
-          simp [getRegion, setRegion, setObligation]
+          simp [getObligation, setRegion, setObligation, newOb, newRegion] at h
+          have hEqOb : ob' = newOb := by
+            exact h.symm
+          subst hEqOb
+          refine ⟨newRegion, ?_⟩
+          simp [getRegion, setRegion, setObligation, newOb, newRegion]
         · have h' : getObligation s o' = some ob' := by
             simpa [getObligation, setRegion, setObligation, hEq] using h
           obtain ⟨region', hReg⟩ := hWF.obligation_region_exists o' ob' h'
-          by_cases hRegEq : ob'.region = task.region
-          · exact ⟨{ region with ledger := region.ledger ++ [o] },
-              by simp [getRegion, setRegion, setObligation, hRegEq]⟩
+          by_cases hRegEq : ob'.region = task0.region
+          · exact ⟨newRegion, by
+              simp [getRegion, setRegion, setObligation, newOb, newRegion, hRegEq]⟩
           · exact ⟨region', by simp [getRegion, setRegion, setObligation, hRegEq]; exact hReg⟩
       obligation_holder_exists := fun o' ob' h => by
         by_cases hEq : o' = o
         · subst hEq
-          refine ⟨task, ?_⟩
+          simp [getObligation, setRegion, setObligation, newOb, newRegion] at h
+          have hEqOb : ob' = newOb := by
+            exact h.symm
+          subst hEqOb
+          refine ⟨task0, ?_⟩
           simpa [getTask, setRegion, setObligation] using hTask
         · have h' : getObligation s o' = some ob' := by
             simpa [getObligation, setRegion, setObligation, hEq] using h
-          obtain ⟨task', hTask'⟩ := hWF.obligation_holder_exists o' ob' h'
-          by_cases hHolder : ob'.holder = t
-          · exact ⟨task, by simp [getTask, setRegion, setObligation, hHolder]⟩
-          · exact ⟨task', by simp [getTask, setRegion, setObligation, hHolder]; exact hTask'⟩
+          obtain ⟨holderTask, hHolderTask⟩ := hWF.obligation_holder_exists o' ob' h'
+          refine ⟨holderTask, ?_⟩
+          simpa [getTask, setRegion, setObligation] using hHolderTask
       ledger_obligations_reserved := fun r' region' h o' hMem => by
-        by_cases hRegEq : r' = task.region
+        by_cases hRegEq : r' = task0.region
         · subst hRegEq
-          have hEqRegion : region' = { region with ledger := region.ledger ++ [o] } := by
-            simpa [getRegion, setRegion, setObligation] using h
+          have hEqRegion : region' = newRegion := by
+            have : some newRegion = some region' := by
+              simpa [getRegion, setRegion, setObligation, newOb, newRegion] using h
+            exact (Option.some.inj this).symm
           subst hEqRegion
-          have hMem' : o' ∈ region.ledger ∨ o' = o := by
-            have : o' ∈ region.ledger ++ [o] := hMem
+          have hMem' : o' ∈ region0.ledger ∨ o' = o := by
+            have : o' ∈ region0.ledger ++ [o] := by
+              simpa [newRegion] using hMem
             simpa [List.mem_append] using this
           cases hMem' with
           | inl hOld =>
               obtain ⟨ob, hOb, hState, hReg⟩ :=
-                hWF.ledger_obligations_reserved task.region region hRegion o' hOld
-              exact ⟨ob,
-                by simp [getObligation, setRegion, setObligation]; exact hOb,
-                hState,
-                hReg⟩
+                hWF.ledger_obligations_reserved task0.region region0 hRegion o' hOld
+              have hNe : o' ≠ o := by
+                intro hEq'
+                -- If `o' = o` then `hOld` would put `o` in the old ledger, but `hAbsent` says it doesn't exist.
+                obtain ⟨ob0, hOb0, _hState0, _hReg0⟩ :=
+                  hWF.ledger_obligations_reserved task0.region region0 hRegion o' hOld
+                have hAbsent' : getObligation s o' = none := by
+                  simpa [hEq'] using hAbsent
+                have : (none : Option ObligationRecord) = some ob0 := by
+                  simpa [hAbsent'] using hOb0
+                cases this
+              refine ⟨ob, ?_, hState, hReg⟩
+              simpa [getObligation, setRegion, setObligation, newOb, newRegion, hNe] using hOb
           | inr hEq =>
               subst hEq
-              refine ⟨{ kind := k, holder := t, region := task.region,
-                state := ObligationState.reserved }, ?_, rfl, rfl⟩
-              simp [getObligation, setRegion, setObligation]
-        · simp [getRegion, setRegion, setObligation, hRegEq] at h
+              refine ⟨newOb, ?_⟩
+              refine And.intro ?_ (And.intro rfl rfl)
+              simp [getObligation, setRegion, setObligation, newOb, newRegion]
+        · have hRegS : getRegion s r' = some region' := by
+            simpa [getRegion, setRegion, setObligation, newOb, newRegion, hRegEq] using h
           obtain ⟨ob, hOb, hState, hReg⟩ :=
-            hWF.ledger_obligations_reserved r' region' h o' hMem
-          exact ⟨ob,
-            by simp [getObligation, setRegion, setObligation]; exact hOb,
-            hState,
-            hReg⟩
+            hWF.ledger_obligations_reserved r' region' hRegS o' hMem
+          have hNe : o' ≠ o := by
+            intro hEq'
+            subst hEq'
+            have : (none : Option ObligationRecord) = some ob := by
+              simpa [hAbsent] using hOb
+            cases this
+          refine ⟨ob, ?_, hState, hReg⟩
+          simpa [getObligation, setRegion, setObligation, newOb, newRegion, hNe] using hOb
       children_exist := fun r' region' h t' hMem => by
-        by_cases hRegEq : r' = task.region
+        by_cases hRegEq : r' = task0.region
         · subst hRegEq
-          have hEqRegion : region' = { region with ledger := region.ledger ++ [o] } := by
-            simpa [getRegion, setRegion, setObligation] using h
+          have hEqRegion : region' = newRegion := by
+            have : some newRegion = some region' := by
+              simpa [getRegion, setRegion, setObligation, newOb, newRegion] using h
+            exact (Option.some.inj this).symm
           subst hEqRegion
-          have hMem' : t' ∈ region.children := by
-            simpa using hMem
-          obtain ⟨task', hTask'⟩ :=
-            hWF.children_exist task.region region hRegion t' hMem'
-          exact ⟨task', by simp [getTask, setRegion, setObligation]; exact hTask'⟩
-        · simp [getRegion, setRegion, setObligation, hRegEq] at h
-          obtain ⟨task', hTask'⟩ := hWF.children_exist r' region' h t' hMem
-          exact ⟨task', by simp [getTask, setRegion, setObligation]; exact hTask'⟩
+          have hMem0 : t' ∈ region0.children := by
+            simpa [newRegion] using hMem
+          obtain ⟨taskX, hTaskX⟩ := hWF.children_exist task0.region region0 hRegion t' hMem0
+          refine ⟨taskX, ?_⟩
+          simpa [getTask, setRegion, setObligation] using hTaskX
+        · have hRegS : getRegion s r' = some region' := by
+            simpa [getRegion, setRegion, setObligation, newOb, newRegion, hRegEq] using h
+          obtain ⟨taskX, hTaskX⟩ := hWF.children_exist r' region' hRegS t' hMem
+          refine ⟨taskX, ?_⟩
+          simpa [getTask, setRegion, setObligation] using hTaskX
       subregions_exist := fun r' region' h r'' hMem => by
-        by_cases hRegEq : r' = task.region
+        by_cases hRegEq : r' = task0.region
         · subst hRegEq
-          have hEqRegion : region' = { region with ledger := region.ledger ++ [o] } := by
-            simpa [getRegion, setRegion, setObligation] using h
+          have hEqRegion : region' = newRegion := by
+            have : some newRegion = some region' := by
+              simpa [getRegion, setRegion, setObligation, newOb, newRegion] using h
+            exact (Option.some.inj this).symm
           subst hEqRegion
-          have hMem' : r'' ∈ region.subregions := by
-            simpa using hMem
-          obtain ⟨sub, hSub⟩ :=
-            hWF.subregions_exist task.region region hRegion r'' hMem'
-          by_cases hSubEq : r'' = r
-          · exact ⟨{ region with ledger := region.ledger ++ [o] },
-              by simp [getRegion, setRegion, setObligation, hSubEq]⟩
-          · exact ⟨sub, by simp [getRegion, setRegion, setObligation, hSubEq]; exact hSub⟩
-        · simp [getRegion, setRegion, setObligation, hRegEq] at h
-          obtain ⟨sub, hSub⟩ := hWF.subregions_exist r' region' h r'' hMem
-          by_cases hSubEq : r'' = r
-          · exact ⟨{ region with ledger := region.ledger ++ [o] },
-              by simp [getRegion, setRegion, setObligation, hSubEq]⟩
-          · exact ⟨sub, by simp [getRegion, setRegion, setObligation, hSubEq]; exact hSub⟩
+          have hMem0 : r'' ∈ region0.subregions := by
+            simpa [newRegion] using hMem
+          obtain ⟨sub, hSub⟩ := hWF.subregions_exist task0.region region0 hRegion r'' hMem0
+          by_cases hSubEq : r'' = task0.region
+          · subst hSubEq
+            refine ⟨newRegion, ?_⟩
+            simp [getRegion, setRegion, setObligation, newOb, newRegion]
+          · refine ⟨sub, ?_⟩
+            simpa [getRegion, setRegion, setObligation, newOb, newRegion, hSubEq] using hSub
+        · have hRegS : getRegion s r' = some region' := by
+            simpa [getRegion, setRegion, setObligation, newOb, newRegion, hRegEq] using h
+          obtain ⟨sub, hSub⟩ := hWF.subregions_exist r' region' hRegS r'' hMem
+          by_cases hSubEq : r'' = task0.region
+          · subst hSubEq
+            refine ⟨newRegion, ?_⟩
+            simp [getRegion, setRegion, setObligation, newOb, newRegion]
+          · refine ⟨sub, ?_⟩
+            simpa [getRegion, setRegion, setObligation, newOb, newRegion, hSubEq] using hSub
     }
 
 -- ==========================================================================
@@ -2069,116 +2111,141 @@ theorem reserve_preserves_wellformed {Value Error Panic : Type}
 -- ==========================================================================
 
 theorem resolve_preserves_wellformed {Value Error Panic : Type}
-    {s s' : State Value Error Panic} {o : ObligationId} {ob : ObligationRecord}
+    {s s' : State Value Error Panic} {oid : ObligationId} {ob : ObligationRecord}
     {region : Region Value Error Panic} {newState : ObligationState}
     (hWF : WellFormed s)
-    (hOb : getObligation s o = some ob)
+    (hOb : getObligation s oid = some ob)
     (hRegion : getRegion s ob.region = some region)
     (hUpdate :
       s' =
         setRegion
-          (setObligation s o { ob with state := newState })
+          (setObligation s oid { ob with state := newState })
           ob.region
-          { region with ledger := removeObligationId o region.ledger })
+          { region with ledger := removeObligationId oid region.ledger })
     : WellFormed s' := by
   subst hUpdate
+  let updatedOb : ObligationRecord := { ob with state := newState }
+  let updatedRegion : Region Value Error Panic := { region with ledger := removeObligationId oid region.ledger }
   exact {
-    task_region_exists := fun t task h => by
-      have h' : getTask s t = some task := by
-        simpa using h
-      obtain ⟨region', hReg⟩ := hWF.task_region_exists t task h'
+    task_region_exists := fun t task hTask => by
+      have hTaskS : getTask s t = some task := by
+        simpa [getTask, setRegion, setObligation] using hTask
+      obtain ⟨reg, hReg⟩ := hWF.task_region_exists t task hTaskS
       by_cases hEq : task.region = ob.region
-      · exact ⟨{ region with ledger := removeObligationId o region.ledger },
-          by simp [getRegion, setRegion, setObligation, hEq]⟩
-      · exact ⟨region', by
-          simpa [getRegion, setRegion, setObligation, hEq] using hReg⟩
-    obligation_region_exists := fun o' ob' h => by
-      by_cases hEq : o' = o
+      · refine ⟨updatedRegion, ?_⟩
+        simp [getRegion, setRegion, setObligation, updatedOb, updatedRegion, hEq]
+      · refine ⟨reg, ?_⟩
+        simpa [getRegion, setRegion, setObligation, updatedOb, updatedRegion, hEq] using hReg
+
+    obligation_region_exists := fun oid' ob' hOb' => by
+      by_cases hEq : oid' = oid
       · subst hEq
-        simp [getObligation, setRegion, setObligation] at h
-        subst h
-        exact ⟨{ region with ledger := removeObligationId o region.ledger },
-          by simp [getRegion, setRegion, setObligation]⟩
-      · have h' : getObligation s o' = some ob' := by
-          simpa [getObligation, setRegion, setObligation, hEq] using h
-        obtain ⟨region', hReg⟩ := hWF.obligation_region_exists o' ob' h'
+        simp [getObligation, setRegion, setObligation, updatedOb, updatedRegion] at hOb'
+        have hEqOb : ob' = updatedOb := by
+          exact hOb'.symm
+        subst hEqOb
+        refine ⟨updatedRegion, ?_⟩
+        simp [getRegion, setRegion, setObligation, updatedOb, updatedRegion]
+      · have hObS : getObligation s oid' = some ob' := by
+          simpa [getObligation, setRegion, setObligation, updatedOb, updatedRegion, hEq] using hOb'
+        obtain ⟨reg, hReg⟩ := hWF.obligation_region_exists oid' ob' hObS
         by_cases hRegEq : ob'.region = ob.region
-        · exact ⟨{ region with ledger := removeObligationId o region.ledger },
-            by simp [getRegion, setRegion, setObligation, hRegEq]⟩
-        · exact ⟨region', by
-            simpa [getRegion, setRegion, setObligation, hRegEq] using hReg⟩
-    obligation_holder_exists := fun o' ob' h => by
-      by_cases hEq : o' = o
+        · refine ⟨updatedRegion, ?_⟩
+          simp [getRegion, setRegion, setObligation, updatedOb, updatedRegion, hRegEq]
+        · refine ⟨reg, ?_⟩
+          simpa [getRegion, setRegion, setObligation, updatedOb, updatedRegion, hRegEq] using hReg
+
+    obligation_holder_exists := fun oid' ob' hOb' => by
+      by_cases hEq : oid' = oid
       · subst hEq
-        obtain ⟨task, hTask⟩ := hWF.obligation_holder_exists o ob hOb
-        exact ⟨task, by simpa [getTask, setRegion, setObligation] using hTask⟩
-      · have h' : getObligation s o' = some ob' := by
-          simpa [getObligation, setRegion, setObligation, hEq] using h
-        obtain ⟨task, hTask⟩ := hWF.obligation_holder_exists o' ob' h'
-        exact ⟨task, by simpa [getTask, setRegion, setObligation] using hTask⟩
-    ledger_obligations_reserved := fun r' region' h o' hMem => by
+        simp [getObligation, setRegion, setObligation, updatedOb, updatedRegion] at hOb'
+        have hEqOb : ob' = updatedOb := by
+          exact hOb'.symm
+        subst hEqOb
+        obtain ⟨task, hTask⟩ := hWF.obligation_holder_exists oid ob hOb
+        refine ⟨task, ?_⟩
+        simpa [getTask, setRegion, setObligation] using hTask
+      · have hObS : getObligation s oid' = some ob' := by
+          simpa [getObligation, setRegion, setObligation, updatedOb, updatedRegion, hEq] using hOb'
+        obtain ⟨task, hTask⟩ := hWF.obligation_holder_exists oid' ob' hObS
+        refine ⟨task, ?_⟩
+        simpa [getTask, setRegion, setObligation] using hTask
+
+    ledger_obligations_reserved := fun r' region' hReg oid' hMem => by
       by_cases hRegEq : r' = ob.region
       · subst hRegEq
-        have hEqRegion : region' = { region with ledger := removeObligationId o region.ledger } := by
-          simpa [getRegion, setRegion, setObligation] using h
+        have hEqRegion : region' = updatedRegion := by
+          have : some updatedRegion = some region' := by
+            simpa [getRegion, setRegion, setObligation, updatedOb, updatedRegion] using hReg
+          exact (Option.some.inj this).symm
         subst hEqRegion
-        have hMem' : o' ∈ region.ledger ∧ o' ≠ o := by
-          simpa [removeObligationId] using hMem
+        have hMem' : oid' ∈ region.ledger ∧ oid' ≠ oid := by
+          simpa [updatedRegion, removeObligationId] using hMem
         rcases hMem' with ⟨hIn, hNe⟩
-        obtain ⟨ob', hOb', hState, hReg⟩ :=
-          hWF.ledger_obligations_reserved ob.region region hRegion o' hIn
-        refine ⟨ob', ?_, hState, hReg⟩
-        simpa [getObligation, setRegion, setObligation, hNe] using hOb'
-      · have h' : getRegion s r' = some region' := by
-          simpa [getRegion, setRegion, setObligation, hRegEq] using h
-        obtain ⟨ob', hOb', hState, hReg⟩ :=
-          hWF.ledger_obligations_reserved r' region' h' o' hMem
-        have hNe : o' ≠ o := by
-          intro hEq
-          subst hEq
+        obtain ⟨ob', hObS, hState, hRegEq2⟩ :=
+          hWF.ledger_obligations_reserved ob.region region hRegion oid' hIn
+        refine ⟨ob', ?_, hState, hRegEq2⟩
+        simpa [getObligation, setRegion, setObligation, updatedOb, updatedRegion, hNe] using hObS
+      · have hRegS : getRegion s r' = some region' := by
+          simpa [getRegion, setRegion, setObligation, updatedOb, updatedRegion, hRegEq] using hReg
+        obtain ⟨ob', hObS, hState, hRegEq2⟩ :=
+          hWF.ledger_obligations_reserved r' region' hRegS oid' hMem
+        have hNe : oid' ≠ oid := by
+          intro hEq'
+          subst hEq'
           have hObEq : ob' = ob := by
-            have : some ob' = some ob := by simpa [hOb] using hOb'
-            injection this
-          have : ob.region = r' := by simpa [hObEq] using hReg
-          exact (hRegEq this.symm).elim
-        refine ⟨ob', ?_, hState, hReg⟩
-        simpa [getObligation, setRegion, setObligation, hNe] using hOb'
-    children_exist := fun r' region' h t hMem => by
+            have : some ob' = some ob := by simpa [hOb] using hObS
+            exact Option.some.inj this
+          have : ob.region = r' := by simpa [hObEq] using hRegEq2
+          exact (hRegEq this).elim
+        refine ⟨ob', ?_, hState, hRegEq2⟩
+        simpa [getObligation, setRegion, setObligation, updatedOb, updatedRegion, hNe] using hObS
+
+    children_exist := fun r' region' hReg t hMem => by
       by_cases hRegEq : r' = ob.region
       · subst hRegEq
-        have hEqRegion : region' = { region with ledger := removeObligationId o region.ledger } := by
-          simpa [getRegion, setRegion, setObligation] using h
+        have hEqRegion : region' = updatedRegion := by
+          have : some updatedRegion = some region' := by
+            simpa [getRegion, setRegion, setObligation, updatedOb, updatedRegion] using hReg
+          exact (Option.some.inj this).symm
         subst hEqRegion
-        have hMem' : t ∈ region.children := by
-          simpa using hMem
-        obtain ⟨task, hTask⟩ :=
-          hWF.children_exist ob.region region hRegion t hMem'
-        exact ⟨task, by simpa [getTask, setRegion, setObligation] using hTask⟩
-      · have h' : getRegion s r' = some region' := by
-          simpa [getRegion, setRegion, setObligation, hRegEq] using h
-        obtain ⟨task, hTask⟩ := hWF.children_exist r' region' h' t hMem
-        exact ⟨task, by simpa [getTask, setRegion, setObligation] using hTask⟩
-    subregions_exist := fun r' region' h r'' hMem => by
+        have hMem0 : t ∈ region.children := by
+          simpa [updatedRegion] using hMem
+        obtain ⟨task, hTask⟩ := hWF.children_exist ob.region region hRegion t hMem0
+        refine ⟨task, ?_⟩
+        simpa [getTask, setRegion, setObligation] using hTask
+      · have hRegS : getRegion s r' = some region' := by
+          simpa [getRegion, setRegion, setObligation, updatedOb, updatedRegion, hRegEq] using hReg
+        obtain ⟨task, hTask⟩ := hWF.children_exist r' region' hRegS t hMem
+        refine ⟨task, ?_⟩
+        simpa [getTask, setRegion, setObligation] using hTask
+
+    subregions_exist := fun r' region' hReg r'' hMem => by
       by_cases hRegEq : r' = ob.region
       · subst hRegEq
-        have hEqRegion : region' = { region with ledger := removeObligationId o region.ledger } := by
-          simpa [getRegion, setRegion, setObligation] using h
+        have hEqRegion : region' = updatedRegion := by
+          have : some updatedRegion = some region' := by
+            simpa [getRegion, setRegion, setObligation, updatedOb, updatedRegion] using hReg
+          exact (Option.some.inj this).symm
         subst hEqRegion
-        have hMem' : r'' ∈ region.subregions := by
-          simpa using hMem
-        obtain ⟨sub, hSub⟩ :=
-          hWF.subregions_exist ob.region region hRegion r'' hMem'
+        have hMem0 : r'' ∈ region.subregions := by
+          simpa [updatedRegion] using hMem
+        obtain ⟨sub, hSub⟩ := hWF.subregions_exist ob.region region hRegion r'' hMem0
         by_cases hSubEq : r'' = ob.region
-        · exact ⟨{ region with ledger := removeObligationId o region.ledger },
-            by simp [getRegion, setRegion, setObligation, hSubEq]⟩
-        · exact ⟨sub, by simp [getRegion, setRegion, setObligation, hSubEq]; exact hSub⟩
-      · have h' : getRegion s r' = some region' := by
-          simpa [getRegion, setRegion, setObligation, hRegEq] using h
-        obtain ⟨sub, hSub⟩ := hWF.subregions_exist r' region' h' r'' hMem
+        · subst hSubEq
+          refine ⟨updatedRegion, ?_⟩
+          simp [getRegion, setRegion, setObligation, updatedOb, updatedRegion]
+        · refine ⟨sub, ?_⟩
+          simpa [getRegion, setRegion, setObligation, updatedOb, updatedRegion, hSubEq] using hSub
+      · have hRegS : getRegion s r' = some region' := by
+          simpa [getRegion, setRegion, setObligation, updatedOb, updatedRegion, hRegEq] using hReg
+        obtain ⟨sub, hSub⟩ := hWF.subregions_exist r' region' hRegS r'' hMem
         by_cases hSubEq : r'' = ob.region
-        · exact ⟨{ region with ledger := removeObligationId o region.ledger },
-            by simp [getRegion, setRegion, setObligation, hSubEq]⟩
-        · exact ⟨sub, by simp [getRegion, setRegion, setObligation, hSubEq]; exact hSub⟩
+        · subst hSubEq
+          refine ⟨updatedRegion, ?_⟩
+          simp [getRegion, setRegion, setObligation, updatedOb, updatedRegion]
+        · refine ⟨sub, ?_⟩
+          simpa [getRegion, setRegion, setObligation, updatedOb, updatedRegion, hSubEq] using hSub
   }
 
 -- ==========================================================================
@@ -2223,11 +2290,12 @@ theorem cancelRequest_preserves_wellformed {Value Error Panic : Type}
     (hStep : Step s (Label.cancel r reason) s')
     : WellFormed s' := by
   cases hStep with
-  | cancelRequest hTask hRegion hRegionMatch hNotCompleted hUpdate =>
+  | cancelRequest reason0 cleanup0 hTask hRegion hRegionMatch hNotCompleted hUpdate =>
+    rename_i t0 task0 region0
     subst hUpdate
     have hWF1 :
         WellFormed
-          (setRegion s r { region with cancel := some (strengthenOpt region.cancel reason) }) := by
+          (setRegion s r { region0 with cancel := some (strengthenOpt region0.cancel reason0) }) := by
       apply setRegion_structural_preserves_wellformed (s := s) (r := r)
       · exact hWF
       · exact hRegion
@@ -2235,22 +2303,22 @@ theorem cancelRequest_preserves_wellformed {Value Error Panic : Type}
       · rfl
       · rfl
     have hTask1 :
-        getTask (setRegion s r { region with cancel := some (strengthenOpt region.cancel reason) }) t =
-          some task := by
+        getTask (setRegion s r { region0 with cancel := some (strengthenOpt region0.cancel reason0) }) t0 =
+          some task0 := by
       simpa [getTask, setRegion] using hTask
     have hSameRegion :
-        { task with state := TaskState.cancelRequested reason cleanup }.region = task.region := by
+        { task0 with state := TaskState.cancelRequested reason0 cleanup0 }.region = task0.region := by
       rfl
     exact
       setTask_same_region_preserves_wellformed
-        (s := setRegion s r { region with cancel := some (strengthenOpt region.cancel reason) })
-        (t := t)
-        (task := task)
-        (newTask := { task with state := TaskState.cancelRequested reason cleanup })
+        (s := setRegion s r { region0 with cancel := some (strengthenOpt region0.cancel reason0) })
+        (t := t0)
+        (task := task0)
+        (newTask := { task0 with state := TaskState.cancelRequested reason0 cleanup0 })
         hWF1
         hTask1
         hSameRegion
-  | closeCancelChildren hRegion _ _ hUpdate =>
+  | closeCancelChildren _ hRegion _ _ hUpdate =>
     subst hUpdate
     exact setRegion_structural_preserves_wellformed hWF hRegion rfl rfl rfl
 
@@ -2270,18 +2338,20 @@ theorem cancel_label_preserves_region_structure {Value Error Panic : Type}
         region'.subregions = region.subregions ∧
         region'.ledger = region.ledger := by
   cases hStep with
-  | cancelRequest hTask hRegion hRegionMatch hNotCompleted hUpdate =>
+  | cancelRequest reason0 cleanup0 hTask hRegion hRegionMatch hNotCompleted hUpdate =>
+      rename_i t0 task0 region0
       subst hUpdate
-      refine ⟨region, { region with cancel := some (strengthenOpt region.cancel reason) }, ?_⟩
+      refine ⟨region0, { region0 with cancel := some (strengthenOpt region0.cancel reason0) }, ?_⟩
       refine ⟨hRegion, ?_⟩
       refine ⟨?_, rfl, rfl, rfl, rfl⟩
       simp [getRegion, setRegion, setTask]
-  | closeCancelChildren hRegion hState hHasLive hUpdate =>
+  | closeCancelChildren reason0 hRegion hState hHasLive hUpdate =>
+      rename_i region0
       subst hUpdate
-      refine ⟨region,
-        { region with
+      refine ⟨region0,
+        { region0 with
             state := RegionState.draining,
-            cancel := some (strengthenOpt region.cancel reason) }, ?_⟩
+            cancel := some (strengthenOpt region0.cancel reason0) }, ?_⟩
       refine ⟨hRegion, ?_⟩
       refine ⟨?_, rfl, rfl, rfl, rfl⟩
       simp [getRegion, setRegion]
@@ -2312,52 +2382,65 @@ theorem committed_obligation_stable {Value Error Panic : Type}
   | complete _ _ _ hUpdate =>
     subst hUpdate; exact ⟨ob, by simp [getObligation, setTask]; exact hOb, hCommitted⟩
   | reserve hTask hRegion hAbsent hUpdate =>
+    rename_i tStep oStep taskStep regionStep kStep
     subst hUpdate
-    by_cases hEq : o = o_1
-    · subst hEq; simp [getObligation] at hOb ⊢; rw [hOb] at *; simp at *
-      have : False := by
-        rw [hAbsent] at hOb
-        cases hOb
-      exact (False.elim this)
+    by_cases hEq : o = oStep
+    · subst hEq
+      rw [hOb] at hAbsent
+      cases hAbsent
     · exact ⟨ob, by simp [getObligation, setRegion, setObligation, hEq]; exact hOb, hCommitted⟩
   | commit hOb' hHolder hState hRegion hUpdate =>
+    rename_i tStep oStep obStep regionStep
     subst hUpdate
-    by_cases hEq : o = o_1
+    by_cases hEq : o = oStep
     · subst hEq
-      simp [getObligation] at hOb hOb'
-      rw [hOb] at hOb'; injection hOb' with hOb'
-      -- ob.state = committed but hState says ob_1.state = reserved; contradiction
-      rw [← hOb'] at hState; rw [hCommitted] at hState; cases hState
+      have hEqOb : obStep = ob := by
+        have : some obStep = some ob := by
+          exact Eq.trans (Eq.symm hOb') hOb
+        exact Option.some.inj this
+      rw [hEqOb] at hState
+      rw [hCommitted] at hState
+      cases hState
     · exact ⟨ob, by simp [getObligation, setRegion, setObligation, hEq]; exact hOb, hCommitted⟩
   | abort hOb' hHolder hState hRegion hUpdate =>
+    rename_i tStep oStep obStep regionStep
     subst hUpdate
-    by_cases hEq : o = o_1
+    by_cases hEq : o = oStep
     · subst hEq
-      simp [getObligation] at hOb hOb'
-      rw [hOb] at hOb'; injection hOb' with hOb'
-      rw [← hOb'] at hState; rw [hCommitted] at hState; cases hState
+      have hEqOb : obStep = ob := by
+        have : some obStep = some ob := by
+          exact Eq.trans (Eq.symm hOb') hOb
+        exact Option.some.inj this
+      rw [hEqOb] at hState
+      rw [hCommitted] at hState
+      cases hState
     · exact ⟨ob, by simp [getObligation, setRegion, setObligation, hEq]; exact hOb, hCommitted⟩
-  | leak _ _ _ hOb' hHolder hState hRegion hUpdate =>
+  | leak outcome hTask hTaskState hOb' hHolder hState hRegion hUpdate =>
+    rename_i tStep oStep taskStep regionStep obStep
     subst hUpdate
-    by_cases hEq : o = o_1
+    by_cases hEq : o = oStep
     · subst hEq
-      simp [getObligation] at hOb hOb'
-      rw [hOb] at hOb'; injection hOb' with hOb'
-      rw [← hOb'] at hState; rw [hCommitted] at hState; cases hState
+      have hEqOb : obStep = ob := by
+        have : some obStep = some ob := by
+          exact Eq.trans (Eq.symm hOb') hOb
+        exact Option.some.inj this
+      rw [hEqOb] at hState
+      rw [hCommitted] at hState
+      cases hState
     · exact ⟨ob, by simp [getObligation, setRegion, setObligation, hEq]; exact hOb, hCommitted⟩
   | cancelRequest _ _ _ _ _ _ hUpdate =>
     subst hUpdate; exact ⟨ob, by simp [getObligation, setTask, setRegion]; exact hOb, hCommitted⟩
-  | cancelMasked _ _ _ hUpdate =>
+  | cancelMasked _ _ _ _ _ hUpdate =>
     subst hUpdate; exact ⟨ob, by simp [getObligation, setTask]; exact hOb, hCommitted⟩
-  | cancelAcknowledge _ _ _ _ hUpdate =>
+  | cancelAcknowledge _ _ _ _ _ hUpdate =>
     subst hUpdate; exact ⟨ob, by simp [getObligation, setTask]; exact hOb, hCommitted⟩
-  | cancelFinalize _ _ _ hUpdate =>
+  | cancelFinalize _ _ _ _ hUpdate =>
     subst hUpdate; exact ⟨ob, by simp [getObligation, setTask]; exact hOb, hCommitted⟩
-  | cancelComplete _ _ _ hUpdate =>
+  | cancelComplete _ _ _ _ hUpdate =>
     subst hUpdate; exact ⟨ob, by simp [getObligation, setTask]; exact hOb, hCommitted⟩
-  | cancelPropagate _ _ _ _ hUpdate =>
+  | cancelPropagate _ _ _ _ _ hUpdate =>
     subst hUpdate; exact ⟨ob, by simp [getObligation, setRegion]; exact hOb, hCommitted⟩
-  | cancelChild _ _ _ _ _ hUpdate =>
+  | cancelChild _ _ _ _ _ _ _ hUpdate =>
     subst hUpdate; exact ⟨ob, by simp [getObligation, setTask]; exact hOb, hCommitted⟩
   | close _ _ _ _ _ hUpdate =>
     subst hUpdate; exact ⟨ob, by simp [getObligation, setRegion]; exact hOb, hCommitted⟩

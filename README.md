@@ -168,6 +168,68 @@ Concurrency bugs become reproducible test failures.
 
 ---
 
+## "Alien Artifact" Quality Algorithms
+
+Asupersync deliberately uses mathematically rigorous machinery where it buys real correctness, determinism, and debuggability. The goal is not "cleverness"; it's to make concurrency properties *structural*, so both humans and coding agents can trust the system under cancellation, failures, and schedule perturbations.
+
+### Formal Semantics (and a Lean Skeleton) for the Runtime Kernel
+
+The runtime design is backed by a small-step operational semantics (`asupersync_v4_formal_semantics.md`) with an accompanying Lean mechanization scaffold (`formal/lean/Asupersync.lean`).
+
+One example: the cancellation/cleanup **budget** composes as a semiring-like object (componentwise `min`, with priority as `max`), which makes "who constrains whom?" algebraic instead of ad-hoc:
+
+```text
+combine(b1, b2) =
+  deadline   := min(b1.deadline,   b2.deadline)
+  pollQuota  := min(b1.pollQuota,  b2.pollQuota)
+  costQuota  := min(b1.costQuota,  b2.costQuota)
+  priority   := max(b1.priority,   b2.priority)
+```
+
+This is the kind of structure that lets us reason about cancellation protocols and bounded cleanup with proof-friendly, compositional rules.
+
+### DPOR-Style Schedule Exploration (Mazurkiewicz Traces, Foata Fingerprints)
+
+The Lab runtime includes a DPOR-style schedule explorer (`src/lab/explorer.rs`) that treats executions as traces modulo commutation of independent events (Mazurkiewicz equivalence). Instead of "run it 10,000 times and pray", it tracks coverage by equivalence class fingerprints and can prioritize exploration based on trace topology.
+
+The net effect: deterministic, replayable concurrency debugging with *coverage semantics* rather than vibes.
+
+### Anytime-Valid Invariant Monitoring via e-processes
+
+Oracles can run repeatedly during an execution without invalidating significance, using **e-processes** (`src/lab/oracle/eprocess.rs`). The key property is Ville's inequality (anytime validity):
+
+```text
+P_H0(∃ t : E_t ≥ 1/α) ≤ α
+```
+
+So you can "peek" after every scheduling step and still control type-I error, which is exactly what you want in a deterministic scheduler + oracle setting.
+
+### Distribution-Free Conformal Calibration for Lab Metrics
+
+For lab metrics that benefit from calibrated prediction sets, Asupersync uses split conformal calibration (`src/lab/conformal.rs`) with finite-sample, distribution-free guarantees (under exchangeability):
+
+```text
+P(Y ∈ C(X)) ≥ 1 − α
+```
+
+This is used to keep alerting and invariant diagnostics robust without baking in fragile distributional assumptions.
+
+### Explainable Evidence Ledgers (Bayes Factors, Galaxy-Brain Diagnostics)
+
+When a run violates an invariant (or conspicuously does not), Asupersync can produce a structured evidence ledger (`src/lab/oracle/evidence.rs`) using Bayes factors and log-likelihood contributions. The goal is agent-friendly debugging: equations + substitutions + one-line intuitions, so you can see *exactly why* the system believes "task leak" (or "clean close") is happening.
+
+### Deterministic Algorithms in the Hot Path (Not Just in Tests)
+
+Determinism is treated as a first-class algorithmic constraint across the codebase:
+
+- A deterministic virtual time wheel (`src/lab/virtual_time_wheel.rs`) with explicit tie-breaking.
+- Deterministic consistent hashing (`src/distributed/consistent_hash.rs`) for stable assignment without iteration-order landmines.
+- Trace canonicalization and race analysis hooks integrated into the lab runtime (`src/lab/runtime.rs`, `src/trace/dpor`).
+
+The point is simple: "same seed, same behavior" should be true end-to-end, not just for a demo scheduler.
+
+---
+
 ## How Asupersync Compares
 
 | Feature | Asupersync | async-std | smol |
