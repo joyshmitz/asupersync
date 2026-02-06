@@ -363,6 +363,152 @@ pub fn minimal_divergent_prefix(trace: &ReplayTrace, divergence_index: usize) ->
 }
 
 // =============================================================================
+// Prefix Minimization (bd-2fywr)
+// =============================================================================
+
+/// Configuration for prefix minimization.
+#[derive(Debug, Clone)]
+pub struct MinimizationConfig {
+    /// Minimum prefix length to consider (floor for binary search).
+    ///
+    /// Defaults to 1 (the algorithm will try prefixes as short as 1 event).
+    pub min_prefix_len: usize,
+
+    /// Maximum number of oracle evaluations before stopping.
+    ///
+    /// Binary search on a prefix of length N needs at most `ceil(log2(N))`
+    /// evaluations, but this provides a hard ceiling in case the oracle is
+    /// expensive. Set to 0 for unlimited.
+    pub max_evaluations: usize,
+}
+
+impl Default for MinimizationConfig {
+    fn default() -> Self {
+        Self {
+            min_prefix_len: 1,
+            max_evaluations: 0,
+        }
+    }
+}
+
+/// Result of prefix minimization.
+#[derive(Debug)]
+pub struct MinimizationResult {
+    /// The minimized prefix as a `ReplayTrace`.
+    pub prefix: ReplayTrace,
+
+    /// Number of events in the minimized prefix.
+    pub minimized_len: usize,
+
+    /// Number of events in the original prefix.
+    pub original_len: usize,
+
+    /// Number of oracle evaluations performed.
+    pub evaluations: usize,
+
+    /// Whether the search was cut short by `max_evaluations`.
+    pub truncated: bool,
+}
+
+/// Minimize a divergent prefix using binary search.
+///
+/// Given a `ReplayTrace` whose full prefix reproduces a failure, finds the
+/// shortest sub-prefix `events[0..k]` that still reproduces. The `oracle`
+/// callback is called with candidate sub-prefixes and must return `true` if
+/// the sub-prefix reproduces the target failure.
+///
+/// # Algorithm
+///
+/// Binary search over prefix length. Assumes monotonicity: if `events[0..k]`
+/// reproduces, then `events[0..j]` for all `j >= k` also reproduces. This
+/// holds for deterministic replay with a fixed seed — once enough of the
+/// schedule is replayed to trigger the failure, adding more events cannot
+/// un-trigger it.
+///
+/// # Determinism
+///
+/// The algorithm is deterministic. Determinism of the overall process depends
+/// on the oracle callback (which should use `LabRuntime` with a fixed seed).
+///
+/// # Panics
+///
+/// Panics if the trace is empty.
+pub fn minimize_divergent_prefix<F>(
+    trace: &ReplayTrace,
+    config: &MinimizationConfig,
+    mut oracle: F,
+) -> MinimizationResult
+where
+    F: FnMut(&[ReplayEvent]) -> bool,
+{
+    let n = trace.events.len();
+    assert!(n > 0, "cannot minimize an empty trace");
+
+    let min_len = config.min_prefix_len.max(1);
+    let mut evaluations = 0u32;
+    let max_evals = if config.max_evaluations == 0 {
+        u32::MAX
+    } else {
+        config.max_evaluations as u32
+    };
+
+    // Trivial case: trace is already at or below the floor.
+    if n <= min_len {
+        return MinimizationResult {
+            prefix: trace.clone(),
+            minimized_len: n,
+            original_len: n,
+            evaluations: 0,
+            truncated: false,
+        };
+    }
+
+    // Binary search: find smallest `k` in [min_len, n] where oracle(events[0..k]) is true.
+    // We know oracle(events[0..n]) is true (the full prefix reproduces).
+    let mut left = min_len;
+    let mut right = n;
+
+    while left < right {
+        if evaluations >= max_evals {
+            // Budget exhausted — return the best known reproducing prefix.
+            return MinimizationResult {
+                prefix: slice_trace(trace, right),
+                minimized_len: right,
+                original_len: n,
+                evaluations: evaluations as usize,
+                truncated: true,
+            };
+        }
+
+        let mid = left + (right - left) / 2;
+        evaluations += 1;
+
+        if oracle(&trace.events[..mid]) {
+            right = mid;
+        } else {
+            left = mid + 1;
+        }
+    }
+
+    MinimizationResult {
+        prefix: slice_trace(trace, left),
+        minimized_len: left,
+        original_len: n,
+        evaluations: evaluations as usize,
+        truncated: false,
+    }
+}
+
+/// Build a `ReplayTrace` from the first `len` events of `source`.
+fn slice_trace(source: &ReplayTrace, len: usize) -> ReplayTrace {
+    ReplayTrace {
+        metadata: source.metadata.clone(),
+        events: source.events[..len].to_vec(),
+        cursor: 0,
+    }
+}
+
+// =============================================================================
 // Classification
 // =============================================================================
 
@@ -1389,5 +1535,167 @@ mod tests {
         assert_eq!(summary.event_type, "RegionCreated");
         assert_eq!(summary.region_id, Some(7));
         assert_eq!(summary.task_id, None);
+    }
+
+    // -------------------------------------------------------------------------
+    // Prefix minimization tests (bd-2fywr)
+    // -------------------------------------------------------------------------
+
+    #[test]
+    fn minimize_finds_exact_threshold() {
+        // 10 events. Failure reproduces when prefix length >= 6.
+        let events: Vec<_> = (0..10)
+            .map(|i| ReplayEvent::RngValue { value: i })
+            .collect();
+        let trace = make_trace(42, events);
+
+        let threshold = 6;
+        let result = minimize_divergent_prefix(
+            &trace,
+            &MinimizationConfig::default(),
+            |prefix| prefix.len() >= threshold,
+        );
+
+        assert_eq!(result.minimized_len, threshold);
+        assert_eq!(result.original_len, 10);
+        assert_eq!(result.prefix.events.len(), threshold);
+        assert!(!result.truncated);
+    }
+
+    #[test]
+    fn minimize_already_minimal() {
+        // Single event — already minimal.
+        let trace = make_trace(42, vec![ReplayEvent::RngSeed { seed: 42 }]);
+
+        let result = minimize_divergent_prefix(
+            &trace,
+            &MinimizationConfig::default(),
+            |_| true,
+        );
+
+        assert_eq!(result.minimized_len, 1);
+        assert_eq!(result.evaluations, 0);
+        assert!(!result.truncated);
+    }
+
+    #[test]
+    fn minimize_full_prefix_required() {
+        // Only the full prefix (length 10) reproduces.
+        let events: Vec<_> = (0..10)
+            .map(|i| ReplayEvent::RngValue { value: i })
+            .collect();
+        let trace = make_trace(42, events);
+
+        let result = minimize_divergent_prefix(
+            &trace,
+            &MinimizationConfig::default(),
+            |prefix| prefix.len() >= 10,
+        );
+
+        assert_eq!(result.minimized_len, 10);
+        assert!(!result.truncated);
+    }
+
+    #[test]
+    fn minimize_respects_min_prefix_len() {
+        // Failure reproduces at length >= 3, but min is 5.
+        let events: Vec<_> = (0..10)
+            .map(|i| ReplayEvent::RngValue { value: i })
+            .collect();
+        let trace = make_trace(42, events);
+
+        let config = MinimizationConfig {
+            min_prefix_len: 5,
+            max_evaluations: 0,
+        };
+
+        let result = minimize_divergent_prefix(
+            &trace,
+            &config,
+            |prefix| prefix.len() >= 3,
+        );
+
+        // Search starts at min_prefix_len=5, and oracle is true at 5,
+        // so result is 5.
+        assert_eq!(result.minimized_len, 5);
+    }
+
+    #[test]
+    fn minimize_respects_max_evaluations() {
+        // 1000 events, threshold at 500. With max_evaluations=2,
+        // we can't binary-search all the way.
+        let events: Vec<_> = (0..1000)
+            .map(|i| ReplayEvent::RngValue { value: i })
+            .collect();
+        let trace = make_trace(42, events);
+
+        let config = MinimizationConfig {
+            min_prefix_len: 1,
+            max_evaluations: 2,
+        };
+
+        let result = minimize_divergent_prefix(
+            &trace,
+            &config,
+            |prefix| prefix.len() >= 500,
+        );
+
+        assert!(result.truncated);
+        assert_eq!(result.evaluations, 2);
+        // Should still have found a shorter prefix than original.
+        assert!(result.minimized_len <= 1000);
+        // And it should be a reproducing prefix (>= 500).
+        assert!(result.minimized_len >= 500);
+    }
+
+    #[test]
+    fn minimize_preserves_metadata() {
+        let events: Vec<_> = (0..10)
+            .map(|i| ReplayEvent::RngValue { value: i })
+            .collect();
+        let trace = make_trace(0xBEEF, events);
+
+        let result = minimize_divergent_prefix(
+            &trace,
+            &MinimizationConfig::default(),
+            |prefix| prefix.len() >= 5,
+        );
+
+        assert_eq!(result.prefix.metadata.seed, 0xBEEF);
+    }
+
+    #[test]
+    fn minimize_binary_search_efficiency() {
+        // 1024 events. Binary search should take at most ceil(log2(1024)) = 10 evals.
+        let events: Vec<_> = (0..1024)
+            .map(|i| ReplayEvent::RngValue { value: i })
+            .collect();
+        let trace = make_trace(42, events);
+
+        let result = minimize_divergent_prefix(
+            &trace,
+            &MinimizationConfig::default(),
+            |prefix| prefix.len() >= 300,
+        );
+
+        assert_eq!(result.minimized_len, 300);
+        assert!(result.evaluations <= 10, "evaluations={}", result.evaluations);
+    }
+
+    #[test]
+    fn minimize_threshold_one() {
+        // Any non-empty prefix reproduces.
+        let events: Vec<_> = (0..100)
+            .map(|i| ReplayEvent::RngValue { value: i })
+            .collect();
+        let trace = make_trace(42, events);
+
+        let result = minimize_divergent_prefix(
+            &trace,
+            &MinimizationConfig::default(),
+            |_| true,
+        );
+
+        assert_eq!(result.minimized_len, 1);
     }
 }
