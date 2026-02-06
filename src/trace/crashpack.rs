@@ -462,6 +462,13 @@ pub struct CrashPack {
     ///
     /// Sorted and deduplicated. Empty if all invariants held.
     pub oracle_violations: Vec<String>,
+
+    /// Verbatim replay command for reproducing this failure.
+    ///
+    /// When present, this can be copy-pasted into a shell to replay the
+    /// exact execution that produced this crash pack.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub replay: Option<ReplayCommand>,
 }
 
 impl PartialEq for CrashPack {
@@ -493,7 +500,17 @@ impl CrashPack {
             evidence: Vec::new(),
             supervision_log: Vec::new(),
             oracle_violations: Vec::new(),
+            replay: None,
         }
+    }
+
+    /// Generate a replay command from this crash pack's configuration.
+    ///
+    /// This is a convenience method equivalent to
+    /// `ReplayCommand::from_config(&pack.manifest.config, artifact_path)`.
+    #[must_use]
+    pub fn replay_command(&self, artifact_path: Option<&str>) -> ReplayCommand {
+        ReplayCommand::from_config(&self.manifest.config, artifact_path)
     }
 
     /// Returns `true` if any oracle violations were detected.
@@ -540,6 +557,7 @@ pub struct CrashPackBuilder {
     evidence: Vec<EvidenceEntrySnapshot>,
     supervision_log: Vec<SupervisionSnapshot>,
     oracle_violations: Vec<String>,
+    replay: Option<ReplayCommand>,
 }
 
 impl CrashPackBuilder {
@@ -628,6 +646,13 @@ impl CrashPackBuilder {
         self
     }
 
+    /// Set the replay command for reproducing this failure.
+    #[must_use]
+    pub fn replay(mut self, command: ReplayCommand) -> Self {
+        self.replay = Some(command);
+        self
+    }
+
     /// Build the crash pack.
     ///
     /// The manifest's attachment list is auto-populated from the crash pack
@@ -699,7 +724,164 @@ impl CrashPackBuilder {
             evidence: self.evidence,
             supervision_log,
             oracle_violations: self.oracle_violations,
+            replay: self.replay,
         }
+    }
+}
+
+// =============================================================================
+// Replay Command Contract (bd-1teda)
+// =============================================================================
+
+/// An environment variable required for deterministic replay.
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+pub struct ReplayEnvVar {
+    /// Variable name (e.g., `ASUPERSYNC_SEED`).
+    pub key: String,
+    /// Variable value.
+    pub value: String,
+}
+
+/// A verbatim replay command that can reproduce the crash pack's failure.
+///
+/// The command is a fully-specified invocation that, given the same code
+/// at the recorded commit, will reproduce the exact failure.
+///
+/// # Example JSON
+///
+/// ```json
+/// {
+///   "program": "cargo",
+///   "args": ["test", "--lib", "--", "--seed", "42"],
+///   "env": [{"key": "ASUPERSYNC_WORKERS", "value": "4"}],
+///   "command_line": "ASUPERSYNC_WORKERS=4 cargo test --lib -- --seed 42"
+/// }
+/// ```
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+pub struct ReplayCommand {
+    /// The binary or program to invoke.
+    pub program: String,
+
+    /// Command-line arguments, each as a separate string.
+    pub args: Vec<String>,
+
+    /// Environment variables required for replay.
+    #[serde(default, skip_serializing_if = "Vec::is_empty")]
+    pub env: Vec<ReplayEnvVar>,
+
+    /// Human-readable one-liner that can be copy-pasted into a shell.
+    ///
+    /// Includes env var prefixes, the program, and all arguments.
+    pub command_line: String,
+}
+
+impl ReplayCommand {
+    /// Build a replay command from a crash pack's configuration.
+    ///
+    /// Generates a `cargo test` invocation with the crash pack's seed
+    /// and configuration parameters.
+    #[must_use]
+    pub fn from_config(config: &CrashPackConfig, artifact_path: Option<&str>) -> Self {
+        let mut args = vec![
+            "test".to_string(),
+            "--lib".to_string(),
+            "--".to_string(),
+            "--seed".to_string(),
+            config.seed.to_string(),
+        ];
+
+        let mut env = Vec::new();
+
+        env.push(ReplayEnvVar {
+            key: "ASUPERSYNC_WORKERS".to_string(),
+            value: config.worker_count.to_string(),
+        });
+
+        if let Some(max_steps) = config.max_steps {
+            env.push(ReplayEnvVar {
+                key: "ASUPERSYNC_MAX_STEPS".to_string(),
+                value: max_steps.to_string(),
+            });
+        }
+
+        if let Some(ref path) = artifact_path {
+            args.push("--crashpack".to_string());
+            args.push((*path).to_string());
+        }
+
+        let command_line = build_command_line("cargo", &args, &env);
+
+        Self {
+            program: "cargo".to_string(),
+            args,
+            env,
+            command_line,
+        }
+    }
+
+    /// Build a replay command for the `asupersync trace replay` CLI subcommand.
+    #[must_use]
+    pub fn from_config_cli(config: &CrashPackConfig, artifact_path: &str) -> Self {
+        let mut args = vec![
+            "trace".to_string(),
+            "replay".to_string(),
+            "--seed".to_string(),
+            config.seed.to_string(),
+            "--workers".to_string(),
+            config.worker_count.to_string(),
+        ];
+
+        if let Some(max_steps) = config.max_steps {
+            args.push("--max-steps".to_string());
+            args.push(max_steps.to_string());
+        }
+
+        args.push(artifact_path.to_string());
+
+        let command_line = build_command_line("asupersync", &args, &[]);
+
+        Self {
+            program: "asupersync".to_string(),
+            args,
+            env: Vec::new(),
+            command_line,
+        }
+    }
+}
+
+impl std::fmt::Display for ReplayCommand {
+    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        write!(f, "{}", self.command_line)
+    }
+}
+
+/// Build a shell-friendly command line string.
+fn build_command_line(program: &str, args: &[String], env: &[ReplayEnvVar]) -> String {
+    let mut parts = Vec::new();
+    for var in env {
+        parts.push(format!("{}={}", var.key, shell_escape(&var.value)));
+    }
+    parts.push(program.to_string());
+    for arg in args {
+        parts.push(shell_escape(arg));
+    }
+    parts.join(" ")
+}
+
+/// Minimally escape a string for shell embedding.
+///
+/// If the string contains shell-unsafe characters, wrap it in single quotes.
+/// Otherwise, return it as-is.
+fn shell_escape(s: &str) -> String {
+    if s.is_empty() {
+        return "''".to_string();
+    }
+    if s.chars()
+        .all(|c| c.is_alphanumeric() || matches!(c, '-' | '_' | '.' | '/' | ':' | '=' | ','))
+    {
+        s.to_string()
+    } else {
+        format!("'{}'", s.replace('\'', "'\\''"))
     }
 }
 
