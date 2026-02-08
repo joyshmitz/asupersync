@@ -803,14 +803,8 @@ mod tests {
 
         let app = AppSpec::new("dep_chain")
             .child(conformance_child("alpha"))
-            .child(conformance_child_depends(
-                "bravo",
-                vec!["alpha".into()],
-            ))
-            .child(conformance_child_depends(
-                "charlie",
-                vec!["bravo".into()],
-            ));
+            .child(conformance_child_depends("bravo", vec!["alpha".into()]))
+            .child(conformance_child_depends("charlie", vec!["bravo".into()]));
         let harness = SporkAppHarness::with_seed(42, app).unwrap();
         schedule_children(&harness);
         let report = harness.run_to_report().unwrap();
@@ -835,10 +829,7 @@ mod tests {
             let app = AppSpec::new("det_multi")
                 .child(conformance_child("alpha"))
                 .child(conformance_child("bravo"))
-                .child(conformance_child_depends(
-                    "charlie",
-                    vec!["alpha".into()],
-                ));
+                .child(conformance_child_depends("charlie", vec!["alpha".into()]));
             let harness = SporkAppHarness::with_seed(seed, app).unwrap();
             schedule_children(&harness);
             harness.run_to_report().unwrap()

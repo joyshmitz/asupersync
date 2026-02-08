@@ -55,7 +55,7 @@ use crate::types::{Budget, CancelReason, Outcome, RegionId, TaskId, Time};
 /// O(n) for a `String` clone. This eliminates heap allocations in the
 /// supervisor restart-plan hot path where names are cloned into
 /// `SupervisorRestartPlan` and `RegionOp` structures.
-#[derive(Clone, Hash, Eq, Ord, PartialOrd)]
+#[derive(Clone, Eq, Ord, PartialOrd)]
 pub struct ChildName(Arc<str>);
 
 impl ChildName {
@@ -65,8 +65,18 @@ impl ChildName {
     }
 
     /// Borrow as a string slice.
+    #[must_use]
     pub fn as_str(&self) -> &str {
         &self.0
+    }
+
+    /// Return the number of strong references to the underlying `Arc`.
+    ///
+    /// Useful in gate tests to verify that hot-path clones share the
+    /// same allocation rather than copying the string.
+    #[must_use]
+    pub fn strong_count(&self) -> usize {
+        Arc::strong_count(&self.0)
     }
 }
 
@@ -86,6 +96,12 @@ impl AsRef<str> for ChildName {
 impl std::borrow::Borrow<str> for ChildName {
     fn borrow(&self) -> &str {
         &self.0
+    }
+}
+
+impl std::hash::Hash for ChildName {
+    fn hash<H: std::hash::Hasher>(&self, state: &mut H) {
+        (*self.0).hash(state);
     }
 }
 
@@ -7707,5 +7723,123 @@ mod tests {
         ));
 
         crate::test_complete!("obs_evidence_ledger_binding_constraints_cover_all_paths");
+    }
+
+    // ── Hot-path allocation gate tests (bd-3h23x) ──────────────────────────
+
+    /// Gate: ChildName::clone() is O(1) — Arc reference count bump, not a heap copy.
+    #[test]
+    fn gate_child_name_clone_is_arc_bump() {
+        init_test("gate_child_name_clone_is_arc_bump");
+
+        let name = ChildName::from("test_worker");
+        // strong_count starts at 1.
+        assert_eq!(name.strong_count(), 1);
+
+        let cloned = name.clone();
+        // After clone, strong_count is 2 — same allocation, reference bumped.
+        assert_eq!(name.strong_count(), 2);
+        assert_eq!(cloned.strong_count(), 2);
+
+        // Content is identical.
+        assert_eq!(name, cloned);
+
+        drop(cloned);
+        assert_eq!(name.strong_count(), 1);
+
+        crate::test_complete!("gate_child_name_clone_is_arc_bump");
+    }
+
+    /// Gate: restart_plan_for_idx names share Arc allocation with ChildSpec.
+    /// This proves restart planning does zero heap string copies.
+    #[test]
+    fn gate_restart_plan_shares_arcs_with_children() {
+        init_test("gate_restart_plan_shares_arcs_with_children");
+
+        let compiled = SupervisorBuilder::new("alloc_gate")
+            .with_restart_policy(RestartPolicy::OneForAll)
+            .child(ChildSpec::new("alpha", noop_start))
+            .child(ChildSpec::new("bravo", noop_start))
+            .child(ChildSpec::new("charlie", noop_start).with_restart(
+                SupervisionStrategy::Restart(RestartConfig::new(3, Duration::from_secs(60))),
+            ))
+            .compile()
+            .unwrap();
+
+        // Before restart plan, each child name has refcount = 1
+        // (plus 1 from the name_to_idx HashMap clone during compile, but that's dropped).
+        // After compile, children own their names with refcount >= 1.
+        let alpha_rc_before = compiled.children[compiled.start_order[0]]
+            .name
+            .strong_count();
+
+        let err: Outcome<(), ()> = Outcome::Err(());
+        let plan = compiled
+            .restart_plan_for_failure("charlie", &err)
+            .expect("plan");
+
+        // After creating the plan, child names in plan should bump the Arc refcount.
+        // cancel_order has 3 names (OneForAll), restart_order has 3 names.
+        // So each child name's refcount increases by 2 (one in cancel, one in restart).
+        let alpha_rc_after = compiled.children[compiled.start_order[0]]
+            .name
+            .strong_count();
+        assert_eq!(
+            alpha_rc_after,
+            alpha_rc_before + 2,
+            "plan names must share Arc with children (refcount bump, not copy)"
+        );
+
+        // Verify plan has the right content.
+        assert_eq!(plan.cancel_order.len(), 3);
+        assert_eq!(plan.restart_order.len(), 3);
+
+        // Dropping the plan restores refcounts.
+        drop(plan);
+        let alpha_rc_final = compiled.children[compiled.start_order[0]]
+            .name
+            .strong_count();
+        assert_eq!(alpha_rc_final, alpha_rc_before);
+
+        crate::test_complete!("gate_restart_plan_shares_arcs_with_children");
+    }
+
+    /// Gate: compile_restart_ops shares Arc allocations with the plan.
+    #[test]
+    fn gate_compiled_ops_share_arcs_with_plan() {
+        init_test("gate_compiled_ops_share_arcs_with_plan");
+
+        let compiled =
+            SupervisorBuilder::new("ops_gate")
+                .with_restart_policy(RestartPolicy::OneForOne)
+                .child(ChildSpec::new("svc", noop_start).with_restart(
+                    SupervisionStrategy::Restart(RestartConfig::new(3, Duration::from_secs(60))),
+                ))
+                .compile()
+                .unwrap();
+
+        let err: Outcome<(), ()> = Outcome::Err(());
+        let plan = compiled
+            .restart_plan_for_failure("svc", &err)
+            .expect("plan");
+
+        let rc_before = plan.cancel_order[0].strong_count();
+        let ops = compiled.compile_restart_ops(&plan);
+
+        // OneForOne: 1 cancel + 1 drain + 1 restart = 3 ops, each cloning the name.
+        let rc_after = plan.cancel_order[0].strong_count();
+        assert_eq!(
+            rc_after,
+            rc_before + 3,
+            "ops names must share Arc with plan (refcount bump per op)"
+        );
+
+        // Verify ops structure.
+        assert_eq!(ops.ops.len(), 3); // Cancel + Drain + Restart
+
+        drop(ops);
+        assert_eq!(plan.cancel_order[0].strong_count(), rc_before);
+
+        crate::test_complete!("gate_compiled_ops_share_arcs_with_plan");
     }
 }

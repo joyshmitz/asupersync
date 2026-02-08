@@ -563,7 +563,7 @@ mod tests {
 
     fn make_child(name: &str) -> ChildSpec {
         ChildSpec {
-            name: name.to_string(),
+            name: name.into(),
             start: Box::new(
                 |scope: &crate::cx::Scope<'static, crate::types::policy::FailFast>,
                  state: &mut RuntimeState,
@@ -915,9 +915,9 @@ mod tests {
         init_test("app_compile_with_dependencies_is_deterministic");
         let build = || {
             let mut b = make_child("b");
-            b.depends_on = vec!["a".to_string()];
+            b.depends_on = vec!["a".into()];
             let mut c = make_child("c");
-            c.depends_on = vec!["b".to_string()];
+            c.depends_on = vec!["b".into()];
             AppSpec::new("dep_det")
                 .child(c)
                 .child(make_child("a"))

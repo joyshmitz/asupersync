@@ -56,7 +56,7 @@ pub mod app {
 /// Re-exports from [`crate::supervision`].
 pub mod supervisor {
     pub use crate::supervision::{
-        BackoffStrategy, ChildSpec, ChildStart, CompiledSupervisor, EscalationPolicy,
+        BackoffStrategy, ChildName, ChildSpec, ChildStart, CompiledSupervisor, EscalationPolicy,
         RestartConfig, RestartPolicy, StartTieBreak, StartedChild, SupervisionStrategy,
         SupervisorBuilder, SupervisorCompileError, SupervisorHandle, SupervisorSpawnError,
     };
@@ -122,8 +122,8 @@ pub mod prelude {
 
     // -- Supervision --
     pub use crate::supervision::{
-        BackoffStrategy, ChildSpec, ChildStart, RestartConfig, RestartPolicy, SupervisionStrategy,
-        SupervisorBuilder,
+        BackoffStrategy, ChildName, ChildSpec, ChildStart, RestartConfig, RestartPolicy,
+        SupervisionStrategy, SupervisorBuilder,
     };
 
     // -- GenServer --
