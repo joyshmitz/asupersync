@@ -706,7 +706,7 @@ mod tests {
     /// Helper: create a ChildSpec that spawns a single async task.
     fn conformance_child(name: &str) -> crate::supervision::ChildSpec {
         crate::supervision::ChildSpec {
-            name: name.to_string(),
+            name: name.into(),
             start: Box::new(
                 |scope: &crate::cx::Scope<'static, crate::types::policy::FailFast>,
                  state: &mut crate::runtime::state::RuntimeState,
@@ -726,7 +726,10 @@ mod tests {
     }
 
     /// Helper: create a ChildSpec with explicit dependencies.
-    fn conformance_child_depends(name: &str, deps: Vec<String>) -> crate::supervision::ChildSpec {
+    fn conformance_child_depends(
+        name: &str,
+        deps: Vec<crate::supervision::ChildName>,
+    ) -> crate::supervision::ChildSpec {
         let mut child = conformance_child(name);
         child.depends_on = deps;
         child
@@ -802,11 +805,11 @@ mod tests {
             .child(conformance_child("alpha"))
             .child(conformance_child_depends(
                 "bravo",
-                vec!["alpha".to_string()],
+                vec!["alpha".into()],
             ))
             .child(conformance_child_depends(
                 "charlie",
-                vec!["bravo".to_string()],
+                vec!["bravo".into()],
             ));
         let harness = SporkAppHarness::with_seed(42, app).unwrap();
         schedule_children(&harness);
@@ -834,7 +837,7 @@ mod tests {
                 .child(conformance_child("bravo"))
                 .child(conformance_child_depends(
                     "charlie",
-                    vec!["alpha".to_string()],
+                    vec!["alpha".into()],
                 ));
             let harness = SporkAppHarness::with_seed(seed, app).unwrap();
             schedule_children(&harness);

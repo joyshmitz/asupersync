@@ -1060,7 +1060,7 @@ mod tests {
 
         // Children with dependencies: charlie depends on bravo, bravo depends on alpha.
         let alpha = ChildSpec {
-            name: "alpha".to_string(),
+            name: "alpha".into(),
             start: Box::new(
                 |scope: &crate::cx::Scope<'static, crate::types::policy::FailFast>,
                  state: &mut RuntimeState,
@@ -1078,7 +1078,7 @@ mod tests {
             required: true,
         };
         let bravo = ChildSpec {
-            name: "bravo".to_string(),
+            name: "bravo".into(),
             start: Box::new(
                 |scope: &crate::cx::Scope<'static, crate::types::policy::FailFast>,
                  state: &mut RuntimeState,
@@ -1090,13 +1090,13 @@ mod tests {
             ),
             restart: SupervisionStrategy::Stop,
             shutdown_budget: Budget::INFINITE,
-            depends_on: vec!["alpha".to_string()],
+            depends_on: vec!["alpha".into()],
             registration: NameRegistrationPolicy::None,
             start_immediately: true,
             required: true,
         };
         let charlie = ChildSpec {
-            name: "charlie".to_string(),
+            name: "charlie".into(),
             start: Box::new(
                 |scope: &crate::cx::Scope<'static, crate::types::policy::FailFast>,
                  state: &mut RuntimeState,
@@ -1108,7 +1108,7 @@ mod tests {
             ),
             restart: SupervisionStrategy::Stop,
             shutdown_budget: Budget::INFINITE,
-            depends_on: vec!["bravo".to_string()],
+            depends_on: vec!["bravo".into()],
             registration: NameRegistrationPolicy::None,
             start_immediately: true,
             required: true,
@@ -1254,7 +1254,7 @@ mod tests {
         let registry_seen = Arc::new(std::sync::atomic::AtomicBool::new(false));
         let seen_clone = Arc::clone(&registry_seen);
         let child = ChildSpec {
-            name: "checker".to_string(),
+            name: "checker".into(),
             start: Box::new(
                 move |scope: &crate::cx::Scope<'static, crate::types::policy::FailFast>,
                       state: &mut RuntimeState,
@@ -1307,7 +1307,7 @@ mod tests {
         let registry_seen = Arc::new(std::sync::atomic::AtomicBool::new(false));
         let seen_clone = Arc::clone(&registry_seen);
         let child = ChildSpec {
-            name: "no_reg".to_string(),
+            name: "no_reg".into(),
             start: Box::new(
                 move |scope: &crate::cx::Scope<'static, crate::types::policy::FailFast>,
                       state: &mut RuntimeState,
@@ -1363,7 +1363,7 @@ mod tests {
         let reg_clone = Arc::clone(&registry);
         let lease_clone = Arc::clone(&lease_slot);
         let child = ChildSpec {
-            name: "named_worker".to_string(),
+            name: "named_worker".into(),
             start: Box::new(
                 move |scope: &crate::cx::Scope<'static, crate::types::policy::FailFast>,
                       state: &mut RuntimeState,
