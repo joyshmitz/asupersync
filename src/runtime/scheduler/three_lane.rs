@@ -246,17 +246,28 @@ pub(crate) fn schedule_on_current_local(task: TaskId, priority: u8) -> bool {
 }
 
 pub(crate) fn schedule_cancel_on_current_local(task: TaskId, priority: u8) -> bool {
-    CURRENT_LOCAL.with(|cell| {
-        if let Some(local) = cell.borrow().as_ref() {
-            local
-                .lock()
-                .expect("local scheduler lock poisoned")
-                .move_to_cancel_lane(task, priority);
-            let _ = remove_from_current_local_ready(task);
-            return true;
-        }
+    // Check if we have a local scheduler first to avoid spurious removal
+    let has_local = CURRENT_LOCAL.with(|cell| cell.borrow().is_some());
+
+    if has_local {
+        // LOCK ORDER: local_ready (B) then local (A)
+        // Matches order in inject_cancel: remove from ready queue first
+        let _ = remove_from_current_local_ready(task);
+
+        CURRENT_LOCAL.with(|cell| {
+            if let Some(local) = cell.borrow().as_ref() {
+                local
+                    .lock()
+                    .expect("local scheduler lock poisoned")
+                    .move_to_cancel_lane(task, priority);
+                return true;
+            }
+            // Should be unreachable if has_local was true
+            false
+        })
+    } else {
         false
-    })
+    }
 }
 
 /// A multi-worker scheduler with 3-lane priority support.
@@ -933,8 +944,10 @@ impl ThreeLaneWorker {
                             if next_deadline > now {
                                 let nanos = next_deadline.duration_since(now);
                                 self.parker.park_timeout(Duration::from_nanos(nanos));
+                            } else {
+                                // If deadline is due or passed, don't park - break to process timers.
+                                break;
                             }
-                            // If deadline is due or passed, don't park - loop back to process timers.
                         } else if has_io {
                             // No pending timers but IO driver is active;
                             // use short timeout so we periodically poll the reactor.
@@ -1408,28 +1421,29 @@ impl ThreeLaneWorker {
 
         let is_local = stored.is_local();
 
-        // Reuse cached waker if priority hasn't changed, otherwise allocate new one
-        let waker = match cached_waker {
-            Some((w, cached_priority)) if cached_priority == priority => w,
-            _ => {
-                if is_local {
-                    Waker::from(Arc::new(ThreeLaneLocalWaker {
-                        task_id,
-                        priority,
-                        wake_state: Arc::clone(&wake_state),
-                        local: Arc::clone(&self.local),
-                        local_ready: Arc::clone(&self.local_ready),
-                        parker: self.parker.clone(),
-                    }))
-                } else {
-                    Waker::from(Arc::new(ThreeLaneWaker {
-                        task_id,
-                        priority,
-                        wake_state: Arc::clone(&wake_state),
-                        global: Arc::clone(&self.global),
-                        coordinator: Arc::clone(&self.coordinator),
-                    }))
-                }
+        // Reuse cached waker (wakers are now dynamic, so priority check is not needed for correctness,
+        // but we still store it in the record).
+        let waker = if let Some((w, _)) = cached_waker {
+            w
+        } else {
+            let weak_inner = cx_inner.as_ref().map(Arc::downgrade).unwrap_or_default();
+            if is_local {
+                Waker::from(Arc::new(ThreeLaneLocalWaker {
+                    task_id,
+                    wake_state: Arc::clone(&wake_state),
+                    local: Arc::clone(&self.local),
+                    local_ready: Arc::clone(&self.local_ready),
+                    parker: self.parker.clone(),
+                    cx_inner: weak_inner,
+                }))
+            } else {
+                Waker::from(Arc::new(ThreeLaneWaker {
+                    task_id,
+                    wake_state: Arc::clone(&wake_state),
+                    global: Arc::clone(&self.global),
+                    coordinator: Arc::clone(&self.coordinator),
+                    cx_inner: weak_inner,
+                }))
             }
         };
         // Create/reuse cancel waker if cx_inner exists
@@ -1437,7 +1451,7 @@ impl ThreeLaneWorker {
             || None,
             |inner| {
                 let cancel_waker = match cached_cancel_waker {
-                    Some((w, cached_priority)) if cached_priority == priority => w,
+                    Some((w, cached_pri)) if cached_pri == priority => w,
                     _ => {
                         if is_local {
                             Waker::from(Arc::new(ThreeLaneLocalCancelWaker {
@@ -1690,16 +1704,22 @@ impl ThreeLaneWorker {
 
 struct ThreeLaneWaker {
     task_id: TaskId,
-    priority: u8,
     wake_state: Arc<crate::record::task::TaskWakeState>,
     global: Arc<GlobalInjector>,
     coordinator: Arc<WorkerCoordinator>,
+    cx_inner: Weak<RwLock<CxInner>>,
 }
 
 impl ThreeLaneWaker {
     fn schedule(&self) {
         if self.wake_state.notify() {
-            self.global.inject_ready(self.task_id, self.priority);
+            let priority = self
+                .cx_inner
+                .upgrade()
+                .and_then(|inner| inner.read().ok().map(|g| g.budget.priority))
+                .unwrap_or(0);
+
+            self.global.inject_ready(self.task_id, priority);
             self.coordinator.wake_one();
         }
     }
@@ -1717,11 +1737,11 @@ impl Wake for ThreeLaneWaker {
 
 struct ThreeLaneLocalWaker {
     task_id: TaskId,
-    priority: u8,
     wake_state: Arc<crate::record::task::TaskWakeState>,
     local: Arc<Mutex<PriorityScheduler>>,
     local_ready: Arc<Mutex<Vec<TaskId>>>,
     parker: Parker,
+    cx_inner: Weak<RwLock<CxInner>>,
 }
 
 impl ThreeLaneLocalWaker {
@@ -2646,10 +2666,10 @@ mod tests {
             .map(|_| {
                 Waker::from(Arc::new(ThreeLaneWaker {
                     task_id,
-                    priority: 100,
                     wake_state: Arc::clone(&wake_state),
                     global: Arc::clone(&global),
                     coordinator: Arc::clone(&coordinator),
+                    cx_inner: Weak::new(),
                 }))
             })
             .collect();
@@ -3765,11 +3785,11 @@ mod tests {
 
         let waker = Waker::from(Arc::new(ThreeLaneLocalWaker {
             task_id,
-            priority: 100,
             wake_state: Arc::clone(&wake_state),
             local: Arc::clone(&priority_sched),
             local_ready: Arc::clone(&local_ready),
             parker,
+            cx_inner: Weak::new(),
         }));
 
         // Set local_ready TLS (waker uses schedule_local_task, not LocalQueue).
@@ -3804,11 +3824,11 @@ mod tests {
 
         let waker = Waker::from(Arc::new(ThreeLaneLocalWaker {
             task_id,
-            priority: 100,
             wake_state: Arc::clone(&wake_state),
             local: Arc::clone(&priority_sched),
             local_ready: Arc::clone(&local_ready),
             parker,
+            cx_inner: Weak::new(),
         }));
 
         waker.wake_by_ref();

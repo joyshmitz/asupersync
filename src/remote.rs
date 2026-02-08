@@ -25,6 +25,7 @@ use crate::types::{Budget, CancelReason, ObligationId, RegionId, TaskId, Time};
 use std::fmt;
 use std::marker::PhantomData;
 use std::sync::atomic::{AtomicU64, Ordering};
+use std::sync::Arc;
 use std::time::Duration;
 
 // ---------------------------------------------------------------------------
@@ -191,6 +192,26 @@ impl RemoteInput {
 }
 
 // ---------------------------------------------------------------------------
+// RemoteRuntime - High-level transport integration
+// ---------------------------------------------------------------------------
+
+/// Abstract interface for the remote runtime (transport + state).
+///
+/// This trait allows the [`RemoteCap`] to bridge the high-level `spawn_remote`
+/// API with the underlying transport (network or virtual harness).
+pub trait RemoteRuntime: Send + Sync + fmt::Debug {
+    /// Sends a message to the network.
+    fn send_message(&self, envelope: MessageEnvelope<RemoteMessage>) -> Result<(), RemoteError>;
+
+    /// Registers a pending local task expecting a result.
+    fn register_task(
+        &self,
+        task_id: RemoteTaskId,
+        tx: oneshot::Sender<Result<RemoteOutcome, RemoteError>>,
+    );
+}
+
+// ---------------------------------------------------------------------------
 // RemoteCap — capability token
 // ---------------------------------------------------------------------------
 
@@ -215,6 +236,7 @@ impl RemoteInput {
 /// The cap holds optional configuration that governs remote execution policy:
 /// - Default lease duration for remote tasks
 /// - Budget constraints for remote operations
+/// - The transport runtime (if connected)
 ///
 /// # Example
 ///
@@ -230,6 +252,8 @@ pub struct RemoteCap {
     default_lease: Duration,
     /// Budget ceiling for remote tasks (if set, tighter than region budget).
     remote_budget: Option<Budget>,
+    /// The connected remote runtime (transport).
+    runtime: Option<Arc<dyn RemoteRuntime>>,
 }
 
 impl RemoteCap {
@@ -239,6 +263,7 @@ impl RemoteCap {
         Self {
             default_lease: Duration::from_secs(30),
             remote_budget: None,
+            runtime: None,
         }
     }
 
@@ -256,6 +281,13 @@ impl RemoteCap {
         self
     }
 
+    /// Attaches a remote runtime (transport).
+    #[must_use]
+    pub fn with_runtime(mut self, runtime: Arc<dyn RemoteRuntime>) -> Self {
+        self.runtime = Some(runtime);
+        self
+    }
+
     /// Returns the default lease duration.
     #[must_use]
     pub fn default_lease(&self) -> Duration {
@@ -266,6 +298,12 @@ impl RemoteCap {
     #[must_use]
     pub fn remote_budget(&self) -> Option<&Budget> {
         self.remote_budget.as_ref()
+    }
+
+    /// Returns the attached remote runtime, if any.
+    #[must_use]
+    pub fn runtime(&self) -> Option<&Arc<dyn RemoteRuntime>> {
+        self.runtime.as_ref()
     }
 }
 
@@ -375,7 +413,7 @@ impl std::error::Error for RemoteError {}
 ///
 /// In Phase 0, the handle wraps a oneshot channel. The actual remote protocol
 /// (spawn/ack/cancel/result/heartbeat) is defined in tmh.1.2.
-pub struct RemoteHandle<T> {
+pub struct RemoteHandle {
     /// Unique identifier for this remote task.
     remote_task_id: RemoteTaskId,
     /// Local proxy task ID (if registered in the runtime).
@@ -387,14 +425,14 @@ pub struct RemoteHandle<T> {
     /// Region that owns this remote task.
     owner_region: RegionId,
     /// Receiver for the remote result.
-    receiver: oneshot::Receiver<Result<T, RemoteError>>,
+    receiver: oneshot::Receiver<Result<RemoteOutcome, RemoteError>>,
     /// Lease duration for this task.
     lease: Duration,
     /// Current observed state.
     state: RemoteTaskState,
 }
 
-impl<T> fmt::Debug for RemoteHandle<T> {
+impl fmt::Debug for RemoteHandle {
     fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
         f.debug_struct("RemoteHandle")
             .field("remote_task_id", &self.remote_task_id)
@@ -408,7 +446,7 @@ impl<T> fmt::Debug for RemoteHandle<T> {
     }
 }
 
-impl<T> RemoteHandle<T> {
+impl RemoteHandle {
     /// Returns the remote task ID.
     #[must_use]
     pub fn remote_task_id(&self) -> RemoteTaskId {
@@ -465,7 +503,7 @@ impl<T> RemoteHandle<T> {
     ///
     /// Returns `RemoteError` if the remote task failed, was cancelled,
     /// or the lease expired.
-    pub async fn join(&self, cx: &Cx) -> Result<T, RemoteError> {
+    pub async fn join(&self, cx: &Cx) -> Result<RemoteOutcome, RemoteError> {
         self.receiver.recv(cx).await.unwrap_or_else(|_| {
             Err(RemoteError::Cancelled(CancelReason::user(
                 "remote handle channel closed",
@@ -480,7 +518,7 @@ impl<T> RemoteHandle<T> {
     /// - `Ok(Some(result))` if the remote task has completed
     /// - `Ok(None)` if the remote task is still running
     /// - `Err(RemoteError)` if the remote task failed
-    pub fn try_join(&self) -> Result<Option<T>, RemoteError> {
+    pub fn try_join(&self) -> Result<Option<RemoteOutcome>, RemoteError> {
         match self.receiver.try_recv() {
             Ok(result) => Ok(Some(result?)),
             Err(oneshot::TryRecvError::Empty) => Ok(None),
@@ -546,14 +584,17 @@ impl<T> RemoteHandle<T> {
 ///     RemoteInput::new(serialized_data),
 /// )?;
 ///
-/// let result: Vec<u8> = handle.join(&cx).await?;
+/// let result = handle.join(&cx).await?;
+/// if let RemoteOutcome::Success(data) = result {
+///     // process data
+/// }
 /// ```
-pub fn spawn_remote<T: Send + 'static>(
+pub fn spawn_remote(
     cx: &Cx,
     node: NodeId,
     computation: ComputationName,
-    _input: RemoteInput,
-) -> Result<RemoteHandle<T>, RemoteError> {
+    input: RemoteInput,
+) -> Result<RemoteHandle, RemoteError> {
     // Check capability
     let cap = cx.remote().ok_or(RemoteError::NoCapability)?;
 
@@ -564,9 +605,39 @@ pub fn spawn_remote<T: Send + 'static>(
     cx.trace("spawn_remote");
 
     // Create the oneshot channel for result delivery.
-    // In Phase 0, the sender is held but not connected to a transport.
-    // In Phase 1+, the transport layer will send the result through this channel.
-    let (_tx, rx) = oneshot::channel::<Result<T, RemoteError>>();
+    let (tx, rx) = oneshot::channel::<Result<RemoteOutcome, RemoteError>>();
+
+    // If a remote runtime is attached, register the task and send the request.
+    if let Some(runtime) = cap.runtime() {
+        runtime.register_task(remote_task_id, tx);
+
+        let req = SpawnRequest {
+            remote_task_id,
+            computation: computation.clone(),
+            input,
+            lease,
+            idempotency_key: IdempotencyKey::generate(cx),
+            budget: cap.remote_budget,
+            origin_node: NodeId::new("local"), // TODO: Local node ID from config
+            origin_region: region,
+            origin_task: cx.task_id(),
+        };
+
+        // Envelope timestamps always come from the task logical clock.
+        let sender_time = cx.logical_now();
+
+        let envelope = MessageEnvelope::new(
+            req.origin_node.clone(),
+            sender_time,
+            RemoteMessage::SpawnRequest(req),
+        );
+        runtime.send_message(envelope)?;
+    } else {
+        // Phase 0: Drop sender (simulates network that never returns)
+        // or keep it alive if we want to simulate timeout?
+        // Dropping tx means rx.recv() will fail with Closed, which we map to Cancelled.
+        // This is fine for Phase 0 stub.
+    }
 
     Ok(RemoteHandle {
         remote_task_id,
@@ -2150,7 +2221,7 @@ mod tests {
         let cx: Cx = Cx::for_testing();
         assert!(!cx.has_remote());
 
-        let result = spawn_remote::<Vec<u8>>(
+        let result = spawn_remote(
             &cx,
             NodeId::new("worker-1"),
             ComputationName::new("encode"),
@@ -2165,7 +2236,7 @@ mod tests {
         let cx: Cx = Cx::for_testing_with_remote(RemoteCap::new());
         assert!(cx.has_remote());
 
-        let result = spawn_remote::<Vec<u8>>(
+        let result = spawn_remote(
             &cx,
             NodeId::new("worker-1"),
             ComputationName::new("encode_block"),
@@ -2184,7 +2255,7 @@ mod tests {
     #[test]
     fn remote_handle_debug() {
         let cx: Cx = Cx::for_testing_with_remote(RemoteCap::new());
-        let handle = spawn_remote::<Vec<u8>>(
+        let handle = spawn_remote(
             &cx,
             NodeId::new("n1"),
             ComputationName::new("compute"),
@@ -2201,7 +2272,7 @@ mod tests {
     #[test]
     fn remote_handle_not_finished_initially() {
         let cx: Cx = Cx::for_testing_with_remote(RemoteCap::new());
-        let handle = spawn_remote::<u64>(
+        let handle = spawn_remote(
             &cx,
             NodeId::new("n1"),
             ComputationName::new("add"),
@@ -2219,7 +2290,7 @@ mod tests {
     #[test]
     fn remote_handle_try_join_pending() {
         let cx: Cx = Cx::for_testing_with_remote(RemoteCap::new());
-        let handle = spawn_remote::<u64>(
+        let handle = spawn_remote(
             &cx,
             NodeId::new("n1"),
             ComputationName::new("work"),
@@ -2237,7 +2308,7 @@ mod tests {
     #[test]
     fn remote_handle_abort_no_panic() {
         let cx: Cx = Cx::for_testing_with_remote(RemoteCap::new());
-        let handle = spawn_remote::<u64>(
+        let handle = spawn_remote(
             &cx,
             NodeId::new("n1"),
             ComputationName::new("long_task"),
@@ -2254,7 +2325,7 @@ mod tests {
         let cap = RemoteCap::new().with_default_lease(Duration::from_secs(120));
         let cx: Cx = Cx::for_testing_with_remote(cap);
 
-        let handle = spawn_remote::<u64>(
+        let handle = spawn_remote(
             &cx,
             NodeId::new("n1"),
             ComputationName::new("slow"),

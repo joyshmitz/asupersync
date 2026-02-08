@@ -300,6 +300,32 @@ impl IoDriver {
         Ok(n)
     }
 
+    /// Takes the events buffer from the driver, replacing it with an empty one.
+    pub(crate) fn take_events(&mut self) -> Events {
+        std::mem::take(&mut self.events)
+    }
+
+    /// Restores the events buffer and dispatches wakers for the events it contains.
+    pub(crate) fn restore_and_dispatch<F>(&mut self, mut events: Events, mut on_event: F)
+    where
+        F: FnMut(&Event, Option<Interest>),
+    {
+        for event in &events {
+            let interest = self.interests.get(&event.token).copied();
+            on_event(event, interest);
+            let slab_token = SlabToken::from_usize(event.token.0);
+            if let Some(waker) = self.wakers.get(slab_token) {
+                waker.wake_by_ref();
+                self.stats.wakers_dispatched += 1;
+            } else {
+                self.stats.unknown_tokens += 1;
+            }
+        }
+
+        events.clear();
+        self.events = events;
+    }
+
     /// Wakes the driver from a blocking poll.
     ///
     /// This is safe to call from any thread. Use it when:
@@ -337,9 +363,19 @@ impl IoDriver {
 ///
 /// This wrapper provides interior mutability for registering and updating
 /// wakers from async I/O types while keeping the driver single-threaded.
-#[derive(Debug, Clone)]
+#[derive(Clone)]
 pub struct IoDriverHandle {
     inner: Arc<Mutex<IoDriver>>,
+    reactor: Arc<dyn Reactor>,
+}
+
+impl std::fmt::Debug for IoDriverHandle {
+    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        f.debug_struct("IoDriverHandle")
+            .field("inner", &self.inner)
+            .field("reactor", &"<dyn Reactor>")
+            .finish()
+    }
 }
 
 impl IoDriverHandle {
@@ -347,7 +383,8 @@ impl IoDriverHandle {
     #[must_use]
     pub fn new(reactor: Arc<dyn Reactor>) -> Self {
         Self {
-            inner: Arc::new(Mutex::new(IoDriver::new(reactor))),
+            inner: Arc::new(Mutex::new(IoDriver::new(reactor.clone()))),
+            reactor,
         }
     }
 
@@ -356,9 +393,10 @@ impl IoDriverHandle {
     pub fn with_capacity(reactor: Arc<dyn Reactor>, events_capacity: usize) -> Self {
         Self {
             inner: Arc::new(Mutex::new(IoDriver::with_capacity(
-                reactor,
+                reactor.clone(),
                 events_capacity,
             ))),
+            reactor,
         }
     }
 
@@ -369,6 +407,12 @@ impl IoDriverHandle {
         interest: Interest,
         waker: Waker,
     ) -> io::Result<IoRegistration> {
+        // We wake the reactor first to ensure that if another thread is blocking
+        // in `poll` (via turn_with), it wakes up and releases the lock.
+        // However, with the split-lock `turn_with` implementation, the lock
+        // is NOT held during poll, so this is strictly necessary only if
+        // we revert to holding the lock, but good practice for responsiveness.
+        // Actually, since we don't hold the lock during poll, we can just lock.
         let token = {
             let mut driver = self.inner.lock().expect("lock poisoned");
             driver.register(source, interest, waker)?
@@ -409,12 +453,37 @@ impl IoDriverHandle {
     }
 
     /// Processes pending I/O events with a per-event callback.
+    ///
+    /// This implementation releases the driver lock during the blocking poll,
+    /// allowing other threads to register I/O sources concurrently.
     pub fn turn_with<F>(&self, timeout: Option<Duration>, on_event: F) -> io::Result<usize>
     where
         F: FnMut(&Event, Option<Interest>),
     {
+        // 1. Lock driver and take the events buffer to use for polling
+        let mut events = {
+            let mut driver = self.inner.lock().expect("lock poisoned");
+            driver.take_events()
+        };
+
+        // 2. Poll the reactor without holding the driver lock.
+        // This allows other threads to acquire the lock for `register`/`deregister`.
+        let poll_result = self.reactor.poll(&mut events, timeout);
+
+        // 3. Re-acquire lock to dispatch wakers and restore the buffer
         let mut driver = self.inner.lock().expect("lock poisoned");
-        driver.turn_with(timeout, on_event)
+
+        // Update stats and dispatch if poll succeeded
+        if let Ok(n) = poll_result {
+            driver.stats.polls += 1;
+            driver.stats.events_received += n as u64;
+            driver.restore_and_dispatch(events, on_event);
+            Ok(n)
+        } else {
+            // Restore buffer even on error (cleared inside)
+            driver.restore_and_dispatch(events, |_e, _i| {});
+            poll_result
+        }
     }
 
     /// Returns a lock guard for direct access to the driver.

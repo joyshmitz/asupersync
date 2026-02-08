@@ -30,8 +30,10 @@
 //! ```
 
 use crate::lab::config::LabConfig;
-use crate::lab::runtime::LabRuntime;
+use crate::lab::runtime::{CrashpackLink, LabRuntime, SporkHarnessReport};
+use crate::lab::spork_harness::{ScenarioRunnerError, SporkScenarioConfig, SporkScenarioRunner};
 use crate::trace::{TraceBuffer, TraceBufferHandle, TraceEvent};
+use std::collections::BTreeMap;
 
 /// Compares two traces and returns the first divergence point.
 ///
@@ -254,6 +256,239 @@ where
         .collect()
 }
 
+/// Single seed-run summary for schedule exploration.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct ExplorationRunSummary {
+    /// Seed used for this run.
+    pub seed: u64,
+    /// Scheduler certificate hash for this run.
+    pub schedule_hash: u64,
+    /// Canonical normalized-trace fingerprint for this run.
+    pub trace_fingerprint: u64,
+}
+
+/// Deterministic fingerprint class produced by exploration.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct ExplorationFingerprintClass {
+    /// Canonical normalized-trace fingerprint.
+    pub trace_fingerprint: u64,
+    /// Number of runs in this class.
+    pub run_count: usize,
+    /// Seeds observed in this class (sorted, deduplicated).
+    pub seeds: Vec<u64>,
+    /// Schedule hashes observed in this class (sorted, deduplicated).
+    pub schedule_hashes: Vec<u64>,
+}
+
+/// Deterministic schedule-exploration report.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct ExplorationReport {
+    /// Per-seed runs in stable order.
+    pub runs: Vec<ExplorationRunSummary>,
+    /// Unique canonical fingerprint classes in stable order.
+    pub fingerprint_classes: Vec<ExplorationFingerprintClass>,
+}
+
+impl ExplorationReport {
+    /// Number of unique canonical fingerprint classes observed.
+    #[must_use]
+    pub fn unique_fingerprint_count(&self) -> usize {
+        self.fingerprint_classes.len()
+    }
+}
+
+/// Per-run deterministic summary for Spork app exploration.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct SporkExplorationRunSummary {
+    /// Seed used for this run.
+    pub seed: u64,
+    /// Scheduler certificate hash for this run.
+    pub schedule_hash: u64,
+    /// Canonical trace fingerprint for this run.
+    pub trace_fingerprint: u64,
+    /// Whether all run invariants/oracles passed.
+    pub passed: bool,
+    /// Crashpack link metadata for failing runs when available.
+    pub crashpack_link: Option<CrashpackLink>,
+}
+
+/// Deterministic DPOR-style report for Spork app seed exploration.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct SporkExplorationReport {
+    /// Per-seed run summaries in stable order.
+    pub runs: Vec<SporkExplorationRunSummary>,
+    /// Unique canonical fingerprint classes in stable order.
+    pub fingerprint_classes: Vec<ExplorationFingerprintClass>,
+}
+
+impl SporkExplorationReport {
+    /// Number of unique canonical fingerprint classes observed.
+    #[must_use]
+    pub fn unique_fingerprint_count(&self) -> usize {
+        self.fingerprint_classes.len()
+    }
+
+    /// Number of failed runs.
+    #[must_use]
+    pub fn failure_count(&self) -> usize {
+        self.runs.iter().filter(|run| !run.passed).count()
+    }
+
+    /// True when every failed run includes crashpack linkage metadata.
+    #[must_use]
+    pub fn all_failures_linked_to_crashpacks(&self) -> bool {
+        self.runs
+            .iter()
+            .filter(|run| !run.passed)
+            .all(|run| run.crashpack_link.is_some())
+    }
+}
+
+/// Classify run summaries by canonical fingerprint into deterministic classes.
+#[must_use]
+pub fn classify_fingerprint_classes(
+    runs: &[ExplorationRunSummary],
+) -> Vec<ExplorationFingerprintClass> {
+    let mut grouped: BTreeMap<u64, (usize, Vec<u64>, Vec<u64>)> = BTreeMap::new();
+
+    for run in runs {
+        let entry = grouped
+            .entry(run.trace_fingerprint)
+            .or_insert_with(|| (0, Vec::new(), Vec::new()));
+        entry.0 += 1;
+        entry.1.push(run.seed);
+        entry.2.push(run.schedule_hash);
+    }
+
+    grouped
+        .into_iter()
+        .map(
+            |(trace_fingerprint, (run_count, mut seeds, mut schedule_hashes))| {
+                seeds.sort_unstable();
+                seeds.dedup();
+                schedule_hashes.sort_unstable();
+                schedule_hashes.dedup();
+                ExplorationFingerprintClass {
+                    trace_fingerprint,
+                    run_count,
+                    seeds,
+                    schedule_hashes,
+                }
+            },
+        )
+        .collect()
+}
+
+/// Explore a seed-space and report deterministic canonical fingerprint classes.
+///
+/// This is a DPOR-style seed exploration helper: each seed produces one schedule
+/// and one normalized-trace fingerprint; the report groups equivalent runs.
+pub fn explore_seed_space<F>(seeds: &[u64], worker_count: usize, test: F) -> ExplorationReport
+where
+    F: Fn(&mut LabRuntime),
+{
+    let mut runs: Vec<ExplorationRunSummary> = seeds
+        .iter()
+        .map(|&seed| {
+            let mut config = LabConfig::new(seed);
+            config = config.worker_count(worker_count);
+            let mut runtime = LabRuntime::new(config);
+            test(&mut runtime);
+
+            let trace_events = runtime.trace().snapshot();
+            let normalized = normalize_for_replay(&trace_events);
+            let trace_fingerprint =
+                crate::trace::canonicalize::trace_fingerprint(&normalized.normalized);
+
+            ExplorationRunSummary {
+                seed,
+                schedule_hash: runtime.certificate().hash(),
+                trace_fingerprint,
+            }
+        })
+        .collect();
+
+    runs.sort_by_key(|run| run.seed);
+    let fingerprint_classes = classify_fingerprint_classes(&runs);
+    ExplorationReport {
+        runs,
+        fingerprint_classes,
+    }
+}
+
+/// Build a deterministic Spork exploration report from completed harness reports.
+#[must_use]
+pub fn summarize_spork_reports(reports: &[SporkHarnessReport]) -> SporkExplorationReport {
+    let mut runs: Vec<SporkExplorationRunSummary> = reports
+        .iter()
+        .map(|report| {
+            let passed = report.passed();
+            SporkExplorationRunSummary {
+                seed: report.seed(),
+                schedule_hash: report.run.trace_certificate.schedule_hash,
+                trace_fingerprint: report.trace_fingerprint(),
+                passed,
+                crashpack_link: if passed {
+                    None
+                } else {
+                    report.crashpack_link()
+                },
+            }
+        })
+        .collect();
+
+    runs.sort_by_key(|run| (run.seed, run.schedule_hash, run.trace_fingerprint));
+
+    let class_input: Vec<ExplorationRunSummary> = runs
+        .iter()
+        .map(|run| ExplorationRunSummary {
+            seed: run.seed,
+            schedule_hash: run.schedule_hash,
+            trace_fingerprint: run.trace_fingerprint,
+        })
+        .collect();
+
+    SporkExplorationReport {
+        runs,
+        fingerprint_classes: classify_fingerprint_classes(&class_input),
+    }
+}
+
+/// Explore a Spork app seed-space and produce a deterministic DPOR-style report.
+///
+/// The caller provides one harness report per seed (typically by running
+/// `SporkAppHarness`/`SporkScenarioRunner` with that seed). The result is
+/// grouped by canonical fingerprint class and keeps failure-to-crashpack links.
+pub fn explore_spork_seed_space<F>(seeds: &[u64], mut run_for_seed: F) -> SporkExplorationReport
+where
+    F: FnMut(u64) -> SporkHarnessReport,
+{
+    let reports: Vec<SporkHarnessReport> = seeds.iter().map(|&seed| run_for_seed(seed)).collect();
+    summarize_spork_reports(&reports)
+}
+
+/// Run a registered Spork scenario across seeds and return deterministic
+/// exploration classes with failure-to-crashpack linkage.
+///
+/// This is the glue between `SporkScenarioRunner` and DPOR-style exploration:
+/// callers provide a scenario id and base config, and this helper handles
+/// seed fan-out + deterministic report grouping.
+pub fn explore_scenario_runner_seed_space(
+    runner: &SporkScenarioRunner,
+    scenario_id: &str,
+    base_config: &SporkScenarioConfig,
+    seeds: &[u64],
+) -> Result<SporkExplorationReport, ScenarioRunnerError> {
+    let mut reports = Vec::with_capacity(seeds.len());
+    for &seed in seeds {
+        let mut config = base_config.clone();
+        config.seed = seed;
+        let result = runner.run_with_config(scenario_id, Some(config))?;
+        reports.push(result.report);
+    }
+    Ok(summarize_spork_reports(&reports))
+}
+
 // ============================================================================
 // Trace Normalization for Canonical Replay
 // ============================================================================
@@ -375,7 +610,10 @@ pub fn traces_equivalent(a: &[TraceEvent], b: &[TraceEvent]) -> bool {
 #[cfg(test)]
 mod tests {
     use super::*;
+    use crate::app::AppSpec;
+    use crate::lab::SporkScenarioSpec;
     use crate::trace::event::{TraceData, TraceEventKind};
+    use crate::types::Budget;
     use crate::types::Time;
 
     fn init_test(name: &str) {
@@ -718,5 +956,187 @@ mod tests {
         // Just verify it runs without panic; algorithm choice depends on trace size
         assert!(!result.algorithm.is_empty());
         crate::test_complete!("normalize_with_config_custom_beam");
+    }
+
+    #[test]
+    fn classify_fingerprint_classes_is_deterministic() {
+        init_test("classify_fingerprint_classes_is_deterministic");
+
+        let runs = vec![
+            ExplorationRunSummary {
+                seed: 9,
+                schedule_hash: 0xB,
+                trace_fingerprint: 0xAA,
+            },
+            ExplorationRunSummary {
+                seed: 3,
+                schedule_hash: 0xA,
+                trace_fingerprint: 0xBB,
+            },
+            ExplorationRunSummary {
+                seed: 7,
+                schedule_hash: 0xC,
+                trace_fingerprint: 0xAA,
+            },
+            ExplorationRunSummary {
+                seed: 7,
+                schedule_hash: 0xC,
+                trace_fingerprint: 0xAA,
+            },
+        ];
+
+        let classes = classify_fingerprint_classes(&runs);
+        assert_eq!(classes.len(), 2);
+        assert_eq!(classes[0].trace_fingerprint, 0xAA);
+        assert_eq!(classes[0].run_count, 3);
+        assert_eq!(classes[0].seeds, vec![7, 9]);
+        assert_eq!(classes[0].schedule_hashes, vec![0xB, 0xC]);
+        assert_eq!(classes[1].trace_fingerprint, 0xBB);
+        assert_eq!(classes[1].run_count, 1);
+        assert_eq!(classes[1].seeds, vec![3]);
+        assert_eq!(classes[1].schedule_hashes, vec![0xA]);
+
+        crate::test_complete!("classify_fingerprint_classes_is_deterministic");
+    }
+
+    #[test]
+    fn explore_seed_space_is_deterministic_for_same_inputs() {
+        init_test("explore_seed_space_is_deterministic_for_same_inputs");
+
+        let seeds = [11_u64, 13_u64, 11_u64];
+        let scenario = |runtime: &mut LabRuntime| {
+            let region = runtime.state.create_root_region(Budget::INFINITE);
+            let (task, _) = runtime
+                .state
+                .create_task(region, Budget::INFINITE, async {})
+                .expect("task");
+            runtime.scheduler.lock().unwrap().schedule(task, 0);
+            runtime.run_until_quiescent();
+        };
+
+        let a = explore_seed_space(&seeds, 1, scenario);
+        let b = explore_seed_space(&seeds, 1, scenario);
+
+        assert_eq!(a, b, "same seeds and scenario must produce same report");
+        assert_eq!(a.runs.len(), seeds.len());
+        assert!(a.unique_fingerprint_count() >= 1);
+
+        crate::test_complete!("explore_seed_space_is_deterministic_for_same_inputs");
+    }
+
+    fn make_spork_report(seed: u64, failing: bool) -> SporkHarnessReport {
+        use crate::record::ObligationKind;
+
+        let mut runtime = LabRuntime::with_seed(seed);
+        let region = runtime.state.create_root_region(Budget::INFINITE);
+        let (task, _) = runtime
+            .state
+            .create_task(region, Budget::INFINITE, async {})
+            .expect("create task");
+        runtime.scheduler.lock().unwrap().schedule(task, 0);
+        runtime.run_until_quiescent();
+
+        if failing {
+            runtime
+                .state
+                .create_obligation(
+                    ObligationKind::SendPermit,
+                    task,
+                    region,
+                    Some("intentional failure for exploration".to_string()),
+                )
+                .expect("create failing obligation");
+        }
+
+        runtime.spork_report("spork_exploration", Vec::new())
+    }
+
+    #[test]
+    fn summarize_spork_reports_links_failures_to_crashpacks() {
+        init_test("summarize_spork_reports_links_failures_to_crashpacks");
+
+        let passing = make_spork_report(31, false);
+        let failing = make_spork_report(32, true);
+
+        let summary = summarize_spork_reports(&[failing, passing]);
+        assert_eq!(summary.runs.len(), 2);
+        assert_eq!(summary.failure_count(), 1);
+        assert!(summary.unique_fingerprint_count() >= 1);
+        assert!(
+            summary.all_failures_linked_to_crashpacks(),
+            "failed runs must include crashpack linkage metadata"
+        );
+
+        let failed_run = summary
+            .runs
+            .iter()
+            .find(|run| !run.passed)
+            .expect("one failing run expected");
+        let crashpack = failed_run
+            .crashpack_link
+            .as_ref()
+            .expect("failing run should have crashpack link");
+        assert!(
+            crashpack.path.starts_with("crashpack-"),
+            "unexpected crashpack path: {}",
+            crashpack.path
+        );
+
+        crate::test_complete!("summarize_spork_reports_links_failures_to_crashpacks");
+    }
+
+    #[test]
+    fn explore_spork_seed_space_is_deterministic() {
+        init_test("explore_spork_seed_space_is_deterministic");
+
+        let seeds = [42_u64, 41_u64, 42_u64];
+
+        let run_for_seed = |seed: u64| make_spork_report(seed, seed.is_multiple_of(2));
+        let a = explore_spork_seed_space(&seeds, run_for_seed);
+
+        let run_for_seed = |seed: u64| make_spork_report(seed, seed.is_multiple_of(2));
+        let b = explore_spork_seed_space(&seeds, run_for_seed);
+
+        assert_eq!(a, b, "same seeds must produce deterministic report");
+        assert_eq!(a.runs.len(), seeds.len());
+        assert_eq!(a.failure_count(), 2);
+        assert!(a.unique_fingerprint_count() >= 1);
+        assert!(a.all_failures_linked_to_crashpacks());
+
+        crate::test_complete!("explore_spork_seed_space_is_deterministic");
+    }
+
+    #[test]
+    fn scenario_runner_exploration_has_deterministic_fingerprints() {
+        init_test("scenario_runner_exploration_has_deterministic_fingerprints");
+
+        let mut runner = SporkScenarioRunner::new();
+        runner
+            .register(
+                SporkScenarioSpec::new("replay.scenario", |_| AppSpec::new("replay_app"))
+                    .with_default_config(SporkScenarioConfig::default()),
+            )
+            .expect("register scenario");
+
+        let base_config = SporkScenarioConfig::default();
+        let seeds = [12_u64, 13_u64, 12_u64];
+
+        let a =
+            explore_scenario_runner_seed_space(&runner, "replay.scenario", &base_config, &seeds)
+                .expect("exploration A");
+        let b =
+            explore_scenario_runner_seed_space(&runner, "replay.scenario", &base_config, &seeds)
+                .expect("exploration B");
+
+        assert_eq!(a, b, "scenario exploration must be deterministic");
+        assert_eq!(a.runs.len(), seeds.len());
+        assert!(a.unique_fingerprint_count() >= 1);
+
+        // Same seed should map to the same fingerprint.
+        let seed_12: Vec<_> = a.runs.iter().filter(|run| run.seed == 12).collect();
+        assert_eq!(seed_12.len(), 2);
+        assert_eq!(seed_12[0].trace_fingerprint, seed_12[1].trace_fingerprint);
+
+        crate::test_complete!("scenario_runner_exploration_has_deterministic_fingerprints");
     }
 }
