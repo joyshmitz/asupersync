@@ -266,7 +266,7 @@ impl<T> Arena<T> {
                 // We use a separate match to avoid holding the borrow of `slot` while calling `f`
                 let remove = match slot {
                     Slot::Occupied { value, .. } => !f(value),
-                    _ => unreachable!(),
+                    Slot::Vacant { .. } => unreachable!(),
                 };
 
                 if remove {

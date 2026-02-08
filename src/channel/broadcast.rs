@@ -358,7 +358,7 @@ impl<T: Clone> Future for Recv<'_, T> {
             if let Some(waker) = inner.wakers.get_mut(token) {
                 // If waker changed, update it in place
                 if !waker.will_wake(current_waker) {
-                    *waker = current_waker.clone();
+                    waker.clone_from(current_waker);
                 }
             } else {
                 // Token invalid (woken and removed from arena), re-register
@@ -371,6 +371,7 @@ impl<T: Clone> Future for Recv<'_, T> {
             this.waiter = Some(token);
         }
 
+        drop(inner);
         Poll::Pending
     }
 }

@@ -44,7 +44,7 @@
 
 use std::collections::VecDeque;
 use std::fmt;
-use std::sync::atomic::{AtomicU32, AtomicU64, Ordering};
+use std::sync::atomic::{AtomicU64, Ordering};
 use std::sync::{Arc, RwLock};
 use std::time::Duration;
 
@@ -201,7 +201,7 @@ impl State {
     /// Format: [state_type:8][data:56]
     fn to_bits(self) -> u64 {
         match self {
-            Self::Closed { failures } => 0 | (u64::from(failures) << 8),
+            Self::Closed { failures } => u64::from(failures) << 8,
             Self::Open { since_millis } => 1 | (since_millis << 8),
             Self::HalfOpen {
                 probes_active,
@@ -474,7 +474,7 @@ impl CircuitBreaker {
     }
 
     /// Record a successful call.
-    #[allow(clippy::significant_drop_tightening)]
+    #[allow(clippy::significant_drop_tightening, clippy::too_many_lines)]
     pub fn record_success(&self, permit: Permit, now: Time) {
         let now_millis = now.as_millis();
 
@@ -621,7 +621,7 @@ impl CircuitBreaker {
     }
 
     /// Record a failed call.
-    #[allow(clippy::significant_drop_tightening)]
+    #[allow(clippy::significant_drop_tightening, clippy::too_many_lines)]
     pub fn record_failure(&self, permit: Permit, error: &str, now: Time) {
         let now_millis = now.as_millis();
 
