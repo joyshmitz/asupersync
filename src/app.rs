@@ -24,6 +24,7 @@
 //! - **Drop bomb**: `AppHandle` panics on drop if not explicitly stopped or joined,
 //!   matching the `GradedObligation` pattern to prevent silent resource leaks.
 
+use crate::cx::registry::RegistryHandle;
 use crate::cx::Cx;
 use crate::record::region::RegionState;
 use crate::runtime::region_table::RegionCreateError;
@@ -50,6 +51,11 @@ pub struct CompiledApp {
     budget: Option<Budget>,
     /// Compiled supervisor (validated DAG, computed start order).
     compiled_supervisor: CompiledSupervisor,
+    /// Optional registry capability to inject into the app's root `Cx`.
+    ///
+    /// When present, child contexts inherit the registry via scope propagation,
+    /// enabling named service registration (bd-2ukjr).
+    registry: Option<RegistryHandle>,
 }
 
 impl std::fmt::Debug for CompiledApp {
@@ -75,6 +81,10 @@ impl CompiledApp {
     }
 
     /// Allocate a root region and spawn the compiled application.
+    ///
+    /// If a registry handle was configured (via [`AppSpec::with_registry`]),
+    /// it is injected into the `Cx` passed to the supervisor so all child
+    /// contexts inherit the registry capability.
     pub fn start(
         self,
         state: &mut RuntimeState,
@@ -90,9 +100,20 @@ impl CompiledApp {
             .region(root_region)
             .map_or(parent_budget, crate::record::RegionRecord::budget);
 
+        // If a registry was configured, create a Cx with it attached so all
+        // children spawned by the supervisor inherit the registry capability.
+        let registry_for_handle = self.registry.clone();
+        let app_cx;
+        let effective_cx = if self.registry.is_some() {
+            app_cx = cx.clone().with_registry_handle(self.registry);
+            &app_cx
+        } else {
+            cx
+        };
+
         let supervisor = self
             .compiled_supervisor
-            .spawn(state, cx, root_region, effective_budget)
+            .spawn(state, effective_cx, root_region, effective_budget)
             .map_err(AppSpawnError::SpawnFailed)?;
 
         cx.trace("app_started");
@@ -101,6 +122,7 @@ impl CompiledApp {
             name: self.name,
             root_region,
             supervisor,
+            registry: registry_for_handle,
             resolved: false,
         })
     }
@@ -122,6 +144,11 @@ pub struct AppSpec {
     budget: Option<Budget>,
     /// Inner supervisor builder accumulating children and policy.
     supervisor: SupervisorBuilder,
+    /// Optional registry capability to inject into the app's root `Cx`.
+    ///
+    /// When set, the registry handle is attached to the `Cx` during
+    /// [`start`](Self::start) so child contexts inherit naming capability.
+    registry: Option<RegistryHandle>,
 }
 
 impl std::fmt::Debug for AppSpec {
@@ -144,6 +171,7 @@ impl AppSpec {
             supervisor: SupervisorBuilder::new(name.clone()),
             name,
             budget: None,
+            registry: None,
         }
     }
 
@@ -152,6 +180,18 @@ impl AppSpec {
     pub fn with_budget(mut self, budget: Budget) -> Self {
         self.budget = Some(budget);
         self.supervisor = self.supervisor.with_budget(budget);
+        self
+    }
+
+    /// Attach a registry capability to this application.
+    ///
+    /// The registry handle is injected into the root `Cx` at start time so
+    /// all child contexts inherit naming capability. Named services can then
+    /// register via [`NameRegistry`](crate::cx::NameRegistry) using the
+    /// handle propagated through `cx.registry_handle()`.
+    #[must_use]
+    pub fn with_registry(mut self, registry: RegistryHandle) -> Self {
+        self.registry = Some(registry);
         self
     }
 
@@ -190,6 +230,7 @@ impl AppSpec {
             name: self.name,
             budget: self.budget,
             compiled_supervisor,
+            registry: self.registry,
         })
     }
 
@@ -229,6 +270,8 @@ pub struct AppHandle {
     root_region: RegionId,
     /// Supervisor state from spawn.
     supervisor: SupervisorHandle,
+    /// Registry capability handle, if the app was started with one.
+    registry: Option<RegistryHandle>,
     /// Whether the handle has been resolved (stop/join/into_raw called).
     resolved: bool,
 }
@@ -271,6 +314,12 @@ impl AppHandle {
     #[must_use]
     pub fn supervisor(&self) -> &SupervisorHandle {
         &self.supervisor
+    }
+
+    /// The registry capability handle, if the app was started with one.
+    #[must_use]
+    pub fn registry(&self) -> Option<&RegistryHandle> {
+        self.registry.as_ref()
     }
 
     /// Request cancellation of the application root region.
@@ -505,6 +554,7 @@ mod tests {
     use crate::runtime::state::RuntimeState;
     use crate::supervision::{ChildSpec, NameRegistrationPolicy, SupervisionStrategy};
     use crate::types::Budget;
+    use std::sync::Arc;
 
     fn init_test(name: &str) {
         crate::test_utils::init_test_logging();
@@ -1178,5 +1228,246 @@ mod tests {
         let _raw1 = h1.into_raw();
         let _raw2 = h2.into_raw();
         crate::test_complete!("conformance_compile_then_start_matches_direct");
+    }
+
+    // --- Registry wiring tests (bd-2ukjr) ---
+
+    #[test]
+    fn app_with_registry_propagates_to_children() {
+        init_test("app_with_registry_propagates_to_children");
+
+        let registry = crate::cx::NameRegistry::new();
+        let handle = RegistryHandle::new(Arc::new(registry));
+
+        let mut state = RuntimeState::new();
+        let root = state.create_root_region(Budget::INFINITE);
+        let cx = Cx::new(
+            root,
+            crate::types::TaskId::testing_default(),
+            Budget::INFINITE,
+        );
+
+        // Parent Cx has no registry.
+        assert!(!cx.has_registry());
+
+        // Build a child that checks for registry capability.
+        let registry_seen = Arc::new(std::sync::atomic::AtomicBool::new(false));
+        let seen_clone = Arc::clone(&registry_seen);
+        let child = ChildSpec {
+            name: "checker".to_string(),
+            start: Box::new(
+                move |scope: &crate::cx::Scope<'static, crate::types::policy::FailFast>,
+                      state: &mut RuntimeState,
+                      cx: &Cx| {
+                    // Child should see the registry propagated through the app.
+                    seen_clone.store(cx.has_registry(), std::sync::atomic::Ordering::SeqCst);
+                    state
+                        .create_task(scope.region_id(), scope.budget(), async { 0_u8 })
+                        .map(|(_, s)| s.task_id())
+                },
+            ),
+            restart: SupervisionStrategy::Stop,
+            shutdown_budget: Budget::INFINITE,
+            depends_on: vec![],
+            registration: NameRegistrationPolicy::None,
+            start_immediately: true,
+            required: true,
+        };
+
+        let spec = AppSpec::new("registry_app")
+            .with_registry(handle)
+            .child(child);
+        let app_handle = spec.start(&mut state, &cx, root).expect("start ok");
+
+        // The child factory should have seen the registry.
+        assert!(
+            registry_seen.load(std::sync::atomic::Ordering::SeqCst),
+            "child Cx must carry registry when app is started with one"
+        );
+
+        // The app handle should expose the registry.
+        assert!(app_handle.registry().is_some());
+
+        let _raw = app_handle.into_raw();
+        crate::test_complete!("app_with_registry_propagates_to_children");
+    }
+
+    #[test]
+    fn app_without_registry_children_see_none() {
+        init_test("app_without_registry_children_see_none");
+
+        let mut state = RuntimeState::new();
+        let root = state.create_root_region(Budget::INFINITE);
+        let cx = Cx::new(
+            root,
+            crate::types::TaskId::testing_default(),
+            Budget::INFINITE,
+        );
+
+        let registry_seen = Arc::new(std::sync::atomic::AtomicBool::new(false));
+        let seen_clone = Arc::clone(&registry_seen);
+        let child = ChildSpec {
+            name: "no_reg".to_string(),
+            start: Box::new(
+                move |scope: &crate::cx::Scope<'static, crate::types::policy::FailFast>,
+                      state: &mut RuntimeState,
+                      cx: &Cx| {
+                    seen_clone.store(cx.has_registry(), std::sync::atomic::Ordering::SeqCst);
+                    state
+                        .create_task(scope.region_id(), scope.budget(), async { 0_u8 })
+                        .map(|(_, s)| s.task_id())
+                },
+            ),
+            restart: SupervisionStrategy::Stop,
+            shutdown_budget: Budget::INFINITE,
+            depends_on: vec![],
+            registration: NameRegistrationPolicy::None,
+            start_immediately: true,
+            required: true,
+        };
+
+        let spec = AppSpec::new("no_registry_app").child(child);
+        let app_handle = spec.start(&mut state, &cx, root).expect("start ok");
+
+        assert!(
+            !registry_seen.load(std::sync::atomic::Ordering::SeqCst),
+            "child Cx must NOT have registry when app has none"
+        );
+        assert!(app_handle.registry().is_none());
+
+        let _raw = app_handle.into_raw();
+        crate::test_complete!("app_without_registry_children_see_none");
+    }
+
+    #[test]
+    fn app_registry_named_service_whereis() {
+        init_test("app_registry_named_service_whereis");
+
+        let registry = Arc::new(parking_lot::Mutex::new(crate::cx::NameRegistry::new()));
+        let reg_handle =
+            RegistryHandle::new(Arc::clone(&registry) as Arc<dyn crate::cx::RegistryCap>);
+
+        // Shared slot for the NameLease (must be resolved before drop).
+        let lease_slot: Arc<parking_lot::Mutex<Option<crate::cx::NameLease>>> =
+            Arc::new(parking_lot::Mutex::new(None));
+
+        let mut state = RuntimeState::new();
+        let root = state.create_root_region(Budget::INFINITE);
+        let cx = Cx::new(
+            root,
+            crate::types::TaskId::testing_default(),
+            Budget::INFINITE,
+        );
+
+        // Child registers itself in the shared registry.
+        let reg_clone = Arc::clone(&registry);
+        let lease_clone = Arc::clone(&lease_slot);
+        let child = ChildSpec {
+            name: "named_worker".to_string(),
+            start: Box::new(
+                move |scope: &crate::cx::Scope<'static, crate::types::policy::FailFast>,
+                      state: &mut RuntimeState,
+                      _cx: &Cx| {
+                    let region = scope.region_id();
+                    let budget = scope.budget();
+                    let (_, stored) = state.create_task(region, budget, async { 1_u8 })?;
+                    let task_id = stored.task_id();
+
+                    // Register the task name in the shared registry.
+                    let now = crate::types::Time::ZERO;
+                    let lease = reg_clone
+                        .lock()
+                        .register("my_worker", task_id, region, now)
+                        .expect("register ok");
+
+                    // Store the lease so it can be resolved after assertions.
+                    *lease_clone.lock() = Some(lease);
+
+                    Ok(task_id)
+                },
+            ),
+            restart: SupervisionStrategy::Stop,
+            shutdown_budget: Budget::INFINITE,
+            depends_on: vec![],
+            registration: NameRegistrationPolicy::None,
+            start_immediately: true,
+            required: true,
+        };
+
+        let spec = AppSpec::new("named_app")
+            .with_registry(reg_handle)
+            .child(child);
+        let app_handle = spec.start(&mut state, &cx, root).expect("start ok");
+
+        // The named worker should be findable via whereis.
+        let found = registry.lock().whereis("my_worker");
+        assert!(found.is_some(), "named worker must be visible via whereis");
+
+        // Clean up: release the lease to avoid obligation drop bomb.
+        lease_slot
+            .lock()
+            .as_mut()
+            .expect("lease should have been set")
+            .release()
+            .expect("release ok");
+
+        let _raw = app_handle.into_raw();
+        crate::test_complete!("app_registry_named_service_whereis");
+    }
+
+    #[test]
+    fn app_registry_compile_preserves_handle() {
+        init_test("app_registry_compile_preserves_handle");
+
+        let registry = crate::cx::NameRegistry::new();
+        let handle = RegistryHandle::new(Arc::new(registry));
+
+        let compiled = AppSpec::new("compiled_reg")
+            .with_registry(handle)
+            .child(make_child("w"))
+            .compile()
+            .expect("compile ok");
+
+        // Registry should survive compilation.
+        assert!(compiled.registry.is_some());
+
+        let mut state = RuntimeState::new();
+        let root = state.create_root_region(Budget::INFINITE);
+        let cx = Cx::new(
+            root,
+            crate::types::TaskId::testing_default(),
+            Budget::INFINITE,
+        );
+
+        let app_handle = compiled.start(&mut state, &cx, root).expect("start ok");
+        assert!(app_handle.registry().is_some());
+
+        let _raw = app_handle.into_raw();
+        crate::test_complete!("app_registry_compile_preserves_handle");
+    }
+
+    #[test]
+    fn app_registry_stop_does_not_panic() {
+        init_test("app_registry_stop_does_not_panic");
+
+        let registry = crate::cx::NameRegistry::new();
+        let handle = RegistryHandle::new(Arc::new(registry));
+
+        let mut state = RuntimeState::new();
+        let root = state.create_root_region(Budget::INFINITE);
+        let cx = Cx::new(
+            root,
+            crate::types::TaskId::testing_default(),
+            Budget::INFINITE,
+        );
+
+        let spec = AppSpec::new("stoppable_reg")
+            .with_registry(handle)
+            .child(make_child("w"));
+        let app_handle = spec.start(&mut state, &cx, root).expect("start ok");
+
+        // Stop should work without panic.
+        let _stopped = app_handle.stop(&mut state).expect("stop ok");
+        crate::test_complete!("app_registry_stop_does_not_panic");
     }
 }

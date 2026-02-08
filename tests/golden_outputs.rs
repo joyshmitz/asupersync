@@ -66,6 +66,10 @@ fn oracle_violation_tag(violation: &OracleViolation) -> &'static str {
         OracleViolation::Supervision(_) => "Supervision",
         OracleViolation::Mailbox(_) => "Mailbox",
         OracleViolation::RRefAccess(_) => "RRefAccess",
+        OracleViolation::ReplyLinearity(_) => "ReplyLinearity",
+        OracleViolation::RegistryLease(_) => "RegistryLease",
+        OracleViolation::DownOrder(_) => "DownOrder",
+        OracleViolation::SupervisorQuiescence(_) => "SupervisorQuiescence",
     }
 }
 

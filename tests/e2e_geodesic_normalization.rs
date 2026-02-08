@@ -90,6 +90,10 @@ fn oracle_violation_tag(v: &OracleViolation) -> String {
         OracleViolation::Supervision(_) => "Supervision".into(),
         OracleViolation::Mailbox(_) => "Mailbox".into(),
         OracleViolation::RRefAccess(_) => "RRefAccess".into(),
+        OracleViolation::ReplyLinearity(_) => "ReplyLinearity".into(),
+        OracleViolation::RegistryLease(_) => "RegistryLease".into(),
+        OracleViolation::DownOrder(_) => "DownOrder".into(),
+        OracleViolation::SupervisorQuiescence(_) => "SupervisorQuiescence".into(),
     }
 }
 

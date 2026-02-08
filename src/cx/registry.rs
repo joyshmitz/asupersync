@@ -1132,6 +1132,15 @@ impl Default for NameRegistry {
     }
 }
 
+// NameRegistry is a valid registry capability, so it can be stored in a
+// RegistryHandle and carried by Cx for capability propagation (bd-2ukjr).
+impl RegistryCap for NameRegistry {}
+
+// A Mutex-wrapped registry is also a valid capability, allowing shared mutable
+// access from multiple child contexts (e.g., when the app layer distributes
+// a single registry to its supervision tree).
+impl<T: RegistryCap> RegistryCap for parking_lot::Mutex<T> {}
+
 // ============================================================================
 // Registry Events (trace visibility)
 // ============================================================================
