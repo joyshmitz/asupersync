@@ -19,14 +19,17 @@ use crate::runtime::reactor::LabReactor;
 use crate::runtime::scheduler::{DispatchLane, ScheduleCertificate};
 use crate::runtime::RuntimeState;
 use crate::time::VirtualClock;
+use crate::trace::crashpack::{
+    artifact_filename, CrashPack, CrashPackConfig, FailureInfo, FailureOutcome, ReplayCommand,
+};
 use crate::trace::event::TraceEventKind;
 use crate::trace::recorder::TraceRecorder;
-use crate::trace::replay::{ReplayTrace, TraceMetadata};
+use crate::trace::replay::{ReplayEvent, ReplayTrace, TraceMetadata};
 use crate::trace::scoring::seed_fingerprint;
 use crate::trace::TraceBufferHandle;
 use crate::trace::{canonicalize::trace_fingerprint, certificate::TraceCertificate};
 use crate::trace::{TraceData, TraceEvent};
-use crate::types::{ObligationId, TaskId};
+use crate::types::{ObligationId, RegionId, TaskId};
 use crate::types::{Severity, Time};
 use crate::util::{DetEntropy, DetRng};
 use std::collections::{HashMap, HashSet};
@@ -330,6 +333,34 @@ impl HarnessAttachmentRef {
     }
 }
 
+/// Deterministic crashpack linkage metadata exposed in harness reports.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct CrashpackLink {
+    /// Artifact path for the crashpack attachment.
+    pub path: String,
+    /// Stable crashpack identifier (seed + fingerprint tuple).
+    pub id: String,
+    /// Canonical trace fingerprint associated with this crashpack.
+    pub fingerprint: u64,
+    /// Reproduction command generated from the run config and crashpack path.
+    pub replay: ReplayCommand,
+}
+
+impl CrashpackLink {
+    /// Convert to JSON for artifact storage.
+    #[must_use]
+    pub fn to_json(&self) -> serde_json::Value {
+        use serde_json::json;
+
+        json!({
+            "path": self.path,
+            "id": self.id,
+            "fingerprint": self.fingerprint,
+            "replay": self.replay,
+        })
+    }
+}
+
 /// Stable, JSON-first report schema for Spork app harness runs.
 ///
 /// This wraps [`LabRunReport`] and adds:
@@ -365,7 +396,9 @@ impl SporkHarnessReport {
     /// - **v2**: Agent report contract (bd-f262i). Added `lab.config_hash` for
     ///   quick equivalence checking. Added `verdict` top-level key. No
     ///   breaking changes to existing fields.
-    pub const SCHEMA_VERSION: u32 = 2;
+    /// - **v3**: Crashpack linking contract (bd-1wen4). Added top-level
+    ///   `crashpack` object with deterministic path/id/fingerprint/replay.
+    pub const SCHEMA_VERSION: u32 = 3;
 
     /// Create a new harness report from a low-level lab run report.
     #[must_use]
@@ -419,6 +452,30 @@ impl SporkHarnessReport {
             .iter()
             .find(|a| a.kind == HarnessAttachmentKind::CrashPack)
             .map(|a| a.path.as_str())
+    }
+
+    /// Deterministic crashpack linkage metadata when a crashpack is attached.
+    #[must_use]
+    pub fn crashpack_link(&self) -> Option<CrashpackLink> {
+        let path = self.crashpack_path()?.to_string();
+        let crash_config = CrashPackConfig {
+            seed: self.seed(),
+            config_hash: self.config_hash(),
+            worker_count: self.config.worker_count,
+            max_steps: self.config.max_steps,
+            commit_hash: None,
+        };
+        let replay = ReplayCommand::from_config(&crash_config, Some(path.as_str()));
+        Some(CrashpackLink {
+            id: format!(
+                "crashpack-{seed:016x}-{fingerprint:016x}",
+                seed = self.seed(),
+                fingerprint = self.trace_fingerprint()
+            ),
+            fingerprint: self.trace_fingerprint(),
+            path,
+            replay,
+        })
     }
 
     /// Returns oracle failure descriptions, if any.
@@ -476,6 +533,7 @@ impl SporkHarnessReport {
     /// | `lab.config_hash`| u64     | yes     | Quick config equivalence hash             |
     /// | `fingerprints.*` | u64     | yes     | Trace/schedule fingerprints               |
     /// | `run.*`          | object  | yes     | Full `LabRunReport` (oracles, invariants) |
+    /// | `crashpack`      | object? | yes     | Deterministic crashpack linkage metadata  |
     /// | `attachments`    | array   | yes     | Sorted by (kind, path)                    |
     #[must_use]
     pub fn to_json(&self) -> serde_json::Value {
@@ -500,6 +558,7 @@ impl SporkHarnessReport {
                 "schedule_hash": self.run.trace_certificate.schedule_hash,
             },
             "run": self.run.to_json(),
+            "crashpack": self.crashpack_link().map(|link| link.to_json()),
             "attachments": attachments.iter().map(HarnessAttachmentRef::to_json).collect::<Vec<_>>(),
         })
     }
@@ -790,7 +849,7 @@ impl LabRuntime {
         attachments: Vec<HarnessAttachmentRef>,
     ) -> SporkHarnessReport {
         let run = self.run_until_quiescent_with_report();
-        SporkHarnessReport::new(app, &self.config, run, attachments)
+        self.build_spork_report(app.into(), run, attachments)
     }
 
     /// Build a Spork harness report for the current runtime state.
@@ -803,7 +862,135 @@ impl LabRuntime {
         attachments: Vec<HarnessAttachmentRef>,
     ) -> SporkHarnessReport {
         let run = self.report();
+        self.build_spork_report(app.into(), run, attachments)
+    }
+
+    fn build_spork_report(
+        &self,
+        app: String,
+        run: LabRunReport,
+        mut attachments: Vec<HarnessAttachmentRef>,
+    ) -> SporkHarnessReport {
+        if let Some(auto_crashpack) = self.auto_crashpack_attachment(&run, &attachments) {
+            attachments.push(auto_crashpack);
+        }
         SporkHarnessReport::new(app, &self.config, run, attachments)
+    }
+
+    fn auto_crashpack_attachment(
+        &self,
+        run: &LabRunReport,
+        attachments: &[HarnessAttachmentRef],
+    ) -> Option<HarnessAttachmentRef> {
+        if attachments
+            .iter()
+            .any(|attachment| attachment.kind == HarnessAttachmentKind::CrashPack)
+        {
+            return None;
+        }
+        let crashpack = self.build_crashpack_for_report(run)?;
+        Some(HarnessAttachmentRef::crashpack(artifact_filename(
+            &crashpack,
+        )))
+    }
+
+    /// Build an in-memory crashpack for a failing report.
+    ///
+    /// Returns `None` for passing reports.
+    #[must_use]
+    pub fn build_crashpack_for_report(&self, run: &LabRunReport) -> Option<CrashPack> {
+        let has_failure = !run.oracle_report.all_passed() || !run.invariant_violations.is_empty();
+        if !has_failure {
+            return None;
+        }
+
+        let config_summary = LabConfigSummary::from_config(&self.config);
+        let crash_config = CrashPackConfig {
+            seed: run.seed,
+            config_hash: config_summary.config_hash(),
+            worker_count: self.config.worker_count,
+            max_steps: self.config.max_steps,
+            commit_hash: None,
+        };
+
+        let (task, region) = self
+            .state
+            .tasks_iter()
+            .find(|(_, task)| !task.state.is_terminal())
+            .map(|(_, task)| (task.id, task.owner))
+            .or_else(|| {
+                self.state
+                    .obligations_iter()
+                    .find(|(_, obligation)| obligation.is_pending())
+                    .map(|(_, obligation)| (obligation.holder, obligation.region))
+            })
+            .or_else(|| {
+                self.state
+                    .regions_iter()
+                    .next()
+                    .map(|(_, region)| (TaskId::testing_default(), region.id))
+            })
+            .or_else(|| {
+                self.state
+                    .root_region
+                    .map(|root| (TaskId::testing_default(), root))
+            })
+            .unwrap_or((TaskId::testing_default(), RegionId::testing_default()));
+
+        let mut oracle_violations = run.invariant_violations.clone();
+        oracle_violations.extend(
+            run.oracle_report
+                .failures()
+                .iter()
+                .map(|entry| entry.invariant.clone()),
+        );
+        oracle_violations.sort();
+        oracle_violations.dedup();
+
+        let trace_events = self.trace().snapshot();
+        let mut builder = CrashPack::builder(crash_config.clone())
+            .failure(FailureInfo {
+                task,
+                region,
+                outcome: FailureOutcome::Err,
+                virtual_time: Time::from_nanos(run.now_nanos),
+            })
+            .oracle_violations(oracle_violations)
+            .replay(ReplayCommand::from_config(&crash_config, None));
+
+        let divergent_prefix = self.auto_divergent_prefix();
+        if !divergent_prefix.is_empty() {
+            builder = builder.divergent_prefix(divergent_prefix);
+        }
+
+        builder = if trace_events.is_empty() {
+            builder
+                .fingerprint(run.trace_fingerprint)
+                .event_count(run.trace_certificate.event_count)
+        } else {
+            builder.from_trace(&trace_events)
+        };
+
+        Some(builder.build())
+    }
+
+    fn auto_divergent_prefix(&self) -> Vec<ReplayEvent> {
+        let Some(replay_trace) = self.replay_recorder.trace() else {
+            return Vec::new();
+        };
+        if replay_trace.events.is_empty() {
+            return Vec::new();
+        }
+
+        let failure_index = replay_trace
+            .events
+            .iter()
+            .position(
+                |event| matches!(event, ReplayEvent::TaskCompleted { outcome, .. } if *outcome > 0),
+            )
+            .unwrap_or(replay_trace.events.len() - 1);
+
+        crate::trace::minimal_divergent_prefix(replay_trace, failure_index).events
     }
 
     fn report_with_steps_delta(&mut self, steps_delta: u64) -> LabRunReport {
@@ -2543,6 +2730,7 @@ mod tests {
             "lab",
             "fingerprints",
             "run",
+            "crashpack",
             "attachments",
         ];
         for key in &required_keys {
@@ -2587,7 +2775,14 @@ mod tests {
             json["run"]["invariants"].is_array(),
             "run.invariants must be an array"
         );
-        assert!(json["attachments"].is_array(), "attachments must be an array");
+        assert!(
+            json["attachments"].is_array(),
+            "attachments must be an array"
+        );
+        assert!(
+            json["crashpack"].is_null(),
+            "passing runs should have null crashpack linkage"
+        );
 
         crate::test_complete!("contract_json_has_required_top_level_keys");
     }
@@ -2682,6 +2877,167 @@ mod tests {
         assert!(report.oracle_failures().is_empty());
 
         crate::test_complete!("contract_convenience_methods_consistent");
+    }
+
+    /// Failing runs auto-attach a deterministic crashpack reference.
+    #[test]
+    fn contract_auto_crashpack_on_failure() {
+        crate::test_utils::init_test_logging();
+        crate::test_phase!("contract_auto_crashpack_on_failure");
+
+        let mut runtime = LabRuntime::with_seed(17);
+        let region = runtime.state.create_root_region(Budget::INFINITE);
+        let (task, _) = runtime
+            .state
+            .create_task(region, Budget::INFINITE, async {})
+            .expect("create task");
+        runtime.scheduler.lock().unwrap().schedule(task, 0);
+        runtime.run_until_quiescent();
+        runtime
+            .state
+            .create_obligation(
+                ObligationKind::SendPermit,
+                task,
+                region,
+                Some("intentional leak".to_string()),
+            )
+            .expect("create obligation");
+
+        let report = runtime.spork_report("failing_app", Vec::new());
+        assert!(!report.passed(), "failing run must not report PASS");
+        let crashpack_path = report
+            .crashpack_path()
+            .expect("failing run should include crashpack attachment");
+        assert!(
+            crashpack_path.starts_with("crashpack-"),
+            "unexpected crashpack path: {crashpack_path}"
+        );
+        assert!(
+            report
+                .attachments
+                .iter()
+                .any(|attachment| attachment.kind == HarnessAttachmentKind::CrashPack),
+            "crashpack attachment kind must be present"
+        );
+        let crashpack_link = report
+            .crashpack_link()
+            .expect("failing run should expose crashpack link metadata");
+        assert_eq!(crashpack_link.path, crashpack_path);
+        assert_eq!(crashpack_link.fingerprint, report.trace_fingerprint());
+        assert!(
+            crashpack_link.id.starts_with("crashpack-"),
+            "unexpected crashpack id: {}",
+            crashpack_link.id
+        );
+        assert!(
+            crashpack_link.replay.command_line.contains(crashpack_path),
+            "replay command should include crashpack path"
+        );
+
+        crate::test_complete!("contract_auto_crashpack_on_failure");
+    }
+
+    /// Failing runs with replay recording enabled include a deterministic
+    /// divergent prefix in the auto-built crashpack.
+    #[test]
+    fn contract_auto_crashpack_contains_divergent_prefix_when_replay_enabled() {
+        crate::test_utils::init_test_logging();
+        crate::test_phase!("contract_auto_crashpack_contains_divergent_prefix_when_replay_enabled");
+
+        let config = LabConfig::new(1701)
+            .panic_on_leak(false)
+            .with_default_replay_recording();
+        let mut runtime = LabRuntime::new(config);
+        let region = runtime.state.create_root_region(Budget::INFINITE);
+        let (task, _) = runtime
+            .state
+            .create_task(region, Budget::INFINITE, async {})
+            .expect("create task");
+        runtime.scheduler.lock().unwrap().schedule(task, 0);
+        runtime.run_until_quiescent();
+        runtime
+            .state
+            .create_obligation(
+                ObligationKind::SendPermit,
+                task,
+                region,
+                Some("intentional leak".to_string()),
+            )
+            .expect("create obligation");
+
+        let run = runtime.report();
+        let crashpack = runtime
+            .build_crashpack_for_report(&run)
+            .expect("failing run should build crashpack");
+
+        assert!(crashpack.has_divergent_prefix());
+        assert!(
+            crashpack
+                .manifest
+                .has_attachment(&crate::trace::crashpack::AttachmentKind::DivergentPrefix),
+            "manifest must include divergent prefix attachment"
+        );
+        assert!(
+            crashpack.replay.is_some(),
+            "crashpack should carry replay command metadata"
+        );
+
+        crate::test_complete!(
+            "contract_auto_crashpack_contains_divergent_prefix_when_replay_enabled"
+        );
+    }
+
+    /// Manual crashpack attachments are preserved without auto-duplication.
+    #[test]
+    fn contract_manual_crashpack_not_duplicated_on_failure() {
+        crate::test_utils::init_test_logging();
+        crate::test_phase!("contract_manual_crashpack_not_duplicated_on_failure");
+
+        let mut runtime = LabRuntime::with_seed(18);
+        let region = runtime.state.create_root_region(Budget::INFINITE);
+        let (task, _) = runtime
+            .state
+            .create_task(region, Budget::INFINITE, async {})
+            .expect("create task");
+        runtime.scheduler.lock().unwrap().schedule(task, 0);
+        runtime.run_until_quiescent();
+        runtime
+            .state
+            .create_obligation(
+                ObligationKind::SendPermit,
+                task,
+                region,
+                Some("intentional leak".to_string()),
+            )
+            .expect("create obligation");
+
+        let report = runtime.spork_report(
+            "failing_app_manual",
+            vec![HarnessAttachmentRef::crashpack("manual-crashpack.json")],
+        );
+        let crashpack_count = report
+            .attachments
+            .iter()
+            .filter(|attachment| attachment.kind == HarnessAttachmentKind::CrashPack)
+            .count();
+        assert_eq!(
+            crashpack_count, 1,
+            "manual crashpack should not be duplicated"
+        );
+        assert_eq!(report.crashpack_path(), Some("manual-crashpack.json"));
+        let crashpack_link = report
+            .crashpack_link()
+            .expect("manual crashpack should still produce metadata");
+        assert_eq!(crashpack_link.path, "manual-crashpack.json");
+        assert!(
+            crashpack_link
+                .replay
+                .command_line
+                .contains("manual-crashpack.json"),
+            "replay command should include manual crashpack path"
+        );
+
+        crate::test_complete!("contract_manual_crashpack_not_duplicated_on_failure");
     }
 
     /// JSON output is deterministic across runs with same seed.

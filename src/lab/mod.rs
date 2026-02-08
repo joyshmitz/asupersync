@@ -99,25 +99,35 @@ pub use network::{
 };
 pub use oracle::{
     assert_deterministic, assert_deterministic_multi, ActorLeakOracle, ActorLeakViolation,
-    BayesFactor, DetectionModel, DeterminismOracle, DeterminismViolation, EProcess, EProcessConfig,
-    EProcessMonitor, EValue, EvidenceEntry, EvidenceLedger, EvidenceLine, EvidenceStrength,
-    EvidenceSummary, FinalizerId, FinalizerOracle, FinalizerViolation, LogLikelihoodContributions,
-    LoserDrainOracle, LoserDrainViolation, MailboxOracle, MailboxViolation, MailboxViolationKind,
-    MonitorResult, ObligationLeakOracle, ObligationLeakViolation, OracleEntryReport, OracleReport,
-    OracleStats, OracleSuite, OracleViolation, QuiescenceOracle, QuiescenceViolation,
-    SupervisionOracle, SupervisionViolation, SupervisionViolationKind, TaskLeakOracle,
-    TaskLeakViolation, TraceEventSummary,
+    BayesFactor, DetectionModel, DeterminismOracle, DeterminismViolation, DownOrderOracle,
+    DownOrderViolation, EProcess, EProcessConfig, EProcessMonitor, EValue, EvidenceEntry,
+    EvidenceLedger, EvidenceLine, EvidenceStrength, EvidenceSummary, FinalizerId, FinalizerOracle,
+    FinalizerViolation, LogLikelihoodContributions, LoserDrainOracle, LoserDrainViolation,
+    MailboxOracle, MailboxViolation, MailboxViolationKind, MonitorResult, ObligationLeakOracle,
+    ObligationLeakViolation, OracleEntryReport, OracleReport, OracleStats, OracleSuite,
+    OracleViolation, QuiescenceOracle, QuiescenceViolation, RegistryLeaseOracle,
+    RegistryLeaseViolation, ReplyLinearityOracle, ReplyLinearityViolation, SupervisionOracle,
+    SupervisionViolation, SupervisionViolationKind, SupervisorQuiescenceOracle,
+    SupervisorQuiescenceViolation, TaskLeakOracle, TaskLeakViolation, TraceEventSummary,
 };
 pub use replay::{
-    compare_normalized, normalize_for_replay, normalize_for_replay_with_config, traces_equivalent,
-    NormalizationResult, ReplayValidation, TraceDivergence, TraceSummary,
+    classify_fingerprint_classes, compare_normalized, explore_scenario_runner_seed_space,
+    explore_seed_space, explore_spork_seed_space, normalize_for_replay,
+    normalize_for_replay_with_config, summarize_spork_reports, traces_equivalent,
+    ExplorationFingerprintClass as ReplayExplorationFingerprintClass,
+    ExplorationReport as ReplayExplorationReport,
+    ExplorationRunSummary as ReplayExplorationRunSummary, NormalizationResult, ReplayValidation,
+    SporkExplorationReport, SporkExplorationRunSummary, TraceDivergence, TraceSummary,
 };
 pub use runtime::{
     HarnessAttachmentKind, HarnessAttachmentRef, LabConfigSummary, LabRunReport, LabRuntime,
     LabTraceCertificateSummary, SporkHarnessReport,
 };
-pub use spork_harness::{HarnessError, SporkAppHarness};
 pub use snapshot_restore::{
     RestorableSnapshot, RestoreError, SnapshotRestore, SnapshotStats, ValidationResult,
+};
+pub use spork_harness::{
+    HarnessError, ScenarioRunnerError, SporkAppHarness, SporkScenarioConfig, SporkScenarioResult,
+    SporkScenarioRunner, SporkScenarioSpec,
 };
 pub use virtual_time_wheel::{ExpiredTimer, VirtualTimerHandle, VirtualTimerWheel};

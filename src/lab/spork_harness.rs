@@ -248,7 +248,7 @@ impl SporkScenarioConfig {
         } else {
             config.no_step_limit()
         };
-        config
+        config.with_default_replay_recording()
     }
 
     /// Convert to JSON for deterministic artifact storage.

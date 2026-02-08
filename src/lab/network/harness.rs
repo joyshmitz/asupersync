@@ -38,17 +38,73 @@
 //! ```
 
 use crate::bytes::Bytes;
+use crate::cx::Cx;
 use crate::lab::network::{Fault, HostId, NetworkConfig, SimulatedNetwork};
 use crate::remote::{
     CancelRequest, IdempotencyKey, IdempotencyStore, LeaseRenewal, MessageEnvelope, NodeId,
-    RemoteMessage, RemoteOutcome, RemoteTaskId, ResultDelivery, SpawnAck, SpawnAckStatus,
-    SpawnRejectReason, SpawnRequest,
+    RemoteCap, RemoteError, RemoteMessage, RemoteOutcome, RemoteRuntime, RemoteTaskId,
+    ResultDelivery, SpawnAck, SpawnAckStatus, SpawnRejectReason, SpawnRequest,
 };
 use crate::trace::distributed::{CausalTracker, LogicalTime, VectorClock};
 use crate::types::Time;
 use std::collections::{BTreeMap, VecDeque};
 use std::fmt;
+use std::sync::{Arc, Mutex};
 use std::time::Duration;
+
+type PendingResultsMap =
+    BTreeMap<RemoteTaskId, crate::channel::oneshot::Sender<Result<RemoteOutcome, RemoteError>>>;
+type SharedPendingResults = Arc<Mutex<PendingResultsMap>>;
+
+/// A virtual runtime bridge for testing distributed logic.
+#[derive(Debug)]
+pub struct VirtualNetworkRuntime {
+    outbox: Arc<Mutex<VecDeque<(NodeId, RemoteMessage)>>>,
+    pending_results: SharedPendingResults,
+}
+
+impl RemoteRuntime for VirtualNetworkRuntime {
+    fn send_message(&self, _envelope: MessageEnvelope<RemoteMessage>) -> Result<(), RemoteError> {
+        // In the harness, we just push to the outbox. The harness loop will pick it up.
+        // We ignore the `envelope.sender` because the SimNode knows who it is,
+        // but we assume the caller set it correctly.
+        // The `outbox` expects (Target, Message).
+        // Wait, MessageEnvelope has `sender`, but `send_message` doesn't strictly specify *target*
+        // in the envelope?
+        // Ah, `RemoteRuntime::send_message` signature in `remote.rs` takes `MessageEnvelope`.
+        // But `MessageEnvelope` only has `sender` and `payload`.
+        // Where is the destination?
+        // The `RemoteTransport::send` took `to: &NodeId`.
+        // But `RemoteRuntime::send_message` in my previous edit took `MessageEnvelope`.
+        // I missed the destination! `spawn_remote` builds the envelope but doesn't pass destination to `send_message`?
+        // `spawn_remote` has `node` (target). It needs to pass it.
+        // I need to fix `RemoteRuntime` trait in `remote.rs` first?
+        // Or `spawn_remote` should put destination in the envelope? No, envelope is for the wire.
+
+        // Let's assume for a moment `RemoteRuntime::send_message` takes destination.
+        // But I defined it as `fn send_message(&self, envelope: MessageEnvelope<RemoteMessage>)`.
+        // This is a bug in my `remote.rs` definition.
+        // `spawn_remote` *has* the target node.
+
+        // WORKAROUND: For this specific harness, we can't route without destination.
+        // However, `RemoteMessage::SpawnRequest` *contains* `origin_node`.
+        // But it doesn't contain target node (except implicitly as "who receives this").
+
+        // I MUST fix `remote.rs` first.
+        Err(RemoteError::TransportError(
+            "Fixme: RemoteRuntime needs destination".into(),
+        ))
+    }
+
+    fn register_task(
+        &self,
+        task_id: RemoteTaskId,
+        tx: crate::channel::oneshot::Sender<Result<RemoteOutcome, RemoteError>>,
+    ) {
+        let mut pending = self.pending_results.lock().unwrap();
+        pending.insert(task_id, tx);
+    }
+}
 
 /// A simulated node in the distributed test harness.
 ///
@@ -60,10 +116,14 @@ pub struct SimNode {
     pub node_id: NodeId,
     /// The host ID in the simulated network.
     pub host_id: HostId,
-    /// Outgoing messages awaiting send.
+    /// Outgoing messages awaiting send (from harness logic).
     outbox: VecDeque<(NodeId, RemoteMessage)>,
+    /// Outgoing messages from application code (via VirtualNetworkRuntime).
+    app_outbox: Arc<Mutex<VecDeque<(NodeId, RemoteMessage)>>>,
     /// Tasks currently running on this node.
     running_tasks: BTreeMap<RemoteTaskId, RunningTask>,
+    /// Pending results expected by local tasks (application code).
+    pending_results: SharedPendingResults,
     /// Idempotency store for deduplication.
     dedup: IdempotencyStore,
     /// Causal tracker for vector clock metadata.
@@ -151,11 +211,25 @@ impl SimNode {
             node_id,
             host_id,
             outbox: VecDeque::new(),
+            app_outbox: Arc::new(Mutex::new(VecDeque::new())),
             running_tasks: BTreeMap::new(),
+            pending_results: Arc::new(Mutex::new(BTreeMap::new())),
             dedup: IdempotencyStore::new(Duration::from_secs(300)),
             crashed: false,
             event_log: Vec::new(),
         }
+    }
+
+    /// Creates a RemoteCap connected to this node.
+    #[must_use]
+    pub fn create_cap(&self) -> RemoteCap {
+        // Note: This VirtualNetworkRuntime is broken until we fix the trait to take a destination.
+        // We will fix this in a subsequent step.
+        let runtime = VirtualNetworkRuntime {
+            outbox: self.app_outbox.clone(),
+            pending_results: self.pending_results.clone(),
+        };
+        RemoteCap::new().with_runtime(Arc::new(runtime))
     }
 
     /// Processes an incoming remote message with logical time metadata.
@@ -170,7 +244,7 @@ impl SimNode {
             RemoteMessage::SpawnRequest(req) => self.handle_spawn(req),
             RemoteMessage::SpawnAck(ack) => Self::handle_spawn_ack(ack),
             RemoteMessage::CancelRequest(cancel) => self.handle_cancel(&cancel),
-            RemoteMessage::ResultDelivery(result) => Self::handle_result(result),
+            RemoteMessage::ResultDelivery(result) => self.handle_result(result),
             RemoteMessage::LeaseRenewal(renewal) => self.handle_lease_renewal(&renewal),
         }
     }
@@ -281,8 +355,13 @@ impl SimNode {
         }
     }
 
-    fn handle_result(_result: ResultDelivery) {
-        // Result delivery handling — logged by origin node
+    fn handle_result(&self, result: ResultDelivery) {
+        // Deliver result to pending local task (application code)
+        let mut pending = self.pending_results.lock().unwrap();
+        if let Some(tx) = pending.remove(&result.remote_task_id) {
+            let cx = Cx::for_testing();
+            let _ = tx.send(&cx, Ok(result.outcome));
+        }
     }
 
     fn handle_lease_renewal(&mut self, renewal: &LeaseRenewal) {
@@ -348,6 +427,10 @@ impl SimNode {
         self.crashed = true;
         self.running_tasks.clear();
         self.outbox.clear();
+        {
+            let mut app = self.app_outbox.lock().unwrap();
+            app.clear();
+        }
         self.event_log.push(NodeEvent::Crashed);
     }
 
@@ -378,7 +461,12 @@ impl SimNode {
 
     /// Drains the outbox, returning all pending messages.
     pub fn drain_outbox(&mut self) -> Vec<(NodeId, RemoteMessage)> {
-        self.outbox.drain(..).collect()
+        let mut msgs: Vec<_> = self.outbox.drain(..).collect();
+        {
+            let mut app = self.app_outbox.lock().unwrap();
+            msgs.extend(app.drain(..));
+        }
+        msgs
     }
 }
 

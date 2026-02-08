@@ -35,6 +35,14 @@ pub const INVARIANT_SUPERVISION: &str = "supervision";
 pub const INVARIANT_MAILBOX: &str = "mailbox";
 /// Invariant name for the RRef access oracle.
 pub const INVARIANT_RREF_ACCESS: &str = "rref_access";
+/// Invariant name for the reply linearity oracle (Spork).
+pub const INVARIANT_REPLY_LINEARITY: &str = "reply_linearity";
+/// Invariant name for the registry lease linearity oracle (Spork).
+pub const INVARIANT_REGISTRY_LEASE: &str = "registry_lease";
+/// Invariant name for the deterministic DOWN ordering oracle (Spork).
+pub const INVARIANT_DOWN_ORDER: &str = "down_order";
+/// Invariant name for the supervisor quiescence oracle (Spork).
+pub const INVARIANT_SUPERVISOR_QUIESCENCE: &str = "supervisor_quiescence";
 
 /// Ordered list of all oracle invariants covered by the meta runner.
 pub const ALL_ORACLE_INVARIANTS: &[&str] = &[
@@ -51,6 +59,10 @@ pub const ALL_ORACLE_INVARIANTS: &[&str] = &[
     INVARIANT_SUPERVISION,
     INVARIANT_MAILBOX,
     INVARIANT_RREF_ACCESS,
+    INVARIANT_REPLY_LINEARITY,
+    INVARIANT_REGISTRY_LEASE,
+    INVARIANT_DOWN_ORDER,
+    INVARIANT_SUPERVISOR_QUIESCENCE,
 ];
 
 /// Built-in mutations used to validate oracle detection.
@@ -580,6 +592,10 @@ pub fn invariant_from_violation(violation: &OracleViolation) -> &'static str {
         OracleViolation::Supervision(_) => INVARIANT_SUPERVISION,
         OracleViolation::Mailbox(_) => INVARIANT_MAILBOX,
         OracleViolation::RRefAccess(_) => INVARIANT_RREF_ACCESS,
+        OracleViolation::ReplyLinearity(_) => INVARIANT_REPLY_LINEARITY,
+        OracleViolation::RegistryLease(_) => INVARIANT_REGISTRY_LEASE,
+        OracleViolation::DownOrder(_) => INVARIANT_DOWN_ORDER,
+        OracleViolation::SupervisorQuiescence(_) => INVARIANT_SUPERVISOR_QUIESCENCE,
     }
 }
 
@@ -590,7 +606,7 @@ mod tests {
 
     #[test]
     fn all_oracle_invariants_count() {
-        assert_eq!(ALL_ORACLE_INVARIANTS.len(), 13);
+        assert_eq!(ALL_ORACLE_INVARIANTS.len(), 17);
     }
 
     #[test]

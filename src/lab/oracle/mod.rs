@@ -38,6 +38,7 @@ pub mod obligation_leak;
 pub mod quiescence;
 pub mod region_tree;
 pub mod rref_access;
+pub mod spork;
 pub mod task_leak;
 
 pub use actor::{
@@ -66,6 +67,11 @@ pub use obligation_leak::{ObligationLeakOracle, ObligationLeakViolation};
 pub use quiescence::{QuiescenceOracle, QuiescenceViolation};
 pub use region_tree::{RegionTreeEntry, RegionTreeOracle, RegionTreeViolation};
 pub use rref_access::{RRefAccessOracle, RRefAccessViolation, RRefAccessViolationKind, RRefId};
+pub use spork::{
+    DownOrderOracle, DownOrderViolation, RegistryLeaseOracle, RegistryLeaseViolation,
+    ReplyLinearityOracle, ReplyLinearityViolation, SupervisorQuiescenceOracle,
+    SupervisorQuiescenceViolation,
+};
 pub use task_leak::{TaskLeakOracle, TaskLeakViolation};
 
 use serde::{Deserialize, Serialize};
@@ -102,6 +108,14 @@ pub enum OracleViolation {
     Mailbox(MailboxViolation),
     /// RRef access violation (cross-region, post-close, or witness mismatch).
     RRefAccess(RRefAccessViolation),
+    /// GenServer reply dropped without send or abort.
+    ReplyLinearity(ReplyLinearityViolation),
+    /// Name lease not committed or aborted (stale name).
+    RegistryLease(RegistryLeaseViolation),
+    /// DOWN messages delivered in non-deterministic order.
+    DownOrder(DownOrderViolation),
+    /// Supervisor region closed with active children.
+    SupervisorQuiescence(SupervisorQuiescenceViolation),
 }
 
 impl std::fmt::Display for OracleViolation {
@@ -120,6 +134,10 @@ impl std::fmt::Display for OracleViolation {
             Self::Supervision(v) => write!(f, "Supervision violation: {v}"),
             Self::Mailbox(v) => write!(f, "Mailbox violation: {v}"),
             Self::RRefAccess(v) => write!(f, "RRef access violation: {v}"),
+            Self::ReplyLinearity(v) => write!(f, "Reply linearity violation: {v}"),
+            Self::RegistryLease(v) => write!(f, "Registry lease violation: {v}"),
+            Self::DownOrder(v) => write!(f, "DOWN order violation: {v}"),
+            Self::SupervisorQuiescence(v) => write!(f, "Supervisor quiescence violation: {v}"),
         }
     }
 }
@@ -155,6 +173,14 @@ pub struct OracleSuite {
     pub mailbox: MailboxOracle,
     /// RRef access oracle.
     pub rref_access: RRefAccessOracle,
+    /// Spork: reply linearity oracle.
+    pub reply_linearity: ReplyLinearityOracle,
+    /// Spork: registry lease linearity oracle.
+    pub registry_lease: RegistryLeaseOracle,
+    /// Spork: deterministic DOWN ordering oracle.
+    pub down_order: DownOrderOracle,
+    /// Spork: supervisor quiescence oracle.
+    pub supervisor_quiescence: SupervisorQuiescenceOracle,
 }
 
 impl OracleSuite {
@@ -221,6 +247,22 @@ impl OracleSuite {
             violations.push(OracleViolation::RRefAccess(v));
         }
 
+        if let Err(v) = self.reply_linearity.check() {
+            violations.push(OracleViolation::ReplyLinearity(v));
+        }
+
+        if let Err(v) = self.registry_lease.check() {
+            violations.push(OracleViolation::RegistryLease(v));
+        }
+
+        if let Err(v) = self.down_order.check() {
+            violations.push(OracleViolation::DownOrder(v));
+        }
+
+        if let Err(v) = self.supervisor_quiescence.check() {
+            violations.push(OracleViolation::SupervisorQuiescence(v));
+        }
+
         violations
     }
 
@@ -239,6 +281,10 @@ impl OracleSuite {
         self.supervision.reset();
         self.mailbox.reset();
         self.rref_access.reset();
+        self.reply_linearity.reset();
+        self.registry_lease.reset();
+        self.down_order.reset();
+        self.supervisor_quiescence.reset();
     }
 
     /// Generates a unified oracle report with per-oracle status and statistics.
@@ -397,6 +443,53 @@ impl OracleSuite {
                     events_recorded: self.rref_access.rref_count()
                         + self.rref_access.task_count()
                         + self.rref_access.closed_region_count(),
+                },
+            ),
+            OracleEntryReport::from_result(
+                "reply_linearity",
+                self.reply_linearity
+                    .check()
+                    .err()
+                    .map(OracleViolation::ReplyLinearity),
+                OracleStats {
+                    entities_tracked: self.reply_linearity.created_count(),
+                    events_recorded: self.reply_linearity.created_count()
+                        + self.reply_linearity.resolved_count(),
+                },
+            ),
+            OracleEntryReport::from_result(
+                "registry_lease",
+                self.registry_lease
+                    .check()
+                    .err()
+                    .map(OracleViolation::RegistryLease),
+                OracleStats {
+                    entities_tracked: self.registry_lease.acquired_count(),
+                    events_recorded: self.registry_lease.acquired_count()
+                        + self.registry_lease.resolved_count(),
+                },
+            ),
+            OracleEntryReport::from_result(
+                "down_order",
+                self.down_order
+                    .check()
+                    .err()
+                    .map(OracleViolation::DownOrder),
+                OracleStats {
+                    entities_tracked: self.down_order.monitor_count(),
+                    events_recorded: self.down_order.down_count(),
+                },
+            ),
+            OracleEntryReport::from_result(
+                "supervisor_quiescence",
+                self.supervisor_quiescence
+                    .check()
+                    .err()
+                    .map(OracleViolation::SupervisorQuiescence),
+                OracleStats {
+                    entities_tracked: self.supervisor_quiescence.supervisor_count(),
+                    events_recorded: self.supervisor_quiescence.child_count()
+                        + self.supervisor_quiescence.closed_region_count(),
                 },
             ),
         ];
