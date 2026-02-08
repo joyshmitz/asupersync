@@ -155,6 +155,38 @@ impl LabConfigSummary {
         }
     }
 
+    /// Compute a stable hash of the configuration for quick equivalence checking.
+    ///
+    /// Two configs with the same hash produced identical lab setups. Agents can
+    /// compare config hashes across runs to confirm they used the same settings.
+    #[must_use]
+    pub fn config_hash(&self) -> u64 {
+        use std::hash::{Hash, Hasher};
+        // Use the same deterministic hasher the runtime uses elsewhere.
+        let mut h = std::collections::hash_map::DefaultHasher::new();
+        self.seed.hash(&mut h);
+        self.entropy_seed.hash(&mut h);
+        self.worker_count.hash(&mut h);
+        self.panic_on_obligation_leak.hash(&mut h);
+        self.trace_capacity.hash(&mut h);
+        self.futurelock_max_idle_steps.hash(&mut h);
+        self.panic_on_futurelock.hash(&mut h);
+        self.max_steps.hash(&mut h);
+        self.replay_recording_enabled.hash(&mut h);
+        if let Some(ref c) = self.chaos {
+            1u8.hash(&mut h);
+            c.seed.hash(&mut h);
+            c.cancel_probability.to_bits().hash(&mut h);
+            c.delay_probability.to_bits().hash(&mut h);
+            c.io_error_probability.to_bits().hash(&mut h);
+            c.wakeup_storm_probability.to_bits().hash(&mut h);
+            c.budget_exhaust_probability.to_bits().hash(&mut h);
+        } else {
+            0u8.hash(&mut h);
+        }
+        h.finish()
+    }
+
     /// Convert to JSON for artifact storage.
     #[must_use]
     pub fn to_json(&self) -> serde_json::Value {
@@ -320,7 +352,20 @@ pub struct SporkHarnessReport {
 
 impl SporkHarnessReport {
     /// Current stable schema version.
-    pub const SCHEMA_VERSION: u32 = 1;
+    ///
+    /// Increment when the JSON contract changes in a backward-incompatible way.
+    /// Backward-compatible additions (new optional fields) do NOT require a bump.
+    /// Breaking changes (field renames, type changes, removals) MUST bump this
+    /// and document the migration in a comment here.
+    ///
+    /// # Version history
+    ///
+    /// - **v1**: Initial schema (bd-11dm5). Top-level keys: `schema_version`,
+    ///   `app`, `lab`, `fingerprints`, `run`, `attachments`.
+    /// - **v2**: Agent report contract (bd-f262i). Added `lab.config_hash` for
+    ///   quick equivalence checking. Added `verdict` top-level key. No
+    ///   breaking changes to existing fields.
+    pub const SCHEMA_VERSION: u32 = 2;
 
     /// Create a new harness report from a low-level lab run report.
     #[must_use]
@@ -339,10 +384,99 @@ impl SporkHarnessReport {
         }
     }
 
+    // -------------------------------------------------------------------------
+    // Agent UX convenience methods (bd-f262i)
+    // -------------------------------------------------------------------------
+
+    /// Quick pass/fail verdict: all oracles passed and no invariant violations.
+    #[must_use]
+    pub fn passed(&self) -> bool {
+        self.run.oracle_report.all_passed() && self.run.invariant_violations.is_empty()
+    }
+
+    /// The canonical trace fingerprint for this run.
+    #[must_use]
+    pub fn trace_fingerprint(&self) -> u64 {
+        self.run.trace_fingerprint
+    }
+
+    /// The lab seed that drove this run.
+    #[must_use]
+    pub fn seed(&self) -> u64 {
+        self.run.seed
+    }
+
+    /// Config hash for quick equivalence checking across runs.
+    #[must_use]
+    pub fn config_hash(&self) -> u64 {
+        self.config.config_hash()
+    }
+
+    /// Returns the path to the first crashpack attachment, if any.
+    #[must_use]
+    pub fn crashpack_path(&self) -> Option<&str> {
+        self.attachments
+            .iter()
+            .find(|a| a.kind == HarnessAttachmentKind::CrashPack)
+            .map(|a| a.path.as_str())
+    }
+
+    /// Returns oracle failure descriptions, if any.
+    #[must_use]
+    pub fn oracle_failures(&self) -> Vec<String> {
+        self.run
+            .oracle_report
+            .failures()
+            .iter()
+            .map(|e| {
+                let desc = e
+                    .violation
+                    .as_ref()
+                    .map_or_else(String::new, |v| format!(": {v}"));
+                format!("{}{desc}", e.invariant)
+            })
+            .collect()
+    }
+
+    /// One-line human-readable summary suitable for agent log output.
+    ///
+    /// Format: `[PASS|FAIL] app="name" seed=N fingerprint=N oracles=P/T`
+    #[must_use]
+    pub fn summary_line(&self) -> String {
+        let verdict = if self.passed() { "PASS" } else { "FAIL" };
+        let oracle = &self.run.oracle_report;
+        format!(
+            "[{verdict}] app=\"{}\" seed={} fingerprint={} oracles={}/{} invariant_violations={}",
+            self.app,
+            self.run.seed,
+            self.run.trace_fingerprint,
+            oracle.passed,
+            oracle.total,
+            self.run.invariant_violations.len(),
+        )
+    }
+
     /// Convert to JSON for artifact storage.
     ///
-    /// Field semantics are intentionally stable: downstream tools should be able
-    /// to depend on key locations without chasing internal lab structs.
+    /// # Agent Report Contract (bd-f262i)
+    ///
+    /// This is the **single stable JSON schema** that agents rely on across:
+    /// - Lab runs (`SporkAppHarness::run_to_report`)
+    /// - DPOR exploration (`ExplorationReport` wraps these)
+    /// - Conformance suites (test assertions against these fields)
+    ///
+    /// ## Top-level fields (v2)
+    ///
+    /// | Key              | Type    | Stable? | Description                              |
+    /// |------------------|---------|---------|------------------------------------------|
+    /// | `schema_version` | u32     | yes     | Schema version (bump on breaking change) |
+    /// | `verdict`        | string  | yes     | `"pass"` or `"fail"`                     |
+    /// | `app.name`       | string  | yes     | Application name from `AppSpec`           |
+    /// | `lab.config`     | object  | yes     | Full config snapshot                      |
+    /// | `lab.config_hash`| u64     | yes     | Quick config equivalence hash             |
+    /// | `fingerprints.*` | u64     | yes     | Trace/schedule fingerprints               |
+    /// | `run.*`          | object  | yes     | Full `LabRunReport` (oracles, invariants) |
+    /// | `attachments`    | array   | yes     | Sorted by (kind, path)                    |
     #[must_use]
     pub fn to_json(&self) -> serde_json::Value {
         use serde_json::json;
@@ -353,8 +487,12 @@ impl SporkHarnessReport {
 
         json!({
             "schema_version": self.schema_version,
+            "verdict": if self.passed() { "pass" } else { "fail" },
             "app": { "name": self.app },
-            "lab": { "config": self.config.to_json() },
+            "lab": {
+                "config": self.config.to_json(),
+                "config_hash": self.config.config_hash(),
+            },
             "fingerprints": {
                 "trace": self.run.trace_fingerprint,
                 "event_hash": self.run.trace_certificate.event_hash,
@@ -2380,5 +2518,220 @@ mod tests {
             other => panic!("unexpected leak data: {other:?}"),
         }
         crate::test_complete!("obligation_leak_emits_trace_event");
+    }
+
+    // =========================================================================
+    // Agent Report Contract tests (bd-f262i)
+    // =========================================================================
+
+    /// The JSON schema must contain all required top-level keys.
+    #[test]
+    fn contract_json_has_required_top_level_keys() {
+        crate::test_utils::init_test_logging();
+        crate::test_phase!("contract_json_has_required_top_level_keys");
+
+        let app = crate::app::AppSpec::new("contract_test");
+        let harness = crate::lab::SporkAppHarness::with_seed(42, app).unwrap();
+        let report = harness.run_to_report().unwrap();
+        let json = report.to_json();
+
+        // Required top-level keys per bd-f262i contract.
+        let required_keys = [
+            "schema_version",
+            "verdict",
+            "app",
+            "lab",
+            "fingerprints",
+            "run",
+            "attachments",
+        ];
+        for key in &required_keys {
+            assert!(
+                json.get(key).is_some(),
+                "missing required top-level key: {key}"
+            );
+        }
+
+        // Nested required keys.
+        assert!(json["app"]["name"].is_string(), "app.name must be a string");
+        assert!(
+            json["lab"]["config"].is_object(),
+            "lab.config must be an object"
+        );
+        assert!(
+            json["lab"]["config_hash"].is_u64(),
+            "lab.config_hash must be a u64"
+        );
+        assert!(
+            json["fingerprints"]["trace"].is_u64(),
+            "fingerprints.trace must be a u64"
+        );
+        assert!(
+            json["fingerprints"]["event_hash"].is_u64(),
+            "fingerprints.event_hash must be a u64"
+        );
+        assert!(
+            json["fingerprints"]["event_count"].is_u64(),
+            "fingerprints.event_count must be a u64"
+        );
+        assert!(
+            json["fingerprints"]["schedule_hash"].is_u64(),
+            "fingerprints.schedule_hash must be a u64"
+        );
+        assert!(json["run"]["seed"].is_u64(), "run.seed must be a u64");
+        assert!(
+            json["run"]["oracles"].is_object(),
+            "run.oracles must be an object"
+        );
+        assert!(
+            json["run"]["invariants"].is_array(),
+            "run.invariants must be an array"
+        );
+        assert!(json["attachments"].is_array(), "attachments must be an array");
+
+        crate::test_complete!("contract_json_has_required_top_level_keys");
+    }
+
+    /// Schema version must be the current constant.
+    #[test]
+    fn contract_schema_version_is_current() {
+        crate::test_utils::init_test_logging();
+        crate::test_phase!("contract_schema_version_is_current");
+
+        let app = crate::app::AppSpec::new("version_test");
+        let harness = crate::lab::SporkAppHarness::with_seed(1, app).unwrap();
+        let report = harness.run_to_report().unwrap();
+
+        assert_eq!(report.schema_version, SporkHarnessReport::SCHEMA_VERSION);
+        assert_eq!(
+            report.to_json()["schema_version"],
+            SporkHarnessReport::SCHEMA_VERSION
+        );
+
+        crate::test_complete!("contract_schema_version_is_current");
+    }
+
+    /// Config hash is deterministic: same config -> same hash.
+    #[test]
+    fn contract_config_hash_deterministic() {
+        crate::test_utils::init_test_logging();
+        crate::test_phase!("contract_config_hash_deterministic");
+
+        let config = LabConfig::new(42);
+        let summary_a = LabConfigSummary::from_config(&config);
+        let summary_b = LabConfigSummary::from_config(&config);
+
+        assert_eq!(summary_a.config_hash(), summary_b.config_hash());
+
+        // Different seed -> different hash.
+        let config_2 = LabConfig::new(99);
+        let summary_c = LabConfigSummary::from_config(&config_2);
+        assert_ne!(summary_a.config_hash(), summary_c.config_hash());
+
+        crate::test_complete!("contract_config_hash_deterministic");
+    }
+
+    /// Verdict field correctly reflects pass/fail.
+    #[test]
+    fn contract_verdict_reflects_oracle_state() {
+        crate::test_utils::init_test_logging();
+        crate::test_phase!("contract_verdict_reflects_oracle_state");
+
+        let app = crate::app::AppSpec::new("verdict_test");
+        let harness = crate::lab::SporkAppHarness::with_seed(42, app).unwrap();
+        let report = harness.run_to_report().unwrap();
+
+        // Empty app should pass.
+        assert!(report.passed());
+        assert_eq!(report.to_json()["verdict"], "pass");
+        assert!(report.summary_line().starts_with("[PASS]"));
+
+        crate::test_complete!("contract_verdict_reflects_oracle_state");
+    }
+
+    /// Agent UX convenience methods return consistent values.
+    #[test]
+    fn contract_convenience_methods_consistent() {
+        crate::test_utils::init_test_logging();
+        crate::test_phase!("contract_convenience_methods_consistent");
+
+        let app = crate::app::AppSpec::new("ux_test");
+        let harness = crate::lab::SporkAppHarness::with_seed(42, app).unwrap();
+        let report = harness.run_to_report().unwrap();
+        let json = report.to_json();
+
+        // trace_fingerprint() matches JSON.
+        assert_eq!(
+            report.trace_fingerprint(),
+            json["fingerprints"]["trace"].as_u64().unwrap()
+        );
+
+        // seed() matches JSON.
+        assert_eq!(report.seed(), json["run"]["seed"].as_u64().unwrap());
+
+        // config_hash() matches JSON.
+        assert_eq!(
+            report.config_hash(),
+            json["lab"]["config_hash"].as_u64().unwrap()
+        );
+
+        // No crashpack by default.
+        assert!(report.crashpack_path().is_none());
+
+        // Empty app -> no oracle failures.
+        assert!(report.oracle_failures().is_empty());
+
+        crate::test_complete!("contract_convenience_methods_consistent");
+    }
+
+    /// JSON output is deterministic across runs with same seed.
+    #[test]
+    fn contract_json_deterministic_same_seed() {
+        crate::test_utils::init_test_logging();
+        crate::test_phase!("contract_json_deterministic_same_seed");
+
+        let json_a = {
+            let app = crate::app::AppSpec::new("det_contract");
+            let harness = crate::lab::SporkAppHarness::with_seed(42, app).unwrap();
+            harness.run_to_report().unwrap().to_json()
+        };
+
+        let json_b = {
+            let app = crate::app::AppSpec::new("det_contract");
+            let harness = crate::lab::SporkAppHarness::with_seed(42, app).unwrap();
+            harness.run_to_report().unwrap().to_json()
+        };
+
+        assert_eq!(json_a, json_b, "same seed must produce identical JSON");
+
+        crate::test_complete!("contract_json_deterministic_same_seed");
+    }
+
+    /// Attachments appear in the report, sorted by (kind, path).
+    #[test]
+    fn contract_attachments_sorted_in_json() {
+        crate::test_utils::init_test_logging();
+        crate::test_phase!("contract_attachments_sorted_in_json");
+
+        let app = crate::app::AppSpec::new("attach_contract");
+        let mut harness = crate::lab::SporkAppHarness::with_seed(7, app).unwrap();
+        // Add in reverse order to verify sorting.
+        harness.attach(HarnessAttachmentRef::trace("z_trace.json"));
+        harness.attach(HarnessAttachmentRef::crashpack("a_crash.tar"));
+
+        let report = harness.run_to_report().unwrap();
+
+        // crashpack_path() returns the crashpack.
+        assert_eq!(report.crashpack_path(), Some("a_crash.tar"));
+
+        let json = report.to_json();
+        let attachments = json["attachments"].as_array().unwrap();
+        assert_eq!(attachments.len(), 2);
+
+        // CrashPack sorts before Trace (enum ordering).
+        assert_eq!(attachments[0]["kind"], "crashpack");
+        assert_eq!(attachments[1]["kind"], "trace");
+
+        crate::test_complete!("contract_attachments_sorted_in_json");
     }
 }
