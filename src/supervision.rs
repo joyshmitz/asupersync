@@ -1132,23 +1132,41 @@ impl CompiledSupervisor {
     #[must_use]
     fn restart_plan_for_idx(&self, failed_child_idx: usize) -> Option<SupervisorRestartPlan> {
         let failed_pos = self.start_pos_for_child_idx(failed_child_idx)?;
-
-        let positions: Vec<usize> = match self.restart_policy {
-            RestartPolicy::OneForOne => vec![failed_pos],
-            RestartPolicy::OneForAll => (0..self.start_order.len()).collect(),
-            RestartPolicy::RestForOne => (failed_pos..self.start_order.len()).collect(),
+        let total = self.start_order.len();
+        let count = match self.restart_policy {
+            RestartPolicy::OneForOne => 1,
+            RestartPolicy::OneForAll => total,
+            RestartPolicy::RestForOne => total.saturating_sub(failed_pos),
         };
 
-        let cancel_order = positions
-            .iter()
-            .rev()
-            .map(|&pos| self.children[self.start_order[pos]].name.clone())
-            .collect();
+        // Hot-path allocation gate: construct orders directly without an
+        // intermediate positions Vec, while preserving deterministic order.
+        let mut cancel_order = Vec::with_capacity(count);
+        let mut restart_order = Vec::with_capacity(count);
 
-        let restart_order = positions
-            .iter()
-            .map(|&pos| self.children[self.start_order[pos]].name.clone())
-            .collect();
+        match self.restart_policy {
+            RestartPolicy::OneForOne => {
+                let name = self.children[self.start_order[failed_pos]].name.clone();
+                cancel_order.push(name.clone());
+                restart_order.push(name);
+            }
+            RestartPolicy::OneForAll => {
+                for pos in (0..total).rev() {
+                    cancel_order.push(self.children[self.start_order[pos]].name.clone());
+                }
+                for pos in 0..total {
+                    restart_order.push(self.children[self.start_order[pos]].name.clone());
+                }
+            }
+            RestartPolicy::RestForOne => {
+                for pos in (failed_pos..total).rev() {
+                    cancel_order.push(self.children[self.start_order[pos]].name.clone());
+                }
+                for pos in failed_pos..total {
+                    restart_order.push(self.children[self.start_order[pos]].name.clone());
+                }
+            }
+        }
 
         Some(SupervisorRestartPlan {
             policy: self.restart_policy,
