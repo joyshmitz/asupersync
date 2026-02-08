@@ -217,6 +217,10 @@ harness = false
 name = "golden_output"
 harness = false
 
+[[bench]]
+name = "spork_baseline"
+harness = false
+
 [lints.rust]
 # Default to deny for unsafe code - specific modules that require it can use #[allow(unsafe_code)]
 # The epoll reactor requires unsafe for the polling crate's FFI operations
