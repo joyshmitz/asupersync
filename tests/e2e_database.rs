@@ -14,12 +14,7 @@ use common::*;
 // Helpers
 // =========================================================================
 
-type BoxFut<T> = std::pin::Pin<
-    Box<
-        dyn std::future::Future<Output = Result<T, Box<dyn std::error::Error + Send + Sync>>>
-            + Send,
-    >,
->;
+type BoxFut<T> = std::pin::Pin<Box<dyn std::future::Future<Output = Result<T, TestError>> + Send>>;
 
 fn test_factory() -> impl Fn() -> BoxFut<TestConnection> + Send + Sync + 'static {
     let counter = Arc::new(AtomicUsize::new(0));

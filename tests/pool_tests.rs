@@ -33,11 +33,7 @@ use std::time::Duration;
 fn acquire_resource<R, F>(pool: &GenericPool<R, F>) -> asupersync::sync::PooledResource<R>
 where
     R: Send + 'static,
-    F: Fn() -> Pin<
-            Box<dyn Future<Output = Result<R, Box<dyn std::error::Error + Send + Sync>>> + Send>,
-        > + Send
-        + Sync
-        + 'static,
+    F: Fn() -> Pin<Box<dyn Future<Output = Result<R, TestError>> + Send>> + Send + Sync + 'static,
 {
     let cx: Cx = Cx::for_testing();
     futures_lite::future::block_on(pool.acquire(&cx)).expect("acquire should succeed")
@@ -51,12 +47,7 @@ where
 static CONNECTION_COUNTER: AtomicUsize = AtomicUsize::new(0);
 
 /// Factory function type for creating test connections.
-type FactoryFuture = Pin<
-    Box<
-        dyn Future<Output = Result<TestConnection, Box<dyn std::error::Error + Send + Sync>>>
-            + Send,
-    >,
->;
+type FactoryFuture = Pin<Box<dyn Future<Output = Result<TestConnection, TestError>> + Send>>;
 
 /// Factory function type (function pointer that returns a future).
 type FactoryFn = fn() -> FactoryFuture;
@@ -83,8 +74,7 @@ fn test_factory() -> FactoryFn {
 fn create_failing_connection() -> FactoryFuture {
     Box::pin(async {
         tracing::debug!("Failing factory invoked");
-        Err(Box::new(TestError("factory failure".to_string()))
-            as Box<dyn std::error::Error + Send + Sync>)
+        Err(TestError("factory failure".to_string()))
     })
 }
 

@@ -3,11 +3,11 @@
 //! Phase 0 offloads `ToSocketAddrs` to a dedicated thread per lookup to avoid
 //! blocking the async runtime.
 
-use crate::runtime::yield_now;
+use crate::cx::Cx;
+use crate::runtime::spawn_blocking;
+use crate::runtime::spawn_blocking::spawn_blocking_on_thread;
 use std::io;
 use std::net::{SocketAddr, ToSocketAddrs};
-use std::sync::mpsc;
-use std::thread;
 
 /// Resolve a hostname to the first available socket address.
 ///
@@ -46,29 +46,16 @@ where
     F: FnOnce() -> io::Result<T> + Send + 'static,
     T: Send + 'static,
 {
-    let (tx, rx) = mpsc::channel();
-    let thread_result = thread::Builder::new()
-        .name("asupersync-resolve".to_string())
-        .spawn(move || {
-            let _ = tx.send(f());
-        });
-    if let Err(err) = thread_result {
-        return Err(io::Error::other(format!(
-            "failed to spawn resolver thread: {err}"
-        )));
-    }
-
-    loop {
-        match rx.try_recv() {
-            Ok(result) => return result,
-            Err(mpsc::TryRecvError::Empty) => {
-                yield_now().await;
-            }
-            Err(mpsc::TryRecvError::Disconnected) => {
-                return Err(io::Error::other("resolver thread dropped without sending"));
-            }
+    if let Some(cx) = Cx::current() {
+        if cx.blocking_pool_handle().is_some() {
+            return spawn_blocking(f).await;
         }
     }
+
+    // No pool available? Force a background thread to avoid blocking the reactor.
+    // This maintains the original behavior (dedicated thread per lookup) but
+    // uses the optimized Waker-based notification mechanism.
+    spawn_blocking_on_thread(f).await
 }
 
 #[cfg(test)]

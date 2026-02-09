@@ -25,6 +25,7 @@ use asupersync::record::distributed_region::{
     ReplicaInfo, ReplicaStatus,
 };
 use asupersync::record::region::RegionState;
+use asupersync::security::{AuthenticatedSymbol, AuthenticationTag};
 use asupersync::types::budget::Budget;
 use asupersync::types::{Outcome, RegionId, TaskId, Time};
 use asupersync::util::DetRng;
@@ -402,6 +403,7 @@ fn e2e_full_encode_distribute_recover_pipeline() {
         .enumerate()
         .map(|(i, s)| CollectedSymbol {
             symbol: s.clone(),
+            tag: AuthenticationTag::zero(),
             source_replica: format!("node-{}", i % 2), // from surviving replicas
             collected_at: Time::from_secs(u64::try_from(i).unwrap()),
             verified: true,
@@ -461,7 +463,7 @@ fn e2e_full_encode_distribute_recover_pipeline() {
     assert_eq!(result.snapshot.parent, snapshot.parent);
     assert_eq!(result.snapshot.metadata, snapshot.metadata);
     assert_eq!(result.snapshot.content_hash(), original_hash);
-    assert!(result.verified);
+    assert!(!result.verified);
 
     test_complete!(
         "e2e_full_pipeline",
@@ -610,7 +612,8 @@ fn e2e_bridge_upgrade_snapshot_close() {
     let encoded = encode_snapshot(&snap_after);
     let mut decoder = StateDecoder::new(RecoveryDecodingConfig::default());
     for sym in &encoded.symbols {
-        decoder.add_symbol(sym).unwrap();
+        let sym = AuthenticatedSymbol::new_verified(sym.clone(), AuthenticationTag::zero());
+        decoder.add_symbol(&sym).unwrap();
     }
     let recovered = decoder.decode_snapshot(&encoded.params).unwrap();
     assert_eq!(recovered.content_hash(), snap_after.content_hash());
@@ -661,6 +664,7 @@ fn e2e_collector_dedup_multi_replica() {
         for sym in &encoded.symbols {
             let ok = collector.add_collected(CollectedSymbol {
                 symbol: sym.clone(),
+                tag: AuthenticationTag::zero(),
                 source_replica: format!("node-{replica_idx}"),
                 collected_at: Time::from_secs(replica_idx),
                 verified: false,
@@ -713,6 +717,7 @@ fn e2e_recover_source_only() {
         .source_symbols()
         .map(|s| CollectedSymbol {
             symbol: s.clone(),
+            tag: AuthenticationTag::zero(),
             source_replica: "node-0".to_string(),
             collected_at: Time::ZERO,
             verified: false,
@@ -743,7 +748,7 @@ fn e2e_recover_source_only() {
         .unwrap();
 
     assert_eq!(result.snapshot.content_hash(), snapshot.content_hash());
-    assert!(result.verified);
+    assert!(!result.verified);
 
     test_complete!("e2e_recover_source_only");
 }
@@ -766,6 +771,7 @@ fn e2e_insufficient_symbols_fails_cleanly() {
         .take(encoded.source_count as usize / 2)
         .map(|s| CollectedSymbol {
             symbol: s.clone(),
+            tag: AuthenticationTag::zero(),
             source_replica: "node-0".to_string(),
             collected_at: Time::ZERO,
             verified: false,

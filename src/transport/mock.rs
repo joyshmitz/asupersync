@@ -9,9 +9,11 @@ use crate::transport::error::{SinkError, StreamError};
 use crate::transport::{SymbolSink, SymbolStream};
 use crate::types::Symbol;
 use crate::util::DetRng;
-use std::collections::{HashMap, HashSet, VecDeque};
+use std::cmp::Reverse;
+use std::collections::{BinaryHeap, HashMap, HashSet, VecDeque};
 use std::pin::Pin;
 use std::sync::atomic::{AtomicBool, Ordering};
+use std::sync::mpsc;
 use std::sync::{Arc, Mutex};
 use std::task::{Context, Poll, Waker};
 use std::time::{Duration, Instant};
@@ -224,60 +226,173 @@ impl SimNetwork {
     }
 }
 
+// NOTE: This simulator is deterministic with respect to loss/duplication/corruption and (when
+// `preserve_order` is enabled) delivery order. If you configure non-zero latency/jitter, delays are
+// implemented using wall time (Instant/sleep) and are therefore not suitable for deterministic lab
+// runtime tests. Keep latency at zero for deterministic behavior.
+
 #[derive(Debug)]
-struct DelayState {
-    waker: Option<Waker>,
-    spawned: bool,
+enum DelayCmd {
+    Register {
+        id: u64,
+        deadline: Instant,
+        waker: Waker,
+    },
+    UpdateWaker {
+        id: u64,
+        waker: Waker,
+    },
+    Cancel {
+        id: u64,
+    },
+    Shutdown,
+}
+
+/// Per-channel delay manager.
+///
+/// This replaces the old design which spawned one OS thread per delayed operation. We instead use
+/// a single background timer thread per simulated channel instance.
+#[derive(Debug)]
+struct DelayManager {
+    tx: mpsc::Sender<DelayCmd>,
+    join: Option<std::thread::JoinHandle<()>>,
+    next_id: std::sync::atomic::AtomicU64,
+}
+
+impl DelayManager {
+    fn new() -> Self {
+        let (tx, rx) = mpsc::channel::<DelayCmd>();
+        let join = std::thread::spawn(move || {
+            // Min-heap over deadlines. Entries can be stale; `entries` is the source of truth.
+            let mut deadlines: BinaryHeap<Reverse<(Instant, u64)>> = BinaryHeap::new();
+            let mut entries: HashMap<u64, (Instant, Waker)> = HashMap::new();
+
+            loop {
+                let now = Instant::now();
+
+                // Fire any expired timers (and discard stale heap entries).
+                while let Some(Reverse((when, id))) = deadlines.peek().copied() {
+                    if when > now {
+                        break;
+                    }
+                    let _ = deadlines.pop();
+                    match entries.get(&id) {
+                        Some((stored_when, _)) if *stored_when == when => {
+                            if let Some((_when, waker)) = entries.remove(&id) {
+                                waker.wake();
+                            }
+                        }
+                        _ => {
+                            // stale heap entry (cancelled or deadline changed)
+                        }
+                    }
+                }
+
+                // Block until next deadline or an incoming command.
+                let recv = if let Some(Reverse((when, _))) = deadlines.peek().copied() {
+                    let now = Instant::now();
+                    if when <= now {
+                        continue;
+                    }
+                    rx.recv_timeout(when - now)
+                } else {
+                    rx.recv().map_err(|_| mpsc::RecvTimeoutError::Disconnected)
+                };
+
+                match recv {
+                    Ok(DelayCmd::Register {
+                        id,
+                        deadline,
+                        waker,
+                    }) => {
+                        entries.insert(id, (deadline, waker));
+                        deadlines.push(Reverse((deadline, id)));
+                    }
+                    Ok(DelayCmd::UpdateWaker { id, waker }) => {
+                        if let Some((_deadline, existing)) = entries.get_mut(&id) {
+                            *existing = waker;
+                        }
+                    }
+                    Ok(DelayCmd::Cancel { id }) => {
+                        let _ = entries.remove(&id);
+                    }
+                    Ok(DelayCmd::Shutdown) | Err(mpsc::RecvTimeoutError::Disconnected) => break,
+                    Err(mpsc::RecvTimeoutError::Timeout) => {}
+                }
+            }
+        });
+        Self {
+            tx,
+            join: Some(join),
+            next_id: std::sync::atomic::AtomicU64::new(1),
+        }
+    }
+
+    fn alloc_id(&self) -> u64 {
+        self.next_id.fetch_add(1, Ordering::Relaxed)
+    }
+}
+
+impl Drop for DelayManager {
+    fn drop(&mut self) {
+        let _ = self.tx.send(DelayCmd::Shutdown);
+        if let Some(join) = self.join.take() {
+            let _ = join.join();
+        }
+    }
 }
 
 #[derive(Debug)]
 struct Delay {
+    id: u64,
     deadline: Instant,
-    state: Arc<Mutex<DelayState>>,
+    tx: mpsc::Sender<DelayCmd>,
+    registered: AtomicBool,
 }
 
 impl Delay {
-    fn new(duration: Duration) -> Self {
+    fn new(duration: Duration, mgr: &DelayManager) -> Self {
         let now = Instant::now();
         let deadline = now.checked_add(duration).unwrap_or(now);
         Self {
+            id: mgr.alloc_id(),
             deadline,
-            state: Arc::new(Mutex::new(DelayState {
-                waker: None,
-                spawned: false,
-            })),
+            tx: mgr.tx.clone(),
+            registered: AtomicBool::new(false),
         }
     }
 
     fn poll(&self, cx: &Context<'_>) -> Poll<()> {
         if Instant::now() >= self.deadline {
+            if self.registered.load(Ordering::Acquire) {
+                let _ = self.tx.send(DelayCmd::Cancel { id: self.id });
+            }
             return Poll::Ready(());
         }
 
-        let mut state = self.state.lock().expect("sim delay lock poisoned");
-        state.waker = Some(cx.waker().clone());
-
-        if !state.spawned {
-            state.spawned = true;
-            let deadline = self.deadline;
-            let state_clone = Arc::clone(&self.state);
-            drop(state);
-            // ubs:ignore — intentional fire-and-forget: short-lived timer thread
-            // self-terminates after sleeping; JoinHandle detach is correct here
-            std::thread::spawn(move || {
-                let now = Instant::now();
-                if deadline > now {
-                    std::thread::sleep(deadline - now);
-                }
-                let mut state = state_clone.lock().expect("sim delay lock poisoned");
-                if let Some(waker) = state.waker.take() {
-                    waker.wake();
-                }
-                state.spawned = false;
+        if self.registered.swap(true, Ordering::AcqRel) {
+            // Keep the stored waker fresh (executors can swap wakers).
+            let _ = self.tx.send(DelayCmd::UpdateWaker {
+                id: self.id,
+                waker: cx.waker().clone(),
+            });
+        } else {
+            let _ = self.tx.send(DelayCmd::Register {
+                id: self.id,
+                deadline: self.deadline,
+                waker: cx.waker().clone(),
             });
         }
 
         Poll::Pending
+    }
+}
+
+impl Drop for Delay {
+    fn drop(&mut self) {
+        if self.registered.load(Ordering::Acquire) {
+            let _ = self.tx.send(DelayCmd::Cancel { id: self.id });
+        }
     }
 }
 
@@ -303,10 +418,13 @@ struct SimQueueState {
 struct SimQueue {
     config: SimTransportConfig,
     state: Mutex<SimQueueState>,
+    delays: Option<DelayManager>,
 }
 
 impl SimQueue {
     fn new(config: SimTransportConfig) -> Self {
+        let has_latency =
+            config.base_latency != Duration::ZERO || config.latency_jitter != Duration::ZERO;
         let seed = config.seed.unwrap_or(1);
         Self {
             config,
@@ -318,6 +436,7 @@ impl SimQueue {
                 closed: false,
                 rng: DetRng::new(seed),
             }),
+            delays: has_latency.then(DelayManager::new),
         }
     }
 
@@ -586,7 +705,11 @@ impl SymbolSink for SimSymbolSink {
             let delay = sample_latency(&inner.config, &mut state.rng);
             drop(state);
             if delay > Duration::ZERO {
-                let delay = Delay::new(delay);
+                let mgr = inner
+                    .delays
+                    .as_ref()
+                    .expect("non-zero latency requires delay manager");
+                let delay = Delay::new(delay, mgr);
                 if delay.poll(cx).is_pending() {
                     *delay_field = Some(delay);
                     return Poll::Pending;
@@ -704,7 +827,13 @@ impl SymbolStream for SimSymbolStream {
             if delay > Duration::ZERO {
                 let pending = PendingSymbol {
                     symbol,
-                    delay: Delay::new(delay),
+                    delay: Delay::new(
+                        delay,
+                        this.inner
+                            .delays
+                            .as_ref()
+                            .expect("non-zero latency requires delay manager"),
+                    ),
                 };
                 this.pending = Some(pending);
                 if this
@@ -944,5 +1073,17 @@ mod tests {
         }));
 
         assert!(matches!(poll_result, Some(Poll::Pending)));
+    }
+
+    #[test]
+    fn delay_manager_is_only_created_when_latency_is_configured() {
+        let q = SimQueue::new(SimTransportConfig::reliable());
+        assert!(q.delays.is_none());
+
+        let q = SimQueue::new(SimTransportConfig::with_latency(
+            Duration::from_nanos(1),
+            Duration::ZERO,
+        ));
+        assert!(q.delays.is_some());
     }
 }

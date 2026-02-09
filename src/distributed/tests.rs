@@ -27,6 +27,8 @@ use crate::record::distributed_region::{
     ReplicaInfo, ReplicaStatus, TransitionReason,
 };
 use crate::record::region::RegionState;
+use crate::security::tag::AuthenticationTag;
+use crate::security::AuthenticatedSymbol;
 use crate::types::budget::Budget;
 use crate::types::symbol::{ObjectId, ObjectParams};
 use crate::types::{Outcome, RegionId, TaskId, Time};
@@ -100,9 +102,13 @@ fn happy_path_encode_assign_distribute_decode() {
     assert!(result.quorum_achieved);
 
     // Decode from one replica's symbols (complete set).
-    let mut decoder = StateDecoder::new(RecoveryDecodingConfig::default());
+    let mut decoder = StateDecoder::new(RecoveryDecodingConfig {
+        verify_integrity: false,
+        ..Default::default()
+    });
     for sym in &encoded.symbols {
-        decoder.add_symbol(sym).unwrap();
+        let auth = AuthenticatedSymbol::from_parts(sym.clone(), AuthenticationTag::zero());
+        decoder.add_symbol(&auth).unwrap();
     }
     let recovered = decoder.decode_snapshot(&encoded.params).unwrap();
     assert_eq!(recovered.content_hash(), original_hash);
@@ -175,6 +181,7 @@ fn recovery_from_source_symbols_only() {
         .source_symbols()
         .map(|s| CollectedSymbol {
             symbol: s.clone(),
+            tag: AuthenticationTag::zero(),
             source_replica: "r0".to_string(),
             collected_at: Time::ZERO,
             verified: false,
@@ -187,8 +194,13 @@ fn recovery_from_source_symbols_only() {
         reason: Some("test recovery".to_string()),
     };
 
-    let mut orchestrator =
-        RecoveryOrchestrator::new(RecoveryConfig::default(), RecoveryDecodingConfig::default());
+    let mut orchestrator = RecoveryOrchestrator::new(
+        RecoveryConfig::default(),
+        RecoveryDecodingConfig {
+            verify_integrity: false,
+            ..Default::default()
+        },
+    );
 
     let result = orchestrator
         .recover_from_symbols(&trigger, &symbols, encoded.params, Duration::from_millis(5))
@@ -196,7 +208,7 @@ fn recovery_from_source_symbols_only() {
 
     assert_eq!(result.snapshot.region_id, snapshot.region_id);
     assert_eq!(result.snapshot.sequence, snapshot.sequence);
-    assert!(result.verified);
+    assert!(!result.verified);
 }
 
 #[test]
@@ -211,6 +223,7 @@ fn recovery_with_mixed_source_and_repair() {
         .enumerate()
         .map(|(i, s)| CollectedSymbol {
             symbol: s.clone(),
+            tag: AuthenticationTag::zero(),
             source_replica: format!("r{}", i % 3),
             collected_at: Time::from_secs(u64::try_from(i).expect("index fits u64")),
             verified: true,
@@ -223,8 +236,13 @@ fn recovery_with_mixed_source_and_repair() {
         required_quorum: 2,
     };
 
-    let mut orchestrator =
-        RecoveryOrchestrator::new(RecoveryConfig::default(), RecoveryDecodingConfig::default());
+    let mut orchestrator = RecoveryOrchestrator::new(
+        RecoveryConfig::default(),
+        RecoveryDecodingConfig {
+            verify_integrity: false,
+            ..Default::default()
+        },
+    );
 
     let result = orchestrator
         .recover_from_symbols(
@@ -253,6 +271,7 @@ fn recovery_insufficient_symbols_fails() {
     let symbols: Vec<CollectedSymbol> = (0..3)
         .map(|i| CollectedSymbol {
             symbol: crate::types::symbol::Symbol::new_for_test(1, 0, i, &[0u8; 1280]),
+            tag: AuthenticationTag::zero(),
             source_replica: "r0".to_string(),
             collected_at: Time::ZERO,
             verified: false,
@@ -310,9 +329,13 @@ fn snapshot_roundtrip_preserves_all_fields() {
 
     // Encode → decode roundtrip.
     let encoded = encode_snapshot(&original);
-    let mut decoder = StateDecoder::new(RecoveryDecodingConfig::default());
+    let mut decoder = StateDecoder::new(RecoveryDecodingConfig {
+        verify_integrity: false,
+        ..Default::default()
+    });
     for sym in &encoded.symbols {
-        decoder.add_symbol(sym).unwrap();
+        let auth = AuthenticatedSymbol::from_parts(sym.clone(), AuthenticationTag::zero());
+        decoder.add_symbol(&auth).unwrap();
     }
     let recovered = decoder.decode_snapshot(&encoded.params).unwrap();
 
@@ -439,6 +462,7 @@ fn recovery_orchestrator_cancellation() {
     let params = ObjectParams::new(ObjectId::new_for_test(1), 128, 128, 1, 1);
     let sym = CollectedSymbol {
         symbol: crate::types::symbol::Symbol::new_for_test(1, 0, 0, &[0u8; 128]),
+        tag: AuthenticationTag::zero(),
         source_replica: "r0".to_string(),
         collected_at: Time::ZERO,
         verified: false,
@@ -723,6 +747,7 @@ fn collector_dedup_and_metrics_comprehensive() {
         let sym = crate::types::symbol::Symbol::new_for_test(1, 0, i, &[i as u8; 128]);
         let accepted = collector.add_collected(CollectedSymbol {
             symbol: sym,
+            tag: AuthenticationTag::zero(),
             source_replica: format!("r{}", i % 3),
             collected_at: Time::from_secs(u64::from(i)),
             verified: false,
@@ -739,6 +764,7 @@ fn collector_dedup_and_metrics_comprehensive() {
         let sym = crate::types::symbol::Symbol::new_for_test(1, 0, i, &[i as u8; 128]);
         let accepted = collector.add_collected(CollectedSymbol {
             symbol: sym,
+            tag: AuthenticationTag::zero(),
             source_replica: "r-dup".to_string(),
             collected_at: Time::from_secs(100),
             verified: false,

@@ -304,7 +304,12 @@ pub trait AsyncResourceFactory: Send + Sync {
     type Resource: Send;
 
     /// The error type for creation failures.
-    type Error: std::error::Error + Send + Sync + 'static;
+    ///
+    /// Note: this is intentionally `Into<Box<dyn Error>>` rather than requiring
+    /// `Error` directly. Some callers use boxed trait-object errors
+    /// (`Box<dyn Error + Send + Sync>`), and on some toolchains `Box<dyn Error>`
+    /// does not satisfy `Error` bounds due to `Sized`/`?Sized` impl details.
+    type Error: Send + Sync + 'static + Into<Box<dyn std::error::Error + Send + Sync>>;
 
     /// Create a new resource asynchronously.
     #[allow(clippy::type_complexity)]
@@ -745,11 +750,7 @@ struct GenericPoolState<R> {
 struct WaitForNotification<'a, R, F>
 where
     R: Send + 'static,
-    F: Fn() -> std::pin::Pin<
-            Box<dyn Future<Output = Result<R, Box<dyn std::error::Error + Send + Sync>>> + Send>,
-        > + Send
-        + Sync
-        + 'static,
+    F: AsyncResourceFactory<Resource = R>,
 {
     pool: &'a GenericPool<R, F>,
     waiter_id: Option<u64>,
@@ -758,11 +759,7 @@ where
 impl<R, F> Future for WaitForNotification<'_, R, F>
 where
     R: Send + 'static,
-    F: Fn() -> std::pin::Pin<
-            Box<dyn Future<Output = Result<R, Box<dyn std::error::Error + Send + Sync>>> + Send>,
-        > + Send
-        + Sync
-        + 'static,
+    F: AsyncResourceFactory<Resource = R>,
 {
     type Output = ();
 
@@ -816,11 +813,7 @@ where
 impl<R, F> Drop for WaitForNotification<'_, R, F>
 where
     R: Send + 'static,
-    F: Fn() -> std::pin::Pin<
-            Box<dyn Future<Output = Result<R, Box<dyn std::error::Error + Send + Sync>>> + Send>,
-        > + Send
-        + Sync
-        + 'static,
+    F: AsyncResourceFactory<Resource = R>,
 {
     fn drop(&mut self) {
         if let Some(id) = self.waiter_id {
@@ -839,11 +832,7 @@ where
 struct CreateSlotReservation<'a, R, F>
 where
     R: Send + 'static,
-    F: Fn() -> std::pin::Pin<
-            Box<dyn Future<Output = Result<R, Box<dyn std::error::Error + Send + Sync>>> + Send>,
-        > + Send
-        + Sync
-        + 'static,
+    F: AsyncResourceFactory<Resource = R>,
 {
     pool: &'a GenericPool<R, F>,
     committed: bool,
@@ -852,11 +841,7 @@ where
 impl<'a, R, F> CreateSlotReservation<'a, R, F>
 where
     R: Send + 'static,
-    F: Fn() -> std::pin::Pin<
-            Box<dyn Future<Output = Result<R, Box<dyn std::error::Error + Send + Sync>>> + Send>,
-        > + Send
-        + Sync
-        + 'static,
+    F: AsyncResourceFactory<Resource = R>,
 {
     fn try_reserve(pool: &'a GenericPool<R, F>) -> Option<Self> {
         if pool.reserve_create_slot() {
@@ -878,16 +863,29 @@ where
 impl<R, F> Drop for CreateSlotReservation<'_, R, F>
 where
     R: Send + 'static,
-    F: Fn() -> std::pin::Pin<
-            Box<dyn Future<Output = Result<R, Box<dyn std::error::Error + Send + Sync>>> + Send>,
-        > + Send
-        + Sync
-        + 'static,
+    F: AsyncResourceFactory<Resource = R>,
 {
     fn drop(&mut self) {
         if !self.committed {
             self.pool.release_create_slot();
         }
+    }
+}
+
+impl<F, R, E, Fut> AsyncResourceFactory for F
+where
+    F: Fn() -> Fut + Send + Sync,
+    Fut: Future<Output = Result<R, E>> + Send + 'static,
+    R: Send,
+    E: Send + Sync + 'static + Into<Box<dyn std::error::Error + Send + Sync>>,
+{
+    type Resource = R;
+    type Error = E;
+
+    fn create(
+        &self,
+    ) -> Pin<Box<dyn Future<Output = Result<Self::Resource, Self::Error>> + Send + '_>> {
+        Box::pin(self())
     }
 }
 
@@ -899,17 +897,13 @@ where
 /// # Type Parameters
 ///
 /// - `R`: The resource type
-/// - `F`: Factory function type that creates resources
+/// - `F`: Factory type that creates resources
 pub struct GenericPool<R, F>
 where
     R: Send + 'static,
-    F: Fn() -> std::pin::Pin<
-            Box<dyn Future<Output = Result<R, Box<dyn std::error::Error + Send + Sync>>> + Send>,
-        > + Send
-        + Sync
-        + 'static,
+    F: AsyncResourceFactory<Resource = R>,
 {
-    /// Factory function to create new resources.
+    /// Factory to create new resources.
     factory: F,
     /// Configuration.
     config: PoolConfig,
@@ -933,11 +927,7 @@ where
 impl<R, F> GenericPool<R, F>
 where
     R: Send + 'static,
-    F: Fn() -> std::pin::Pin<
-            Box<dyn Future<Output = Result<R, Box<dyn std::error::Error + Send + Sync>>> + Send>,
-        > + Send
-        + Sync
-        + 'static,
+    F: AsyncResourceFactory<Resource = R>,
 {
     /// Creates a new generic pool with the given factory and configuration.
     pub fn new(factory: F, config: PoolConfig) -> Self {
@@ -1225,8 +1215,8 @@ where
 
     /// Create a new resource using the factory.
     async fn create_resource(&self) -> Result<R, PoolError> {
-        let fut = (self.factory)();
-        fut.await.map_err(PoolError::CreateFailed)
+        let fut = self.factory.create();
+        fut.await.map_err(|e| PoolError::CreateFailed(e.into()))
     }
 
     /// Register as a waiter.
@@ -1268,11 +1258,7 @@ where
 impl<R, F> Pool for GenericPool<R, F>
 where
     R: Send + 'static,
-    F: Fn() -> std::pin::Pin<
-            Box<dyn Future<Output = Result<R, Box<dyn std::error::Error + Send + Sync>>> + Send>,
-        > + Send
-        + Sync
-        + 'static,
+    F: AsyncResourceFactory<Resource = R>,
 {
     type Resource = R;
     type Error = PoolError;
@@ -1838,7 +1824,7 @@ mod tests {
             } => {
                 crate::assert_with_log!(value == 42, "return value", 42u8, value);
             }
-            PoolReturn::Discard { .. } => panic!("unexpected discard"),
+            PoolReturn::Discard { .. } => unreachable!("unexpected discard"),
         }
         crate::test_complete!("pooled_resource_returns_on_drop");
     }
@@ -1859,7 +1845,7 @@ mod tests {
             } => {
                 crate::assert_with_log!(value == 7, "return value", 7u8, value);
             }
-            PoolReturn::Discard { .. } => panic!("unexpected discard"),
+            PoolReturn::Discard { .. } => unreachable!("unexpected discard"),
         }
         crate::test_complete!("pooled_resource_return_to_pool_sends_return");
     }
@@ -1873,7 +1859,7 @@ mod tests {
 
         let msg = rx.recv().expect("return message");
         match msg {
-            PoolReturn::Return { .. } => panic!("unexpected return"),
+            PoolReturn::Return { .. } => unreachable!("unexpected return"),
             PoolReturn::Discard { hold_duration: _ } => {
                 crate::assert_with_log!(true, "discard", true, true);
             }
@@ -2097,7 +2083,7 @@ mod tests {
             } => {
                 crate::assert_with_log!(value == 99, "returned value", 99u8, value);
             }
-            PoolReturn::Discard { .. } => panic!("expected Return, got Discard"),
+            PoolReturn::Discard { .. } => unreachable!("expected Return, got Discard"),
         }
 
         // Verify channel is empty (exactly one return)
@@ -2134,7 +2120,7 @@ mod tests {
             } => {
                 crate::assert_with_log!(value == 77, "returned value", 77u8, value);
             }
-            PoolReturn::Discard { .. } => panic!("expected Return, got Discard"),
+            PoolReturn::Discard { .. } => unreachable!("expected Return, got Discard"),
         }
 
         // No second message (drop should not send again)
@@ -2163,7 +2149,7 @@ mod tests {
         // Verify we got a discard message
         let msg = rx.recv().expect("should receive discard message");
         match msg {
-            PoolReturn::Return { .. } => panic!("expected Discard, got Return"),
+            PoolReturn::Return { .. } => unreachable!("expected Discard, got Return"),
             PoolReturn::Discard { hold_duration: _ } => {
                 // Good - discard was sent
             }
@@ -2221,8 +2207,8 @@ mod tests {
             Err(PoolError::Closed) => {
                 // Good - closed error as expected
             }
-            Ok(_) => panic!("expected Closed error, got Ok"),
-            Err(e) => panic!("expected Closed error, got {e:?}"),
+            Ok(_) => unreachable!("expected Closed error, got Ok"),
+            Err(e) => unreachable!("expected Closed error, got {e:?}"),
         }
 
         crate::test_complete!("generic_pool_acquire_when_closed_returns_error");

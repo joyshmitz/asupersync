@@ -24,9 +24,9 @@
 
 use crate::cx::Cx;
 use crate::runtime::blocking_pool::{BlockingPoolHandle, BlockingTaskHandle};
-use crate::runtime::yield_now;
 use std::sync::atomic::{AtomicUsize, Ordering};
-use std::sync::mpsc;
+use std::sync::{Arc, Mutex};
+use std::task::Waker;
 use std::thread;
 
 /// Maximum number of concurrent fallback blocking threads (when no pool exists).
@@ -58,6 +58,66 @@ impl Drop for CancelOnDrop {
     fn drop(&mut self) {
         if !self.done {
             self.handle.cancel();
+        }
+    }
+}
+
+struct BlockingOneshotState<T> {
+    result: Option<std::thread::Result<T>>,
+    waker: Option<Waker>,
+    done: bool,
+}
+
+struct BlockingOneshot<T> {
+    state: Arc<Mutex<BlockingOneshotState<T>>>,
+}
+
+impl<T> BlockingOneshot<T> {
+    fn new() -> (Self, BlockingOneshotReceiver<T>) {
+        let state = Arc::new(Mutex::new(BlockingOneshotState {
+            result: None,
+            waker: None,
+            done: false,
+        }));
+        (
+            Self {
+                state: state.clone(),
+            },
+            BlockingOneshotReceiver { state },
+        )
+    }
+
+    fn send(self, val: std::thread::Result<T>) {
+        let mut guard = self.state.lock().unwrap();
+        guard.result = Some(val);
+        guard.done = true;
+        if let Some(waker) = guard.waker.take() {
+            waker.wake();
+        }
+    }
+}
+
+struct BlockingOneshotReceiver<T> {
+    state: Arc<Mutex<BlockingOneshotState<T>>>,
+}
+
+impl<T> std::future::Future for BlockingOneshotReceiver<T> {
+    type Output = T;
+
+    fn poll(
+        self: std::pin::Pin<&mut Self>,
+        cx: &mut std::task::Context<'_>,
+    ) -> std::task::Poll<Self::Output> {
+        let mut guard = self.state.lock().unwrap();
+        if guard.done {
+            let result = guard.result.take().expect("result consumed twice");
+            match result {
+                Ok(val) => std::task::Poll::Ready(val),
+                Err(payload) => std::panic::resume_unwind(payload),
+            }
+        } else {
+            guard.waker = Some(cx.waker().clone());
+            std::task::Poll::Pending
         }
     }
 }
@@ -114,30 +174,19 @@ where
     F: FnOnce() -> T + Send + 'static,
     T: Send + 'static,
 {
-    let (tx, rx) = mpsc::channel();
+    let (tx, rx) = BlockingOneshot::new();
     let handle = pool.spawn(move || {
         let result = std::panic::catch_unwind(std::panic::AssertUnwindSafe(f));
-        let _ = tx.send(result);
+        tx.send(result);
     });
 
     let mut guard = CancelOnDrop::new(handle);
-
-    loop {
-        match rx.try_recv() {
-            Ok(Ok(result)) => {
-                guard.mark_done();
-                return result;
-            }
-            Ok(Err(panic_payload)) => std::panic::resume_unwind(panic_payload),
-            Err(mpsc::TryRecvError::Empty) => yield_now().await,
-            Err(mpsc::TryRecvError::Disconnected) => {
-                panic!("blocking pool task dropped without sending result");
-            }
-        }
-    }
+    let result = rx.await;
+    guard.mark_done();
+    result
 }
 
-async fn spawn_blocking_on_thread<F, T>(f: F) -> T
+pub(crate) async fn spawn_blocking_on_thread<F, T>(f: F) -> T
 where
     F: FnOnce() -> T + Send + 'static,
     T: Send + 'static,
@@ -154,38 +203,40 @@ where
                 break;
             }
         } else {
-            yield_now().await;
+            // Spin-wait is acceptable here as we are outside the runtime
+            std::thread::yield_now();
         }
     }
 
-    let (tx, rx) = mpsc::channel();
+    let (tx, rx) = BlockingOneshot::new();
 
+    // If thread spawn fails, run the closure inline instead of panicking.
+    // This keeps `spawn_blocking` usable under resource pressure.
+    let f_cell = Arc::new(Mutex::new(Some(f)));
+    let f_for_thread = Arc::clone(&f_cell);
     let thread_result = thread::Builder::new()
         .name("asupersync-blocking".to_string())
         .spawn(move || {
+            let f = f_for_thread
+                .lock()
+                .expect("spawn_blocking_on_thread fn lock poisoned")
+                .take()
+                .expect("spawn_blocking_on_thread fn missing");
             let result = std::panic::catch_unwind(std::panic::AssertUnwindSafe(f));
-            let _ = tx.send(result);
+            tx.send(result);
             FALLBACK_THREAD_COUNT.fetch_sub(1, Ordering::AcqRel);
         });
 
     match thread_result {
-        Ok(_) => {}
-        Err(e) => {
-            // Decrement the counter we incremented above before panicking,
-            // otherwise the slot leaks permanently on spawn failure.
+        Ok(_) => rx.await,
+        Err(_err) => {
             FALLBACK_THREAD_COUNT.fetch_sub(1, Ordering::AcqRel);
-            panic!("failed to spawn blocking thread: {e}");
-        }
-    }
-
-    loop {
-        match rx.try_recv() {
-            Ok(Ok(result)) => return result,
-            Ok(Err(panic_payload)) => std::panic::resume_unwind(panic_payload),
-            Err(mpsc::TryRecvError::Empty) => yield_now().await,
-            Err(mpsc::TryRecvError::Disconnected) => {
-                panic!("blocking thread dropped without sending result");
-            }
+            let f = f_cell
+                .lock()
+                .expect("spawn_blocking_on_thread fn lock poisoned")
+                .take()
+                .expect("spawn_blocking_on_thread fn missing");
+            f()
         }
     }
 }
@@ -352,7 +403,7 @@ mod tests {
     #[should_panic(expected = "test panic")]
     fn spawn_blocking_propagates_panic() {
         future::block_on(async {
-            spawn_blocking(|| panic!("test panic")).await;
+            spawn_blocking(|| std::panic::panic_any("test panic")).await;
         });
     }
 }

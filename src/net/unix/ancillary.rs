@@ -271,7 +271,7 @@ impl<'a> Iterator for AncillaryMessages<'a> {
                 return None;
             }
 
-            let cmsg_len = (*cmsg_ptr).cmsg_len as usize;
+            let cmsg_len = (*cmsg_ptr).cmsg_len;
             if cmsg_len < mem::size_of::<libc::cmsghdr>() {
                 return None;
             }

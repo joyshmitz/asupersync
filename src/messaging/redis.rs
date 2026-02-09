@@ -634,13 +634,8 @@ impl RedisConnection {
 }
 
 type RedisFactory = Box<
-    dyn Fn() -> Pin<
-            Box<
-                dyn Future<
-                        Output = Result<RedisConnection, Box<dyn std::error::Error + Send + Sync>>,
-                    > + Send,
-            >,
-        > + Send
+    dyn Fn() -> Pin<Box<dyn Future<Output = Result<RedisConnection, RedisError>> + Send>>
+        + Send
         + Sync,
 >;
 
@@ -671,11 +666,7 @@ impl RedisClient {
 
         let factory: RedisFactory = Box::new(move || {
             let config = config_for_factory.clone();
-            Box::pin(async move {
-                RedisConnection::connect(config)
-                    .await
-                    .map_err(|e| Box::new(e) as Box<dyn std::error::Error + Send + Sync>)
-            })
+            Box::pin(async move { RedisConnection::connect(config).await })
         });
 
         let pool = GenericPool::new(factory, PoolConfig::with_max_size(10));

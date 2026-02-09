@@ -297,15 +297,24 @@ impl DecodingPipeline {
         let symbol_id = auth_symbol.symbol().id();
 
         if self.config.verify_auth {
-            let Some(ctx) = &self.auth_context else {
-                return Err(DecodingError::AuthenticationFailed { symbol_id });
-            };
-            if !auth_symbol.is_verified()
-                && ctx.verify_authenticated_symbol(&mut auth_symbol).is_err()
-            {
-                return Ok(SymbolAcceptResult::Rejected(
-                    RejectReason::AuthenticationFailed,
-                ));
+            match &self.auth_context {
+                Some(ctx) => {
+                    if !auth_symbol.is_verified()
+                        && ctx.verify_authenticated_symbol(&mut auth_symbol).is_err()
+                    {
+                        return Ok(SymbolAcceptResult::Rejected(
+                            RejectReason::AuthenticationFailed,
+                        ));
+                    }
+                }
+                None => {
+                    // If callers already verified the symbol (e.g. at a trusted boundary), allow
+                    // the verified flag to stand. If not verified and we have no auth context,
+                    // we cannot validate the tag and must fail deterministically.
+                    if !auth_symbol.is_verified() {
+                        return Err(DecodingError::AuthenticationFailed { symbol_id });
+                    }
+                }
             }
         }
 

@@ -150,6 +150,8 @@ impl Default for RecoveryConfig {
 pub struct CollectedSymbol {
     /// The symbol data.
     pub symbol: Symbol,
+    /// The authentication tag verifying the symbol.
+    pub tag: AuthenticationTag,
     /// Replica it was collected from.
     pub source_replica: String,
     /// Collection timestamp.
@@ -359,7 +361,9 @@ pub struct RecoveryDecodingConfig {
 impl Default for RecoveryDecodingConfig {
     fn default() -> Self {
         Self {
-            verify_integrity: true,
+            // Default off until recovery is plumbed with a `SecurityContext`.
+            // (DecodingPipeline requires an auth context to verify tags.)
+            verify_integrity: false,
             max_decode_attempts: 3,
             allow_partial_decode: false,
         }
@@ -390,7 +394,7 @@ enum DecoderState {
 pub struct StateDecoder {
     config: RecoveryDecodingConfig,
     decoder_state: DecoderState,
-    symbols: Vec<Symbol>,
+    symbols: Vec<AuthenticatedSymbol>,
     seen_esi: HashSet<u32>,
 }
 
@@ -410,13 +414,13 @@ impl StateDecoder {
     }
 
     /// Adds a symbol to the decoder, deduplicating by ESI.
-    pub fn add_symbol(&mut self, symbol: &Symbol) -> Result<(), Error> {
-        let esi = symbol.esi();
+    pub fn add_symbol(&mut self, auth_symbol: &AuthenticatedSymbol) -> Result<(), Error> {
+        let esi = auth_symbol.symbol().esi();
         if self.seen_esi.contains(&esi) {
             return Ok(()); // Skip duplicates silently
         }
         self.seen_esi.insert(esi);
-        self.symbols.push(symbol.clone());
+        self.symbols.push(auth_symbol.clone());
 
         // Update state
         if let DecoderState::Accumulating { received, .. } = &mut self.decoder_state {
@@ -474,7 +478,9 @@ impl StateDecoder {
             min_overhead: 0,
             max_buffered_symbols: 0,
             block_timeout: Duration::from_secs(30),
-            verify_auth: false,
+            // Respect the integrity verification setting from recovery config.
+            // If verify_integrity is true, the pipeline will validate auth tags.
+            verify_auth: self.config.verify_integrity,
         };
         let mut pipeline = DecodingPipeline::new(config);
         if let Err(err) = pipeline.set_object_params(*params) {
@@ -485,8 +491,7 @@ impl StateDecoder {
         }
 
         for symbol in &self.symbols {
-            let auth = AuthenticatedSymbol::new_verified(symbol.clone(), AuthenticationTag::zero());
-            match pipeline.feed(auth).map_err(Error::from)? {
+            match pipeline.feed(symbol.clone()).map_err(Error::from)? {
                 SymbolAcceptResult::Rejected(RejectReason::BlockAlreadyDecoded) => {
                     // Additional symbols after decode are fine; ignore them.
                 }
@@ -642,7 +647,16 @@ impl RecoveryOrchestrator {
 
         // Feed unique symbols to decoder.
         for cs in self.collector.symbols() {
-            if let Err(e) = self.decoder.add_symbol(&cs.symbol) {
+            // Reconstruct AuthenticatedSymbol from CollectedSymbol parts
+            // This assumes the tag was valid when collected (if verified=true).
+            // StateDecoder will re-verify if verify_auth is true.
+            let auth = if cs.verified {
+                AuthenticatedSymbol::new_verified(cs.symbol.clone(), cs.tag)
+            } else {
+                AuthenticatedSymbol::from_parts(cs.symbol.clone(), cs.tag)
+            };
+
+            if let Err(e) = self.decoder.add_symbol(&auth) {
                 self.recovering = false;
                 return Err(e);
             }
@@ -776,6 +790,7 @@ mod tests {
 
         let added1 = collector.add_collected(CollectedSymbol {
             symbol: sym1,
+            tag: AuthenticationTag::zero(),
             source_replica: "r1".to_string(),
             collected_at: Time::ZERO,
             verified: false,
@@ -784,6 +799,7 @@ mod tests {
 
         let added2 = collector.add_collected(CollectedSymbol {
             symbol: sym2,
+            tag: AuthenticationTag::zero(),
             source_replica: "r2".to_string(),
             collected_at: Time::from_secs(1),
             verified: false,
@@ -841,7 +857,10 @@ mod tests {
     fn decoder_accumulates_symbols() {
         let mut decoder = StateDecoder::new(RecoveryDecodingConfig::default());
 
-        let sym = Symbol::new_for_test(1, 0, 0, &[1, 2, 3]);
+        let sym = AuthenticatedSymbol::new_verified(
+            Symbol::new_for_test(1, 0, 0, &[1, 2, 3]),
+            AuthenticationTag::zero(),
+        );
         decoder.add_symbol(&sym).unwrap();
 
         assert_eq!(decoder.symbols_received(), 1);
@@ -851,7 +870,10 @@ mod tests {
     fn decoder_deduplicates() {
         let mut decoder = StateDecoder::new(RecoveryDecodingConfig::default());
 
-        let sym = Symbol::new_for_test(1, 0, 0, &[1, 2, 3]);
+        let sym = AuthenticatedSymbol::new_verified(
+            Symbol::new_for_test(1, 0, 0, &[1, 2, 3]),
+            AuthenticationTag::zero(),
+        );
         decoder.add_symbol(&sym).unwrap();
         decoder.add_symbol(&sym).unwrap(); // duplicate
 
@@ -866,7 +888,10 @@ mod tests {
 
         // Add fewer than K symbols.
         for i in 0..2 {
-            let sym = Symbol::new_for_test(1, 0, i, &[0u8; 1280]);
+            let sym = AuthenticatedSymbol::new_verified(
+                Symbol::new_for_test(1, 0, i, &[0u8; 1280]),
+                AuthenticationTag::zero(),
+            );
             decoder.add_symbol(&sym).unwrap();
         }
 
@@ -882,7 +907,8 @@ mod tests {
 
         let mut decoder = StateDecoder::new(RecoveryDecodingConfig::default());
         for sym in &encoded.symbols {
-            decoder.add_symbol(sym).unwrap();
+            let sym = AuthenticatedSymbol::new_verified(sym.clone(), AuthenticationTag::zero());
+            decoder.add_symbol(&sym).unwrap();
         }
 
         let recovered = decoder.decode_snapshot(&encoded.params).unwrap();
@@ -895,7 +921,10 @@ mod tests {
     fn decoder_reset() {
         let mut decoder = StateDecoder::new(RecoveryDecodingConfig::default());
 
-        let sym = Symbol::new_for_test(1, 0, 0, &[1, 2, 3]);
+        let sym = AuthenticatedSymbol::new_verified(
+            Symbol::new_for_test(1, 0, 0, &[1, 2, 3]),
+            AuthenticationTag::zero(),
+        );
         decoder.add_symbol(&sym).unwrap();
         assert_eq!(decoder.symbols_received(), 1);
 
@@ -926,6 +955,7 @@ mod tests {
             .enumerate()
             .map(|(i, s)| CollectedSymbol {
                 symbol: s.clone(),
+                tag: AuthenticationTag::zero(),
                 source_replica: format!("r{}", i % 3),
                 collected_at: Time::ZERO,
                 verified: false,
@@ -938,8 +968,14 @@ mod tests {
             reason: None,
         };
 
-        let mut orchestrator =
-            RecoveryOrchestrator::new(RecoveryConfig::default(), RecoveryDecodingConfig::default());
+        // Use verify_integrity: false for test since we used zero tags
+        let mut orchestrator = RecoveryOrchestrator::new(
+            RecoveryConfig::default(),
+            RecoveryDecodingConfig {
+                verify_integrity: false,
+                ..Default::default()
+            },
+        );
 
         let result = orchestrator
             .recover_from_symbols(
@@ -950,7 +986,7 @@ mod tests {
             )
             .unwrap();
 
-        assert!(result.verified);
+        assert!(!result.verified); // matches config
         assert!(!result.contributing_replicas.is_empty());
         assert_eq!(result.snapshot.region_id, snapshot.region_id);
         assert_eq!(result.snapshot.sequence, snapshot.sequence);
@@ -992,10 +1028,6 @@ mod tests {
         assert!(result.is_err());
     }
 
-    // =====================================================================
-    // Integration Test: Full Workflow
-    // =====================================================================
-
     #[test]
     fn full_recovery_workflow() {
         // 1. Create original region state.
@@ -1031,6 +1063,7 @@ mod tests {
             .enumerate()
             .map(|(i, s)| CollectedSymbol {
                 symbol: s.clone(),
+                tag: AuthenticationTag::zero(),
                 source_replica: format!("r{}", i % 3),
                 collected_at: Time::ZERO,
                 verified: false,
@@ -1043,8 +1076,13 @@ mod tests {
             last_known_sequence: 41,
         };
 
-        let mut orchestrator =
-            RecoveryOrchestrator::new(RecoveryConfig::default(), RecoveryDecodingConfig::default());
+        let mut orchestrator = RecoveryOrchestrator::new(
+            RecoveryConfig::default(),
+            RecoveryDecodingConfig {
+                verify_integrity: false,
+                ..Default::default()
+            },
+        );
 
         let result = orchestrator
             .recover_from_symbols(
@@ -1105,6 +1143,7 @@ mod tests {
     fn make_collected_symbol(esi: u32) -> CollectedSymbol {
         CollectedSymbol {
             symbol: Symbol::new_for_test(1, 0, esi, &[0u8; 128]),
+            tag: AuthenticationTag::zero(),
             source_replica: "r1".to_string(),
             collected_at: Time::ZERO,
             verified: false,
@@ -1138,12 +1177,14 @@ mod tests {
 
         let sym1 = CollectedSymbol {
             symbol: Symbol::new_for_test(1, 0, 5, &[1, 2, 3]),
+            tag: AuthenticationTag::zero(),
             source_replica: "r1".to_string(),
             collected_at: Time::ZERO,
             verified: false,
         };
         let sym2 = CollectedSymbol {
             symbol: Symbol::new_for_test(1, 0, 5, &[4, 5, 6]),
+            tag: AuthenticationTag::zero(),
             source_replica: "r1".to_string(),
             collected_at: Time::from_secs(1),
             verified: false,
@@ -1171,6 +1212,7 @@ mod tests {
         // ESI 200 > 110 threshold → rejected as corrupt
         let cs = CollectedSymbol {
             symbol: Symbol::new_for_test(1, 0, 200, &[0u8; 128]),
+            tag: AuthenticationTag::zero(),
             source_replica: "r1".to_string(),
             collected_at: Time::ZERO,
             verified: false,
@@ -1194,6 +1236,7 @@ mod tests {
         // ESI 15 <= 110 threshold → accepted
         let cs = CollectedSymbol {
             symbol: Symbol::new_for_test(1, 0, 15, &[0u8; 128]),
+            tag: AuthenticationTag::zero(),
             source_replica: "r1".to_string(),
             collected_at: Time::ZERO,
             verified: false,
@@ -1210,6 +1253,7 @@ mod tests {
 
         let cs = CollectedSymbol {
             symbol: Symbol::new_for_test(1, 0, 999_999, &[0u8; 128]),
+            tag: AuthenticationTag::zero(),
             source_replica: "r1".to_string(),
             collected_at: Time::ZERO,
             verified: false,
@@ -1264,7 +1308,10 @@ mod tests {
 
         // Add K-1 = 9 symbols (need 10)
         for i in 0..9 {
-            let sym = make_source_symbol(i, &[0u8; 1280]);
+            let sym = AuthenticatedSymbol::new_verified(
+                make_source_symbol(i, &[0u8; 1280]),
+                AuthenticationTag::zero(),
+            );
             decoder.add_symbol(&sym).unwrap();
         }
 
@@ -1287,7 +1334,8 @@ mod tests {
 
         // First use
         let sym = make_source_symbol(0, &[1, 2, 3]);
-        decoder.add_symbol(&sym).unwrap();
+        let auth = AuthenticatedSymbol::new_verified(sym.clone(), AuthenticationTag::zero());
+        decoder.add_symbol(&auth).unwrap();
         assert_eq!(decoder.symbols_received(), 1);
 
         // Reset
@@ -1296,7 +1344,8 @@ mod tests {
         assert!(!decoder.can_decode());
 
         // Reuse — same ESI should be accepted again after reset
-        decoder.add_symbol(&sym).unwrap();
+        let auth = AuthenticatedSymbol::new_verified(sym, AuthenticationTag::zero());
+        decoder.add_symbol(&auth).unwrap();
         assert_eq!(decoder.symbols_received(), 1);
         assert!(decoder.can_decode());
     }
@@ -1317,7 +1366,8 @@ mod tests {
         // Take exactly K symbols
         let mut decoder = StateDecoder::new(RecoveryDecodingConfig::default());
         for sym in encoded.symbols.iter().take(k) {
-            decoder.add_symbol(sym).unwrap();
+            let sym = AuthenticatedSymbol::new_verified(sym.clone(), AuthenticationTag::zero());
+            decoder.add_symbol(&sym).unwrap();
         }
 
         let result = decoder.decode_snapshot(&encoded.params);
@@ -1377,22 +1427,22 @@ mod tests {
         orchestrator.cancel("pre-emptive cancel");
         assert!(orchestrator.cancelled);
         assert!(!orchestrator.is_recovering());
+        assert_eq!(orchestrator.attempt, 0);
 
-        // Even with valid symbols, cancelled orchestrator reports not recovering
+        // Even with valid symbols, a cancelled orchestrator refuses to start.
         let symbols: Vec<CollectedSymbol> = encoded
             .symbols
             .iter()
             .map(|s| CollectedSymbol {
                 symbol: s.clone(),
+                tag: AuthenticationTag::zero(),
                 source_replica: "r1".to_string(),
                 collected_at: Time::ZERO,
                 verified: false,
             })
             .collect();
 
-        // recover_from_symbols doesn't check cancelled flag — it still runs.
-        // But is_recovering() returns false because cancelled is true.
-        let _result = orchestrator.recover_from_symbols(
+        let result = orchestrator.recover_from_symbols(
             &RecoveryTrigger::ManualTrigger {
                 region_id: RegionId::new_for_test(1, 0),
                 initiator: "test".to_string(),
@@ -1402,6 +1452,7 @@ mod tests {
             encoded.params,
             Duration::ZERO,
         );
+        assert!(result.is_err());
         assert!(!orchestrator.is_recovering());
     }
 
@@ -1420,7 +1471,7 @@ mod tests {
     #[test]
     fn decoding_config_default_values() {
         let config = RecoveryDecodingConfig::default();
-        assert!(config.verify_integrity);
+        assert!(!config.verify_integrity);
         assert_eq!(config.max_decode_attempts, 3);
         assert!(!config.allow_partial_decode);
     }
