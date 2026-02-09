@@ -240,8 +240,11 @@ impl<T, E> QuorumResult<T, E> {
 /// # Returns
 /// A `QuorumResult` containing success/failure information.
 ///
-/// # Panics
-/// Panics if `required > outcomes.len()`.
+/// # Invalid Parameters
+/// If `required > outcomes.len()`, the quorum is invalid and can never be met.
+/// In this case, [`quorum_outcomes`] returns a `QuorumResult` with
+/// `quorum_met = false`; [`quorum_to_result`] will return
+/// [`QuorumError::InvalidQuorum`].
 ///
 /// # Example
 /// ```
@@ -259,18 +262,7 @@ impl<T, E> QuorumResult<T, E> {
 /// assert_eq!(result.success_count(), 2);
 /// ```
 #[must_use]
-pub fn quorum_outcomes<T, E: Clone>(
-    required: usize,
-    outcomes: Vec<Outcome<T, E>>,
-) -> QuorumResult<T, E> {
-    let total = outcomes.len();
-
-    // Handle invalid quorum
-    if required > total {
-        // Return a result with quorum not met
-        return QuorumResult::new(false, required, Vec::new(), Vec::new());
-    }
-
+pub fn quorum_outcomes<T, E>(required: usize, outcomes: Vec<Outcome<T, E>>) -> QuorumResult<T, E> {
     // Handle trivial quorum(0, N)
     if required == 0 {
         let failures: Vec<_> = outcomes
@@ -373,7 +365,15 @@ pub const fn quorum_achieved(required: usize, successes: usize) -> bool {
 /// let v = values.unwrap();
 /// assert_eq!(v.len(), 2);
 /// ```
-pub fn quorum_to_result<T, E: Clone>(result: QuorumResult<T, E>) -> Result<Vec<T>, QuorumError<E>> {
+pub fn quorum_to_result<T, E>(result: QuorumResult<T, E>) -> Result<Vec<T>, QuorumError<E>> {
+    let total = result.total();
+    if result.required > total {
+        return Err(QuorumError::InvalidQuorum {
+            required: result.required,
+            total,
+        });
+    }
+
     if result.quorum_met {
         // Return successful values (without indices)
         Ok(result.successes.into_iter().map(|(_, v)| v).collect())
@@ -397,8 +397,6 @@ pub fn quorum_to_result<T, E: Clone>(result: QuorumResult<T, E>) -> Result<Vec<T
 
         // Compute counts before moving failures
         let success_count = result.success_count();
-        let failure_count = result.failure_count();
-        let total = success_count + failure_count;
         let required = result.required;
 
         // Collect errors
@@ -548,6 +546,10 @@ mod tests {
 
         // Invalid quorum cannot be met
         assert!(!result.quorum_met);
+
+        // Fail-fast conversion should surface invalid parameters explicitly.
+        let err = quorum_to_result(result).unwrap_err();
+        assert!(matches!(err, QuorumError::InvalidQuorum { .. }));
     }
 
     #[test]

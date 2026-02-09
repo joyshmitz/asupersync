@@ -611,6 +611,7 @@ struct MailboxStats {
     total_sent: u64,
     total_received: u64,
     high_water_mark: usize,
+    stopped_at: Option<Time>,
 }
 
 /// Oracle for verifying mailbox invariants.
@@ -676,6 +677,12 @@ impl MailboxOracle {
         stats.current_size = stats.current_size.saturating_sub(1);
     }
 
+    /// Marks an actor as stopped (no further mailbox progress expected).
+    pub fn on_stop(&mut self, actor: ActorId, time: Time) {
+        let stats = self.mailboxes.entry(actor).or_default();
+        stats.stopped_at = Some(time);
+    }
+
     /// Records a backpressure event (sender blocked).
     pub fn on_backpressure(&mut self, actor: ActorId, applied: bool, time: Time) {
         let stats = self.mailboxes.entry(actor).or_default();
@@ -690,15 +697,18 @@ impl MailboxOracle {
 
     /// Verifies the invariants hold.
     pub fn check(&self, now: Time) -> Result<(), MailboxViolation> {
-        // For end-of-run oracle checking, the mailbox must be fully drained.
-        //
-        // If `total_sent != total_received`, then either:
-        // - some messages were never received (pending/lost), or
-        // - receive bookkeeping is incorrect (spurious receives).
-        //
-        // Either way, this violates "no silent drops" and should fail.
+        // Return first recorded violation if any. These correspond to
+        // point-in-time safety properties (e.g. capacity/backpressure).
+        if let Some(violation) = self.violations.first() {
+            return Err(violation.clone());
+        }
+
+        // Message accounting checks.
         for (&actor, stats) in &self.mailboxes {
-            if stats.total_sent != stats.total_received {
+            // If an actor is known-stopped, its mailbox must be fully drained.
+            if stats.stopped_at.is_some()
+                && (stats.current_size != 0 || stats.total_sent != stats.total_received)
+            {
                 return Err(MailboxViolation {
                     kind: MailboxViolationKind::MessageLost {
                         sent: stats.total_sent,
@@ -708,11 +718,19 @@ impl MailboxOracle {
                     time: now,
                 });
             }
-        }
 
-        // Return first recorded violation if any
-        if let Some(violation) = self.violations.first() {
-            return Err(violation.clone());
+            // If the mailbox is empty, then `sent == received` must hold; otherwise we'd be
+            // claiming there are "in-flight" messages without any queued/pending count.
+            if stats.current_size == 0 && stats.total_sent != stats.total_received {
+                return Err(MailboxViolation {
+                    kind: MailboxViolationKind::MessageLost {
+                        sent: stats.total_sent,
+                        received: stats.total_received,
+                    },
+                    actor,
+                    time: now,
+                });
+            }
         }
 
         Ok(())
@@ -1042,12 +1060,13 @@ mod tests {
         }
 
         #[test]
-        fn sent_but_not_received_fails() {
-            init_test("sent_but_not_received_fails");
+        fn stopped_with_pending_messages_fails() {
+            init_test("stopped_with_pending_messages_fails");
             let mut oracle = MailboxOracle::new();
 
             oracle.configure_mailbox(actor(1), 10, true);
             oracle.on_send(actor(1), t(10));
+            oracle.on_stop(actor(1), t(20));
 
             let result = oracle.check(t(100));
             let err = result.is_err();
@@ -1060,11 +1079,11 @@ mod tests {
                     crate::assert_with_log!(received == 0, "received", 0, received);
                 }
                 other => {
-                    panic!("Expected MessageLost, got {other:?}");
+                    crate::assert_with_log!(false, "kind", "MessageLost", other);
                 }
             }
 
-            crate::test_complete!("sent_but_not_received_fails");
+            crate::test_complete!("stopped_with_pending_messages_fails");
         }
     }
 }

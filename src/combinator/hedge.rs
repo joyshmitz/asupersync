@@ -85,13 +85,22 @@ impl HedgeConfig {
     #[must_use]
     pub fn delay_elapsed(&self, start: Time, now: Time) -> bool {
         let elapsed_nanos = now.as_nanos().saturating_sub(start.as_nanos());
-        elapsed_nanos >= self.hedge_delay.as_nanos() as u64
+        elapsed_nanos >= self.hedge_delay_nanos_u64()
     }
 
     /// Computes the deadline time given a start time.
     #[must_use]
     pub fn deadline_from(&self, start: Time) -> Time {
-        start.saturating_add_nanos(self.hedge_delay.as_nanos() as u64)
+        start.saturating_add_nanos(self.hedge_delay_nanos_u64())
+    }
+
+    fn hedge_delay_nanos_u64(&self) -> u64 {
+        let nanos = self.hedge_delay.as_nanos();
+        if nanos > u128::from(u64::MAX) {
+            u64::MAX
+        } else {
+            nanos as u64
+        }
     }
 }
 
@@ -428,9 +437,9 @@ pub fn hedge_to_result<T, E>(result: HedgeResult<T, E>) -> Result<T, HedgeError<
 macro_rules! hedge {
     ($delay:expr, $primary:expr, $backup:expr) => {{
         // Placeholder: in real implementation, this spawns and hedges
-        let _ = $delay;
-        let _ = $primary;
-        let _ = $backup;
+        drop($delay);
+        drop($primary);
+        drop($backup);
     }};
 }
 
@@ -486,6 +495,15 @@ mod tests {
 
         let deadline = config.deadline_from(start);
         assert_eq!(deadline.as_nanos(), 101_000_000); // 101ms
+    }
+
+    #[test]
+    fn hedge_config_deadline_from_saturates_on_large_duration() {
+        let config = HedgeConfig::new(Duration::from_secs(u64::MAX));
+        let start = Time::from_nanos(1);
+
+        let deadline = config.deadline_from(start);
+        assert_eq!(deadline, Time::MAX);
     }
 
     // =========================================================================
