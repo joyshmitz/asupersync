@@ -118,11 +118,9 @@ impl<T> Arena<T> {
 
     /// Inserts a value into the arena and returns its index.
     pub fn insert(&mut self, value: T) -> ArenaIndex {
-        self.len += 1;
-
         if let Some(free_index) = self.free_head {
             let slot = &mut self.slots[free_index as usize];
-            match slot {
+            let idx = match slot {
                 Slot::Vacant {
                     next_free,
                     generation,
@@ -139,13 +137,16 @@ impl<T> Arena<T> {
                     }
                 }
                 Slot::Occupied { .. } => unreachable!("free list pointed to occupied slot"),
-            }
+            };
+            self.len += 1;
+            idx
         } else {
             let index = u32::try_from(self.slots.len()).expect("arena overflow");
             self.slots.push(Slot::Occupied {
                 value,
                 generation: 0,
             });
+            self.len += 1;
             ArenaIndex {
                 index,
                 generation: 0,
@@ -161,30 +162,25 @@ impl<T> Arena<T> {
     where
         F: FnOnce(ArenaIndex) -> T,
     {
-        self.len += 1;
-
         if let Some(free_index) = self.free_head {
-            let slot = &mut self.slots[free_index as usize];
-            match slot {
+            let (next_free, generation) = match self.slots[free_index as usize] {
                 Slot::Vacant {
                     next_free,
                     generation,
-                } => {
-                    let gen = *generation;
-                    self.free_head = *next_free;
-                    let idx = ArenaIndex {
-                        index: free_index,
-                        generation: gen,
-                    };
-                    let value = f(idx);
-                    *slot = Slot::Occupied {
-                        value,
-                        generation: gen,
-                    };
-                    idx
-                }
+                } => (next_free, generation),
                 Slot::Occupied { .. } => unreachable!("free list pointed to occupied slot"),
-            }
+            };
+
+            let idx = ArenaIndex {
+                index: free_index,
+                generation,
+            };
+            let value = f(idx);
+
+            self.free_head = next_free;
+            self.slots[free_index as usize] = Slot::Occupied { value, generation };
+            self.len += 1;
+            idx
         } else {
             let index = u32::try_from(self.slots.len()).expect("arena overflow");
             let idx = ArenaIndex {
@@ -196,6 +192,7 @@ impl<T> Arena<T> {
                 value,
                 generation: 0,
             });
+            self.len += 1;
             idx
         }
     }
@@ -365,6 +362,7 @@ impl<T> Arena<T> {
 #[cfg(test)]
 mod tests {
     use super::*;
+    use std::panic::{catch_unwind, AssertUnwindSafe};
 
     #[test]
     fn insert_and_get() {
@@ -417,5 +415,42 @@ mod tests {
         let mut arena = Arena::new();
         let idx = arena.insert_with(super::ArenaIndex::index);
         assert_eq!(arena.get(idx), Some(&idx.index()));
+    }
+
+    #[test]
+    fn insert_with_panic_keeps_arena_empty_when_no_free_slots() {
+        let mut arena = Arena::new();
+        let result = catch_unwind(AssertUnwindSafe(|| {
+            let _ = arena.insert_with(|_| -> u32 { panic!("boom") });
+        }));
+        assert!(result.is_err());
+        assert!(arena.is_empty());
+        assert_eq!(arena.len(), 0);
+
+        let idx = arena.insert(7);
+        assert_eq!(idx.index(), 0);
+        assert_eq!(arena.get(idx), Some(&7));
+    }
+
+    #[test]
+    fn insert_with_panic_preserves_free_list_when_reusing_slot() {
+        let mut arena = Arena::new();
+        let idx1 = arena.insert(10);
+        let idx2 = arena.insert(20);
+        assert_eq!(arena.remove(idx1), Some(10));
+        assert_eq!(arena.len(), 1);
+
+        let result = catch_unwind(AssertUnwindSafe(|| {
+            let _ = arena.insert_with(|_| -> u32 { panic!("boom") });
+        }));
+        assert!(result.is_err());
+        assert_eq!(arena.len(), 1);
+        assert_eq!(arena.get(idx2), Some(&20));
+
+        // The next insert should still reuse the previously freed slot.
+        let reused = arena.insert(30);
+        assert_eq!(reused.index(), idx1.index());
+        assert_ne!(reused.generation(), idx1.generation());
+        assert_eq!(arena.get(reused), Some(&30));
     }
 }

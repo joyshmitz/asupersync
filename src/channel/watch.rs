@@ -165,6 +165,15 @@ impl<T> WatchInner<T> {
         // They have no owner `Receiver` reference, so only the waiters vec
         // holds their flag (`strong_count == 1`). Prune before inserting.
         waiters.retain(|entry| Arc::strong_count(&entry.queued) > 1);
+        if let Some(existing) = waiters
+            .iter_mut()
+            .find(|entry| Arc::ptr_eq(&entry.queued, &waiter.queued))
+        {
+            if !existing.waker.will_wake(&waiter.waker) {
+                existing.waker = waiter.waker;
+            }
+            return;
+        }
         waiters.push(waiter);
     }
 }
@@ -471,7 +480,14 @@ impl<T> Future for ChangedFuture<'_, '_, T> {
                     queued: Arc::clone(w),
                 });
             }
-            Some(_) => {} // Still queued from a prior poll — skip duplicate
+            Some(w) => {
+                // Still queued, but the task's waker may have changed.
+                // Refresh stored waker to avoid waking a stale task.
+                this.receiver.inner.register_waker(WatchWaiter {
+                    waker: context.waker().clone(),
+                    queued: Arc::clone(w),
+                });
+            }
             None => {
                 // First poll — create a new waiter.
                 let w = Arc::new(AtomicBool::new(true));
@@ -565,6 +581,7 @@ mod tests {
     use crate::types::Budget;
     use crate::util::ArenaIndex;
     use crate::{RegionId, TaskId};
+    use std::sync::atomic::AtomicUsize;
 
     fn init_test(name: &str) {
         crate::test_utils::init_test_logging();
@@ -1144,6 +1161,74 @@ mod tests {
             waiter_count
         );
         crate::test_complete!("dropped_receiver_waiter_is_pruned_on_next_registration");
+    }
+
+    struct CountWake {
+        count: Arc<AtomicUsize>,
+    }
+
+    impl std::task::Wake for CountWake {
+        fn wake(self: Arc<Self>) {
+            self.count.fetch_add(1, Ordering::SeqCst);
+        }
+
+        fn wake_by_ref(self: &Arc<Self>) {
+            self.count.fetch_add(1, Ordering::SeqCst);
+        }
+    }
+
+    #[test]
+    fn changed_updates_waiter_waker_on_repoll() {
+        init_test("changed_updates_waiter_waker_on_repoll");
+        let cx = test_cx();
+        let (tx, mut rx) = channel(0);
+        let mut future = rx.changed(&cx);
+
+        let first_count = Arc::new(AtomicUsize::new(0));
+        let first_waker = Waker::from(Arc::new(CountWake {
+            count: Arc::clone(&first_count),
+        }));
+        let mut first_cx = Context::from_waker(&first_waker);
+        let first_poll = Pin::new(&mut future).poll(&mut first_cx);
+        crate::assert_with_log!(
+            first_poll.is_pending(),
+            "first poll pending",
+            true,
+            first_poll.is_pending()
+        );
+
+        let second_count = Arc::new(AtomicUsize::new(0));
+        let second_waker = Waker::from(Arc::new(CountWake {
+            count: Arc::clone(&second_count),
+        }));
+        let mut second_cx = Context::from_waker(&second_waker);
+        let second_poll = Pin::new(&mut future).poll(&mut second_cx);
+        crate::assert_with_log!(
+            second_poll.is_pending(),
+            "second poll pending",
+            true,
+            second_poll.is_pending()
+        );
+
+        tx.send(1).expect("send failed");
+
+        let second_wake_count = second_count.load(Ordering::SeqCst);
+        crate::assert_with_log!(
+            second_wake_count > 0,
+            "latest waker notified",
+            "> 0",
+            second_wake_count
+        );
+        let first_wake_count = first_count.load(Ordering::SeqCst);
+        crate::assert_with_log!(
+            first_wake_count == 0,
+            "stale waker not notified",
+            0,
+            first_wake_count
+        );
+
+        poll_ready(&mut future).expect("changed should complete after send");
+        crate::test_complete!("changed_updates_waiter_waker_on_repoll");
     }
 
     #[test]

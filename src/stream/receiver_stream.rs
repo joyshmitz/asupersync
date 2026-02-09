@@ -22,6 +22,7 @@ use std::task::{Context, Poll};
 pub struct ReceiverStream<T> {
     inner: mpsc::Receiver<T>,
     cx: Cx,
+    terminated: bool,
 }
 
 impl<T> ReceiverStream<T> {
@@ -29,7 +30,11 @@ impl<T> ReceiverStream<T> {
     #[must_use]
     pub fn new(cx: Cx, inner: mpsc::Receiver<T>) -> Self {
         cx.trace("stream::ReceiverStream created");
-        Self { inner, cx }
+        Self {
+            inner,
+            cx,
+            terminated: false,
+        }
     }
 
     /// Returns a reference to the inner receiver.
@@ -61,6 +66,10 @@ impl<T> Stream for ReceiverStream<T> {
 
     fn poll_next(self: Pin<&mut Self>, poll_cx: &mut Context<'_>) -> Poll<Option<Self::Item>> {
         let this = self.get_mut();
+        if this.terminated {
+            return Poll::Ready(None);
+        }
+
         // Poll the recv future using std::pin::pin! for safe pinning
         let recv_future = this.inner.recv(&this.cx);
         let mut pinned = std::pin::pin!(recv_future);
@@ -69,7 +78,10 @@ impl<T> Stream for ReceiverStream<T> {
                 this.cx.trace("stream::ReceiverStream yielded item");
                 Poll::Ready(Some(item))
             }
-            Poll::Ready(Err(RecvError::Disconnected | RecvError::Cancelled)) => Poll::Ready(None),
+            Poll::Ready(Err(RecvError::Disconnected | RecvError::Cancelled)) => {
+                this.terminated = true;
+                Poll::Ready(None)
+            }
             Poll::Ready(Err(RecvError::Empty)) | Poll::Pending => Poll::Pending,
         }
     }
@@ -125,5 +137,29 @@ mod tests {
         let ok = matches!(poll, Poll::Ready(None));
         crate::assert_with_log!(ok, "poll done", "Poll::Ready(None)", poll);
         crate::test_complete!("receiver_stream_reads_messages");
+    }
+
+    #[test]
+    fn receiver_stream_none_is_terminal_after_cancel() {
+        init_test("receiver_stream_none_is_terminal_after_cancel");
+        let cx_recv: Cx = Cx::for_testing();
+        cx_recv.set_cancel_requested(true);
+        let (tx, rx) = mpsc::channel(2);
+        let mut stream = ReceiverStream::new(cx_recv.clone(), rx);
+
+        let waker = noop_waker();
+        let mut cx = Context::from_waker(&waker);
+
+        let poll = Pin::new(&mut stream).poll_next(&mut cx);
+        let first_none = matches!(poll, Poll::Ready(None));
+        crate::assert_with_log!(first_none, "first poll none", true, first_none);
+
+        cx_recv.set_cancel_requested(false);
+        tx.try_send(7).expect("send after cancel clear");
+
+        let poll = Pin::new(&mut stream).poll_next(&mut cx);
+        let still_none = matches!(poll, Poll::Ready(None));
+        crate::assert_with_log!(still_none, "stream remains terminated", true, still_none);
+        crate::test_complete!("receiver_stream_none_is_terminal_after_cancel");
     }
 }

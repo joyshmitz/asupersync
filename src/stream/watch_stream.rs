@@ -13,6 +13,7 @@ pub struct WatchStream<T> {
     inner: watch::Receiver<T>,
     cx: Cx,
     has_seen_initial: bool,
+    terminated: bool,
 }
 
 impl<T: Clone> WatchStream<T> {
@@ -23,6 +24,7 @@ impl<T: Clone> WatchStream<T> {
             inner: recv,
             cx,
             has_seen_initial: false,
+            terminated: false,
         }
     }
 
@@ -40,6 +42,9 @@ impl<T: Clone + Send + Sync> Stream for WatchStream<T> {
 
     fn poll_next(self: Pin<&mut Self>, context: &mut Context<'_>) -> Poll<Option<Self::Item>> {
         let this = self.get_mut();
+        if this.terminated {
+            return Poll::Ready(None);
+        }
 
         // First poll: return current value immediately
         if !this.has_seen_initial {
@@ -55,8 +60,56 @@ impl<T: Clone + Send + Sync> Stream for WatchStream<T> {
         };
         match result {
             Poll::Ready(Ok(())) => Poll::Ready(Some(this.inner.borrow_and_clone())),
-            Poll::Ready(Err(_)) => Poll::Ready(None),
+            Poll::Ready(Err(_)) => {
+                this.terminated = true;
+                Poll::Ready(None)
+            }
             Poll::Pending => Poll::Pending,
         }
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+    use std::sync::Arc;
+    use std::task::{Context, Wake, Waker};
+
+    struct NoopWaker;
+
+    impl Wake for NoopWaker {
+        fn wake(self: Arc<Self>) {}
+    }
+
+    fn noop_waker() -> Waker {
+        Waker::from(Arc::new(NoopWaker))
+    }
+
+    fn init_test(name: &str) {
+        crate::test_utils::init_test_logging();
+        crate::test_phase!(name);
+    }
+
+    #[test]
+    fn watch_stream_none_is_terminal_after_cancel() {
+        init_test("watch_stream_none_is_terminal_after_cancel");
+        let cx: Cx = Cx::for_testing();
+        cx.set_cancel_requested(true);
+        let (tx, rx) = watch::channel(0);
+        let mut stream = WatchStream::from_changes(cx.clone(), rx);
+        let waker = noop_waker();
+        let mut task_cx = Context::from_waker(&waker);
+
+        let poll = Pin::new(&mut stream).poll_next(&mut task_cx);
+        let first_none = matches!(poll, Poll::Ready(None));
+        crate::assert_with_log!(first_none, "first poll none", true, first_none);
+
+        cx.set_cancel_requested(false);
+        tx.send(1).expect("send after cancel clear");
+
+        let poll = Pin::new(&mut stream).poll_next(&mut task_cx);
+        let still_none = matches!(poll, Poll::Ready(None));
+        crate::assert_with_log!(still_none, "stream remains terminated", true, still_none);
+        crate::test_complete!("watch_stream_none_is_terminal_after_cancel");
     }
 }
