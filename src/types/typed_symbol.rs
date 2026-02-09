@@ -55,9 +55,7 @@ impl SerializationFormat {
             2 => Ok(Self::Bincode),
             3 => Ok(Self::Json),
             255 => Ok(Self::Custom),
-            _ => Err(TypeMismatchError::UnsupportedFormat {
-                format: Self::Custom,
-            }),
+            _ => Err(TypeMismatchError::UnsupportedFormatByte { value }),
         }
     }
 }
@@ -130,10 +128,10 @@ pub enum TypeMismatchError {
         type_id: u64,
     },
     /// Unsupported format.
-    #[error("format not supported: {format:?}")]
-    UnsupportedFormat {
-        /// Unsupported format.
-        format: SerializationFormat,
+    #[error("unsupported serialization format byte: {value}")]
+    UnsupportedFormatByte {
+        /// Raw format byte from the symbol header.
+        value: u8,
     },
     /// Schema hash mismatch.
     #[error("schema hash mismatch: expected {expected}, got {actual}")]
@@ -1105,6 +1103,22 @@ mod tests {
         match result {
             Err(TypeMismatchError::InvalidMagic) => {}
             _ => panic!("Expected InvalidMagic error"),
+        }
+    }
+
+    #[test]
+    fn test_unsupported_format_byte_is_reported() {
+        let value: u64 = 42;
+        let symbol = TypedSymbol::from_value(&value, SerializationFormat::Bincode).unwrap();
+        let mut raw = symbol.into_symbol();
+
+        // Corrupt the format byte to an unknown value.
+        raw.data_mut()[14] = 4;
+
+        let result = TypedSymbol::<u64>::try_from_symbol(raw);
+        match result {
+            Err(TypeMismatchError::UnsupportedFormatByte { value: 4 }) => {}
+            other => panic!("expected UnsupportedFormatByte {{ value: 4 }}, got {other:?}"),
         }
     }
 
