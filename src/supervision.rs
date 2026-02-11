@@ -39,6 +39,7 @@
 //! ```
 
 use std::collections::BTreeMap;
+use std::hash::Hasher;
 use std::sync::Arc;
 use std::time::Duration;
 
@@ -700,6 +701,33 @@ impl ChildSpec {
         self.required = required;
         self
     }
+
+    /// Compare two child specs by deterministic declarative surface only.
+    ///
+    /// This intentionally ignores the `start` factory closure and compares
+    /// only pure spec fields so builder outputs can be compared in tests and
+    /// tooling without depending on closure identity.
+    #[must_use]
+    pub fn spec_eq(&self, other: &Self) -> bool {
+        self.name == other.name
+            && self.restart == other.restart
+            && self.shutdown_budget == other.shutdown_budget
+            && self.depends_on == other.depends_on
+            && self.registration == other.registration
+            && self.start_immediately == other.start_immediately
+            && self.required == other.required
+    }
+
+    /// Deterministic fingerprint of the declarative child spec fields.
+    ///
+    /// Like [`spec_eq`](Self::spec_eq), this excludes the `start` closure and
+    /// hashes only pure spec data.
+    #[must_use]
+    pub fn spec_fingerprint(&self) -> u64 {
+        let mut hasher = crate::util::DetHasher::default();
+        hash_child_spec_fields(self, &mut hasher);
+        std::hash::Hasher::finish(&hasher)
+    }
 }
 
 /// Deterministic start-order tie-break policy.
@@ -845,9 +873,167 @@ impl SupervisorBuilder {
         self
     }
 
+    /// Compare two builders by deterministic declarative surface only.
+    ///
+    /// Child start factories are intentionally ignored; only pure spec fields
+    /// are compared.
+    #[must_use]
+    pub fn spec_eq(&self, other: &Self) -> bool {
+        self.name == other.name
+            && self.budget == other.budget
+            && self.tie_break == other.tie_break
+            && self.restart_policy == other.restart_policy
+            && self.children.len() == other.children.len()
+            && self
+                .children
+                .iter()
+                .zip(other.children.iter())
+                .all(|(left, right)| left.spec_eq(right))
+    }
+
+    /// Deterministic fingerprint of the declarative builder surface.
+    ///
+    /// Child start factories are intentionally excluded so the result is stable
+    /// across equivalent builder construction paths.
+    #[must_use]
+    pub fn spec_fingerprint(&self) -> u64 {
+        let mut hasher = crate::util::DetHasher::default();
+        hasher.write(self.name.as_str().as_bytes());
+        hash_budget_option(&mut hasher, self.budget);
+        hash_start_tie_break(&mut hasher, self.tie_break);
+        hash_restart_policy(&mut hasher, self.restart_policy);
+        hasher.write_u64(self.children.len() as u64);
+        for child in &self.children {
+            hash_child_spec_fields(child, &mut hasher);
+        }
+        std::hash::Hasher::finish(&hasher)
+    }
+
     /// Compile the topology into a deterministic start order.
     pub fn compile(self) -> Result<CompiledSupervisor, SupervisorCompileError> {
         CompiledSupervisor::new(self)
+    }
+}
+
+fn hash_child_spec_fields(spec: &ChildSpec, hasher: &mut crate::util::DetHasher) {
+    hasher.write(spec.name.as_str().as_bytes());
+    hash_supervision_strategy(hasher, &spec.restart);
+    hash_budget(hasher, spec.shutdown_budget);
+    hasher.write_u64(spec.depends_on.len() as u64);
+    for dep in &spec.depends_on {
+        hasher.write(dep.as_str().as_bytes());
+    }
+    hash_registration_policy(hasher, &spec.registration);
+    hasher.write_u8(u8::from(spec.start_immediately));
+    hasher.write_u8(u8::from(spec.required));
+}
+
+fn hash_budget_option(hasher: &mut crate::util::DetHasher, budget: Option<Budget>) {
+    match budget {
+        Some(value) => {
+            hasher.write_u8(1);
+            hash_budget(hasher, value);
+        }
+        None => hasher.write_u8(0),
+    }
+}
+
+fn hash_budget(hasher: &mut crate::util::DetHasher, budget: Budget) {
+    match budget.deadline {
+        Some(deadline) => {
+            hasher.write_u8(1);
+            hasher.write_u64(deadline.as_nanos());
+        }
+        None => hasher.write_u8(0),
+    }
+    hasher.write_u32(budget.poll_quota);
+    match budget.cost_quota {
+        Some(cost) => {
+            hasher.write_u8(1);
+            hasher.write_u64(cost);
+        }
+        None => hasher.write_u8(0),
+    }
+    hasher.write_u8(budget.priority);
+}
+
+fn hash_supervision_strategy(hasher: &mut crate::util::DetHasher, strategy: &SupervisionStrategy) {
+    match strategy {
+        SupervisionStrategy::Stop => hasher.write_u8(0),
+        SupervisionStrategy::Restart(config) => {
+            hasher.write_u8(1);
+            hash_restart_config(hasher, config);
+        }
+        SupervisionStrategy::Escalate => hasher.write_u8(2),
+    }
+}
+
+fn hash_restart_config(hasher: &mut crate::util::DetHasher, config: &RestartConfig) {
+    hasher.write_u32(config.max_restarts);
+    hasher.write_u64(config.window.as_nanos() as u64);
+    hash_backoff_strategy(hasher, &config.backoff);
+    hasher.write_u64(config.restart_cost);
+    match config.min_remaining_for_restart {
+        Some(value) => {
+            hasher.write_u8(1);
+            hasher.write_u64(value.as_nanos() as u64);
+        }
+        None => hasher.write_u8(0),
+    }
+    hasher.write_u32(config.min_polls_for_restart);
+}
+
+fn hash_backoff_strategy(hasher: &mut crate::util::DetHasher, strategy: &BackoffStrategy) {
+    match strategy {
+        BackoffStrategy::None => hasher.write_u8(0),
+        BackoffStrategy::Fixed(value) => {
+            hasher.write_u8(1);
+            hasher.write_u64(value.as_nanos() as u64);
+        }
+        BackoffStrategy::Exponential {
+            initial,
+            max,
+            multiplier,
+        } => {
+            hasher.write_u8(2);
+            hasher.write_u64(initial.as_nanos() as u64);
+            hasher.write_u64(max.as_nanos() as u64);
+            hasher.write_u64(multiplier.to_bits());
+        }
+    }
+}
+
+fn hash_registration_policy(hasher: &mut crate::util::DetHasher, policy: &NameRegistrationPolicy) {
+    match policy {
+        NameRegistrationPolicy::None => hasher.write_u8(0),
+        NameRegistrationPolicy::Register { name, collision } => {
+            hasher.write_u8(1);
+            hasher.write(name.as_bytes());
+            hash_collision_policy(hasher, *collision);
+        }
+    }
+}
+
+fn hash_collision_policy(hasher: &mut crate::util::DetHasher, policy: NameCollisionPolicy) {
+    match policy {
+        NameCollisionPolicy::Fail => hasher.write_u8(0),
+        NameCollisionPolicy::Replace => hasher.write_u8(1),
+        NameCollisionPolicy::Wait => hasher.write_u8(2),
+    }
+}
+
+fn hash_restart_policy(hasher: &mut crate::util::DetHasher, policy: RestartPolicy) {
+    match policy {
+        RestartPolicy::OneForOne => hasher.write_u8(0),
+        RestartPolicy::OneForAll => hasher.write_u8(1),
+        RestartPolicy::RestForOne => hasher.write_u8(2),
+    }
+}
+
+fn hash_start_tie_break(hasher: &mut crate::util::DetHasher, tie_break: StartTieBreak) {
+    match tie_break {
+        StartTieBreak::InsertionOrder => hasher.write_u8(0),
+        StartTieBreak::NameLex => hasher.write_u8(1),
     }
 }
 
@@ -3305,6 +3491,15 @@ mod tests {
         Ok(test_task_id())
     }
 
+    #[allow(clippy::unnecessary_wraps)]
+    fn noop_start_alt(
+        _scope: &crate::cx::Scope<'static, crate::types::policy::FailFast>,
+        _state: &mut RuntimeState,
+        _cx: &crate::cx::Cx,
+    ) -> Result<TaskId, SpawnError> {
+        Ok(test_task_id())
+    }
+
     use std::sync::{Arc, Mutex};
 
     struct LoggingStart {
@@ -3766,6 +3961,80 @@ mod tests {
         assert!(spec.required);
 
         crate::test_complete!("child_spec_defaults");
+    }
+
+    #[test]
+    fn supervisor_builder_defaults() {
+        init_test("supervisor_builder_defaults");
+
+        let defaults = SupervisorBuilder::new("sup-default");
+
+        assert_eq!(defaults.name, "sup-default");
+        assert_eq!(defaults.budget, None);
+        assert_eq!(defaults.tie_break, StartTieBreak::InsertionOrder);
+        assert_eq!(defaults.restart_policy, RestartPolicy::OneForOne);
+        assert!(defaults.children.is_empty());
+
+        let same = SupervisorBuilder::new("sup-default");
+        assert!(defaults.spec_eq(&same));
+        assert_eq!(defaults.spec_fingerprint(), same.spec_fingerprint());
+
+        let different =
+            SupervisorBuilder::new("sup-default").with_restart_policy(RestartPolicy::OneForAll);
+        assert!(!defaults.spec_eq(&different));
+        assert_ne!(defaults.spec_fingerprint(), different.spec_fingerprint());
+
+        crate::test_complete!("supervisor_builder_defaults");
+    }
+
+    #[test]
+    fn child_spec_pure_surface_is_comparable_and_hashable() {
+        init_test("child_spec_pure_surface_is_comparable_and_hashable");
+
+        let left = ChildSpec::new("svc", noop_start)
+            .with_restart(SupervisionStrategy::Restart(RestartConfig::new(
+                3,
+                Duration::from_secs(10),
+            )))
+            .with_shutdown_budget(Budget::with_deadline_secs(2))
+            .depends_on("db")
+            .with_start_immediately(false)
+            .with_required(true);
+
+        let right = ChildSpec::new("svc", noop_start_alt)
+            .with_restart(SupervisionStrategy::Restart(RestartConfig::new(
+                3,
+                Duration::from_secs(10),
+            )))
+            .with_shutdown_budget(Budget::with_deadline_secs(2))
+            .depends_on("db")
+            .with_start_immediately(false)
+            .with_required(true);
+
+        assert!(left.spec_eq(&right));
+        assert_eq!(left.spec_fingerprint(), right.spec_fingerprint());
+
+        crate::test_complete!("child_spec_pure_surface_is_comparable_and_hashable");
+    }
+
+    #[test]
+    fn supervisor_builder_pure_surface_is_comparable_and_hashable() {
+        init_test("supervisor_builder_pure_surface_is_comparable_and_hashable");
+
+        let left = SupervisorBuilder::new("sup")
+            .with_tie_break(StartTieBreak::NameLex)
+            .with_restart_policy(RestartPolicy::OneForAll)
+            .child(ChildSpec::new("worker", noop_start));
+
+        let right = SupervisorBuilder::new("sup")
+            .with_tie_break(StartTieBreak::NameLex)
+            .with_restart_policy(RestartPolicy::OneForAll)
+            .child(ChildSpec::new("worker", noop_start_alt));
+
+        assert!(left.spec_eq(&right));
+        assert_eq!(left.spec_fingerprint(), right.spec_fingerprint());
+
+        crate::test_complete!("supervisor_builder_pure_surface_is_comparable_and_hashable");
     }
 
     #[test]

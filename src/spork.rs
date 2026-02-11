@@ -7,7 +7,7 @@
 //! |-----------------|------------------------|----------------------------------------|
 //! | Application     | [`app`]                | `AppSpec`, `AppHandle`, `CompiledApp`  |
 //! | Supervisor      | [`supervisor`]         | `SupervisorBuilder`, `ChildSpec`       |
-//! | GenServer       | [`gen_server`]         | `GenServer`, `GenServerHandle`, `Reply`|
+//! | GenServer       | [`gen_server`]         | `GenServer`, `GenServerHandle`, `Reply`, `SystemMsg` |
 //! | Registry        | [`registry`]           | `NameRegistry`, `RegistryHandle`, `NameLease` |
 //! | Monitor         | [`monitor`]            | `MonitorRef`, `DownReason`             |
 //! | Link            | [`link`]               | `LinkRef`, `ExitPolicy`, `ExitSignal`  |
@@ -31,6 +31,67 @@
 //! app.stop(&mut cx).await?;
 //! ```
 //!
+//! # Invariant Checklist
+//!
+//! When adding or reviewing Spork behavior, validate these contracts explicitly:
+//!
+//! - Region close implies quiescence and no orphan children.
+//! - Cancellation follows request -> drain -> finalize with bounded cleanup.
+//! - Reply/name/permit obligations are always committed or aborted.
+//! - Ordering-sensitive behavior follows deterministic tie-break rules.
+//!
+//! Canonical references:
+//!
+//! - [`docs/spork_glossary_invariants.md`](../docs/spork_glossary_invariants.md)
+//! - [`docs/spork_deterministic_ordering.md`](../docs/spork_deterministic_ordering.md)
+//! - [`docs/replay-debugging.md`](../docs/replay-debugging.md)
+//!
+//! # Primitive Semantics Matrix
+//!
+//! | Primitive | Cancellation Semantics | Determinism / Ordering Contract | Obligation Linearity |
+//! |-----------|------------------------|---------------------------------|----------------------|
+//! | `spork::app` | Region close implies quiescence | Child start/stop ordering follows supervisor contracts | N/A |
+//! | `spork::supervisor` | Failed children are drained before restart/escalation | `SUP-START` / `SUP-STOP` ordering in deterministic docs | Child lifecycle transitions remain monotone |
+//! | `spork::gen_server` | Request -> drain -> `on_stop` under terminate budget | Mailbox FIFO + `SYS-ORDER` for shutdown messages | Calls create reply obligations that must resolve |
+//! | `spork::registry` | Name ownership ends on task/region close | `REG-FIRST` and deterministic collision tie-breaks | Name leases are obligations |
+//! | `spork::monitor` | Monitor scope ends with owner region | `DOWN-ORDER`: `(vt, tid)` for batched down notifications | N/A |
+//! | `spork::link` | Exit propagation participates in cancel protocol | `SYS-LINK-MONITOR` for `Down`/`Exit` ordering | N/A |
+//! | `spork::crash` | Crash artifacts emitted on terminal failure paths | Replay certificates detect ordering divergence | Artifact manifest must remain internally consistent |
+//!
+//! # Deterministic Failure Triage
+//!
+//! Standard incident workflow for humans and coding agents:
+//!
+//! 1. Read `repro_manifest.json` and capture `test_id` + `seed`.
+//! 2. Re-run with the same seed and artifact directory.
+//! 3. Inspect and verify the trace file.
+//! 4. If needed, diff against a known-good trace.
+//!
+//! ```bash
+//! ASUPERSYNC_SEED=<seed> ASUPERSYNC_TEST_ARTIFACTS_DIR=target/test-artifacts \
+//!   cargo test <test_id> -- --nocapture
+//!
+//! cargo run --features cli --bin asupersync -- trace info target/test-artifacts/trace.async
+//! cargo run --features cli --bin asupersync -- trace verify --strict \
+//!   target/test-artifacts/trace.async
+//! cargo run --features cli --bin asupersync -- trace diff <trace_a> <trace_b>
+//! ```
+//!
+//! # Minimal Compile-Time Example
+//!
+//! ```
+//! use asupersync::spork::error::{SporkError, SporkSeverity};
+//! use asupersync::spork::prelude::{CastError, RestartConfig, RestartPolicy, SupervisionStrategy};
+//!
+//! let strategy = SupervisionStrategy::Restart(RestartConfig::default());
+//! let policy = RestartPolicy::OneForOne;
+//! assert!(matches!(strategy, SupervisionStrategy::Restart(_)));
+//! assert!(matches!(policy, RestartPolicy::OneForOne));
+//!
+//! let err = SporkError::from(CastError::Full);
+//! assert_eq!(err.severity(), SporkSeverity::Transient);
+//! ```
+//!
 //! # Prelude
 //!
 //! The [`prelude`] re-exports the most commonly needed types so that a
@@ -44,6 +105,8 @@
 /// Application lifecycle: build, compile, start, stop.
 ///
 /// Re-exports from [`crate::app`].
+/// Cancellation semantics: app stop triggers region cancellation and requires
+/// quiescence before completion.
 pub mod app {
     pub use crate::app::{
         AppCompileError, AppHandle, AppSpawnError, AppSpec, AppStartError, AppStopError,
@@ -54,6 +117,8 @@ pub mod app {
 /// Supervision trees: strategies, child specs, builders.
 ///
 /// Re-exports from [`crate::supervision`].
+/// Determinism contract: child start/stop follows compiled ordering and
+/// restart policy tie-break rules.
 pub mod supervisor {
     pub use crate::supervision::{
         BackoffStrategy, ChildName, ChildSpec, ChildStart, CompiledSupervisor, EscalationPolicy,
@@ -65,17 +130,23 @@ pub mod supervisor {
 /// Typed request-response actors (GenServer pattern).
 ///
 /// Re-exports from [`crate::gen_server`].
+/// Invariant notes:
+/// - Cancellation uses request -> drain -> finalize.
+/// - Ordering follows mailbox FIFO and shutdown `SYS-ORDER`.
+/// - `call` replies are linear obligations (reply or abort).
 pub mod gen_server {
     pub use crate::gen_server::{
-        named_gen_server_start, CallError, CastError, CastOverflowPolicy, GenServer,
-        GenServerHandle, GenServerRef, InfoError, NamedGenServerStart, Reply, ReplyOutcome,
-        SystemMsg,
+        named_gen_server_start, CallError, CastError, CastOverflowPolicy, DownMsg, ExitMsg,
+        GenServer, GenServerHandle, GenServerRef, InfoError, NamedGenServerStart, Reply,
+        ReplyOutcome, SystemMsg, TimeoutMsg,
     };
 }
 
 /// Capability-scoped name registry and lease obligations.
 ///
 /// Re-exports from [`crate::cx::registry`].
+/// Determinism contract: first-commit collision resolution with stable
+/// tie-break behavior in lab mode.
 pub mod registry {
     pub use crate::cx::registry::{
         GrantedLease, NameCollisionOutcome, NameCollisionPolicy, NameLease, NameLeaseError,
@@ -87,6 +158,7 @@ pub mod registry {
 /// Unidirectional down notifications.
 ///
 /// Re-exports from [`crate::monitor`].
+/// Ordering contract: batched down notifications are delivered by `(vt, tid)`.
 pub mod monitor {
     pub use crate::monitor::{DownNotification, DownReason, MonitorRef};
 }
@@ -94,6 +166,8 @@ pub mod monitor {
 /// Bidirectional exit signal propagation.
 ///
 /// Re-exports from [`crate::link`].
+/// Shutdown ordering contract: link exits follow `Down` and precede timeouts
+/// for equal virtual timestamps.
 pub mod link {
     pub use crate::link::{ExitPolicy, ExitSignal, LinkRef};
 }
@@ -101,6 +175,8 @@ pub mod link {
 /// Crash pack format and artifact writing.
 ///
 /// Re-exports from [`crate::trace::crashpack`].
+/// Replay contract: crash artifacts preserve deterministic repro commands and
+/// schedule certificate correlation.
 pub mod crash {
     pub use crate::trace::crashpack::{
         ArtifactId, CrashPack, CrashPackConfig, CrashPackManifest, CrashPackWriteError,
@@ -124,7 +200,8 @@ pub mod crash {
 /// - **App lifecycle**: `AppSpec`, `AppHandle`, `StoppedApp`
 /// - **Supervision**: `SupervisorBuilder`, `ChildSpec`, `ChildStart`,
 ///   `SupervisionStrategy`, `RestartConfig`, `RestartPolicy`
-/// - **GenServer**: `GenServer`, `GenServerHandle`, `Reply`, `SystemMsg`
+/// - **GenServer**: `GenServer`, `GenServerHandle`, `Reply`,
+///   `SystemMsg`, `DownMsg`, `ExitMsg`, `TimeoutMsg`
 /// - **Registry**: `NameRegistry`, `RegistryHandle`, `NameLease`
 /// - **Monitoring**: `MonitorRef`, `DownReason`, `DownNotification`
 /// - **Linking**: `ExitPolicy`, `ExitSignal`, `LinkRef`
@@ -141,8 +218,8 @@ pub mod prelude {
 
     // -- GenServer --
     pub use crate::gen_server::{
-        named_gen_server_start, CallError, CastError, GenServer, GenServerHandle,
-        NamedGenServerStart, Reply, SystemMsg,
+        named_gen_server_start, CallError, CastError, DownMsg, ExitMsg, GenServer, GenServerHandle,
+        NamedGenServerStart, Reply, SystemMsg, TimeoutMsg,
     };
 
     // -- Registry --
@@ -407,6 +484,9 @@ mod tests {
         let _ = std::any::type_name::<prelude::MonitorRef>();
         let _ = std::any::type_name::<prelude::DownReason>();
         let _ = std::any::type_name::<prelude::DownNotification>();
+        let _ = std::any::type_name::<prelude::DownMsg>();
+        let _ = std::any::type_name::<prelude::ExitMsg>();
+        let _ = std::any::type_name::<prelude::TimeoutMsg>();
         let _ = std::any::type_name::<prelude::ExitPolicy>();
         let _ = std::any::type_name::<prelude::LinkRef>();
         let _ = std::any::type_name::<prelude::CallError>();
@@ -439,6 +519,9 @@ mod tests {
         let _ = std::any::type_name::<gen_server::CastOverflowPolicy>();
         let _ = std::any::type_name::<gen_server::InfoError>();
         let _ = std::any::type_name::<gen_server::ReplyOutcome>();
+        let _ = std::any::type_name::<gen_server::DownMsg>();
+        let _ = std::any::type_name::<gen_server::ExitMsg>();
+        let _ = std::any::type_name::<gen_server::TimeoutMsg>();
 
         // Registry sub-module
         let _ = std::any::type_name::<registry::NameRegistry>();

@@ -89,6 +89,142 @@ pub enum TraceEventKind {
     ExitDelivered,
 }
 
+impl TraceEventKind {
+    /// Canonical list of all trace event kinds.
+    ///
+    /// Keep this list in sync with the enum definition and
+    /// `docs/spork_deterministic_ordering.md` taxonomy section.
+    pub const ALL: [Self; 36] = [
+        Self::Spawn,
+        Self::Schedule,
+        Self::Yield,
+        Self::Wake,
+        Self::Poll,
+        Self::Complete,
+        Self::CancelRequest,
+        Self::CancelAck,
+        Self::RegionCloseBegin,
+        Self::RegionCloseComplete,
+        Self::RegionCreated,
+        Self::RegionCancelled,
+        Self::ObligationReserve,
+        Self::ObligationCommit,
+        Self::ObligationAbort,
+        Self::ObligationLeak,
+        Self::TimeAdvance,
+        Self::TimerScheduled,
+        Self::TimerFired,
+        Self::TimerCancelled,
+        Self::IoRequested,
+        Self::IoReady,
+        Self::IoResult,
+        Self::IoError,
+        Self::RngSeed,
+        Self::RngValue,
+        Self::Checkpoint,
+        Self::FuturelockDetected,
+        Self::ChaosInjection,
+        Self::UserTrace,
+        Self::MonitorCreated,
+        Self::MonitorDropped,
+        Self::DownDelivered,
+        Self::LinkCreated,
+        Self::LinkDropped,
+        Self::ExitDelivered,
+    ];
+
+    /// Stable, grep-friendly taxonomy name.
+    #[must_use]
+    pub const fn stable_name(self) -> &'static str {
+        match self {
+            Self::Spawn => "spawn",
+            Self::Schedule => "schedule",
+            Self::Yield => "yield",
+            Self::Wake => "wake",
+            Self::Poll => "poll",
+            Self::Complete => "complete",
+            Self::CancelRequest => "cancel_request",
+            Self::CancelAck => "cancel_ack",
+            Self::RegionCloseBegin => "region_close_begin",
+            Self::RegionCloseComplete => "region_close_complete",
+            Self::RegionCreated => "region_created",
+            Self::RegionCancelled => "region_cancelled",
+            Self::ObligationReserve => "obligation_reserve",
+            Self::ObligationCommit => "obligation_commit",
+            Self::ObligationAbort => "obligation_abort",
+            Self::ObligationLeak => "obligation_leak",
+            Self::TimeAdvance => "time_advance",
+            Self::TimerScheduled => "timer_scheduled",
+            Self::TimerFired => "timer_fired",
+            Self::TimerCancelled => "timer_cancelled",
+            Self::IoRequested => "io_requested",
+            Self::IoReady => "io_ready",
+            Self::IoResult => "io_result",
+            Self::IoError => "io_error",
+            Self::RngSeed => "rng_seed",
+            Self::RngValue => "rng_value",
+            Self::Checkpoint => "checkpoint",
+            Self::FuturelockDetected => "futurelock_detected",
+            Self::ChaosInjection => "chaos_injection",
+            Self::UserTrace => "user_trace",
+            Self::MonitorCreated => "monitor_created",
+            Self::MonitorDropped => "monitor_dropped",
+            Self::DownDelivered => "down_delivered",
+            Self::LinkCreated => "link_created",
+            Self::LinkDropped => "link_dropped",
+            Self::ExitDelivered => "exit_delivered",
+        }
+    }
+
+    /// Stable required field set for taxonomy documentation.
+    #[must_use]
+    pub const fn required_fields(self) -> &'static str {
+        match self {
+            Self::Spawn
+            | Self::Schedule
+            | Self::Yield
+            | Self::Wake
+            | Self::Poll
+            | Self::Complete => "task, region",
+            Self::CancelRequest | Self::CancelAck => "task, region, reason",
+            Self::RegionCloseBegin | Self::RegionCloseComplete | Self::RegionCreated => {
+                "region, parent"
+            }
+            Self::RegionCancelled => "region, reason",
+            Self::ObligationReserve
+            | Self::ObligationCommit
+            | Self::ObligationAbort
+            | Self::ObligationLeak => {
+                "obligation, task, region, kind, state, duration_ns, abort_reason"
+            }
+            Self::TimeAdvance => "old, new",
+            Self::TimerScheduled | Self::TimerFired | Self::TimerCancelled => "timer_id, deadline",
+            Self::IoRequested => "token, interest",
+            Self::IoReady => "token, readiness",
+            Self::IoResult => "token, bytes",
+            Self::IoError => "token, kind",
+            Self::RngSeed => "seed",
+            Self::RngValue => "value",
+            Self::Checkpoint => "sequence, active_tasks, active_regions",
+            Self::FuturelockDetected => "task, region, idle_steps, held",
+            Self::ChaosInjection => "kind, task, detail",
+            Self::UserTrace => "message",
+            Self::MonitorCreated | Self::MonitorDropped => {
+                "monitor_ref, watcher, watcher_region, monitored"
+            }
+            Self::DownDelivered => "monitor_ref, watcher, monitored, completion_vt, reason",
+            Self::LinkCreated | Self::LinkDropped => "link_ref, task_a, region_a, task_b, region_b",
+            Self::ExitDelivered => "link_ref, from, to, failure_vt, reason",
+        }
+    }
+}
+
+impl fmt::Display for TraceEventKind {
+    fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
+        f.write_str(self.stable_name())
+    }
+}
+
 /// Additional data carried by a trace event.
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub enum TraceData {
@@ -846,7 +982,7 @@ impl TraceEvent {
 impl fmt::Display for TraceEvent {
     #[allow(clippy::too_many_lines)]
     fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
-        write!(f, "[{:06}] {} {:?}", self.seq, self.time, self.kind)?;
+        write!(f, "[{:06}] {} {}", self.seq, self.time, self.kind)?;
         if let Some(ref lt) = self.logical_time {
             write!(f, " @{lt:?}")?;
         }
@@ -987,10 +1123,32 @@ impl fmt::Display for TraceEvent {
 #[cfg(test)]
 mod tests {
     use super::*;
+    use std::collections::BTreeSet;
 
     #[test]
     fn trace_event_version_is_set() {
         let event = TraceEvent::new(1, Time::ZERO, TraceEventKind::UserTrace, TraceData::None);
         assert_eq!(event.version, TRACE_EVENT_SCHEMA_VERSION);
+    }
+
+    #[test]
+    fn trace_event_kind_stable_names_are_unique() {
+        let mut names = BTreeSet::new();
+        for kind in TraceEventKind::ALL {
+            assert!(names.insert(kind.stable_name()));
+        }
+    }
+
+    #[test]
+    fn trace_event_taxonomy_is_documented() {
+        const DOC: &str = include_str!("../../docs/spork_deterministic_ordering.md");
+        for kind in TraceEventKind::ALL {
+            let marker = format!("- `{}` => `{}`", kind.stable_name(), kind.required_fields());
+            assert!(
+                DOC.contains(&marker),
+                "missing taxonomy entry in docs/spork_deterministic_ordering.md for {}",
+                kind.stable_name()
+            );
+        }
     }
 }

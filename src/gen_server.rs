@@ -228,6 +228,66 @@ impl std::fmt::Display for CastOverflowPolicy {
 /// These messages are intended to model OTP-style "out-of-band" notifications
 /// (Down/Exit/Timeout) in a cancel-correct, deterministic way.
 #[derive(Debug, Clone)]
+pub struct DownMsg {
+    /// Virtual time at which the monitored task completed (for deterministic ordering).
+    pub completion_vt: Time,
+    /// The monitor notification payload.
+    pub notification: DownNotification,
+}
+
+impl DownMsg {
+    /// Create a new down system message payload.
+    #[must_use]
+    pub const fn new(completion_vt: Time, notification: DownNotification) -> Self {
+        Self {
+            completion_vt,
+            notification,
+        }
+    }
+}
+
+/// Payload for an OTP-style `Exit` system message.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct ExitMsg {
+    /// Virtual time at which the exit was observed/emitted.
+    pub exit_vt: Time,
+    /// The task that triggered the exit.
+    pub from: TaskId,
+    /// Why it exited.
+    pub reason: DownReason,
+}
+
+impl ExitMsg {
+    /// Create a new exit system message payload.
+    #[must_use]
+    pub const fn new(exit_vt: Time, from: TaskId, reason: DownReason) -> Self {
+        Self {
+            exit_vt,
+            from,
+            reason,
+        }
+    }
+}
+
+/// Payload for a deterministic timeout tick system message.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub struct TimeoutMsg {
+    /// Virtual time of the tick.
+    pub tick_vt: Time,
+    /// Timeout identifier (user-defined semantics).
+    pub id: u64,
+}
+
+impl TimeoutMsg {
+    /// Create a new timeout system message payload.
+    #[must_use]
+    pub const fn new(tick_vt: Time, id: u64) -> Self {
+        Self { tick_vt, id }
+    }
+}
+
+/// Typed system messages delivered to a GenServer via [`GenServer::handle_info`].
+#[derive(Debug, Clone)]
 pub enum SystemMsg {
     /// OTP-style `Down` notification (monitor fired).
     Down {
@@ -257,6 +317,24 @@ pub enum SystemMsg {
 }
 
 impl SystemMsg {
+    /// Construct a down-system message.
+    #[must_use]
+    pub fn down(msg: DownMsg) -> Self {
+        msg.into()
+    }
+
+    /// Construct an exit-system message.
+    #[must_use]
+    pub fn exit(msg: ExitMsg) -> Self {
+        msg.into()
+    }
+
+    /// Construct a timeout-system message.
+    #[must_use]
+    pub fn timeout(msg: TimeoutMsg) -> Self {
+        msg.into()
+    }
+
     const fn vt(&self) -> Time {
         match self {
             Self::Down { completion_vt, .. } => *completion_vt,
@@ -293,6 +371,81 @@ impl SystemMsg {
     #[must_use]
     pub const fn sort_key(&self) -> (Time, u8, SystemMsgSubjectKey) {
         (self.vt(), self.kind_rank(), self.subject_key())
+    }
+}
+
+impl From<DownMsg> for SystemMsg {
+    fn from(value: DownMsg) -> Self {
+        Self::Down {
+            completion_vt: value.completion_vt,
+            notification: value.notification,
+        }
+    }
+}
+
+impl From<ExitMsg> for SystemMsg {
+    fn from(value: ExitMsg) -> Self {
+        Self::Exit {
+            exit_vt: value.exit_vt,
+            from: value.from,
+            reason: value.reason,
+        }
+    }
+}
+
+impl From<TimeoutMsg> for SystemMsg {
+    fn from(value: TimeoutMsg) -> Self {
+        Self::Timeout {
+            tick_vt: value.tick_vt,
+            id: value.id,
+        }
+    }
+}
+
+impl TryFrom<SystemMsg> for DownMsg {
+    type Error = SystemMsg;
+
+    fn try_from(value: SystemMsg) -> Result<Self, Self::Error> {
+        match value {
+            SystemMsg::Down {
+                completion_vt,
+                notification,
+            } => Ok(Self {
+                completion_vt,
+                notification,
+            }),
+            other => Err(other),
+        }
+    }
+}
+
+impl TryFrom<SystemMsg> for ExitMsg {
+    type Error = SystemMsg;
+
+    fn try_from(value: SystemMsg) -> Result<Self, Self::Error> {
+        match value {
+            SystemMsg::Exit {
+                exit_vt,
+                from,
+                reason,
+            } => Ok(Self {
+                exit_vt,
+                from,
+                reason,
+            }),
+            other => Err(other),
+        }
+    }
+}
+
+impl TryFrom<SystemMsg> for TimeoutMsg {
+    type Error = SystemMsg;
+
+    fn try_from(value: SystemMsg) -> Result<Self, Self::Error> {
+        match value {
+            SystemMsg::Timeout { tick_vt, id } => Ok(Self { tick_vt, id }),
+            other => Err(other),
+        }
     }
 }
 
@@ -2597,6 +2750,78 @@ mod tests {
         assert_eq!(batched_keys, explicit_keys);
 
         crate::test_complete!("conformance_system_msg_batch_matches_explicit_sort");
+    }
+
+    #[test]
+    fn system_msg_payload_types_roundtrip_via_conversions() {
+        init_test("system_msg_payload_types_roundtrip_via_conversions");
+
+        let mut monitors = crate::monitor::MonitorSet::new();
+        let mref = monitors.establish(tid(7), rid(0), tid(8));
+
+        let down = DownMsg::new(
+            Time::from_secs(11),
+            DownNotification {
+                monitored: tid(8),
+                reason: DownReason::Normal,
+                monitor_ref: mref,
+            },
+        );
+        let down_msg = SystemMsg::down(down.clone());
+        let down_back = DownMsg::try_from(down_msg).expect("down conversion");
+        assert_eq!(down_back.completion_vt, down.completion_vt);
+        assert_eq!(
+            down_back.notification.monitored,
+            down.notification.monitored
+        );
+        assert_eq!(down_back.notification.reason, down.notification.reason);
+        assert_eq!(
+            down_back.notification.monitor_ref,
+            down.notification.monitor_ref
+        );
+
+        let exit = ExitMsg::new(
+            Time::from_secs(12),
+            tid(9),
+            DownReason::Error("boom".into()),
+        );
+        let exit_msg = SystemMsg::exit(exit.clone());
+        let exit_back = ExitMsg::try_from(exit_msg).expect("exit conversion");
+        assert_eq!(exit_back, exit);
+
+        let timeout = TimeoutMsg::new(Time::from_secs(13), 42);
+        let timeout_msg = SystemMsg::timeout(timeout);
+        let timeout_back = TimeoutMsg::try_from(timeout_msg).expect("timeout conversion");
+        assert_eq!(timeout_back, timeout);
+
+        crate::test_complete!("system_msg_payload_types_roundtrip_via_conversions");
+    }
+
+    #[test]
+    fn system_msg_try_from_mismatch_returns_original_variant() {
+        init_test("system_msg_try_from_mismatch_returns_original_variant");
+        let mut monitors = crate::monitor::MonitorSet::new();
+        let mref = monitors.establish(tid(10), rid(0), tid(1));
+
+        let timeout = SystemMsg::Timeout {
+            tick_vt: Time::from_secs(5),
+            id: 99,
+        };
+        let err = DownMsg::try_from(timeout).expect_err("timeout is not down");
+        assert!(matches!(err, SystemMsg::Timeout { id: 99, .. }));
+
+        let down = SystemMsg::Down {
+            completion_vt: Time::from_secs(6),
+            notification: DownNotification {
+                monitored: tid(1),
+                reason: DownReason::Normal,
+                monitor_ref: mref,
+            },
+        };
+        let err = TimeoutMsg::try_from(down).expect_err("down is not timeout");
+        assert!(matches!(err, SystemMsg::Down { .. }));
+
+        crate::test_complete!("system_msg_try_from_mismatch_returns_original_variant");
     }
 
     #[test]
