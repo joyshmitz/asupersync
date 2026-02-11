@@ -21,6 +21,7 @@ inductive Outcome (Value Error Cancel Panic : Type) where
   | err (e : Error)
   | cancelled (c : Cancel)
   | panicked (p : Panic)
+  deriving DecidableEq, Repr
 
 /-- Cancellation kinds. -/
 inductive CancelKind where
@@ -35,6 +36,7 @@ inductive CancelKind where
 structure CancelReason where
   kind : CancelKind
   message : Option String
+  deriving DecidableEq, Repr
 
 def CancelKind.rank : CancelKind -> Nat
   | CancelKind.user => 0
@@ -288,6 +290,27 @@ inductive Label (Value Error Panic : Type) where
   | finalize (r : RegionId) (f : TaskId)
   | close (r : RegionId) (outcome : Outcome Value Error CancelReason Panic)
   | tick
+  deriving DecidableEq, Repr
+
+section LabelDerivingSmoke
+
+theorem label_dec_eq_tau :
+    (Label.tau : Label Unit Unit Unit) = Label.tau := by
+  decide
+
+theorem label_dec_ne_tau_tick :
+    (Label.tau : Label Unit Unit Unit) ≠ Label.tick := by
+  decide
+
+end LabelDerivingSmoke
+
+section LabelReprSmoke
+
+theorem label_repr_tick_stable :
+    reprStr (Label.tick : Label Unit Unit Unit) =
+      reprStr (Label.tick : Label Unit Unit Unit) := rfl
+
+end LabelReprSmoke
 
 /-- Small-step operational relation. -/
 inductive Step {Value Error Panic : Type} :
@@ -2157,7 +2180,7 @@ theorem resolve_preserves_wellformed {Value Error Panic : Type}
 
     obligation_holder_exists := fun oid' ob' hOb' => by
       by_cases hEq : oid' = oid
-      · subst hEq
+      · cases hEq
         simp [getObligation, setRegion, setObligation, updatedOb, updatedRegion] at hOb'
         have hEqOb : ob' = updatedOb := by
           exact hOb'.symm
@@ -2193,11 +2216,10 @@ theorem resolve_preserves_wellformed {Value Error Panic : Type}
         have hNe : oid' ≠ oid := by
           intro hEq'
           subst hEq'
-          have hObEq : ob' = ob := by
-            have : some ob' = some ob := by simpa [hOb] using hObS
-            exact Option.some.inj this
+          have hObEq : ob = ob' := by
+            simpa [hOb] using hObS
           have : ob.region = r' := by simpa [hObEq] using hRegEq2
-          exact (hRegEq this).elim
+          exact (hRegEq this.symm).elim
         refine ⟨ob', ?_, hState, hRegEq2⟩
         simpa [getObligation, setRegion, setObligation, updatedOb, updatedRegion, hNe] using hObS
 
@@ -2290,12 +2312,12 @@ theorem cancelRequest_preserves_wellformed {Value Error Panic : Type}
     (hStep : Step s (Label.cancel r reason) s')
     : WellFormed s' := by
   cases hStep with
-  | cancelRequest reason0 cleanup0 hTask hRegion hRegionMatch hNotCompleted hUpdate =>
+  | cancelRequest _ cleanup0 hTask hRegion hRegionMatch hNotCompleted hUpdate =>
     rename_i t0 task0 region0
     subst hUpdate
     have hWF1 :
         WellFormed
-          (setRegion s r { region0 with cancel := some (strengthenOpt region0.cancel reason0) }) := by
+          (setRegion s r { region0 with cancel := some (strengthenOpt region0.cancel reason) }) := by
       apply setRegion_structural_preserves_wellformed (s := s) (r := r)
       · exact hWF
       · exact hRegion
@@ -2303,18 +2325,18 @@ theorem cancelRequest_preserves_wellformed {Value Error Panic : Type}
       · rfl
       · rfl
     have hTask1 :
-        getTask (setRegion s r { region0 with cancel := some (strengthenOpt region0.cancel reason0) }) t0 =
+        getTask (setRegion s r { region0 with cancel := some (strengthenOpt region0.cancel reason) }) t0 =
           some task0 := by
       simpa [getTask, setRegion] using hTask
     have hSameRegion :
-        { task0 with state := TaskState.cancelRequested reason0 cleanup0 }.region = task0.region := by
+        { task0 with state := TaskState.cancelRequested reason cleanup0 }.region = task0.region := by
       rfl
     exact
       setTask_same_region_preserves_wellformed
-        (s := setRegion s r { region0 with cancel := some (strengthenOpt region0.cancel reason0) })
+        (s := setRegion s r { region0 with cancel := some (strengthenOpt region0.cancel reason) })
         (t := t0)
         (task := task0)
-        (newTask := { task0 with state := TaskState.cancelRequested reason0 cleanup0 })
+        (newTask := { task0 with state := TaskState.cancelRequested reason cleanup0 })
         hWF1
         hTask1
         hSameRegion
@@ -2338,20 +2360,20 @@ theorem cancel_label_preserves_region_structure {Value Error Panic : Type}
         region'.subregions = region.subregions ∧
         region'.ledger = region.ledger := by
   cases hStep with
-  | cancelRequest reason0 cleanup0 hTask hRegion hRegionMatch hNotCompleted hUpdate =>
+  | cancelRequest _ cleanup0 hTask hRegion hRegionMatch hNotCompleted hUpdate =>
       rename_i t0 task0 region0
       subst hUpdate
-      refine ⟨region0, { region0 with cancel := some (strengthenOpt region0.cancel reason0) }, ?_⟩
+      refine ⟨region0, { region0 with cancel := some (strengthenOpt region0.cancel reason) }, ?_⟩
       refine ⟨hRegion, ?_⟩
       refine ⟨?_, rfl, rfl, rfl, rfl⟩
       simp [getRegion, setRegion, setTask]
-  | closeCancelChildren reason0 hRegion hState hHasLive hUpdate =>
+  | closeCancelChildren _ hRegion hState hHasLive hUpdate =>
       rename_i region0
       subst hUpdate
       refine ⟨region0,
         { region0 with
             state := RegionState.draining,
-            cancel := some (strengthenOpt region0.cancel reason0) }, ?_⟩
+            cancel := some (strengthenOpt region0.cancel reason) }, ?_⟩
       refine ⟨hRegion, ?_⟩
       refine ⟨?_, rfl, rfl, rfl, rfl⟩
       simp [getRegion, setRegion]
@@ -3091,7 +3113,8 @@ theorem cancelMasked_potential_decreases {Value Error Panic : Type}
     (hState : task.state = TaskState.cancelRequested reason cleanup)
     (hMask : task.mask > 0)
     : let task' := { task with mask := task.mask - 1,
-                               state := TaskState.cancelRequested reason cleanup }
+                               state := (TaskState.cancelRequested reason cleanup :
+                                 TaskState Value Error Panic) }
       ∃ n n', cancel_potential task = some n ∧
               cancel_potential task' = some n' ∧
               n' + 1 = n := by
@@ -3104,7 +3127,8 @@ theorem cancelAcknowledge_potential_decreases {Value Error Panic : Type}
     {reason : CancelReason} {cleanup : Budget}
     (hState : task.state = TaskState.cancelRequested reason cleanup)
     (hMask : task.mask = 0)
-    : let task' := { task with state := TaskState.cancelling reason cleanup }
+    : let task' := { task with state := (TaskState.cancelling reason cleanup :
+                                 TaskState Value Error Panic) }
       ∃ n n', cancel_potential task = some n ∧
               cancel_potential task' = some n' ∧
               n' < n := by
@@ -3116,7 +3140,8 @@ theorem cancelFinalize_potential_decreases {Value Error Panic : Type}
     {task : Task Value Error Panic}
     {reason : CancelReason} {cleanup : Budget}
     (hState : task.state = TaskState.cancelling reason cleanup)
-    : let task' := { task with state := TaskState.finalizing reason cleanup }
+    : let task' := { task with state := (TaskState.finalizing reason cleanup :
+                                 TaskState Value Error Panic) }
       ∃ n n', cancel_potential task = some n ∧
               cancel_potential task' = some n' ∧
               n' < n := by
@@ -3129,7 +3154,8 @@ theorem cancelComplete_potential_reaches_zero {Value Error Panic : Type}
     {reason : CancelReason} {cleanup : Budget}
     (hState : task.state = TaskState.finalizing reason cleanup)
     : let task' := { task with state :=
-                       TaskState.completed (Outcome.cancelled reason) }
+                       (TaskState.completed (Outcome.cancelled reason) :
+                         TaskState Value Error Panic) }
       cancel_potential task' = some 0 ∧
       ∃ n, cancel_potential task = some n ∧ n > 0 := by
   simp only [cancel_potential, hState]
@@ -3185,11 +3211,10 @@ theorem cancel_protocol_terminates {Value Error Panic : Type}
   | succ m ih =>
     -- mask > 0: one cancelMasked step decrements mask, then recurse
     obtain ⟨s1, hStep1, hTask1⟩ := cancel_masked_step hTask hState (by omega)
-    have hMask1 : ({ task with mask := task.mask - 1,
-        state := TaskState.cancelRequested reason cleanup } :
-        Task Value Error Panic).mask = m := by
-      show task.mask - 1 = m; omega
-    obtain ⟨s', hSteps, task', hTask', hState'⟩ := ih hTask1 rfl hMask1
+    have hMask1 : task.mask - 1 = m := by
+      omega
+    obtain ⟨s', hSteps, task', hTask', hState'⟩ := ih hTask1 rfl (by
+      simpa using hMask1)
     exact ⟨s', Steps.step hStep1 hSteps, task', hTask', hState'⟩
 
 /-- From cancelling state, termination in 2 steps (finalize → complete). -/

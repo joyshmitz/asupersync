@@ -334,7 +334,10 @@ independent of container insertion order.
 ```
 
 This is implemented by `SystemMsg::sort_key()` and
-`SystemMsgBatch::into_sorted()` in `src/gen_server.rs`.
+`SystemMsgBatch::into_sorted()` in `src/gen_server.rs`. Ergonomic payload
+types (`DownMsg`, `ExitMsg`, `TimeoutMsg`) map into the same `SystemMsg`
+ordering path, so the contract applies identically to typed and enum-style
+construction.
 
 **Contract (SYS-LINK-MONITOR)**:
 ```
@@ -429,3 +432,92 @@ Each contract should have at least one lab-mode test that:
 2. Runs with a fixed seed
 3. Asserts the exact ordering specified by the contract
 4. Replays and asserts `ScheduleCertificate` equality
+
+---
+
+## 7. Operational Verification Checklist
+
+Use this checklist when a failure report mentions mailbox ordering, monitor/link
+delivery, registry races, or shutdown system messages.
+
+### 7.1 Contract-to-Artifact Mapping
+
+| Contract Area | What to Validate | Primary Artifact |
+|---------------|------------------|------------------|
+| MAIL-\* | Multi-sender ordering and reserve/commit behavior | `event_log.txt` + `trace.async` |
+| DOWN-\* | `(vt, tid)` notification order | `trace.async` |
+| REG-\* | First-commit winner and collision behavior | `event_log.txt` + test assertion output |
+| SYS-\* | `Down` before `Exit` before `Timeout` for equal `vt` | `trace.async` |
+| REPLAY-\* | Certificate and observable sequence stability | `trace.async` + verification output |
+
+### 7.2 Command Sequence
+
+```bash
+# Reproduce the exact run
+ASUPERSYNC_SEED=<seed> ASUPERSYNC_TEST_ARTIFACTS_DIR=target/test-artifacts \
+  cargo test <test_id> -- --nocapture
+
+# Verify trace format + ordering-related integrity
+cargo run --features cli --bin asupersync -- trace verify --strict \
+  target/test-artifacts/trace.async
+
+# Compare against a baseline trace when available
+cargo run --features cli --bin asupersync -- trace diff <baseline_trace> \
+  target/test-artifacts/trace.async
+```
+
+### 7.3 Pass/Fail Rule
+
+- Pass: same seed reproduces the same observable order and certificate.
+- Fail: any order or certificate mismatch is a determinism regression and must
+  be tracked with seed, first divergence step, and trace artifact paths.
+
+---
+
+## 8. Trace Event Taxonomy (Stable Names + Required Fields)
+
+This section is the canonical, grep-friendly taxonomy for `TraceEventKind`.
+
+Rules:
+- Use the stable snake_case name when searching logs/artifacts.
+- The required field set is contractually stable for tooling and docs.
+- Any new trace event kind must add a line here and update `TraceEventKind`
+  taxonomy code in `src/trace/event.rs`.
+
+Canonical taxonomy markers:
+- `spawn` => `task, region`
+- `schedule` => `task, region`
+- `yield` => `task, region`
+- `wake` => `task, region`
+- `poll` => `task, region`
+- `complete` => `task, region`
+- `cancel_request` => `task, region, reason`
+- `cancel_ack` => `task, region, reason`
+- `region_close_begin` => `region, parent`
+- `region_close_complete` => `region, parent`
+- `region_created` => `region, parent`
+- `region_cancelled` => `region, reason`
+- `obligation_reserve` => `obligation, task, region, kind, state, duration_ns, abort_reason`
+- `obligation_commit` => `obligation, task, region, kind, state, duration_ns, abort_reason`
+- `obligation_abort` => `obligation, task, region, kind, state, duration_ns, abort_reason`
+- `obligation_leak` => `obligation, task, region, kind, state, duration_ns, abort_reason`
+- `time_advance` => `old, new`
+- `timer_scheduled` => `timer_id, deadline`
+- `timer_fired` => `timer_id, deadline`
+- `timer_cancelled` => `timer_id, deadline`
+- `io_requested` => `token, interest`
+- `io_ready` => `token, readiness`
+- `io_result` => `token, bytes`
+- `io_error` => `token, kind`
+- `rng_seed` => `seed`
+- `rng_value` => `value`
+- `checkpoint` => `sequence, active_tasks, active_regions`
+- `futurelock_detected` => `task, region, idle_steps, held`
+- `chaos_injection` => `kind, task, detail`
+- `user_trace` => `message`
+- `monitor_created` => `monitor_ref, watcher, watcher_region, monitored`
+- `monitor_dropped` => `monitor_ref, watcher, watcher_region, monitored`
+- `down_delivered` => `monitor_ref, watcher, monitored, completion_vt, reason`
+- `link_created` => `link_ref, task_a, region_a, task_b, region_b`
+- `link_dropped` => `link_ref, task_a, region_a, task_b, region_b`
+- `exit_delivered` => `link_ref, from, to, failure_vt, reason`

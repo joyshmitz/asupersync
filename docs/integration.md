@@ -761,18 +761,18 @@ registry.unregister("counter")?;
 # Ok::<(), asupersync::cx::NameLeaseError>(())
 ```
 
-Planned end-to-end Spork surface (API names may still shift):
+Runnable minimal end-to-end example:
 
-```ignore
-use asupersync::spork::prelude::*;
-
-// Spawn supervised GenServer child, register name, then interact via call/cast.
-// Current anchors in code:
-// - Scope::spawn_gen_server (src/gen_server.rs)
-// - GenServerHandle::{call,cast,info} (src/gen_server.rs)
-// - NameRegistry reserve/commit/abort model (src/cx/registry.rs)
-// - SupervisorBuilder + ChildSpec compile/start contracts (src/supervision.rs)
+```bash
+cargo run --example spork_minimal_supervised_app
 ```
+
+This example lives at `examples/spork_minimal_supervised_app.rs` and demonstrates:
+- app start under a supervisor-owned region
+- supervised named GenServer start
+- client `cast` + `call`
+- cancel-correct shutdown (`request -> drain -> finalize`)
+- deterministic lease/name cleanup (`whereis("counter") == None` after stop)
 
 What to verify in lab tests:
 - region close implies quiescence (no live descendants)

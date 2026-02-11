@@ -492,3 +492,197 @@ Allowed patterns:
 - explicit handles stored in app state and passed through constructors
 - capability objects derived from `Cx` / `Scope` and scoped to a region
 - trace/log collection only via `Cx::trace` or structured observability hooks
+
+---
+
+## 7. Deterministic Failure Triage Playbook (Humans + Agents)
+
+This is the standard Spork incident workflow for replayable failures. It is
+explicitly optimized for human+agent handoff and deterministic reproduction.
+
+### 7.1 Required Artifacts
+
+Primary artifacts:
+- `target/test-artifacts/<safe_test_id>/repro_manifest.json`
+- `target/test-artifacts/<safe_test_id>/event_log.txt`
+- `target/test-artifacts/<safe_test_id>/failed_assertions.json`
+- `target/test-artifacts/<safe_test_id>/trace.async` (if replay recording enabled)
+- `target/test-artifacts/<safe_test_id>_summary.json`
+
+Optional crash artifact:
+- `crashpack-<seed>-<fingerprint>-v1.json` (if crashpack attachment is present)
+
+### 7.2 Exact Commands (Copy/Paste)
+
+```bash
+# Inputs
+TEST_ID=<cargo-test-selector>
+ART=target/test-artifacts
+SAFE_TEST_ID=$(printf '%s' "$TEST_ID" | sed 's/[^[:alnum:]]/_/g')
+
+# (1) Read report fingerprint first (and seed/config)
+jq '{scenario_id,seed,schema_version,config_hash,trace_fingerprint,trace_file,input_file}' \
+  "$ART/$SAFE_TEST_ID/repro_manifest.json"
+
+# (2) Re-run exactly with same seed + artifact dir
+SEED=$(jq -r '.seed' "$ART/$SAFE_TEST_ID/repro_manifest.json")
+ASUPERSYNC_SEED="$SEED" ASUPERSYNC_TEST_ARTIFACTS_DIR="$ART" \
+  cargo test "$TEST_ID" -- --nocapture
+
+# (3) Verify trace + inspect divergence
+TRACE_FILE=$(jq -r '.trace_file // "trace.async"' "$ART/$SAFE_TEST_ID/repro_manifest.json")
+cargo run --features cli --bin asupersync -- trace info "$ART/$SAFE_TEST_ID/$TRACE_FILE"
+cargo run --features cli --bin asupersync -- trace verify --strict "$ART/$SAFE_TEST_ID/$TRACE_FILE"
+# optional compare against baseline
+cargo run --features cli --bin asupersync -- trace diff <trace_a> <trace_b>
+
+# (4) If crashpack exists, inspect + replay metadata
+CRASHPACK=$(jq -r '.failure_artifacts[]? | select(test("crashpack-.*\\.json$"))' \
+  "$ART/${SAFE_TEST_ID}_summary.json" | head -n1)
+
+if [ -n "$CRASHPACK" ]; then
+  jq '{fingerprint:.manifest.fingerprint,replay:.replay.command_line,attachments:.manifest.attachments}' "$CRASHPACK"
+  jq '.supervision_log[]? | {virtual_time,task,region,decision,context}' "$CRASHPACK"
+  jq '.evidence[]? | {birth,death,is_novel,persistence}' "$CRASHPACK"
+fi
+
+# (5) DPOR exploration + minimal counterexample diagnostics
+cargo test --test dpor_exploration explorer_discovers_classes_for_concurrent_tasks -- --nocapture
+cargo test --test replay_divergence_diagnostics e2e_divergence_diagnostics_structured_report -- --nocapture
+```
+
+### 7.3 Four-Step Triage Protocol
+
+1. Read fingerprint first:
+`repro_manifest.json` is the source of truth for `seed`, `scenario_id`, and
+`trace_fingerprint` (when present). Do not start from logs.
+2. If crashpack exists, replay from crashpack metadata:
+use `crashpack.manifest.fingerprint` + `crashpack.replay.command_line` as the
+repro anchor and keep the crashpack path in handoff notes.
+3. Inspect evidence cards:
+`crashpack.supervision_log` is the restart/cancel decision ledger and
+`crashpack.evidence` is the canonical evidence snapshot set. Triage decisions
+must reference one of these, not intuition.
+4. Run DPOR and minimize:
+use `dpor_exploration` to enumerate schedule classes and
+`replay_divergence_diagnostics` to extract the minimal divergent prefix.
+
+### 7.4 Real Failing Example (Repository-Backed)
+
+Use the crashpack walkthrough suite in `src/trace/crashpack.rs`:
+
+```bash
+cargo test --lib crashpack::tests::walkthrough -- --nocapture
+```
+
+What this demonstrates (deterministic and currently passing in-tree):
+1. `walkthrough_01_forced_failure_and_emission` models a real panic outcome
+   (`assertion failed: balance >= 0`) and emits crashpack data.
+2. `walkthrough_03_fingerprint_interpretation` proves equivalent schedules map
+   to the same canonical fingerprint.
+3. `walkthrough_04_replay_command` validates replay command metadata generation.
+4. `walkthrough_05_minimization` shows prefix minimization from 50 events down
+   to a 15-event reproducer.
+
+### 7.5 Bead Handoff Template
+
+Use this structure in bead notes for deterministic handoff:
+
+```text
+[spork-triage]
+seed=<u64>
+test_id=<cargo test selector>
+fingerprint=<manifest.trace_fingerprint or crashpack.manifest.fingerprint>
+invariant=<INV-* or contract id>
+first_divergence_step=<n or none>
+crashpack=<path or none>
+dpor_command=cargo test --test dpor_exploration explorer_discovers_classes_for_concurrent_tasks -- --nocapture
+artifacts=
+  - target/test-artifacts/<safe_test_id>/repro_manifest.json
+  - target/test-artifacts/<safe_test_id>/event_log.txt
+  - target/test-artifacts/<safe_test_id>/failed_assertions.json
+  - target/test-artifacts/<safe_test_id>/trace.async
+  - target/test-artifacts/<safe_test_id>_summary.json
+```
+
+---
+
+## 8. Agent-First Work Loop (Operational Contract)
+
+This is the canonical work loop for humans and coding agents collaborating on
+Spork incidents and feature tasks.
+
+### 8.1 Identity and Threading Rules
+
+Every unit of work must map to one stable identifier:
+
+- Bead issue id: `bd-...`
+- Mail thread id: same bead id (for example `thread_id="bd-1h1hp"`)
+- Mail subjects: prefix with `[bd-...]`
+
+This gives one deterministic audit trail across:
+- bead status history
+- mail conversation
+- artifact paths
+
+### 8.2 Start-of-Work Checklist
+
+```bash
+# 1) Claim ownership
+br update <bd-id> --status in_progress --assignee <agent-name>
+
+# 2) Announce in-thread
+# subject: [<bd-id>] Start: <short scope>
+# thread_id: <bd-id>
+
+# 3) Reproduce deterministically (see Section 7.2)
+ASUPERSYNC_SEED=<seed> ASUPERSYNC_TEST_ARTIFACTS_DIR=target/test-artifacts \
+  cargo test <test_id> -- --nocapture
+```
+
+Minimum start message fields:
+- scope being changed
+- files intended for edit
+- expected acceptance target
+
+### 8.3 Artifact Bundle Contract
+
+Every progress or completion message must include enough data for a zero-guess
+handoff:
+
+- bead id / thread id
+- seed
+- test id
+- fingerprint (`repro_manifest.trace_fingerprint` or crashpack fingerprint)
+- first divergence step (or `none`)
+- crashpack path (or `none`)
+- exact commands used
+- concrete artifact paths
+
+If any field is unknown, write `unknown` explicitly. Never omit required fields.
+
+### 8.4 Evidence-First Decision Rule
+
+Operational decisions must reference deterministic artifacts:
+
+- restart/cancel reasoning from `crashpack.supervision_log`
+- invariant reasoning from `failed_assertions.json` and evidence ledger entries
+- schedule-class reasoning from DPOR output and replay divergence diagnostics
+
+No decision should be justified only by intuition or non-replayable logs.
+
+### 8.5 Completion Checklist
+
+```bash
+# 1) Mark issue complete when acceptance is met
+br close <bd-id> --reason "<deterministic acceptance summary>"
+
+# 2) Post final in-thread summary
+# subject: [<bd-id>] Completed: <what landed>
+# include artifact bundle contract fields
+```
+
+Completion summary must include:
+- exact file paths edited
+- validation commands run
+- what remains open (if anything)
