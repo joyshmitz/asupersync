@@ -1221,6 +1221,784 @@ pub enum WasmHandleEventKind {
     Released,
 }
 
+// ---------------------------------------------------------------------------
+// Export Dispatch Layer
+// ---------------------------------------------------------------------------
+//
+// Implements the concrete wasm-bindgen export boundary. Each of the 8
+// `WasmAbiSymbol` operations maps to a dispatcher method that:
+//
+// 1. Validates ABI compatibility.
+// 2. Validates/decodes the request payload.
+// 3. Manages handle table state transitions.
+// 4. Emits structured boundary events for observability.
+// 5. Returns a typed `WasmAbiOutcomeEnvelope` (or `WasmHandleRef`).
+//
+// The dispatcher is single-threaded (WASM event loop) and owns all
+// boundary state. No runtime coupling — the dispatcher delegates
+// actual work via callback traits injected by the runtime adapter.
+
+/// Request payload for `ScopeEnter`.
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+pub struct WasmScopeEnterRequest {
+    /// Parent runtime or region handle.
+    pub parent: WasmHandleRef,
+    /// Optional human-readable label for diagnostics.
+    pub label: Option<String>,
+}
+
+/// Request payload for `TaskSpawn`.
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+pub struct WasmTaskSpawnRequest {
+    /// Scope/region handle in which to spawn the task.
+    pub scope: WasmHandleRef,
+    /// Optional task label for diagnostics.
+    pub label: Option<String>,
+    /// Optional cancel kind to associate with the task.
+    pub cancel_kind: Option<String>,
+}
+
+/// Request payload for `TaskCancel`.
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+pub struct WasmTaskCancelRequest {
+    /// Task handle to cancel.
+    pub task: WasmHandleRef,
+    /// Cancellation kind (maps to `CancelKind` variants).
+    pub kind: String,
+    /// Optional human-readable reason message.
+    pub message: Option<String>,
+}
+
+/// Request payload for `FetchRequest`.
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+pub struct WasmFetchRequest {
+    /// Scope handle providing capability context.
+    pub scope: WasmHandleRef,
+    /// URL to fetch.
+    pub url: String,
+    /// HTTP method (GET, POST, etc.).
+    pub method: String,
+    /// Optional request body bytes.
+    pub body: Option<Vec<u8>>,
+}
+
+/// Dispatch result for operations that return a handle.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub enum WasmExportResult {
+    /// Operation produced a new handle (RuntimeCreate, ScopeEnter, TaskSpawn).
+    Handle(WasmHandleRef),
+    /// Operation produced an outcome envelope (Close, Join, Cancel, Fetch).
+    Outcome(WasmAbiOutcomeEnvelope),
+}
+
+/// Error returned when a dispatch call fails at the boundary level
+/// (before reaching the runtime).
+#[derive(Debug, Clone, PartialEq, Eq, Error)]
+pub enum WasmDispatchError {
+    /// ABI version is not compatible.
+    #[error("ABI incompatible: {decision:?}")]
+    Incompatible {
+        /// The compatibility decision that rejected the call.
+        decision: WasmAbiCompatibilityDecision,
+    },
+    /// Handle validation failed.
+    #[error("handle error: {0}")]
+    Handle(#[from] WasmHandleError),
+    /// Boundary state does not allow this operation.
+    #[error("invalid boundary state {state:?} for symbol {symbol:?}")]
+    InvalidState {
+        /// Current boundary state.
+        state: WasmBoundaryState,
+        /// Attempted operation.
+        symbol: WasmAbiSymbol,
+    },
+    /// Request payload failed validation.
+    #[error("invalid request: {reason}")]
+    InvalidRequest {
+        /// Explanation of the validation failure.
+        reason: String,
+    },
+}
+
+impl WasmDispatchError {
+    /// Converts this dispatch error to a boundary failure envelope.
+    #[must_use]
+    pub fn to_failure(&self) -> WasmAbiFailure {
+        match self {
+            Self::Incompatible { .. } => WasmAbiFailure {
+                code: WasmAbiErrorCode::CompatibilityRejected,
+                recoverability: WasmAbiRecoverability::Permanent,
+                message: self.to_string(),
+            },
+            Self::Handle(_) | Self::InvalidState { .. } => WasmAbiFailure {
+                code: WasmAbiErrorCode::InvalidHandle,
+                recoverability: WasmAbiRecoverability::Permanent,
+                message: self.to_string(),
+            },
+            Self::InvalidRequest { .. } => WasmAbiFailure {
+                code: WasmAbiErrorCode::DecodeFailure,
+                recoverability: WasmAbiRecoverability::Permanent,
+                message: self.to_string(),
+            },
+        }
+    }
+
+    /// Wraps this error as an `Err` outcome envelope.
+    #[must_use]
+    pub fn to_outcome(&self) -> WasmAbiOutcomeEnvelope {
+        WasmAbiOutcomeEnvelope::Err {
+            failure: self.to_failure(),
+        }
+    }
+}
+
+/// Boundary event collector for structured observability.
+///
+/// Collects `WasmAbiBoundaryEvent`s emitted during dispatch for
+/// post-hoc analysis, deterministic replay, and diagnostics.
+#[derive(Debug, Default)]
+pub struct WasmBoundaryEventLog {
+    events: Vec<WasmAbiBoundaryEvent>,
+}
+
+impl WasmBoundaryEventLog {
+    /// Creates an empty event log.
+    #[must_use]
+    pub fn new() -> Self {
+        Self { events: Vec::new() }
+    }
+
+    /// Records a boundary event.
+    pub fn record(&mut self, event: WasmAbiBoundaryEvent) {
+        self.events.push(event);
+    }
+
+    /// Returns all recorded events.
+    #[must_use]
+    pub fn events(&self) -> &[WasmAbiBoundaryEvent] {
+        &self.events
+    }
+
+    /// Drains all events, returning them.
+    pub fn drain(&mut self) -> Vec<WasmAbiBoundaryEvent> {
+        std::mem::take(&mut self.events)
+    }
+
+    /// Number of recorded events.
+    #[must_use]
+    pub fn len(&self) -> usize {
+        self.events.len()
+    }
+
+    /// Whether the log is empty.
+    #[must_use]
+    pub fn is_empty(&self) -> bool {
+        self.events.is_empty()
+    }
+}
+
+/// Export dispatcher implementing the 8-symbol wasm boundary contract.
+///
+/// Owns the handle table, event log, and ABI version state. Each public
+/// method corresponds to one `WasmAbiSymbol` and performs:
+///
+/// 1. ABI compatibility check (if consumer version provided).
+/// 2. Handle validation and state transition.
+/// 3. Boundary event emission.
+/// 4. Result encoding.
+///
+/// # Single-threaded
+///
+/// WASM is single-threaded by spec. This dispatcher is `!Sync` and
+/// must be called from the WASM event loop thread.
+#[derive(Debug)]
+pub struct WasmExportDispatcher {
+    /// Handle table for all boundary-visible entities.
+    handles: WasmHandleTable,
+    /// Boundary event log for observability.
+    event_log: WasmBoundaryEventLog,
+    /// Producer ABI version (this WASM module).
+    producer_version: WasmAbiVersion,
+    /// Abort interop mode for cancel/abort bridging.
+    abort_mode: WasmAbortPropagationMode,
+    /// Total dispatch call counter (monotonic).
+    dispatch_count: u64,
+}
+
+impl Default for WasmExportDispatcher {
+    fn default() -> Self {
+        Self::new()
+    }
+}
+
+impl WasmExportDispatcher {
+    /// Creates a new dispatcher with current ABI version.
+    #[must_use]
+    pub fn new() -> Self {
+        Self {
+            handles: WasmHandleTable::new(),
+            event_log: WasmBoundaryEventLog::new(),
+            producer_version: WasmAbiVersion::CURRENT,
+            abort_mode: WasmAbortPropagationMode::Bidirectional,
+            dispatch_count: 0,
+        }
+    }
+
+    /// Creates a dispatcher with a specific abort propagation mode.
+    #[must_use]
+    pub fn with_abort_mode(mut self, mode: WasmAbortPropagationMode) -> Self {
+        self.abort_mode = mode;
+        self
+    }
+
+    /// Returns a reference to the handle table.
+    #[must_use]
+    pub fn handles(&self) -> &WasmHandleTable {
+        &self.handles
+    }
+
+    /// Returns a mutable reference to the handle table.
+    pub fn handles_mut(&mut self) -> &mut WasmHandleTable {
+        &mut self.handles
+    }
+
+    /// Returns the boundary event log.
+    #[must_use]
+    pub fn event_log(&self) -> &WasmBoundaryEventLog {
+        &self.event_log
+    }
+
+    /// Returns a mutable reference to the event log.
+    pub fn event_log_mut(&mut self) -> &mut WasmBoundaryEventLog {
+        &mut self.event_log
+    }
+
+    /// Total number of dispatch calls processed.
+    #[must_use]
+    pub fn dispatch_count(&self) -> u64 {
+        self.dispatch_count
+    }
+
+    /// Validates ABI compatibility for an incoming call.
+    fn check_compat(
+        &self,
+        consumer: Option<WasmAbiVersion>,
+    ) -> Result<WasmAbiCompatibilityDecision, WasmDispatchError> {
+        let consumer = consumer.unwrap_or(self.producer_version);
+        let decision = classify_wasm_abi_compatibility(self.producer_version, consumer);
+        if decision.is_compatible() {
+            Ok(decision)
+        } else {
+            Err(WasmDispatchError::Incompatible { decision })
+        }
+    }
+
+    /// Emits a boundary event for a symbol invocation.
+    fn emit_event(
+        &mut self,
+        symbol: WasmAbiSymbol,
+        state_from: WasmBoundaryState,
+        state_to: WasmBoundaryState,
+        compatibility: WasmAbiCompatibilityDecision,
+    ) {
+        let sig = WASM_ABI_SIGNATURES_V1
+            .iter()
+            .find(|s| s.symbol == symbol)
+            .expect("symbol not in signature table");
+
+        self.event_log.record(WasmAbiBoundaryEvent {
+            abi_version: self.producer_version,
+            symbol,
+            payload_shape: sig.request,
+            state_from,
+            state_to,
+            compatibility,
+        });
+    }
+
+    // ----- Symbol implementations -----
+
+    /// `RuntimeCreate`: allocates a new runtime handle.
+    ///
+    /// Creates a runtime handle, transitions it to `Bound`, and returns it.
+    /// This is the entry point for JS code initializing the WASM runtime.
+    pub fn runtime_create(
+        &mut self,
+        consumer_version: Option<WasmAbiVersion>,
+    ) -> Result<WasmHandleRef, WasmDispatchError> {
+        self.dispatch_count += 1;
+        let compat = self.check_compat(consumer_version)?;
+        let handle = self.handles.allocate(WasmHandleKind::Runtime);
+        self.handles
+            .transition(&handle, WasmBoundaryState::Bound)
+            .map_err(WasmDispatchError::Handle)?;
+        self.handles
+            .transition(&handle, WasmBoundaryState::Active)
+            .map_err(WasmDispatchError::Handle)?;
+        self.emit_event(
+            WasmAbiSymbol::RuntimeCreate,
+            WasmBoundaryState::Unbound,
+            WasmBoundaryState::Active,
+            compat,
+        );
+        Ok(handle)
+    }
+
+    /// `RuntimeClose`: closes a runtime handle and drains all children.
+    ///
+    /// Transitions the runtime handle through cancelling → draining → closed
+    /// and releases it. Returns an outcome envelope.
+    pub fn runtime_close(
+        &mut self,
+        handle: &WasmHandleRef,
+        consumer_version: Option<WasmAbiVersion>,
+    ) -> Result<WasmAbiOutcomeEnvelope, WasmDispatchError> {
+        self.dispatch_count += 1;
+        let compat = self.check_compat(consumer_version)?;
+        let entry = self
+            .handles
+            .get(handle)
+            .map_err(WasmDispatchError::Handle)?;
+
+        if entry.handle.kind != WasmHandleKind::Runtime {
+            return Err(WasmDispatchError::InvalidState {
+                state: entry.state,
+                symbol: WasmAbiSymbol::RuntimeClose,
+            });
+        }
+        let state_from = entry.state;
+
+        // Drive to Closed via valid transitions
+        let target_states = [
+            WasmBoundaryState::Cancelling,
+            WasmBoundaryState::Draining,
+            WasmBoundaryState::Closed,
+        ];
+        for target in target_states {
+            if is_valid_wasm_boundary_transition(
+                self.handles
+                    .get(handle)
+                    .map_err(WasmDispatchError::Handle)?
+                    .state,
+                target,
+            ) {
+                self.handles
+                    .transition(handle, target)
+                    .map_err(WasmDispatchError::Handle)?;
+            }
+        }
+
+        // Unpin if pinned, then release
+        let entry = self
+            .handles
+            .get(handle)
+            .map_err(WasmDispatchError::Handle)?;
+        if entry.pinned {
+            self.handles
+                .unpin(handle)
+                .map_err(WasmDispatchError::Handle)?;
+        }
+        self.handles
+            .release(handle)
+            .map_err(WasmDispatchError::Handle)?;
+
+        self.emit_event(
+            WasmAbiSymbol::RuntimeClose,
+            state_from,
+            WasmBoundaryState::Closed,
+            compat,
+        );
+
+        Ok(WasmAbiOutcomeEnvelope::Ok {
+            value: WasmAbiValue::Unit,
+        })
+    }
+
+    /// `ScopeEnter`: creates a new scope/region under a parent handle.
+    pub fn scope_enter(
+        &mut self,
+        request: &WasmScopeEnterRequest,
+        consumer_version: Option<WasmAbiVersion>,
+    ) -> Result<WasmHandleRef, WasmDispatchError> {
+        self.dispatch_count += 1;
+        let compat = self.check_compat(consumer_version)?;
+
+        // Validate parent handle exists and is active
+        let parent_entry = self
+            .handles
+            .get(&request.parent)
+            .map_err(WasmDispatchError::Handle)?;
+        if parent_entry.state != WasmBoundaryState::Active {
+            return Err(WasmDispatchError::InvalidState {
+                state: parent_entry.state,
+                symbol: WasmAbiSymbol::ScopeEnter,
+            });
+        }
+
+        let handle = self.handles.allocate(WasmHandleKind::Region);
+        self.handles
+            .transition(&handle, WasmBoundaryState::Bound)
+            .map_err(WasmDispatchError::Handle)?;
+        self.handles
+            .transition(&handle, WasmBoundaryState::Active)
+            .map_err(WasmDispatchError::Handle)?;
+        self.emit_event(
+            WasmAbiSymbol::ScopeEnter,
+            WasmBoundaryState::Unbound,
+            WasmBoundaryState::Active,
+            compat,
+        );
+        Ok(handle)
+    }
+
+    /// `ScopeClose`: closes a scope/region handle.
+    pub fn scope_close(
+        &mut self,
+        handle: &WasmHandleRef,
+        consumer_version: Option<WasmAbiVersion>,
+    ) -> Result<WasmAbiOutcomeEnvelope, WasmDispatchError> {
+        self.dispatch_count += 1;
+        let compat = self.check_compat(consumer_version)?;
+        let entry = self
+            .handles
+            .get(handle)
+            .map_err(WasmDispatchError::Handle)?;
+
+        if entry.handle.kind != WasmHandleKind::Region {
+            return Err(WasmDispatchError::InvalidState {
+                state: entry.state,
+                symbol: WasmAbiSymbol::ScopeClose,
+            });
+        }
+        let state_from = entry.state;
+
+        // Drive to Closed
+        for target in [
+            WasmBoundaryState::Cancelling,
+            WasmBoundaryState::Draining,
+            WasmBoundaryState::Closed,
+        ] {
+            if is_valid_wasm_boundary_transition(
+                self.handles
+                    .get(handle)
+                    .map_err(WasmDispatchError::Handle)?
+                    .state,
+                target,
+            ) {
+                self.handles
+                    .transition(handle, target)
+                    .map_err(WasmDispatchError::Handle)?;
+            }
+        }
+
+        let entry = self
+            .handles
+            .get(handle)
+            .map_err(WasmDispatchError::Handle)?;
+        if entry.pinned {
+            self.handles
+                .unpin(handle)
+                .map_err(WasmDispatchError::Handle)?;
+        }
+        self.handles
+            .release(handle)
+            .map_err(WasmDispatchError::Handle)?;
+
+        self.emit_event(
+            WasmAbiSymbol::ScopeClose,
+            state_from,
+            WasmBoundaryState::Closed,
+            compat,
+        );
+        Ok(WasmAbiOutcomeEnvelope::Ok {
+            value: WasmAbiValue::Unit,
+        })
+    }
+
+    /// `TaskSpawn`: spawns a task within a scope.
+    pub fn task_spawn(
+        &mut self,
+        request: &WasmTaskSpawnRequest,
+        consumer_version: Option<WasmAbiVersion>,
+    ) -> Result<WasmHandleRef, WasmDispatchError> {
+        self.dispatch_count += 1;
+        let compat = self.check_compat(consumer_version)?;
+
+        // Validate scope handle
+        let scope_entry = self
+            .handles
+            .get(&request.scope)
+            .map_err(WasmDispatchError::Handle)?;
+        if scope_entry.state != WasmBoundaryState::Active {
+            return Err(WasmDispatchError::InvalidState {
+                state: scope_entry.state,
+                symbol: WasmAbiSymbol::TaskSpawn,
+            });
+        }
+        if scope_entry.handle.kind != WasmHandleKind::Region
+            && scope_entry.handle.kind != WasmHandleKind::Runtime
+        {
+            return Err(WasmDispatchError::InvalidRequest {
+                reason: format!(
+                    "task_spawn requires Region or Runtime scope, got {:?}",
+                    scope_entry.handle.kind
+                ),
+            });
+        }
+
+        let handle = self.handles.allocate(WasmHandleKind::Task);
+        self.handles
+            .transition(&handle, WasmBoundaryState::Bound)
+            .map_err(WasmDispatchError::Handle)?;
+        self.handles
+            .transition(&handle, WasmBoundaryState::Active)
+            .map_err(WasmDispatchError::Handle)?;
+        // Pin task handles during execution to prevent premature deallocation
+        self.handles
+            .pin(&handle)
+            .map_err(WasmDispatchError::Handle)?;
+        self.emit_event(
+            WasmAbiSymbol::TaskSpawn,
+            WasmBoundaryState::Unbound,
+            WasmBoundaryState::Active,
+            compat,
+        );
+        Ok(handle)
+    }
+
+    /// `TaskJoin`: waits for a task to complete and returns its outcome.
+    pub fn task_join(
+        &mut self,
+        handle: &WasmHandleRef,
+        outcome: WasmAbiOutcomeEnvelope,
+        consumer_version: Option<WasmAbiVersion>,
+    ) -> Result<WasmAbiOutcomeEnvelope, WasmDispatchError> {
+        self.dispatch_count += 1;
+        let compat = self.check_compat(consumer_version)?;
+        let entry = self
+            .handles
+            .get(handle)
+            .map_err(WasmDispatchError::Handle)?;
+
+        if entry.handle.kind != WasmHandleKind::Task {
+            return Err(WasmDispatchError::InvalidState {
+                state: entry.state,
+                symbol: WasmAbiSymbol::TaskJoin,
+            });
+        }
+        let state_from = entry.state;
+
+        // Drive to Closed
+        for target in [WasmBoundaryState::Draining, WasmBoundaryState::Closed] {
+            if is_valid_wasm_boundary_transition(
+                self.handles
+                    .get(handle)
+                    .map_err(WasmDispatchError::Handle)?
+                    .state,
+                target,
+            ) {
+                self.handles
+                    .transition(handle, target)
+                    .map_err(WasmDispatchError::Handle)?;
+            }
+        }
+
+        // Unpin and release
+        if self
+            .handles
+            .get(handle)
+            .map_err(WasmDispatchError::Handle)?
+            .pinned
+        {
+            self.handles
+                .unpin(handle)
+                .map_err(WasmDispatchError::Handle)?;
+        }
+        self.handles
+            .release(handle)
+            .map_err(WasmDispatchError::Handle)?;
+
+        self.emit_event(
+            WasmAbiSymbol::TaskJoin,
+            state_from,
+            WasmBoundaryState::Closed,
+            compat,
+        );
+        Ok(outcome)
+    }
+
+    /// `TaskCancel`: requests cancellation of a task.
+    pub fn task_cancel(
+        &mut self,
+        request: &WasmTaskCancelRequest,
+        consumer_version: Option<WasmAbiVersion>,
+    ) -> Result<WasmAbiOutcomeEnvelope, WasmDispatchError> {
+        self.dispatch_count += 1;
+        let compat = self.check_compat(consumer_version)?;
+        let entry = self
+            .handles
+            .get(&request.task)
+            .map_err(WasmDispatchError::Handle)?;
+
+        if entry.handle.kind != WasmHandleKind::Task {
+            return Err(WasmDispatchError::InvalidState {
+                state: entry.state,
+                symbol: WasmAbiSymbol::TaskCancel,
+            });
+        }
+        let state_from = entry.state;
+
+        // Only active tasks can be cancelled
+        if state_from != WasmBoundaryState::Active {
+            return Err(WasmDispatchError::InvalidState {
+                state: state_from,
+                symbol: WasmAbiSymbol::TaskCancel,
+            });
+        }
+
+        self.handles
+            .transition(&request.task, WasmBoundaryState::Cancelling)
+            .map_err(WasmDispatchError::Handle)?;
+
+        self.emit_event(
+            WasmAbiSymbol::TaskCancel,
+            state_from,
+            WasmBoundaryState::Cancelling,
+            compat,
+        );
+
+        Ok(WasmAbiOutcomeEnvelope::Ok {
+            value: WasmAbiValue::Unit,
+        })
+    }
+
+    /// `FetchRequest`: initiates a fetch operation within a scope.
+    pub fn fetch_request(
+        &mut self,
+        request: &WasmFetchRequest,
+        consumer_version: Option<WasmAbiVersion>,
+    ) -> Result<WasmHandleRef, WasmDispatchError> {
+        self.dispatch_count += 1;
+        let compat = self.check_compat(consumer_version)?;
+
+        // Validate scope handle
+        let scope_entry = self
+            .handles
+            .get(&request.scope)
+            .map_err(WasmDispatchError::Handle)?;
+        if scope_entry.state != WasmBoundaryState::Active {
+            return Err(WasmDispatchError::InvalidState {
+                state: scope_entry.state,
+                symbol: WasmAbiSymbol::FetchRequest,
+            });
+        }
+
+        // Validate URL is non-empty
+        if request.url.is_empty() {
+            return Err(WasmDispatchError::InvalidRequest {
+                reason: "fetch URL must not be empty".to_string(),
+            });
+        }
+
+        let handle = self.handles.allocate(WasmHandleKind::FetchRequest);
+        self.handles
+            .transition(&handle, WasmBoundaryState::Bound)
+            .map_err(WasmDispatchError::Handle)?;
+        self.handles
+            .transition(&handle, WasmBoundaryState::Active)
+            .map_err(WasmDispatchError::Handle)?;
+        self.handles
+            .pin(&handle)
+            .map_err(WasmDispatchError::Handle)?;
+        self.emit_event(
+            WasmAbiSymbol::FetchRequest,
+            WasmBoundaryState::Unbound,
+            WasmBoundaryState::Active,
+            compat,
+        );
+        Ok(handle)
+    }
+
+    /// Completes a fetch handle with an outcome, releasing it.
+    ///
+    /// This is called when the browser fetch resolves/rejects, delivering
+    /// the result back through the boundary.
+    pub fn fetch_complete(
+        &mut self,
+        handle: &WasmHandleRef,
+        outcome: WasmAbiOutcomeEnvelope,
+    ) -> Result<WasmAbiOutcomeEnvelope, WasmDispatchError> {
+        let entry = self
+            .handles
+            .get(handle)
+            .map_err(WasmDispatchError::Handle)?;
+        if entry.handle.kind != WasmHandleKind::FetchRequest {
+            return Err(WasmDispatchError::InvalidState {
+                state: entry.state,
+                symbol: WasmAbiSymbol::FetchRequest,
+            });
+        }
+
+        // Drive to closed
+        for target in [WasmBoundaryState::Draining, WasmBoundaryState::Closed] {
+            if is_valid_wasm_boundary_transition(
+                self.handles
+                    .get(handle)
+                    .map_err(WasmDispatchError::Handle)?
+                    .state,
+                target,
+            ) {
+                self.handles
+                    .transition(handle, target)
+                    .map_err(WasmDispatchError::Handle)?;
+            }
+        }
+
+        if self
+            .handles
+            .get(handle)
+            .map_err(WasmDispatchError::Handle)?
+            .pinned
+        {
+            self.handles
+                .unpin(handle)
+                .map_err(WasmDispatchError::Handle)?;
+        }
+        self.handles
+            .release(handle)
+            .map_err(WasmDispatchError::Handle)?;
+
+        Ok(outcome)
+    }
+
+    /// Applies an abort signal event to a handle, propagating cancellation
+    /// according to the configured abort interop mode.
+    pub fn apply_abort(
+        &mut self,
+        handle: &WasmHandleRef,
+    ) -> Result<WasmAbortInteropUpdate, WasmDispatchError> {
+        let entry = self
+            .handles
+            .get(handle)
+            .map_err(WasmDispatchError::Handle)?;
+        let snapshot = WasmAbortInteropSnapshot {
+            mode: self.abort_mode,
+            boundary_state: entry.state,
+            abort_signal_aborted: false,
+        };
+        let update = apply_abort_signal_event(snapshot);
+
+        // Apply boundary state change if needed
+        if update.next_boundary_state != entry.state {
+            self.handles
+                .transition(handle, update.next_boundary_state)
+                .map_err(WasmDispatchError::Handle)?;
+        }
+
+        Ok(update)
+    }
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
@@ -1778,7 +2556,7 @@ mod tests {
         let mut table = WasmHandleTable::with_capacity(8);
         let h1 = table.allocate(WasmHandleKind::Runtime);
         let h2 = table.allocate(WasmHandleKind::Task);
-        let h3 = table.allocate(WasmHandleKind::Task);
+        let _h3 = table.allocate(WasmHandleKind::Task);
 
         table.transition(&h1, WasmBoundaryState::Bound).unwrap();
         table.transition(&h1, WasmBoundaryState::Active).unwrap();
@@ -1790,7 +2568,7 @@ mod tests {
         assert_eq!(report.by_kind.get("task"), Some(&2));
         assert_eq!(report.by_kind.get("runtime"), Some(&1));
 
-        // h3 is still unbound
+        // _h3 is still unbound
         assert_eq!(report.by_state.get("unbound"), Some(&2));
         assert_eq!(report.by_state.get("active"), Some(&1));
     }
@@ -1892,5 +2670,763 @@ mod tests {
         let table = WasmHandleTable::with_capacity(16);
         assert_eq!(table.live_count(), 0);
         assert_eq!(table.capacity(), 0); // No actual slots until allocated
+    }
+
+    // -----------------------------------------------------------------------
+    // Export Dispatcher Conformance Tests
+    // -----------------------------------------------------------------------
+
+    #[test]
+    fn dispatcher_runtime_create_and_close_lifecycle() {
+        let mut d = WasmExportDispatcher::new();
+        assert_eq!(d.dispatch_count(), 0);
+
+        let rt = d.runtime_create(None).unwrap();
+        assert_eq!(rt.kind, WasmHandleKind::Runtime);
+        assert_eq!(d.dispatch_count(), 1);
+        assert_eq!(d.handles().live_count(), 1);
+
+        let outcome = d.runtime_close(&rt, None).unwrap();
+        assert!(matches!(outcome, WasmAbiOutcomeEnvelope::Ok { .. }));
+        assert_eq!(d.dispatch_count(), 2);
+        assert_eq!(d.handles().live_count(), 0);
+    }
+
+    #[test]
+    fn dispatcher_scope_enter_and_close() {
+        let mut d = WasmExportDispatcher::new();
+        let rt = d.runtime_create(None).unwrap();
+
+        let scope = d
+            .scope_enter(
+                &WasmScopeEnterRequest {
+                    parent: rt,
+                    label: Some("test-scope".to_string()),
+                },
+                None,
+            )
+            .unwrap();
+        assert_eq!(scope.kind, WasmHandleKind::Region);
+        assert_eq!(d.handles().live_count(), 2);
+
+        let outcome = d.scope_close(&scope, None).unwrap();
+        assert!(matches!(outcome, WasmAbiOutcomeEnvelope::Ok { .. }));
+        assert_eq!(d.handles().live_count(), 1); // runtime still alive
+
+        d.runtime_close(&rt, None).unwrap();
+        assert_eq!(d.handles().live_count(), 0);
+    }
+
+    #[test]
+    fn dispatcher_task_spawn_join_lifecycle() {
+        let mut d = WasmExportDispatcher::new();
+        let rt = d.runtime_create(None).unwrap();
+        let scope = d
+            .scope_enter(
+                &WasmScopeEnterRequest {
+                    parent: rt,
+                    label: None,
+                },
+                None,
+            )
+            .unwrap();
+
+        let task = d
+            .task_spawn(
+                &WasmTaskSpawnRequest {
+                    scope,
+                    label: Some("worker".to_string()),
+                    cancel_kind: None,
+                },
+                None,
+            )
+            .unwrap();
+        assert_eq!(task.kind, WasmHandleKind::Task);
+        assert!(d.handles().get(&task).unwrap().pinned); // tasks are auto-pinned
+
+        let result = d
+            .task_join(
+                &task,
+                WasmAbiOutcomeEnvelope::Ok {
+                    value: WasmAbiValue::I64(42),
+                },
+                None,
+            )
+            .unwrap();
+        assert!(matches!(
+            result,
+            WasmAbiOutcomeEnvelope::Ok {
+                value: WasmAbiValue::I64(42)
+            }
+        ));
+
+        d.scope_close(&scope, None).unwrap();
+        d.runtime_close(&rt, None).unwrap();
+        assert_eq!(d.handles().live_count(), 0);
+    }
+
+    #[test]
+    fn dispatcher_task_cancel_flow() {
+        let mut d = WasmExportDispatcher::new();
+        let rt = d.runtime_create(None).unwrap();
+
+        let task = d
+            .task_spawn(
+                &WasmTaskSpawnRequest {
+                    scope: rt,
+                    label: None,
+                    cancel_kind: None,
+                },
+                None,
+            )
+            .unwrap();
+
+        // Cancel the active task
+        let cancel_result = d
+            .task_cancel(
+                &WasmTaskCancelRequest {
+                    task,
+                    kind: "user".to_string(),
+                    message: Some("user requested".to_string()),
+                },
+                None,
+            )
+            .unwrap();
+        assert!(matches!(cancel_result, WasmAbiOutcomeEnvelope::Ok { .. }));
+
+        // Task is now Cancelling
+        assert_eq!(
+            d.handles().get(&task).unwrap().state,
+            WasmBoundaryState::Cancelling
+        );
+
+        // Join with cancelled outcome
+        let join_result = d
+            .task_join(
+                &task,
+                WasmAbiOutcomeEnvelope::Cancelled {
+                    cancellation: WasmAbiCancellation {
+                        kind: "user".to_string(),
+                        phase: "completed".to_string(),
+                        origin_region: "R0".to_string(),
+                        origin_task: None,
+                        timestamp_nanos: 0,
+                        message: Some("user requested".to_string()),
+                        truncated: false,
+                    },
+                },
+                None,
+            )
+            .unwrap();
+        assert!(matches!(
+            join_result,
+            WasmAbiOutcomeEnvelope::Cancelled { .. }
+        ));
+        assert_eq!(d.handles().live_count(), 1); // only runtime left
+
+        d.runtime_close(&rt, None).unwrap();
+    }
+
+    #[test]
+    fn dispatcher_abi_incompatible_rejected() {
+        let mut d = WasmExportDispatcher::new();
+        let bad_version = WasmAbiVersion {
+            major: 99,
+            minor: 0,
+        };
+
+        let err = d.runtime_create(Some(bad_version)).unwrap_err();
+        assert!(matches!(err, WasmDispatchError::Incompatible { .. }));
+
+        // Error converts to proper failure envelope
+        let failure = err.to_failure();
+        assert_eq!(failure.code, WasmAbiErrorCode::CompatibilityRejected);
+        assert_eq!(failure.recoverability, WasmAbiRecoverability::Permanent);
+    }
+
+    #[test]
+    fn dispatcher_stale_handle_rejected() {
+        let mut d = WasmExportDispatcher::new();
+        let rt = d.runtime_create(None).unwrap();
+        d.runtime_close(&rt, None).unwrap();
+
+        // Try to close again — handle is stale
+        let err = d.runtime_close(&rt, None).unwrap_err();
+        assert!(matches!(err, WasmDispatchError::Handle(_)));
+    }
+
+    #[test]
+    fn dispatcher_scope_enter_requires_active_parent() {
+        let mut d = WasmExportDispatcher::new();
+        let rt = d.runtime_create(None).unwrap();
+        d.runtime_close(&rt, None).unwrap();
+
+        // Try to enter scope on closed runtime — stale handle
+        let err = d
+            .scope_enter(
+                &WasmScopeEnterRequest {
+                    parent: rt,
+                    label: None,
+                },
+                None,
+            )
+            .unwrap_err();
+        assert!(matches!(err, WasmDispatchError::Handle(_)));
+    }
+
+    #[test]
+    fn dispatcher_task_spawn_wrong_handle_kind_rejected() {
+        let mut d = WasmExportDispatcher::new();
+        let rt = d.runtime_create(None).unwrap();
+
+        // Spawn a task
+        let task = d
+            .task_spawn(
+                &WasmTaskSpawnRequest {
+                    scope: rt,
+                    label: None,
+                    cancel_kind: None,
+                },
+                None,
+            )
+            .unwrap();
+
+        // Try to spawn under a Task handle (not Region/Runtime)
+        let err = d
+            .task_spawn(
+                &WasmTaskSpawnRequest {
+                    scope: task,
+                    label: None,
+                    cancel_kind: None,
+                },
+                None,
+            )
+            .unwrap_err();
+        assert!(matches!(err, WasmDispatchError::InvalidRequest { .. }));
+    }
+
+    #[test]
+    fn dispatcher_cancel_non_active_task_rejected() {
+        let mut d = WasmExportDispatcher::new();
+        let rt = d.runtime_create(None).unwrap();
+
+        let task = d
+            .task_spawn(
+                &WasmTaskSpawnRequest {
+                    scope: rt,
+                    label: None,
+                    cancel_kind: None,
+                },
+                None,
+            )
+            .unwrap();
+
+        // Cancel once (should succeed)
+        d.task_cancel(
+            &WasmTaskCancelRequest {
+                task,
+                kind: "user".to_string(),
+                message: None,
+            },
+            None,
+        )
+        .unwrap();
+
+        // Cancel again — task is now Cancelling, not Active
+        let err = d
+            .task_cancel(
+                &WasmTaskCancelRequest {
+                    task,
+                    kind: "user".to_string(),
+                    message: None,
+                },
+                None,
+            )
+            .unwrap_err();
+        assert!(matches!(err, WasmDispatchError::InvalidState { .. }));
+    }
+
+    #[test]
+    fn dispatcher_fetch_request_and_complete() {
+        let mut d = WasmExportDispatcher::new();
+        let rt = d.runtime_create(None).unwrap();
+        let scope = d
+            .scope_enter(
+                &WasmScopeEnterRequest {
+                    parent: rt,
+                    label: None,
+                },
+                None,
+            )
+            .unwrap();
+
+        let fetch = d
+            .fetch_request(
+                &WasmFetchRequest {
+                    scope,
+                    url: "https://example.com/api".to_string(),
+                    method: "GET".to_string(),
+                    body: None,
+                },
+                None,
+            )
+            .unwrap();
+        assert_eq!(fetch.kind, WasmHandleKind::FetchRequest);
+        assert!(d.handles().get(&fetch).unwrap().pinned);
+
+        let result = d
+            .fetch_complete(
+                &fetch,
+                WasmAbiOutcomeEnvelope::Ok {
+                    value: WasmAbiValue::String("response body".to_string()),
+                },
+            )
+            .unwrap();
+        assert!(matches!(result, WasmAbiOutcomeEnvelope::Ok { .. }));
+        // Fetch handle released after completion
+        assert!(d.handles().get(&fetch).is_err());
+    }
+
+    #[test]
+    fn dispatcher_fetch_empty_url_rejected() {
+        let mut d = WasmExportDispatcher::new();
+        let rt = d.runtime_create(None).unwrap();
+
+        let err = d
+            .fetch_request(
+                &WasmFetchRequest {
+                    scope: rt,
+                    url: String::new(),
+                    method: "GET".to_string(),
+                    body: None,
+                },
+                None,
+            )
+            .unwrap_err();
+        assert!(matches!(err, WasmDispatchError::InvalidRequest { .. }));
+    }
+
+    #[test]
+    fn dispatcher_event_log_records_all_symbol_calls() {
+        let mut d = WasmExportDispatcher::new();
+
+        let rt = d.runtime_create(None).unwrap();
+        let scope = d
+            .scope_enter(
+                &WasmScopeEnterRequest {
+                    parent: rt,
+                    label: None,
+                },
+                None,
+            )
+            .unwrap();
+        let task = d
+            .task_spawn(
+                &WasmTaskSpawnRequest {
+                    scope,
+                    label: None,
+                    cancel_kind: None,
+                },
+                None,
+            )
+            .unwrap();
+        d.task_cancel(
+            &WasmTaskCancelRequest {
+                task,
+                kind: "timeout".to_string(),
+                message: None,
+            },
+            None,
+        )
+        .unwrap();
+        d.task_join(
+            &task,
+            WasmAbiOutcomeEnvelope::Ok {
+                value: WasmAbiValue::Unit,
+            },
+            None,
+        )
+        .unwrap();
+        d.scope_close(&scope, None).unwrap();
+        d.runtime_close(&rt, None).unwrap();
+
+        let events = d.event_log().events();
+        assert_eq!(events.len(), 7);
+        assert_eq!(events[0].symbol, WasmAbiSymbol::RuntimeCreate);
+        assert_eq!(events[1].symbol, WasmAbiSymbol::ScopeEnter);
+        assert_eq!(events[2].symbol, WasmAbiSymbol::TaskSpawn);
+        assert_eq!(events[3].symbol, WasmAbiSymbol::TaskCancel);
+        assert_eq!(events[4].symbol, WasmAbiSymbol::TaskJoin);
+        assert_eq!(events[5].symbol, WasmAbiSymbol::ScopeClose);
+        assert_eq!(events[6].symbol, WasmAbiSymbol::RuntimeClose);
+    }
+
+    #[test]
+    fn dispatcher_event_log_drain_clears() {
+        let mut d = WasmExportDispatcher::new();
+        d.runtime_create(None).unwrap();
+
+        assert_eq!(d.event_log().len(), 1);
+        let drained = d.event_log_mut().drain();
+        assert_eq!(drained.len(), 1);
+        assert!(d.event_log().is_empty());
+    }
+
+    #[test]
+    fn dispatcher_dispatch_count_increments_on_errors() {
+        let mut d = WasmExportDispatcher::new();
+
+        // Failing call still increments dispatch count
+        let _ = d.runtime_create(Some(WasmAbiVersion {
+            major: 99,
+            minor: 0,
+        }));
+        assert_eq!(d.dispatch_count(), 1);
+    }
+
+    #[test]
+    fn dispatcher_abort_signal_propagation() {
+        let mut d =
+            WasmExportDispatcher::new().with_abort_mode(WasmAbortPropagationMode::Bidirectional);
+        let rt = d.runtime_create(None).unwrap();
+
+        let task = d
+            .task_spawn(
+                &WasmTaskSpawnRequest {
+                    scope: rt,
+                    label: None,
+                    cancel_kind: None,
+                },
+                None,
+            )
+            .unwrap();
+
+        // Apply abort signal
+        let update = d.apply_abort(&task).unwrap();
+        assert!(update.propagated_to_runtime);
+        assert_eq!(
+            d.handles().get(&task).unwrap().state,
+            WasmBoundaryState::Cancelling
+        );
+    }
+
+    #[test]
+    fn dispatcher_full_multi_task_lifecycle() {
+        let mut d = WasmExportDispatcher::new();
+        let rt = d.runtime_create(None).unwrap();
+        let scope = d
+            .scope_enter(
+                &WasmScopeEnterRequest {
+                    parent: rt,
+                    label: Some("multi-task".to_string()),
+                },
+                None,
+            )
+            .unwrap();
+
+        // Spawn multiple tasks
+        let t1 = d
+            .task_spawn(
+                &WasmTaskSpawnRequest {
+                    scope,
+                    label: Some("t1".to_string()),
+                    cancel_kind: None,
+                },
+                None,
+            )
+            .unwrap();
+        let t2 = d
+            .task_spawn(
+                &WasmTaskSpawnRequest {
+                    scope,
+                    label: Some("t2".to_string()),
+                    cancel_kind: None,
+                },
+                None,
+            )
+            .unwrap();
+        let t3 = d
+            .task_spawn(
+                &WasmTaskSpawnRequest {
+                    scope,
+                    label: Some("t3".to_string()),
+                    cancel_kind: None,
+                },
+                None,
+            )
+            .unwrap();
+
+        assert_eq!(d.handles().live_count(), 5); // rt + scope + 3 tasks
+
+        // Complete t1, cancel t2, join t3
+        d.task_join(
+            &t1,
+            WasmAbiOutcomeEnvelope::Ok {
+                value: WasmAbiValue::I64(1),
+            },
+            None,
+        )
+        .unwrap();
+        d.task_cancel(
+            &WasmTaskCancelRequest {
+                task: t2,
+                kind: "race_lost".to_string(),
+                message: None,
+            },
+            None,
+        )
+        .unwrap();
+        d.task_join(
+            &t2,
+            WasmAbiOutcomeEnvelope::Ok {
+                value: WasmAbiValue::Unit,
+            },
+            None,
+        )
+        .unwrap();
+        d.task_join(
+            &t3,
+            WasmAbiOutcomeEnvelope::Err {
+                failure: WasmAbiFailure {
+                    code: WasmAbiErrorCode::InternalFailure,
+                    recoverability: WasmAbiRecoverability::Transient,
+                    message: "transient failure".to_string(),
+                },
+            },
+            None,
+        )
+        .unwrap();
+
+        assert_eq!(d.handles().live_count(), 2); // rt + scope
+
+        d.scope_close(&scope, None).unwrap();
+        d.runtime_close(&rt, None).unwrap();
+        assert_eq!(d.handles().live_count(), 0);
+        assert!(d.handles().detect_leaks().is_empty());
+    }
+
+    #[test]
+    fn dispatcher_high_frequency_invocation_stress() {
+        let mut d = WasmExportDispatcher::new();
+        let rt = d.runtime_create(None).unwrap();
+
+        // Rapid-fire 100 task spawn/join cycles
+        for i in 0u64..100 {
+            let task = d
+                .task_spawn(
+                    &WasmTaskSpawnRequest {
+                        scope: rt,
+                        label: Some(format!("task-{i}")),
+                        cancel_kind: None,
+                    },
+                    None,
+                )
+                .unwrap();
+            d.task_join(
+                &task,
+                WasmAbiOutcomeEnvelope::Ok {
+                    value: WasmAbiValue::U64(i),
+                },
+                None,
+            )
+            .unwrap();
+        }
+
+        assert_eq!(d.dispatch_count(), 201); // 1 create + 100 spawns + 100 joins
+        assert_eq!(d.handles().live_count(), 1); // only runtime
+        assert!(d.handles().detect_leaks().is_empty());
+
+        // Verify slot recycling worked — capacity should be much less than 100
+        let report = d.handles().memory_report();
+        assert!(report.capacity <= 100);
+
+        d.runtime_close(&rt, None).unwrap();
+    }
+
+    #[test]
+    fn dispatcher_error_to_outcome_envelope_conversion() {
+        let errors = [
+            WasmDispatchError::Incompatible {
+                decision: WasmAbiCompatibilityDecision::MajorMismatch {
+                    producer_major: 1,
+                    consumer_major: 2,
+                },
+            },
+            WasmDispatchError::Handle(WasmHandleError::SlotOutOfRange {
+                slot: 5,
+                table_size: 3,
+            }),
+            WasmDispatchError::InvalidState {
+                state: WasmBoundaryState::Closed,
+                symbol: WasmAbiSymbol::TaskSpawn,
+            },
+            WasmDispatchError::InvalidRequest {
+                reason: "bad payload".to_string(),
+            },
+        ];
+
+        let expected_codes = [
+            WasmAbiErrorCode::CompatibilityRejected,
+            WasmAbiErrorCode::InvalidHandle,
+            WasmAbiErrorCode::InvalidHandle,
+            WasmAbiErrorCode::DecodeFailure,
+        ];
+
+        for (err, expected_code) in errors.iter().zip(expected_codes.iter()) {
+            let outcome = err.to_outcome();
+            match outcome {
+                WasmAbiOutcomeEnvelope::Err { failure } => {
+                    assert_eq!(failure.code, *expected_code);
+                    assert_eq!(failure.recoverability, WasmAbiRecoverability::Permanent);
+                    assert!(!failure.message.is_empty());
+                }
+                _ => panic!("expected Err outcome"),
+            }
+        }
+    }
+
+    #[test]
+    fn dispatcher_backward_compatible_version_accepted() {
+        let mut d = WasmExportDispatcher::new();
+        // Consumer with higher minor version (backward compatible)
+        let compat_version = WasmAbiVersion {
+            major: WASM_ABI_MAJOR_VERSION,
+            minor: WASM_ABI_MINOR_VERSION + 5,
+        };
+
+        let rt = d.runtime_create(Some(compat_version)).unwrap();
+        assert_eq!(rt.kind, WasmHandleKind::Runtime);
+
+        // Check that the event recorded the compatibility decision
+        let event = &d.event_log().events()[0];
+        assert!(matches!(
+            event.compatibility,
+            WasmAbiCompatibilityDecision::BackwardCompatible { .. }
+        ));
+    }
+
+    #[test]
+    fn dispatcher_request_payload_serialization_round_trip() {
+        let scope_req = WasmScopeEnterRequest {
+            parent: WasmHandleRef {
+                kind: WasmHandleKind::Runtime,
+                slot: 0,
+                generation: 0,
+            },
+            label: Some("test".to_string()),
+        };
+        let json = serde_json::to_string(&scope_req).unwrap();
+        let back: WasmScopeEnterRequest = serde_json::from_str(&json).unwrap();
+        assert_eq!(scope_req, back);
+
+        let spawn_req = WasmTaskSpawnRequest {
+            scope: WasmHandleRef {
+                kind: WasmHandleKind::Region,
+                slot: 1,
+                generation: 0,
+            },
+            label: Some("worker".to_string()),
+            cancel_kind: Some("timeout".to_string()),
+        };
+        let json = serde_json::to_string(&spawn_req).unwrap();
+        let back: WasmTaskSpawnRequest = serde_json::from_str(&json).unwrap();
+        assert_eq!(spawn_req, back);
+
+        let cancel_req = WasmTaskCancelRequest {
+            task: WasmHandleRef {
+                kind: WasmHandleKind::Task,
+                slot: 2,
+                generation: 0,
+            },
+            kind: "user".to_string(),
+            message: Some("cancelled by operator".to_string()),
+        };
+        let json = serde_json::to_string(&cancel_req).unwrap();
+        let back: WasmTaskCancelRequest = serde_json::from_str(&json).unwrap();
+        assert_eq!(cancel_req, back);
+
+        let fetch_req = WasmFetchRequest {
+            scope: WasmHandleRef {
+                kind: WasmHandleKind::Region,
+                slot: 1,
+                generation: 0,
+            },
+            url: "https://example.com".to_string(),
+            method: "POST".to_string(),
+            body: Some(vec![1, 2, 3]),
+        };
+        let json = serde_json::to_string(&fetch_req).unwrap();
+        let back: WasmFetchRequest = serde_json::from_str(&json).unwrap();
+        assert_eq!(fetch_req, back);
+    }
+
+    #[test]
+    fn dispatcher_nested_scopes_lifecycle() {
+        let mut d = WasmExportDispatcher::new();
+        let rt = d.runtime_create(None).unwrap();
+
+        let s1 = d
+            .scope_enter(
+                &WasmScopeEnterRequest {
+                    parent: rt,
+                    label: Some("outer".to_string()),
+                },
+                None,
+            )
+            .unwrap();
+        let s2 = d
+            .scope_enter(
+                &WasmScopeEnterRequest {
+                    parent: s1,
+                    label: Some("inner".to_string()),
+                },
+                None,
+            )
+            .unwrap();
+
+        assert_eq!(d.handles().live_count(), 3); // rt + s1 + s2
+
+        // Close inner first, then outer (structured concurrency order)
+        d.scope_close(&s2, None).unwrap();
+        assert_eq!(d.handles().live_count(), 2);
+
+        d.scope_close(&s1, None).unwrap();
+        assert_eq!(d.handles().live_count(), 1);
+
+        d.runtime_close(&rt, None).unwrap();
+        assert_eq!(d.handles().live_count(), 0);
+    }
+
+    #[test]
+    fn dispatcher_panicked_outcome_passes_through() {
+        let mut d = WasmExportDispatcher::new();
+        let rt = d.runtime_create(None).unwrap();
+
+        let task = d
+            .task_spawn(
+                &WasmTaskSpawnRequest {
+                    scope: rt,
+                    label: None,
+                    cancel_kind: None,
+                },
+                None,
+            )
+            .unwrap();
+
+        let result = d
+            .task_join(
+                &task,
+                WasmAbiOutcomeEnvelope::Panicked {
+                    message: "boundary panic in task".to_string(),
+                },
+                None,
+            )
+            .unwrap();
+        assert_eq!(
+            result,
+            WasmAbiOutcomeEnvelope::Panicked {
+                message: "boundary panic in task".to_string(),
+            }
+        );
     }
 }
