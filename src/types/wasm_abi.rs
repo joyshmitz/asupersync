@@ -1999,6 +1999,354 @@ impl WasmExportDispatcher {
     }
 }
 
+// ---------------------------------------------------------------------------
+// High-Level Ergonomic API Facade
+// ---------------------------------------------------------------------------
+//
+// These types reduce ceremony for common WASM boundary patterns while
+// keeping lifecycle, cancellation, and ownership semantics fully explicit.
+//
+// Design principle: **thin wrappers, not hidden behavior**. Every facade
+// method documents which lifecycle transitions it performs. The caller
+// always sees state changes through return values.
+
+/// Builder for `WasmScopeEnterRequest` — reduces boilerplate for scope creation.
+///
+/// ```ignore
+/// let req = WasmScopeEnterBuilder::new(runtime_handle)
+///     .label("data-fetch")
+///     .build();
+/// ```
+#[derive(Debug, Clone)]
+pub struct WasmScopeEnterBuilder {
+    parent: WasmHandleRef,
+    label: Option<String>,
+}
+
+impl WasmScopeEnterBuilder {
+    /// Start building a scope enter request.
+    #[must_use]
+    pub fn new(parent: WasmHandleRef) -> Self {
+        Self {
+            parent,
+            label: None,
+        }
+    }
+
+    /// Set a diagnostic label for the scope.
+    #[must_use]
+    pub fn label(mut self, label: impl Into<String>) -> Self {
+        self.label = Some(label.into());
+        self
+    }
+
+    /// Build the request.
+    #[must_use]
+    pub fn build(self) -> WasmScopeEnterRequest {
+        WasmScopeEnterRequest {
+            parent: self.parent,
+            label: self.label,
+        }
+    }
+}
+
+/// Builder for `WasmTaskSpawnRequest` — reduces boilerplate for task spawning.
+///
+/// ```ignore
+/// let req = WasmTaskSpawnBuilder::new(scope_handle)
+///     .label("background-sync")
+///     .cancel_kind("timeout")
+///     .build();
+/// ```
+#[derive(Debug, Clone)]
+pub struct WasmTaskSpawnBuilder {
+    scope: WasmHandleRef,
+    label: Option<String>,
+    cancel_kind: Option<String>,
+}
+
+impl WasmTaskSpawnBuilder {
+    /// Start building a task spawn request.
+    #[must_use]
+    pub fn new(scope: WasmHandleRef) -> Self {
+        Self {
+            scope,
+            label: None,
+            cancel_kind: None,
+        }
+    }
+
+    /// Set a diagnostic label for the task.
+    #[must_use]
+    pub fn label(mut self, label: impl Into<String>) -> Self {
+        self.label = Some(label.into());
+        self
+    }
+
+    /// Set the cancel kind to associate with the task.
+    #[must_use]
+    pub fn cancel_kind(mut self, kind: impl Into<String>) -> Self {
+        self.cancel_kind = Some(kind.into());
+        self
+    }
+
+    /// Build the request.
+    #[must_use]
+    pub fn build(self) -> WasmTaskSpawnRequest {
+        WasmTaskSpawnRequest {
+            scope: self.scope,
+            label: self.label,
+            cancel_kind: self.cancel_kind,
+        }
+    }
+}
+
+/// Builder for `WasmFetchRequest` — reduces boilerplate for fetch operations.
+///
+/// ```ignore
+/// let req = WasmFetchBuilder::new(scope, "https://api.example.com/data")
+///     .method("POST")
+///     .body(payload_bytes)
+///     .build();
+/// ```
+#[derive(Debug, Clone)]
+pub struct WasmFetchBuilder {
+    scope: WasmHandleRef,
+    url: String,
+    method: String,
+    body: Option<Vec<u8>>,
+}
+
+impl WasmFetchBuilder {
+    /// Start building a fetch request (defaults to GET).
+    #[must_use]
+    pub fn new(scope: WasmHandleRef, url: impl Into<String>) -> Self {
+        Self {
+            scope,
+            url: url.into(),
+            method: "GET".to_string(),
+            body: None,
+        }
+    }
+
+    /// Set the HTTP method.
+    #[must_use]
+    pub fn method(mut self, method: impl Into<String>) -> Self {
+        self.method = method.into();
+        self
+    }
+
+    /// Set the request body.
+    #[must_use]
+    pub fn body(mut self, body: Vec<u8>) -> Self {
+        self.body = Some(body);
+        self
+    }
+
+    /// Build the request.
+    #[must_use]
+    pub fn build(self) -> WasmFetchRequest {
+        WasmFetchRequest {
+            scope: self.scope,
+            url: self.url,
+            method: self.method,
+            body: self.body,
+        }
+    }
+}
+
+/// Extension trait for inspecting `WasmAbiOutcomeEnvelope` values.
+///
+/// Provides pattern-match helpers so callers don't need to destructure
+/// the tagged enum for common checks.
+pub trait WasmOutcomeExt {
+    /// Returns `true` if the outcome is `Ok`.
+    fn is_ok(&self) -> bool;
+    /// Returns `true` if the outcome is an error.
+    fn is_err(&self) -> bool;
+    /// Returns `true` if the outcome is a cancellation.
+    fn is_cancelled(&self) -> bool;
+    /// Returns `true` if the outcome is a panic.
+    fn is_panicked(&self) -> bool;
+
+    /// Extracts the `Ok` value, if present.
+    fn ok_value(&self) -> Option<&WasmAbiValue>;
+    /// Extracts the error failure, if present.
+    fn err_failure(&self) -> Option<&WasmAbiFailure>;
+    /// Extracts the cancellation payload, if present.
+    fn cancellation(&self) -> Option<&WasmAbiCancellation>;
+
+    /// Returns the stable outcome kind name for structured logging.
+    fn outcome_kind(&self) -> &'static str;
+}
+
+impl WasmOutcomeExt for WasmAbiOutcomeEnvelope {
+    fn is_ok(&self) -> bool {
+        matches!(self, Self::Ok { .. })
+    }
+
+    fn is_err(&self) -> bool {
+        matches!(self, Self::Err { .. })
+    }
+
+    fn is_cancelled(&self) -> bool {
+        matches!(self, Self::Cancelled { .. })
+    }
+
+    fn is_panicked(&self) -> bool {
+        matches!(self, Self::Panicked { .. })
+    }
+
+    fn ok_value(&self) -> Option<&WasmAbiValue> {
+        match self {
+            Self::Ok { value } => Some(value),
+            _ => None,
+        }
+    }
+
+    fn err_failure(&self) -> Option<&WasmAbiFailure> {
+        match self {
+            Self::Err { failure } => Some(failure),
+            _ => None,
+        }
+    }
+
+    fn cancellation(&self) -> Option<&WasmAbiCancellation> {
+        match self {
+            Self::Cancelled { cancellation } => Some(cancellation),
+            _ => None,
+        }
+    }
+
+    fn outcome_kind(&self) -> &'static str {
+        match self {
+            Self::Ok { .. } => "ok",
+            Self::Err { .. } => "err",
+            Self::Cancelled { .. } => "cancelled",
+            Self::Panicked { .. } => "panicked",
+        }
+    }
+}
+
+/// Convenience methods on `WasmExportDispatcher` for common patterns.
+///
+/// These methods compose multiple dispatch calls into single operations.
+/// Each method documents the lifecycle transitions it performs so the
+/// caller retains full visibility into state changes.
+impl WasmExportDispatcher {
+    /// Creates a runtime and scope in one call.
+    ///
+    /// Lifecycle: allocates runtime (→ Active), allocates scope (→ Active).
+    /// Returns both handles. Caller is responsible for closing scope then runtime.
+    pub fn create_scoped_runtime(
+        &mut self,
+        scope_label: Option<&str>,
+        consumer_version: Option<WasmAbiVersion>,
+    ) -> Result<(WasmHandleRef, WasmHandleRef), WasmDispatchError> {
+        let runtime = self.runtime_create(consumer_version)?;
+        let scope = self.scope_enter(
+            &WasmScopeEnterBuilder::new(runtime)
+                .label(scope_label.unwrap_or("root"))
+                .build(),
+            consumer_version,
+        )?;
+        Ok((runtime, scope))
+    }
+
+    /// Spawns a task using the builder pattern.
+    ///
+    /// Lifecycle: allocates task (→ Active, pinned).
+    pub fn spawn(
+        &mut self,
+        request: WasmTaskSpawnBuilder,
+        consumer_version: Option<WasmAbiVersion>,
+    ) -> Result<WasmHandleRef, WasmDispatchError> {
+        self.task_spawn(&request.build(), consumer_version)
+    }
+
+    /// Spawns a task and immediately provides its outcome (for sync-like patterns).
+    ///
+    /// Lifecycle: allocates task (→ Active, pinned), then joins (→ Closed, released).
+    /// Returns the outcome envelope.
+    pub fn spawn_and_join(
+        &mut self,
+        scope: WasmHandleRef,
+        label: Option<&str>,
+        outcome: WasmAbiOutcomeEnvelope,
+        consumer_version: Option<WasmAbiVersion>,
+    ) -> Result<WasmAbiOutcomeEnvelope, WasmDispatchError> {
+        let mut builder = WasmTaskSpawnBuilder::new(scope);
+        if let Some(l) = label {
+            builder = builder.label(l);
+        }
+        let task = self.task_spawn(&builder.build(), consumer_version)?;
+        self.task_join(&task, outcome, consumer_version)
+    }
+
+    /// Closes a scope and runtime in order (structured teardown).
+    ///
+    /// Lifecycle: scope (→ Closed, released), runtime (→ Closed, released).
+    /// Returns the runtime close outcome.
+    pub fn close_scoped_runtime(
+        &mut self,
+        scope: &WasmHandleRef,
+        runtime: &WasmHandleRef,
+        consumer_version: Option<WasmAbiVersion>,
+    ) -> Result<WasmAbiOutcomeEnvelope, WasmDispatchError> {
+        self.scope_close(scope, consumer_version)?;
+        self.runtime_close(runtime, consumer_version)
+    }
+
+    /// Returns a diagnostic snapshot of the current dispatcher state.
+    #[must_use]
+    pub fn diagnostic_snapshot(&self) -> WasmDispatcherDiagnostics {
+        WasmDispatcherDiagnostics {
+            dispatch_count: self.dispatch_count,
+            memory_report: self.handles.memory_report(),
+            event_count: self.event_log.len(),
+            leaks: self.handles.detect_leaks(),
+            producer_version: self.producer_version,
+        }
+    }
+}
+
+/// Diagnostic snapshot of dispatcher state for observability and leak detection.
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+pub struct WasmDispatcherDiagnostics {
+    /// Total dispatch calls processed.
+    pub dispatch_count: u64,
+    /// Handle table memory report.
+    pub memory_report: WasmMemoryReport,
+    /// Number of boundary events recorded.
+    pub event_count: usize,
+    /// Handles that appear leaked (Closed but not released).
+    pub leaks: Vec<WasmHandleRef>,
+    /// Producer ABI version.
+    pub producer_version: WasmAbiVersion,
+}
+
+impl WasmDispatcherDiagnostics {
+    /// Returns `true` if there are no leaks and no live handles.
+    #[must_use]
+    pub fn is_clean(&self) -> bool {
+        self.leaks.is_empty() && self.memory_report.live_handles == 0
+    }
+
+    /// Converts diagnostics to stable key/value fields for structured logging.
+    #[must_use]
+    pub fn as_log_fields(&self) -> BTreeMap<&'static str, String> {
+        let mut fields = BTreeMap::new();
+        fields.insert("dispatch_count", self.dispatch_count.to_string());
+        fields.insert("live_handles", self.memory_report.live_handles.to_string());
+        fields.insert("pinned_count", self.memory_report.pinned_count.to_string());
+        fields.insert("event_count", self.event_count.to_string());
+        fields.insert("leak_count", self.leaks.len().to_string());
+        fields.insert("abi_version", self.producer_version.to_string());
+        fields.insert("clean", self.is_clean().to_string());
+        fields
+    }
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
@@ -3428,5 +3776,309 @@ mod tests {
                 message: "boundary panic in task".to_string(),
             }
         );
+    }
+
+    // -----------------------------------------------------------------------
+    // Ergonomic API Facade Tests
+    // -----------------------------------------------------------------------
+
+    #[test]
+    fn scope_enter_builder_produces_correct_request() {
+        let parent = WasmHandleRef {
+            kind: WasmHandleKind::Runtime,
+            slot: 0,
+            generation: 0,
+        };
+
+        // With label
+        let req = WasmScopeEnterBuilder::new(parent).label("test").build();
+        assert_eq!(req.parent, parent);
+        assert_eq!(req.label, Some("test".to_string()));
+
+        // Without label
+        let req = WasmScopeEnterBuilder::new(parent).build();
+        assert_eq!(req.label, None);
+    }
+
+    #[test]
+    fn task_spawn_builder_produces_correct_request() {
+        let scope = WasmHandleRef {
+            kind: WasmHandleKind::Region,
+            slot: 1,
+            generation: 0,
+        };
+
+        let req = WasmTaskSpawnBuilder::new(scope)
+            .label("worker")
+            .cancel_kind("timeout")
+            .build();
+        assert_eq!(req.scope, scope);
+        assert_eq!(req.label, Some("worker".to_string()));
+        assert_eq!(req.cancel_kind, Some("timeout".to_string()));
+    }
+
+    #[test]
+    fn fetch_builder_defaults_to_get() {
+        let scope = WasmHandleRef {
+            kind: WasmHandleKind::Region,
+            slot: 1,
+            generation: 0,
+        };
+
+        let req = WasmFetchBuilder::new(scope, "https://example.com").build();
+        assert_eq!(req.method, "GET");
+        assert_eq!(req.url, "https://example.com");
+        assert!(req.body.is_none());
+
+        let req = WasmFetchBuilder::new(scope, "https://example.com")
+            .method("POST")
+            .body(vec![1, 2, 3])
+            .build();
+        assert_eq!(req.method, "POST");
+        assert_eq!(req.body, Some(vec![1, 2, 3]));
+    }
+
+    #[test]
+    fn outcome_ext_trait_inspectors() {
+        let ok = WasmAbiOutcomeEnvelope::Ok {
+            value: WasmAbiValue::I64(42),
+        };
+        assert!(ok.is_ok());
+        assert!(!ok.is_err());
+        assert!(!ok.is_cancelled());
+        assert!(!ok.is_panicked());
+        assert_eq!(ok.ok_value(), Some(&WasmAbiValue::I64(42)));
+        assert!(ok.err_failure().is_none());
+        assert_eq!(ok.outcome_kind(), "ok");
+
+        let err = WasmAbiOutcomeEnvelope::Err {
+            failure: WasmAbiFailure {
+                code: WasmAbiErrorCode::InternalFailure,
+                recoverability: WasmAbiRecoverability::Transient,
+                message: "boom".to_string(),
+            },
+        };
+        assert!(err.is_err());
+        assert!(!err.is_ok());
+        assert_eq!(
+            err.err_failure().unwrap().code,
+            WasmAbiErrorCode::InternalFailure
+        );
+        assert_eq!(err.outcome_kind(), "err");
+
+        let cancelled = WasmAbiOutcomeEnvelope::Cancelled {
+            cancellation: WasmAbiCancellation {
+                kind: "user".to_string(),
+                phase: "completed".to_string(),
+                origin_region: "R0".to_string(),
+                origin_task: None,
+                timestamp_nanos: 0,
+                message: None,
+                truncated: false,
+            },
+        };
+        assert!(cancelled.is_cancelled());
+        assert!(cancelled.cancellation().is_some());
+        assert_eq!(cancelled.outcome_kind(), "cancelled");
+
+        let panicked = WasmAbiOutcomeEnvelope::Panicked {
+            message: "oom".to_string(),
+        };
+        assert!(panicked.is_panicked());
+        assert_eq!(panicked.outcome_kind(), "panicked");
+    }
+
+    #[test]
+    fn create_scoped_runtime_convenience() {
+        let mut d = WasmExportDispatcher::new();
+        let (rt, scope) = d.create_scoped_runtime(Some("test"), None).unwrap();
+
+        assert_eq!(rt.kind, WasmHandleKind::Runtime);
+        assert_eq!(scope.kind, WasmHandleKind::Region);
+        assert_eq!(d.handles().live_count(), 2);
+
+        d.close_scoped_runtime(&scope, &rt, None).unwrap();
+        assert_eq!(d.handles().live_count(), 0);
+    }
+
+    #[test]
+    fn spawn_with_builder_convenience() {
+        let mut d = WasmExportDispatcher::new();
+        let (rt, scope) = d.create_scoped_runtime(None, None).unwrap();
+
+        let task = d
+            .spawn(WasmTaskSpawnBuilder::new(scope).label("worker"), None)
+            .unwrap();
+        assert_eq!(task.kind, WasmHandleKind::Task);
+
+        d.task_join(
+            &task,
+            WasmAbiOutcomeEnvelope::Ok {
+                value: WasmAbiValue::Unit,
+            },
+            None,
+        )
+        .unwrap();
+        d.close_scoped_runtime(&scope, &rt, None).unwrap();
+    }
+
+    #[test]
+    fn spawn_and_join_convenience() {
+        let mut d = WasmExportDispatcher::new();
+        let (rt, scope) = d.create_scoped_runtime(None, None).unwrap();
+
+        let result = d
+            .spawn_and_join(
+                scope,
+                Some("inline-task"),
+                WasmAbiOutcomeEnvelope::Ok {
+                    value: WasmAbiValue::String("done".to_string()),
+                },
+                None,
+            )
+            .unwrap();
+        assert!(result.is_ok());
+        assert_eq!(
+            result.ok_value(),
+            Some(&WasmAbiValue::String("done".to_string()))
+        );
+
+        d.close_scoped_runtime(&scope, &rt, None).unwrap();
+    }
+
+    #[test]
+    fn diagnostic_snapshot_clean_after_full_lifecycle() {
+        let mut d = WasmExportDispatcher::new();
+        let (rt, scope) = d.create_scoped_runtime(Some("diag-test"), None).unwrap();
+
+        let task = d
+            .spawn(WasmTaskSpawnBuilder::new(scope).label("t1"), None)
+            .unwrap();
+        d.task_join(
+            &task,
+            WasmAbiOutcomeEnvelope::Ok {
+                value: WasmAbiValue::Unit,
+            },
+            None,
+        )
+        .unwrap();
+        d.close_scoped_runtime(&scope, &rt, None).unwrap();
+
+        let diag = d.diagnostic_snapshot();
+        assert!(diag.is_clean());
+        assert!(diag.leaks.is_empty());
+        assert_eq!(diag.memory_report.live_handles, 0);
+        assert!(diag.dispatch_count > 0);
+    }
+
+    #[test]
+    fn diagnostic_snapshot_detects_leaks() {
+        let mut d = WasmExportDispatcher::new();
+        let rt = d.runtime_create(None).unwrap();
+        let task = d
+            .task_spawn(&WasmTaskSpawnBuilder::new(rt).label("leaked").build(), None)
+            .unwrap();
+
+        // Cancel and close but don't join (handle transitions to Closed via
+        // dispatcher internals when we force-close)
+        d.task_cancel(
+            &WasmTaskCancelRequest {
+                task,
+                kind: "user".to_string(),
+                message: None,
+            },
+            None,
+        )
+        .unwrap();
+
+        // Task is still live (Cancelling, pinned) — not leaked yet
+        let diag = d.diagnostic_snapshot();
+        assert!(!diag.is_clean());
+        assert_eq!(diag.memory_report.live_handles, 2); // rt + task
+    }
+
+    #[test]
+    fn diagnostic_log_fields_include_expected_keys() {
+        let mut d = WasmExportDispatcher::new();
+        d.runtime_create(None).unwrap();
+
+        let diag = d.diagnostic_snapshot();
+        let fields = diag.as_log_fields();
+
+        assert!(fields.contains_key("dispatch_count"));
+        assert!(fields.contains_key("live_handles"));
+        assert!(fields.contains_key("pinned_count"));
+        assert!(fields.contains_key("event_count"));
+        assert!(fields.contains_key("leak_count"));
+        assert!(fields.contains_key("abi_version"));
+        assert!(fields.contains_key("clean"));
+        assert_eq!(fields.get("abi_version"), Some(&"1.0".to_string()));
+    }
+
+    #[test]
+    fn ergonomic_api_full_lifecycle_with_mixed_outcomes() {
+        let mut d = WasmExportDispatcher::new();
+        let (rt, scope) = d.create_scoped_runtime(Some("mixed"), None).unwrap();
+
+        // Spawn-and-join with Ok
+        let r1 = d
+            .spawn_and_join(
+                scope,
+                Some("ok-task"),
+                WasmAbiOutcomeEnvelope::Ok {
+                    value: WasmAbiValue::I64(1),
+                },
+                None,
+            )
+            .unwrap();
+        assert!(r1.is_ok());
+
+        // Spawn-and-join with Err
+        let r2 = d
+            .spawn_and_join(
+                scope,
+                Some("err-task"),
+                WasmAbiOutcomeEnvelope::Err {
+                    failure: WasmAbiFailure {
+                        code: WasmAbiErrorCode::InternalFailure,
+                        recoverability: WasmAbiRecoverability::Transient,
+                        message: "retriable".to_string(),
+                    },
+                },
+                None,
+            )
+            .unwrap();
+        assert!(r2.is_err());
+        assert_eq!(
+            r2.err_failure().unwrap().recoverability,
+            WasmAbiRecoverability::Transient
+        );
+
+        // Spawn-and-join with Cancelled
+        let r3 = d
+            .spawn_and_join(
+                scope,
+                Some("cancelled-task"),
+                WasmAbiOutcomeEnvelope::Cancelled {
+                    cancellation: WasmAbiCancellation {
+                        kind: "timeout".to_string(),
+                        phase: "completed".to_string(),
+                        origin_region: "R0".to_string(),
+                        origin_task: None,
+                        timestamp_nanos: 100,
+                        message: Some("deadline".to_string()),
+                        truncated: false,
+                    },
+                },
+                None,
+            )
+            .unwrap();
+        assert!(r3.is_cancelled());
+        assert_eq!(r3.cancellation().unwrap().kind, "timeout");
+
+        d.close_scoped_runtime(&scope, &rt, None).unwrap();
+
+        let diag = d.diagnostic_snapshot();
+        assert!(diag.is_clean());
     }
 }
