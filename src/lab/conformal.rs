@@ -87,6 +87,7 @@ impl ConformalConfig {
     /// Set the minimum calibration samples.
     #[must_use]
     pub fn min_samples(mut self, n: usize) -> Self {
+        assert_valid_min_samples(n);
         self.min_calibration_samples = n;
         self
     }
@@ -592,6 +593,7 @@ impl HealthThresholdConfig {
     /// Set the minimum calibration samples.
     #[must_use]
     pub fn min_samples(mut self, n: usize) -> Self {
+        assert_valid_min_samples(n);
         self.min_calibration_samples = n;
         self
     }
@@ -1577,6 +1579,12 @@ mod tests {
     }
 
     #[test]
+    #[should_panic(expected = "min_calibration_samples must be > 0")]
+    fn conformal_config_builder_rejects_zero_min_samples() {
+        let _ = ConformalConfig::new(0.05).min_samples(0);
+    }
+
+    #[test]
     #[should_panic(expected = "alpha must be finite and in (0, 1)")]
     fn health_threshold_config_rejects_invalid_alpha() {
         let _ = HealthThresholdConfig::new(0.0, ThresholdMode::Upper);
@@ -1588,6 +1596,12 @@ mod tests {
         let mut cfg = HealthThresholdConfig::new(0.05, ThresholdMode::Upper);
         cfg.min_calibration_samples = 0;
         let _ = HealthThresholdCalibrator::new(cfg);
+    }
+
+    #[test]
+    #[should_panic(expected = "min_calibration_samples must be > 0")]
+    fn health_threshold_config_builder_rejects_zero_min_samples() {
+        let _ = HealthThresholdConfig::new(0.05, ThresholdMode::Upper).min_samples(0);
     }
 
     #[test]

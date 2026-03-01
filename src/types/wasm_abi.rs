@@ -82,6 +82,7 @@ pub enum WasmAbiCompatibilityDecision {
 
 impl WasmAbiCompatibilityDecision {
     /// Returns `true` when the decision is compatible.
+    #[must_use]
     pub const fn is_compatible(self) -> bool {
         matches!(self, Self::Exact | Self::BackwardCompatible { .. })
     }
@@ -94,6 +95,7 @@ impl WasmAbiCompatibilityDecision {
 /// - Same major + consumer minor < producer minor => incompatible
 /// - Same major + equal minor => exact
 /// - Same major + consumer minor > producer minor => backward compatible
+#[must_use]
 pub const fn classify_wasm_abi_compatibility(
     producer: WasmAbiVersion,
     consumer: WasmAbiVersion,
@@ -155,6 +157,7 @@ pub enum WasmAbiVersionBump {
 }
 
 /// Computes the required semantic version bump for a given ABI change class.
+#[must_use]
 pub const fn required_wasm_abi_bump(change: WasmAbiChangeClass) -> WasmAbiVersionBump {
     match change {
         WasmAbiChangeClass::AdditiveField
@@ -185,6 +188,7 @@ pub enum WasmAbiSymbol {
 
 impl WasmAbiSymbol {
     /// Stable symbol name used in diagnostics and JS package tables.
+    #[must_use]
     pub const fn as_str(self) -> &'static str {
         match self {
             Self::RuntimeCreate => "runtime_create",
@@ -271,6 +275,7 @@ pub const WASM_ABI_SIGNATURES_V1: [WasmAbiSignature; 8] = [
 /// Computes a deterministic fingerprint for a signature set.
 ///
 /// The fingerprint is used by CI checks to detect contract drift.
+#[must_use]
 pub fn wasm_abi_signature_fingerprint(signatures: &[WasmAbiSignature]) -> u64 {
     let mut hasher = DetHasher::default();
     for signature in signatures {
@@ -400,6 +405,7 @@ pub enum WasmAbiOutcomeEnvelope {
 
 impl WasmAbiOutcomeEnvelope {
     /// Converts a typed runtime outcome to the boundary envelope.
+    #[must_use]
     pub fn from_outcome(outcome: Outcome<WasmAbiValue, WasmAbiFailure>) -> Self {
         match outcome {
             Outcome::Ok(value) => Self::Ok { value },
@@ -441,22 +447,30 @@ pub enum WasmBoundaryTransitionError {
 }
 
 /// Returns true when a state transition is legal.
+#[must_use]
 pub fn is_valid_wasm_boundary_transition(from: WasmBoundaryState, to: WasmBoundaryState) -> bool {
     if from == to {
         return true;
     }
-    match (from, to) {
+    matches!(
+        (from, to),
         (WasmBoundaryState::Unbound, WasmBoundaryState::Bound)
-        | (WasmBoundaryState::Bound, WasmBoundaryState::Active)
-        | (WasmBoundaryState::Bound, WasmBoundaryState::Closed)
-        | (WasmBoundaryState::Active, WasmBoundaryState::Cancelling)
-        | (WasmBoundaryState::Active, WasmBoundaryState::Draining)
-        | (WasmBoundaryState::Active, WasmBoundaryState::Closed)
-        | (WasmBoundaryState::Cancelling, WasmBoundaryState::Draining)
-        | (WasmBoundaryState::Cancelling, WasmBoundaryState::Closed)
-        | (WasmBoundaryState::Draining, WasmBoundaryState::Closed) => true,
-        _ => false,
-    }
+            | (
+                WasmBoundaryState::Bound,
+                WasmBoundaryState::Active | WasmBoundaryState::Closed
+            )
+            | (
+                WasmBoundaryState::Active,
+                WasmBoundaryState::Cancelling
+                    | WasmBoundaryState::Draining
+                    | WasmBoundaryState::Closed
+            )
+            | (
+                WasmBoundaryState::Cancelling,
+                WasmBoundaryState::Draining | WasmBoundaryState::Closed
+            )
+            | (WasmBoundaryState::Draining, WasmBoundaryState::Closed)
+    )
 }
 
 /// Validates a state transition against contract rules.
@@ -490,6 +504,7 @@ pub struct WasmAbiBoundaryEvent {
 
 impl WasmAbiBoundaryEvent {
     /// Converts this event to stable key/value log fields.
+    #[must_use]
     pub fn as_log_fields(&self) -> BTreeMap<&'static str, String> {
         let mut fields = BTreeMap::new();
         fields.insert("abi_version", self.abi_version.to_string());

@@ -376,6 +376,354 @@ impl BrowserFetchIoCap {
     }
 }
 
+/// Browser long-lived transport kind requiring explicit authority.
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Hash)]
+pub enum BrowserTransportKind {
+    /// RFC 6455 WebSocket channel.
+    WebSocket,
+    /// WebTransport session (HTTPS-only in browsers).
+    WebTransport,
+}
+
+/// Request envelope used for explicit transport authority checks.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct BrowserTransportRequest {
+    /// Requested transport kind.
+    pub kind: BrowserTransportKind,
+    /// Absolute URL for the transport endpoint.
+    pub url: String,
+    /// Requested subprotocols (WebSocket only).
+    pub subprotocols: Vec<String>,
+    /// Reconnect attempt index (0 for initial connection).
+    pub reconnect_attempt: u32,
+}
+
+impl BrowserTransportRequest {
+    /// Creates a new transport request envelope.
+    #[must_use]
+    pub fn new(kind: BrowserTransportKind, url: impl Into<String>) -> Self {
+        Self {
+            kind,
+            url: url.into(),
+            subprotocols: Vec::new(),
+            reconnect_attempt: 0,
+        }
+    }
+
+    /// Adds a requested subprotocol.
+    #[must_use]
+    pub fn with_subprotocol(mut self, protocol: impl Into<String>) -> Self {
+        self.subprotocols.push(protocol.into());
+        self
+    }
+
+    /// Sets reconnect attempt metadata.
+    #[must_use]
+    pub fn with_reconnect_attempt(mut self, reconnect_attempt: u32) -> Self {
+        self.reconnect_attempt = reconnect_attempt;
+        self
+    }
+}
+
+fn parse_browser_transport_url(url: &str) -> Option<(String, String, String)> {
+    let scheme_end = url.find("://")?;
+    if scheme_end == 0 {
+        return None;
+    }
+
+    let scheme = url[..scheme_end].to_owned();
+    let rest = &url[scheme_end + 3..];
+    if rest.is_empty() {
+        return None;
+    }
+
+    let authority_end = rest.find(['/', '?', '#']).unwrap_or(rest.len());
+    if authority_end == 0 {
+        return None;
+    }
+    let authority = &rest[..authority_end];
+    let origin = format!("{scheme}://{authority}");
+
+    let host_authority = authority
+        .rsplit_once('@')
+        .map_or(authority, |(_, host)| host);
+    if host_authority.is_empty() {
+        return None;
+    }
+
+    let host = if let Some(rest) = host_authority.strip_prefix('[') {
+        let closing = rest.find(']')?;
+        rest[..closing].to_owned()
+    } else {
+        host_authority.split(':').next()?.to_owned()
+    };
+
+    if host.is_empty() {
+        return None;
+    }
+
+    Some((scheme, origin, host))
+}
+
+/// Deterministic policy errors for browser transport capability checks.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub enum BrowserTransportPolicyError {
+    /// URL did not contain a valid scheme/authority.
+    InvalidUrl(String),
+    /// Origin is outside explicit allowlist.
+    OriginDenied(String),
+    /// Transport kind is outside explicit allowlist.
+    KindDenied(BrowserTransportKind),
+    /// Transport kind is unsupported in current browser context.
+    UnsupportedKind(BrowserTransportKind),
+    /// URL scheme is not valid for requested transport/security policy.
+    InsecureScheme {
+        /// Requested transport kind.
+        kind: BrowserTransportKind,
+        /// Requested scheme.
+        scheme: String,
+    },
+    /// Requested subprotocol count exceeds policy.
+    TooManySubprotocols {
+        /// Subprotocol count found in request.
+        count: usize,
+        /// Maximum allowed subprotocol count.
+        limit: usize,
+    },
+    /// Reconnect attempt exceeds configured policy.
+    ReconnectAttemptExceeded {
+        /// Requested reconnect attempt.
+        attempt: u32,
+        /// Maximum permitted reconnect attempt.
+        max_attempts: u32,
+    },
+}
+
+impl std::fmt::Display for BrowserTransportPolicyError {
+    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        match self {
+            Self::InvalidUrl(url) => write!(f, "invalid browser transport URL: {url}"),
+            Self::OriginDenied(origin) => {
+                write!(f, "browser transport origin denied by policy: {origin}")
+            }
+            Self::KindDenied(kind) => {
+                write!(f, "browser transport kind denied by policy: {kind:?}")
+            }
+            Self::UnsupportedKind(kind) => {
+                write!(
+                    f,
+                    "browser transport kind unsupported in this context: {kind:?}"
+                )
+            }
+            Self::InsecureScheme { kind, scheme } => {
+                write!(
+                    f,
+                    "scheme '{scheme}' is invalid for browser transport {kind:?}"
+                )
+            }
+            Self::TooManySubprotocols { count, limit } => {
+                write!(
+                    f,
+                    "subprotocol count {count} exceeds browser transport policy limit {limit}"
+                )
+            }
+            Self::ReconnectAttemptExceeded {
+                attempt,
+                max_attempts,
+            } => write!(
+                f,
+                "reconnect attempt {attempt} exceeds browser transport policy max {max_attempts}"
+            ),
+        }
+    }
+}
+
+impl std::error::Error for BrowserTransportPolicyError {}
+
+/// Explicit authority boundaries for browser transport operations.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct BrowserTransportAuthority {
+    /// Allowed origins (`scheme://host[:port]`). Empty means no origin authority.
+    pub allowed_origins: Vec<String>,
+    /// Allowed transport kinds. Empty means no transport authority.
+    pub allowed_kinds: Vec<BrowserTransportKind>,
+    /// Maximum allowed subprotocol count per request.
+    pub max_subprotocol_count: usize,
+    /// Allows plain `ws://` when host is loopback/localhost only.
+    pub allow_insecure_localhost_ws: bool,
+}
+
+impl Default for BrowserTransportAuthority {
+    fn default() -> Self {
+        Self::deny_all()
+    }
+}
+
+impl BrowserTransportAuthority {
+    /// Creates an authority with no grants (default-deny posture).
+    #[must_use]
+    pub fn deny_all() -> Self {
+        Self {
+            allowed_origins: Vec::new(),
+            allowed_kinds: Vec::new(),
+            max_subprotocol_count: 0,
+            allow_insecure_localhost_ws: false,
+        }
+    }
+
+    /// Grants authority for a specific origin.
+    #[must_use]
+    pub fn grant_origin(mut self, origin: impl Into<String>) -> Self {
+        let origin = origin.into();
+        if !origin.is_empty()
+            && !self
+                .allowed_origins
+                .iter()
+                .any(|candidate| candidate == &origin)
+        {
+            self.allowed_origins.push(origin);
+        }
+        self
+    }
+
+    /// Grants authority for a specific transport kind.
+    #[must_use]
+    pub fn grant_kind(mut self, kind: BrowserTransportKind) -> Self {
+        if !self.allowed_kinds.contains(&kind) {
+            self.allowed_kinds.push(kind);
+        }
+        self
+    }
+
+    /// Sets maximum allowed subprotocol count.
+    #[must_use]
+    pub fn with_max_subprotocol_count(mut self, max_subprotocol_count: usize) -> Self {
+        self.max_subprotocol_count = max_subprotocol_count;
+        self
+    }
+
+    /// Enables localhost-only insecure websocket (`ws://`) authority.
+    #[must_use]
+    pub fn with_localhost_insecure_ws(mut self) -> Self {
+        self.allow_insecure_localhost_ws = true;
+        self
+    }
+}
+
+/// Browser support matrix for long-lived transport channels.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub struct BrowserTransportSupport {
+    /// Browser context supports WebSocket.
+    pub websocket: bool,
+    /// Browser context supports WebTransport.
+    pub webtransport: bool,
+}
+
+impl BrowserTransportSupport {
+    /// No long-lived transport support in the current context.
+    pub const NONE: Self = Self {
+        websocket: false,
+        webtransport: false,
+    };
+
+    /// WebSocket-only support.
+    pub const WEBSOCKET_ONLY: Self = Self {
+        websocket: true,
+        webtransport: false,
+    };
+
+    /// WebSocket and WebTransport support.
+    pub const FULL: Self = Self {
+        websocket: true,
+        webtransport: true,
+    };
+
+    fn supports(self, kind: BrowserTransportKind) -> bool {
+        match kind {
+            BrowserTransportKind::WebSocket => self.websocket,
+            BrowserTransportKind::WebTransport => self.webtransport,
+        }
+    }
+}
+
+/// Reconnection policy for browser long-lived transport channels.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub struct BrowserTransportReconnectPolicy {
+    /// Maximum reconnect attempts after initial connection.
+    pub max_attempts: u32,
+    /// Base delay for reconnect backoff.
+    pub base_delay_ms: u64,
+    /// Maximum reconnect backoff delay.
+    pub max_delay_ms: u64,
+    /// Deterministic jitter window (0 keeps strictly deterministic delay).
+    pub jitter_ms: u64,
+}
+
+impl Default for BrowserTransportReconnectPolicy {
+    fn default() -> Self {
+        Self {
+            max_attempts: 3,
+            base_delay_ms: 250,
+            max_delay_ms: 5_000,
+            jitter_ms: 0,
+        }
+    }
+}
+
+/// Cancellation contract for browser long-lived transport adapters.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum BrowserTransportCancellationPolicy {
+    /// Send protocol close signal first, then host-abort if drain deadline expires.
+    CloseThenAbort,
+    /// Abort immediately on cancellation request.
+    ImmediateAbort,
+}
+
+/// Transport capability interface surfaced through [`IoCap`].
+pub trait TransportIoCap: Send + Sync + Debug {
+    /// Validates a request against explicit authority and support policy.
+    fn authorize(
+        &self,
+        request: &BrowserTransportRequest,
+    ) -> Result<(), BrowserTransportPolicyError>;
+
+    /// Returns browser transport support matrix.
+    fn support(&self) -> BrowserTransportSupport;
+
+    /// Returns cancellation semantics.
+    fn cancellation_policy(&self) -> BrowserTransportCancellationPolicy;
+
+    /// Returns reconnection semantics.
+    fn reconnect_policy(&self) -> BrowserTransportReconnectPolicy;
+}
+
+/// Browser-oriented transport adapter carrying explicit authority and policy.
+#[derive(Debug, Clone)]
+pub struct BrowserTransportIoCap {
+    authority: BrowserTransportAuthority,
+    support: BrowserTransportSupport,
+    cancellation: BrowserTransportCancellationPolicy,
+    reconnect: BrowserTransportReconnectPolicy,
+}
+
+impl BrowserTransportIoCap {
+    /// Creates a new browser transport capability adapter.
+    #[must_use]
+    pub fn new(
+        authority: BrowserTransportAuthority,
+        support: BrowserTransportSupport,
+        cancellation: BrowserTransportCancellationPolicy,
+        reconnect: BrowserTransportReconnectPolicy,
+    ) -> Self {
+        Self {
+            authority,
+            support,
+            cancellation,
+            reconnect,
+        }
+    }
+}
+
 /// Browser storage backend target.
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Hash, PartialOrd, Ord)]
 pub enum StorageBackend {
@@ -824,6 +1172,14 @@ pub trait IoCap: Send + Sync + Debug {
         None
     }
 
+    /// Returns the browser long-lived transport adapter capability, when available.
+    ///
+    /// Most I/O capabilities do not expose browser transport semantics and
+    /// return `None`. Browser-oriented adapters return `Some(...)`.
+    fn transport_cap(&self) -> Option<&dyn TransportIoCap> {
+        None
+    }
+
     /// Returns the storage adapter capability, when available.
     ///
     /// Most I/O capabilities do not expose browser storage semantics and return
@@ -939,6 +1295,116 @@ impl IoCap for BrowserFetchIoCap {
     }
 
     fn fetch_cap(&self) -> Option<&dyn FetchIoCap> {
+        Some(self)
+    }
+}
+
+fn is_local_loopback_host(host: &str) -> bool {
+    host.eq_ignore_ascii_case("localhost") || host == "127.0.0.1" || host == "::1"
+}
+
+impl TransportIoCap for BrowserTransportIoCap {
+    fn authorize(
+        &self,
+        request: &BrowserTransportRequest,
+    ) -> Result<(), BrowserTransportPolicyError> {
+        let (scheme, origin, host) = parse_browser_transport_url(&request.url)
+            .ok_or_else(|| BrowserTransportPolicyError::InvalidUrl(request.url.clone()))?;
+
+        if !self.support.supports(request.kind) {
+            return Err(BrowserTransportPolicyError::UnsupportedKind(request.kind));
+        }
+
+        if !self.authority.allowed_kinds.contains(&request.kind) {
+            return Err(BrowserTransportPolicyError::KindDenied(request.kind));
+        }
+
+        let origin_allowed = self
+            .authority
+            .allowed_origins
+            .iter()
+            .any(|candidate| candidate == "*" || candidate == &origin);
+        if !origin_allowed {
+            return Err(BrowserTransportPolicyError::OriginDenied(origin));
+        }
+
+        if request.subprotocols.len() > self.authority.max_subprotocol_count {
+            return Err(BrowserTransportPolicyError::TooManySubprotocols {
+                count: request.subprotocols.len(),
+                limit: self.authority.max_subprotocol_count,
+            });
+        }
+
+        if request.reconnect_attempt > self.reconnect.max_attempts {
+            return Err(BrowserTransportPolicyError::ReconnectAttemptExceeded {
+                attempt: request.reconnect_attempt,
+                max_attempts: self.reconnect.max_attempts,
+            });
+        }
+
+        match request.kind {
+            BrowserTransportKind::WebSocket => {
+                if scheme == "wss" {
+                    return Ok(());
+                }
+
+                if scheme == "ws"
+                    && self.authority.allow_insecure_localhost_ws
+                    && is_local_loopback_host(&host)
+                {
+                    return Ok(());
+                }
+
+                Err(BrowserTransportPolicyError::InsecureScheme {
+                    kind: request.kind,
+                    scheme,
+                })
+            }
+            BrowserTransportKind::WebTransport => {
+                if scheme == "https" {
+                    Ok(())
+                } else {
+                    Err(BrowserTransportPolicyError::InsecureScheme {
+                        kind: request.kind,
+                        scheme,
+                    })
+                }
+            }
+        }
+    }
+
+    fn support(&self) -> BrowserTransportSupport {
+        self.support
+    }
+
+    fn cancellation_policy(&self) -> BrowserTransportCancellationPolicy {
+        self.cancellation
+    }
+
+    fn reconnect_policy(&self) -> BrowserTransportReconnectPolicy {
+        self.reconnect
+    }
+}
+
+impl IoCap for BrowserTransportIoCap {
+    fn is_real_io(&self) -> bool {
+        true
+    }
+
+    fn name(&self) -> &'static str {
+        "browser-transport"
+    }
+
+    fn capabilities(&self) -> IoCapabilities {
+        IoCapabilities {
+            file_ops: false,
+            network_ops: true,
+            timer_integration: true,
+            deterministic: false,
+        }
+    }
+
+    fn transport_cap(&self) -> Option<&dyn TransportIoCap> {
         Some(self)
     }
 }
@@ -1196,6 +1662,159 @@ mod tests {
             fetch_cap.cancellation_policy(),
             FetchCancellationPolicy::AbortSignalWithDrain
         );
+    }
+
+    fn strict_transport_cap(
+        support: BrowserTransportSupport,
+        localhost_insecure_ws: bool,
+    ) -> BrowserTransportIoCap {
+        let mut authority = BrowserTransportAuthority::deny_all()
+            .grant_origin("wss://chat.example.com")
+            .grant_origin("https://transport.example.com")
+            .grant_kind(BrowserTransportKind::WebSocket)
+            .grant_kind(BrowserTransportKind::WebTransport)
+            .with_max_subprotocol_count(2);
+        if localhost_insecure_ws {
+            authority = authority.with_localhost_insecure_ws();
+        }
+
+        BrowserTransportIoCap::new(
+            authority,
+            support,
+            BrowserTransportCancellationPolicy::CloseThenAbort,
+            BrowserTransportReconnectPolicy {
+                max_attempts: 2,
+                base_delay_ms: 100,
+                max_delay_ms: 1_000,
+                jitter_ms: 0,
+            },
+        )
+    }
+
+    #[test]
+    fn transport_authority_default_is_deny_all() {
+        let cap = BrowserTransportIoCap::new(
+            BrowserTransportAuthority::default(),
+            BrowserTransportSupport::FULL,
+            BrowserTransportCancellationPolicy::CloseThenAbort,
+            BrowserTransportReconnectPolicy::default(),
+        );
+        let request =
+            BrowserTransportRequest::new(BrowserTransportKind::WebSocket, "wss://chat.example.com");
+
+        assert_eq!(
+            cap.authorize(&request),
+            Err(BrowserTransportPolicyError::KindDenied(
+                BrowserTransportKind::WebSocket
+            ))
+        );
+    }
+
+    #[test]
+    fn transport_policy_rejects_insecure_remote_ws() {
+        let cap = BrowserTransportIoCap::new(
+            BrowserTransportAuthority::deny_all()
+                .grant_origin("ws://chat.example.com")
+                .grant_kind(BrowserTransportKind::WebSocket)
+                .with_max_subprotocol_count(2),
+            BrowserTransportSupport::WEBSOCKET_ONLY,
+            BrowserTransportCancellationPolicy::CloseThenAbort,
+            BrowserTransportReconnectPolicy::default(),
+        );
+        let request =
+            BrowserTransportRequest::new(BrowserTransportKind::WebSocket, "ws://chat.example.com");
+
+        assert_eq!(
+            cap.authorize(&request),
+            Err(BrowserTransportPolicyError::InsecureScheme {
+                kind: BrowserTransportKind::WebSocket,
+                scheme: "ws".to_owned()
+            })
+        );
+    }
+
+    #[test]
+    fn transport_policy_allows_localhost_ws_when_explicitly_granted() {
+        let cap = BrowserTransportIoCap::new(
+            BrowserTransportAuthority::deny_all()
+                .grant_origin("ws://localhost:8080")
+                .grant_kind(BrowserTransportKind::WebSocket)
+                .with_max_subprotocol_count(2)
+                .with_localhost_insecure_ws(),
+            BrowserTransportSupport::WEBSOCKET_ONLY,
+            BrowserTransportCancellationPolicy::CloseThenAbort,
+            BrowserTransportReconnectPolicy::default(),
+        );
+        let request =
+            BrowserTransportRequest::new(BrowserTransportKind::WebSocket, "ws://localhost:8080");
+        assert_eq!(cap.authorize(&request), Ok(()));
+    }
+
+    #[test]
+    fn transport_policy_enforces_support_matrix() {
+        let cap = strict_transport_cap(BrowserTransportSupport::WEBSOCKET_ONLY, false);
+        let request = BrowserTransportRequest::new(
+            BrowserTransportKind::WebTransport,
+            "https://transport.example.com/session",
+        );
+
+        assert_eq!(
+            cap.authorize(&request),
+            Err(BrowserTransportPolicyError::UnsupportedKind(
+                BrowserTransportKind::WebTransport
+            ))
+        );
+    }
+
+    #[test]
+    fn transport_policy_enforces_reconnect_limit() {
+        let cap = strict_transport_cap(BrowserTransportSupport::FULL, false);
+        let request = BrowserTransportRequest::new(
+            BrowserTransportKind::WebTransport,
+            "https://transport.example.com/session",
+        )
+        .with_reconnect_attempt(3);
+
+        assert_eq!(
+            cap.authorize(&request),
+            Err(BrowserTransportPolicyError::ReconnectAttemptExceeded {
+                attempt: 3,
+                max_attempts: 2
+            })
+        );
+    }
+
+    #[test]
+    fn browser_transport_cap_exposes_policies_through_iocap() {
+        let reconnect = BrowserTransportReconnectPolicy {
+            max_attempts: 4,
+            base_delay_ms: 250,
+            max_delay_ms: 4_000,
+            jitter_ms: 0,
+        };
+        let cap = BrowserTransportIoCap::new(
+            BrowserTransportAuthority::deny_all()
+                .grant_origin("wss://chat.example.com")
+                .grant_kind(BrowserTransportKind::WebSocket)
+                .with_max_subprotocol_count(3),
+            BrowserTransportSupport::WEBSOCKET_ONLY,
+            BrowserTransportCancellationPolicy::CloseThenAbort,
+            reconnect,
+        );
+
+        let io_cap: &dyn IoCap = &cap;
+        let transport_cap = io_cap
+            .transport_cap()
+            .expect("browser transport cap should be present");
+        assert_eq!(
+            transport_cap.support(),
+            BrowserTransportSupport::WEBSOCKET_ONLY
+        );
+        assert_eq!(
+            transport_cap.cancellation_policy(),
+            BrowserTransportCancellationPolicy::CloseThenAbort
+        );
+        assert_eq!(transport_cap.reconnect_policy(), reconnect);
     }
 
     #[test]

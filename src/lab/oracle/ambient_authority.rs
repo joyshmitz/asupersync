@@ -206,12 +206,14 @@ impl AmbientAuthorityOracle {
 
         if let Some(parent_id) = parent {
             self.parent_task.insert(task, parent_id);
-            // Child inherits parent's capabilities by default
+            // Child inherits parent's capabilities by default.
+            // If the parent is unknown, grant nothing: missing lineage must
+            // never escalate into ambient authority.
             let parent_caps = self
                 .capabilities
                 .get(&parent_id)
                 .cloned()
-                .unwrap_or_else(CapabilitySet::full);
+                .unwrap_or_default();
             self.capabilities.insert(task, parent_caps);
         } else {
             // Root task has full capabilities
@@ -443,6 +445,36 @@ mod tests {
         let has_time = oracle.task_has_capability(task(2), CapabilityKind::Time);
         crate::assert_with_log!(has_time, "child has time", true, has_time);
         crate::test_complete!("child_inherits_parent_capabilities");
+    }
+
+    #[test]
+    fn child_with_missing_parent_has_no_capabilities() {
+        init_test("child_with_missing_parent_has_no_capabilities");
+        let mut oracle = AmbientAuthorityOracle::new();
+
+        // Parent task(99) was never created.
+        oracle.on_task_created(task(2), region(0), Some(task(99)), t(10));
+
+        let has_spawn = oracle.task_has_capability(task(2), CapabilityKind::Spawn);
+        crate::assert_with_log!(!has_spawn, "child spawn denied", false, has_spawn);
+        let has_time = oracle.task_has_capability(task(2), CapabilityKind::Time);
+        crate::assert_with_log!(!has_time, "child time denied", false, has_time);
+
+        // Attempting an effect must be flagged as unauthorized.
+        oracle.on_spawn_effect(task(2), task(3), t(20));
+        let result = oracle.check();
+        let err = result.is_err();
+        crate::assert_with_log!(err, "result err", true, err);
+        let violation = result.unwrap_err();
+        crate::assert_with_log!(
+            violation.task == task(2),
+            "violation task",
+            task(2),
+            violation.task
+        );
+        let empty = violation.granted_capabilities.is_empty();
+        crate::assert_with_log!(empty, "capabilities empty", true, empty);
+        crate::test_complete!("child_with_missing_parent_has_no_capabilities");
     }
 
     #[test]

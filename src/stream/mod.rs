@@ -160,6 +160,17 @@ pub trait StreamExt: Stream {
         Chain::new(self, other)
     }
 
+    /// Interleaves this stream with another stream of the same concrete type.
+    ///
+    /// For heterogeneous stream types, use [`chain`](Self::chain), [`zip`](Self::zip),
+    /// or the free [`merge`] function with an iterator of streams.
+    fn merge(self, other: Self) -> Merge<Self>
+    where
+        Self: Sized,
+    {
+        merge([self, other])
+    }
+
     /// Zips this stream with another stream, yielding pairs.
     fn zip<S2>(self, other: S2) -> Zip<Self, S2>
     where
@@ -951,5 +962,44 @@ mod tests {
             poll
         );
         crate::test_complete!("test_forward");
+    }
+
+    #[test]
+    fn test_stream_merge_method() {
+        init_test("test_stream_merge_method");
+
+        let mut merged = iter(vec![1, 2, 3]).merge(iter(vec![10, 20, 30]));
+        let waker = noop_waker();
+        let mut cx = Context::from_waker(&waker);
+
+        let poll = Pin::new(&mut merged).poll_next(&mut cx);
+        crate::assert_with_log!(
+            poll == Poll::Ready(Some(1)),
+            "merge first",
+            Poll::Ready(Some(1)),
+            poll
+        );
+        let poll = Pin::new(&mut merged).poll_next(&mut cx);
+        crate::assert_with_log!(
+            poll == Poll::Ready(Some(10)),
+            "merge second",
+            Poll::Ready(Some(10)),
+            poll
+        );
+        let poll = Pin::new(&mut merged).poll_next(&mut cx);
+        crate::assert_with_log!(
+            poll == Poll::Ready(Some(2)),
+            "merge third",
+            Poll::Ready(Some(2)),
+            poll
+        );
+        let poll = Pin::new(&mut merged).poll_next(&mut cx);
+        crate::assert_with_log!(
+            poll == Poll::Ready(Some(20)),
+            "merge fourth",
+            Poll::Ready(Some(20)),
+            poll
+        );
+        crate::test_complete!("test_stream_merge_method");
     }
 }

@@ -5016,7 +5016,7 @@ mod tests {
             let _ = driver.register_waker(waker);
         }
 
-        state.set_io_driver(handle.clone());
+        state.set_io_driver(handle);
         crate::assert_with_log!(
             state.has_io_driver(),
             "io driver attached",

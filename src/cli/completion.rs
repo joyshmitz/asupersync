@@ -185,7 +185,7 @@ fn generate_bash_completions<W: Write, C: Completable>(
         .map(|c| c.value.clone())
         .collect();
 
-    writeln!(writer, " Bash completion for {cmd}")?;
+    writeln!(writer, "# Bash completion for {cmd}")?;
     writeln!(writer, "_{cmd}_completions() {{")?;
     writeln!(writer, "    local cur prev")?;
     writeln!(writer, "    cur=\"${{COMP_WORDS[COMP_CWORD]}}\"")?;
@@ -279,7 +279,7 @@ fn generate_fish_completions<W: Write, C: Completable>(
     let subcommands = completable.subcommands();
     let options = completable.global_options();
 
-    writeln!(writer, " Fish completion for {cmd}")?;
+    writeln!(writer, "# Fish completion for {cmd}")?;
     writeln!(writer)?;
 
     for item in &subcommands {
@@ -328,7 +328,7 @@ fn generate_powershell_completions<W: Write, C: Completable>(
     let subcommands = completable.subcommands();
     let options = completable.global_options();
 
-    writeln!(writer, " PowerShell completion for {cmd}")?;
+    writeln!(writer, "# PowerShell completion for {cmd}")?;
     writeln!(writer)?;
     writeln!(
         writer,
@@ -378,7 +378,7 @@ fn generate_elvish_completions<W: Write, C: Completable>(
     let subcommands = completable.subcommands();
     let options = completable.global_options();
 
-    writeln!(writer, " Elvish completion for {cmd}")?;
+    writeln!(writer, "# Elvish completion for {cmd}")?;
     writeln!(writer)?;
     writeln!(writer, "edit:completion:arg-completer[{cmd}] = {{|@args|")?;
     writeln!(writer, "    var commands = [")?;
@@ -572,6 +572,30 @@ mod tests {
         let has_run = output.contains("-a 'run'");
         crate::assert_with_log!(has_run, "has run", true, has_run);
         crate::test_complete!("generate_fish_completions_works");
+    }
+
+    #[test]
+    fn generated_script_banners_are_comments() {
+        init_test("generated_script_banners_are_comments");
+
+        for shell in [Shell::Bash, Shell::Fish, Shell::PowerShell, Shell::Elvish] {
+            let mut buf = Vec::new();
+            generate_completions(shell, &TestCompletable, &mut buf).unwrap();
+            let output = String::from_utf8(buf).unwrap();
+            let first_non_empty = output
+                .lines()
+                .find(|line| !line.trim().is_empty())
+                .unwrap_or_default();
+            let is_comment = first_non_empty.trim_start().starts_with('#');
+            crate::assert_with_log!(
+                is_comment,
+                "script banner is comment",
+                true,
+                first_non_empty
+            );
+        }
+
+        crate::test_complete!("generated_script_banners_are_comments");
     }
 
     #[test]

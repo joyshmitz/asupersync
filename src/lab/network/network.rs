@@ -246,6 +246,16 @@ impl SimulatedNetwork {
         self.hosts.get(&host).map(|h| h.inbox.as_slice())
     }
 
+    /// Drains and returns all packets currently in a host's inbox.
+    ///
+    /// This is useful for harness-style consumers that must process each
+    /// packet exactly once without repeatedly scanning historical deliveries.
+    pub fn take_inbox(&mut self, host: HostId) -> Option<Vec<Packet>> {
+        self.hosts
+            .get_mut(&host)
+            .map(|h| std::mem::take(&mut h.inbox))
+    }
+
     /// Sets custom network conditions for a link.
     pub fn set_link_conditions(&mut self, src: HostId, dst: HostId, conditions: NetworkConditions) {
         self.links.insert(LinkKey::new(src, dst), conditions);

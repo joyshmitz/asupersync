@@ -1612,8 +1612,8 @@ mod tests {
         let timer_driver = TimerDriverHandle::with_virtual_clock(virtual_clock);
 
         let runtime = RuntimeBuilder::current_thread()
-            .with_io_driver(io_driver.clone())
-            .with_timer_driver(timer_driver.clone())
+            .with_io_driver(io_driver)
+            .with_timer_driver(timer_driver)
             .with_entropy_source(Arc::new(crate::util::DetEntropy::new(1234)))
             .build()
             .expect("runtime build");
@@ -1655,6 +1655,7 @@ mod tests {
             Time::from_secs(42),
             "runtime should retain the injected timer driver instance"
         );
+        drop(guard);
     }
 
     #[test]
@@ -1694,6 +1695,7 @@ mod tests {
             Time::from_secs(7),
             "explicit timer driver should override wall-clock default"
         );
+        drop(guard);
     }
 
     #[test]

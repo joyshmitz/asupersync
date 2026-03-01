@@ -70,8 +70,8 @@ pub enum Breakpoint {
 pub struct DivergenceError {
     /// The event index where divergence occurred.
     pub index: usize,
-    /// The expected event from the trace.
-    pub expected: ReplayEvent,
+    /// The expected event from the trace, or `None` when the trace is exhausted.
+    pub expected: Option<ReplayEvent>,
     /// The actual event that occurred.
     pub actual: ReplayEvent,
     /// Additional context about the divergence.
@@ -80,10 +80,14 @@ pub struct DivergenceError {
 
 impl fmt::Display for DivergenceError {
     fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
+        let expected = self.expected.as_ref().map_or_else(
+            || "<trace_exhausted>".to_string(),
+            |event| format!("{event:?}"),
+        );
         write!(
             f,
-            "Replay divergence at event {}: expected {:?}, got {:?}. {}",
-            self.index, self.expected, self.actual, self.context
+            "Replay divergence at event {}: expected {}, got {:?}. {}",
+            self.index, expected, self.actual, self.context
         )
     }
 }
@@ -257,7 +261,7 @@ impl TraceReplayer {
         let Some(expected) = self.peek() else {
             return Err(DivergenceError {
                 index: self.current_index,
-                expected: ReplayEvent::RngSeed { seed: 0 }, // Placeholder
+                expected: None,
                 actual: actual.clone(),
                 context: "Trace ended but execution continued".to_string(),
             });
@@ -266,7 +270,7 @@ impl TraceReplayer {
         if !events_match(expected, actual) {
             return Err(DivergenceError {
                 index: self.current_index,
-                expected: expected.clone(),
+                expected: Some(expected.clone()),
                 actual: actual.clone(),
                 context: divergence_context(expected, actual),
             });
@@ -689,7 +693,7 @@ mod tests {
 
         let err = DivergenceError {
             index: 5,
-            expected: expected.clone(),
+            expected: Some(expected.clone()),
             actual: actual.clone(),
             context: divergence_context(&expected, &actual),
         };
@@ -697,6 +701,20 @@ mod tests {
         let msg = format!("{err}");
         assert!(msg.contains("event 5"));
         assert!(msg.contains("Different task scheduled"));
+    }
+
+    #[test]
+    fn divergence_error_formatting_handles_trace_exhausted() {
+        let err = DivergenceError {
+            index: 7,
+            expected: None,
+            actual: ReplayEvent::RngSeed { seed: 99 },
+            context: "Trace ended but execution continued".to_string(),
+        };
+
+        let msg = format!("{err}");
+        assert!(msg.contains("<trace_exhausted>"));
+        assert!(msg.contains("event 7"));
     }
 
     #[test]

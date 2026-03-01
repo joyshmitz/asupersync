@@ -313,6 +313,11 @@ pub struct StreamingReplayer {
 
     /// Whether we're at a breakpoint.
     at_breakpoint: bool,
+    /// Last error observed via the [`EventSource`] adapter path.
+    ///
+    /// This preserves diagnosability for consumers that use the fallible-free
+    /// trait surface.
+    event_source_error: Option<StreamingReplayError>,
 }
 
 impl StreamingReplayer {
@@ -334,6 +339,7 @@ impl StreamingReplayer {
             peeked: None,
             mode: ReplayMode::Run,
             at_breakpoint: false,
+            event_source_error: None,
         })
     }
 
@@ -376,6 +382,7 @@ impl StreamingReplayer {
             peeked: None,
             mode: ReplayMode::Run,
             at_breakpoint: false,
+            event_source_error: None,
         })
     }
 
@@ -413,6 +420,17 @@ impl StreamingReplayer {
     #[must_use]
     pub fn at_breakpoint(&self) -> bool {
         self.at_breakpoint
+    }
+
+    /// Returns the most recent [`EventSource`] adapter error, if any.
+    #[must_use]
+    pub fn last_event_source_error(&self) -> Option<&StreamingReplayError> {
+        self.event_source_error.as_ref()
+    }
+
+    /// Takes and clears the most recent [`EventSource`] adapter error.
+    pub fn take_event_source_error(&mut self) -> Option<StreamingReplayError> {
+        self.event_source_error.take()
     }
 
     /// Sets the replay mode.
@@ -479,7 +497,7 @@ impl StreamingReplayer {
         let Some(expected) = expected else {
             return Err(StreamingReplayError::Divergence(DivergenceError {
                 index: current_position as usize,
-                expected: ReplayEvent::RngSeed { seed: 0 }, // Placeholder
+                expected: None,
                 actual: actual.clone(),
                 context: "Trace ended but execution continued".to_string(),
             }));
@@ -490,7 +508,7 @@ impl StreamingReplayer {
             let expected_clone = expected.clone();
             return Err(StreamingReplayError::Divergence(DivergenceError {
                 index: current_position as usize,
-                expected: expected_clone,
+                expected: Some(expected_clone),
                 actual: actual.clone(),
                 context: format!("Event mismatch at position {current_position}"),
             }));
@@ -571,7 +589,7 @@ impl StreamingReplayer {
     {
         let mut count = 0u64;
 
-        while !self.is_complete() {
+        while !self.is_complete() && !self.at_breakpoint {
             if let Some(event) = self.next_event()? {
                 let progress = self.progress();
                 callback(event, progress)?;
@@ -610,7 +628,16 @@ impl StreamingReplayer {
 
 impl EventSource for StreamingReplayer {
     fn next_event(&mut self) -> Option<ReplayEvent> {
-        Self::next_event(self).ok().flatten()
+        match Self::next_event(self) {
+            Ok(event) => {
+                self.event_source_error = None;
+                event
+            }
+            Err(err) => {
+                self.event_source_error = Some(err);
+                None
+            }
+        }
     }
 
     fn metadata(&self) -> &TraceMetadata {
@@ -625,8 +652,10 @@ impl EventSource for StreamingReplayer {
 #[cfg(test)]
 mod tests {
     use super::*;
-    use crate::trace::file::{TraceWriter, write_trace};
+    use crate::trace::file::{HEADER_SIZE, TraceWriter, write_trace};
     use crate::trace::replay::CompactTaskId;
+    use std::fs::OpenOptions;
+    use std::io::{Seek, SeekFrom, Write};
     use tempfile::NamedTempFile;
 
     fn sample_events(count: u64) -> Vec<ReplayEvent> {
@@ -932,5 +961,76 @@ mod tests {
         let display = format!("{progress}");
         assert!(display.contains("250/1000"));
         assert!(display.contains("25.0%"));
+    }
+
+    #[test]
+    fn run_with_respects_runto_breakpoint() {
+        let temp = NamedTempFile::new().unwrap();
+        let path = temp.path();
+
+        let metadata = TraceMetadata::new(42);
+        let events: Vec<_> = (0..10)
+            .map(|i| ReplayEvent::TaskScheduled {
+                task: CompactTaskId(i),
+                at_tick: i * 10,
+            })
+            .collect();
+        write_trace(path, &metadata, &events).unwrap();
+
+        let mut replayer = StreamingReplayer::open(path).unwrap();
+        replayer.set_mode(ReplayMode::RunTo(Breakpoint::Tick(50)));
+
+        let count = replayer
+            .run_with(|_, _| Ok::<_, StreamingReplayError>(()))
+            .unwrap();
+        assert_eq!(count, 6);
+        assert!(replayer.at_breakpoint());
+    }
+
+    #[test]
+    fn run_with_respects_step_mode() {
+        let temp = NamedTempFile::new().unwrap();
+        let path = temp.path();
+
+        let metadata = TraceMetadata::new(7);
+        let events = sample_events(5);
+        write_trace(path, &metadata, &events).unwrap();
+
+        let mut replayer = StreamingReplayer::open(path).unwrap();
+        replayer.set_mode(ReplayMode::Step);
+
+        let count = replayer
+            .run_with(|_, _| Ok::<_, StreamingReplayError>(()))
+            .unwrap();
+        assert_eq!(count, 1);
+        assert!(replayer.at_breakpoint());
+    }
+
+    #[test]
+    fn event_source_adapter_captures_stream_error() {
+        let temp = NamedTempFile::new().unwrap();
+        let path = temp.path();
+
+        let metadata = TraceMetadata::new(42);
+        let events = vec![ReplayEvent::RngSeed { seed: 42 }];
+        write_trace(path, &metadata, &events).unwrap();
+
+        // Corrupt the first event payload byte while preserving file structure.
+        let meta_len = rmp_serde::to_vec(&metadata).unwrap().len() as u64;
+        let first_event_payload = HEADER_SIZE as u64 + meta_len + 8 + 4;
+        let mut file = OpenOptions::new().write(true).open(path).unwrap();
+        file.seek(SeekFrom::Start(first_event_payload)).unwrap();
+        file.write_all(&[0xC1]).unwrap(); // MessagePack never-used marker => decode error.
+        file.flush().unwrap();
+
+        let mut replayer = StreamingReplayer::open(path).unwrap();
+        let event = <StreamingReplayer as EventSource>::next_event(&mut replayer);
+        assert!(event.is_none());
+
+        let err = replayer
+            .take_event_source_error()
+            .expect("expected captured event-source error");
+        assert!(matches!(err, StreamingReplayError::File(_)));
+        assert!(replayer.last_event_source_error().is_none());
     }
 }

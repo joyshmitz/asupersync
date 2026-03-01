@@ -6,8 +6,8 @@
 //! is stable.
 
 use crate::io::cap::{
-    BrowserStorageIoCap, StorageBackend, StorageIoCap, StorageOperation, StoragePolicyError,
-    StorageRequest,
+    BrowserStorageIoCap, StorageBackend, StorageConsistencyPolicy, StorageIoCap, StorageOperation,
+    StoragePolicyError, StorageRequest,
 };
 use std::collections::BTreeMap;
 
@@ -16,12 +16,17 @@ use std::collections::BTreeMap;
 pub enum BrowserStorageError {
     /// Policy validation failed.
     Policy(StoragePolicyError),
+    /// Backend is temporarily unavailable in current execution context.
+    BackendUnavailable(StorageBackend),
 }
 
 impl std::fmt::Display for BrowserStorageError {
     fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
         match self {
             Self::Policy(error) => write!(f, "{error}"),
+            Self::BackendUnavailable(backend) => {
+                write!(f, "storage backend unavailable: {backend:?}")
+            }
         }
     }
 }
@@ -49,6 +54,8 @@ pub struct StorageEvent {
     pub value_len: Option<usize>,
     /// Event outcome.
     pub outcome: StorageEventOutcome,
+    /// Deterministic reason code for policy and availability diagnostics.
+    pub reason_code: StorageEventReasonCode,
 }
 
 /// Deterministic outcome classification for storage telemetry events.
@@ -60,6 +67,35 @@ pub enum StorageEventOutcome {
     Denied,
 }
 
+/// Stable reason code attached to storage telemetry events.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum StorageEventReasonCode {
+    /// Request passed policy checks and was applied.
+    Allowed,
+    /// Namespace was empty/invalid.
+    InvalidNamespace,
+    /// Backend was outside allowed policy.
+    BackendDenied,
+    /// Namespace was outside allowed policy.
+    NamespaceDenied,
+    /// Operation was outside allowed policy.
+    OperationDenied,
+    /// Required key was missing.
+    MissingKey,
+    /// Key exceeded configured length limits.
+    KeyTooLarge,
+    /// Value exceeded configured length limits.
+    ValueTooLarge,
+    /// Namespace exceeded configured length limits.
+    NamespaceTooLarge,
+    /// Entry count would exceed configured limits.
+    EntryCountExceeded,
+    /// Aggregate bytes would exceed configured limits.
+    QuotaExceeded,
+    /// Backend is unavailable in this execution context.
+    BackendUnavailable,
+}
+
 #[derive(Debug, Clone, PartialEq, Eq, PartialOrd, Ord)]
 struct StorageKey {
     backend: StorageBackend,
@@ -67,11 +103,19 @@ struct StorageKey {
     key: String,
 }
 
+#[derive(Debug, Clone, PartialEq, Eq, PartialOrd, Ord)]
+struct StorageNamespaceKey {
+    backend: StorageBackend,
+    namespace: String,
+}
+
 /// Deterministic browser storage adapter used for policy enforcement and tests.
 #[derive(Debug, Clone)]
 pub struct BrowserStorageAdapter {
     cap: BrowserStorageIoCap,
     entries: BTreeMap<StorageKey, Vec<u8>>,
+    list_snapshot: BTreeMap<StorageNamespaceKey, Vec<String>>,
+    unavailable_backends: BTreeMap<StorageBackend, bool>,
     used_bytes: usize,
     events: Vec<StorageEvent>,
 }
@@ -83,6 +127,8 @@ impl BrowserStorageAdapter {
         Self {
             cap,
             entries: BTreeMap::new(),
+            list_snapshot: BTreeMap::new(),
+            unavailable_backends: BTreeMap::new(),
             used_bytes: 0,
             events: Vec::new(),
         }
@@ -110,6 +156,37 @@ impl BrowserStorageAdapter {
     #[must_use]
     pub fn events(&self) -> &[StorageEvent] {
         &self.events
+    }
+
+    /// Configures deterministic availability for a backend.
+    ///
+    /// When set to unavailable, all operations targeting the backend fail with
+    /// [`BrowserStorageError::BackendUnavailable`] after authority validation.
+    pub fn set_backend_available(&mut self, backend: StorageBackend, available: bool) {
+        if available {
+            self.unavailable_backends.remove(&backend);
+        } else {
+            self.unavailable_backends.insert(backend, false);
+        }
+    }
+
+    /// Returns whether a backend is currently marked available.
+    #[must_use]
+    pub fn backend_available(&self, backend: StorageBackend) -> bool {
+        self.unavailable_backends
+            .get(&backend)
+            .copied()
+            .unwrap_or(true)
+    }
+
+    /// Deterministically forces list-view convergence for a namespace.
+    pub fn flush_namespace_list_view(
+        &mut self,
+        backend: StorageBackend,
+        namespace: impl Into<String>,
+    ) {
+        let namespace = namespace.into();
+        self.recompute_list_snapshot(backend, &namespace);
     }
 
     /// Stores a value under `(backend, namespace, key)`.
@@ -227,12 +304,24 @@ impl BrowserStorageAdapter {
         let request = StorageRequest::list_keys(backend, namespace.clone());
         self.authorize_and_record(&request)?;
 
-        Ok(self
-            .entries
-            .keys()
-            .filter(|candidate| candidate.backend == backend && candidate.namespace == namespace)
-            .map(|candidate| candidate.key.clone())
-            .collect())
+        if self.cap.consistency_policy() == StorageConsistencyPolicy::ImmediateReadAfterWrite {
+            return Ok(self.collect_namespace_keys(backend, &namespace));
+        }
+
+        let namespace_key = StorageNamespaceKey {
+            backend,
+            namespace: namespace.clone(),
+        };
+        let visible = self
+            .list_snapshot
+            .get(&namespace_key)
+            .cloned()
+            .unwrap_or_default();
+
+        // Deterministic eventual-consistency seam: this call may return a
+        // stale list, but advances the snapshot so the next list converges.
+        self.recompute_list_snapshot(backend, &namespace);
+        Ok(visible)
     }
 
     /// Clears all keys in a namespace and returns number of removed entries.
@@ -272,7 +361,14 @@ impl BrowserStorageAdapter {
     ) -> Result<(), BrowserStorageError> {
         match self.cap.authorize(request) {
             Ok(()) => {
-                self.record_event(request, StorageEventOutcome::Allowed);
+                if !self.backend_available(request.backend) {
+                    return self.backend_unavailable(request);
+                }
+                self.record_event(
+                    request,
+                    StorageEventOutcome::Allowed,
+                    StorageEventReasonCode::Allowed,
+                );
                 Ok(())
             }
             Err(error) => self.policy_error(request, error),
@@ -284,11 +380,49 @@ impl BrowserStorageAdapter {
         request: &StorageRequest,
         error: StoragePolicyError,
     ) -> Result<T, BrowserStorageError> {
-        self.record_event(request, StorageEventOutcome::Denied);
+        self.record_event(
+            request,
+            StorageEventOutcome::Denied,
+            reason_code_for_policy_error(&error),
+        );
         Err(BrowserStorageError::Policy(error))
     }
 
-    fn record_event(&mut self, request: &StorageRequest, outcome: StorageEventOutcome) {
+    fn backend_unavailable<T>(
+        &mut self,
+        request: &StorageRequest,
+    ) -> Result<T, BrowserStorageError> {
+        self.record_event(
+            request,
+            StorageEventOutcome::Denied,
+            StorageEventReasonCode::BackendUnavailable,
+        );
+        Err(BrowserStorageError::BackendUnavailable(request.backend))
+    }
+
+    fn collect_namespace_keys(&self, backend: StorageBackend, namespace: &str) -> Vec<String> {
+        self.entries
+            .keys()
+            .filter(|candidate| candidate.backend == backend && candidate.namespace == namespace)
+            .map(|candidate| candidate.key.clone())
+            .collect()
+    }
+
+    fn recompute_list_snapshot(&mut self, backend: StorageBackend, namespace: &str) {
+        let key = StorageNamespaceKey {
+            backend,
+            namespace: namespace.to_owned(),
+        };
+        self.list_snapshot
+            .insert(key, self.collect_namespace_keys(backend, namespace));
+    }
+
+    fn record_event(
+        &mut self,
+        request: &StorageRequest,
+        outcome: StorageEventOutcome,
+        reason_code: StorageEventReasonCode,
+    ) {
         let redaction = self.cap.redaction_policy();
         let namespace_label = if redaction.redact_namespaces {
             format!("namespace[len:{}]", request.namespace.len())
@@ -315,7 +449,23 @@ impl BrowserStorageAdapter {
             key_label,
             value_len,
             outcome,
+            reason_code,
         });
+    }
+}
+
+fn reason_code_for_policy_error(error: &StoragePolicyError) -> StorageEventReasonCode {
+    match error {
+        StoragePolicyError::InvalidNamespace(_) => StorageEventReasonCode::InvalidNamespace,
+        StoragePolicyError::BackendDenied(_) => StorageEventReasonCode::BackendDenied,
+        StoragePolicyError::NamespaceDenied(_) => StorageEventReasonCode::NamespaceDenied,
+        StoragePolicyError::OperationDenied(_) => StorageEventReasonCode::OperationDenied,
+        StoragePolicyError::MissingKey(_) => StorageEventReasonCode::MissingKey,
+        StoragePolicyError::KeyTooLarge { .. } => StorageEventReasonCode::KeyTooLarge,
+        StoragePolicyError::ValueTooLarge { .. } => StorageEventReasonCode::ValueTooLarge,
+        StoragePolicyError::NamespaceTooLarge { .. } => StorageEventReasonCode::NamespaceTooLarge,
+        StoragePolicyError::EntryCountExceeded { .. } => StorageEventReasonCode::EntryCountExceeded,
+        StoragePolicyError::QuotaExceeded { .. } => StorageEventReasonCode::QuotaExceeded,
     }
 }
 
@@ -483,8 +633,178 @@ mod tests {
 
         let event = adapter.events().last().expect("event should exist");
         assert_eq!(event.outcome, StorageEventOutcome::Allowed);
+        assert_eq!(event.reason_code, StorageEventReasonCode::Allowed);
         assert_eq!(event.namespace_label, "namespace[len:15]");
         assert_eq!(event.key_label.as_deref(), Some("key[len:10]"));
         assert_eq!(event.value_len, None);
+    }
+
+    #[test]
+    fn adapter_records_denied_reason_code_for_policy_error() {
+        let mut adapter = BrowserStorageAdapter::new(storage_cap_with_defaults());
+        let result = adapter.clear_namespace(StorageBackend::IndexedDb, "session:v1");
+        assert_eq!(
+            result,
+            Err(BrowserStorageError::Policy(
+                StoragePolicyError::NamespaceDenied("session:v1".to_owned())
+            ))
+        );
+
+        let event = adapter.events().last().expect("event should exist");
+        assert_eq!(event.outcome, StorageEventOutcome::Denied);
+        assert_eq!(event.reason_code, StorageEventReasonCode::NamespaceDenied);
+    }
+
+    #[test]
+    fn adapter_backend_unavailable_is_deterministic_and_traced() {
+        let mut adapter = BrowserStorageAdapter::new(storage_cap_with_defaults());
+        adapter.set_backend_available(StorageBackend::IndexedDb, false);
+
+        let result = adapter.set(
+            StorageBackend::IndexedDb,
+            "cache:user:1",
+            "token",
+            b"abc".to_vec(),
+        );
+        assert_eq!(
+            result,
+            Err(BrowserStorageError::BackendUnavailable(
+                StorageBackend::IndexedDb
+            ))
+        );
+
+        let event = adapter.events().last().expect("event should exist");
+        assert_eq!(event.outcome, StorageEventOutcome::Denied);
+        assert_eq!(
+            event.reason_code,
+            StorageEventReasonCode::BackendUnavailable
+        );
+    }
+
+    #[test]
+    fn adapter_eventual_list_is_stale_then_converges() {
+        let cap = BrowserStorageIoCap::new(
+            StorageAuthority::deny_all()
+                .grant_backend(StorageBackend::IndexedDb)
+                .grant_namespace("cache:*")
+                .grant_operation(StorageOperation::Get)
+                .grant_operation(StorageOperation::Set)
+                .grant_operation(StorageOperation::Delete)
+                .grant_operation(StorageOperation::ListKeys),
+            StorageQuotaPolicy::default(),
+            StorageConsistencyPolicy::ReadAfterWriteEventualList,
+            StorageRedactionPolicy::default(),
+        );
+        let mut adapter = BrowserStorageAdapter::new(cap);
+
+        adapter
+            .set(
+                StorageBackend::IndexedDb,
+                "cache:user:7",
+                "profile",
+                b"v1".to_vec(),
+            )
+            .expect("set should succeed");
+        assert_eq!(
+            adapter
+                .get(StorageBackend::IndexedDb, "cache:user:7", "profile")
+                .expect("get should succeed"),
+            Some(b"v1".to_vec())
+        );
+
+        assert_eq!(
+            adapter
+                .list_keys(StorageBackend::IndexedDb, "cache:user:7")
+                .expect("first list should succeed"),
+            Vec::<String>::new()
+        );
+        assert_eq!(
+            adapter
+                .list_keys(StorageBackend::IndexedDb, "cache:user:7")
+                .expect("second list should converge"),
+            vec!["profile".to_owned()]
+        );
+
+        adapter
+            .delete(StorageBackend::IndexedDb, "cache:user:7", "profile")
+            .expect("delete should succeed");
+        assert_eq!(
+            adapter
+                .get(StorageBackend::IndexedDb, "cache:user:7", "profile")
+                .expect("get should succeed"),
+            None
+        );
+        assert_eq!(
+            adapter
+                .list_keys(StorageBackend::IndexedDb, "cache:user:7")
+                .expect("first post-delete list should be stale"),
+            vec!["profile".to_owned()]
+        );
+        assert_eq!(
+            adapter
+                .list_keys(StorageBackend::IndexedDb, "cache:user:7")
+                .expect("second post-delete list should converge"),
+            Vec::<String>::new()
+        );
+    }
+
+    #[test]
+    fn adapter_flush_namespace_list_view_forces_convergence() {
+        let cap = BrowserStorageIoCap::new(
+            StorageAuthority::deny_all()
+                .grant_backend(StorageBackend::IndexedDb)
+                .grant_namespace("cache:*")
+                .grant_operation(StorageOperation::ListKeys)
+                .grant_operation(StorageOperation::Set),
+            StorageQuotaPolicy::default(),
+            StorageConsistencyPolicy::ReadAfterWriteEventualList,
+            StorageRedactionPolicy::default(),
+        );
+        let mut adapter = BrowserStorageAdapter::new(cap);
+        adapter
+            .set(
+                StorageBackend::IndexedDb,
+                "cache:user:9",
+                "profile",
+                b"v2".to_vec(),
+            )
+            .expect("set should succeed");
+
+        adapter.flush_namespace_list_view(StorageBackend::IndexedDb, "cache:user:9");
+        assert_eq!(
+            adapter
+                .list_keys(StorageBackend::IndexedDb, "cache:user:9")
+                .expect("list should succeed"),
+            vec!["profile".to_owned()]
+        );
+    }
+
+    #[test]
+    fn adapter_clear_namespace_updates_used_bytes() {
+        let mut adapter = BrowserStorageAdapter::new(storage_cap_with_defaults());
+        adapter
+            .set(
+                StorageBackend::IndexedDb,
+                "cache:user:42",
+                "a",
+                b"12".to_vec(),
+            )
+            .expect("set should succeed");
+        adapter
+            .set(
+                StorageBackend::IndexedDb,
+                "cache:user:42",
+                "b",
+                b"123".to_vec(),
+            )
+            .expect("set should succeed");
+        assert!(adapter.used_bytes() > 0);
+
+        let removed = adapter
+            .clear_namespace(StorageBackend::IndexedDb, "cache:user:42")
+            .expect("clear should succeed");
+        assert_eq!(removed, 2);
+        assert_eq!(adapter.entry_count(), 0);
+        assert_eq!(adapter.used_bytes(), 0);
     }
 }

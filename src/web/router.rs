@@ -310,11 +310,19 @@ impl Router {
         }
 
         // Check nested routers.
+        let mut best_nested_match: Option<(usize, &Self, String)> = None;
         for (prefix, router) in &self.nested {
             if let Some(sub_path) = strip_prefix(&req.path, prefix) {
-                req.path = sub_path;
-                return router.handle(req);
+                let normalized_len = prefix.trim_end_matches('/').len();
+                match &best_nested_match {
+                    Some((best_len, _, _)) if *best_len >= normalized_len => {}
+                    _ => best_nested_match = Some((normalized_len, router, sub_path)),
+                }
             }
+        }
+        if let Some((_, router, sub_path)) = best_nested_match {
+            req.path = sub_path;
+            return router.handle(req);
         }
 
         // Fallback.
@@ -564,6 +572,18 @@ mod tests {
 
         let resp = app.handle(Request::new("GET", "/api/v1/users/"));
         assert_eq!(resp.status, StatusCode::OK);
+    }
+
+    #[test]
+    fn nested_router_prefers_most_specific_prefix() {
+        let broad = Router::new().route("/health", get(FnHandler::new(ok_handler)));
+        let specific = Router::new().route("/users", get(FnHandler::new(created_handler)));
+
+        // Register broader prefix first: the router should still pick `/api/v1`.
+        let app = Router::new().nest("/api", broad).nest("/api/v1", specific);
+
+        let resp = app.handle(Request::new("GET", "/api/v1/users"));
+        assert_eq!(resp.status, StatusCode::CREATED);
     }
 
     #[test]

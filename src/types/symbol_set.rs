@@ -356,6 +356,9 @@ impl SymbolSet {
 
     fn calculate_threshold(progress: &BlockProgress, config: &ThresholdConfig) -> bool {
         progress.k.is_some_and(|k| {
+            if k == 0 {
+                return false;
+            }
             let k_usize = k as usize;
             if progress.source_symbols >= k_usize {
                 return true;
@@ -366,7 +369,7 @@ impl SymbolSet {
                 return false;
             }
             #[allow(clippy::cast_sign_loss)]
-            let threshold = raw as usize + config.min_overhead;
+            let threshold = (raw as usize).saturating_add(config.min_overhead);
             total >= threshold
         })
     }
@@ -600,6 +603,24 @@ mod tests {
         assert_eq!(drained, 2);
         assert!(set.is_empty());
         assert_eq!(set.memory_usage(), 0);
+    }
+
+    #[test]
+    fn zero_k_never_reaches_threshold() {
+        let config = ThresholdConfig::new(1.0, 0, 0);
+        let mut set = SymbolSet::with_config(config);
+        let _ = set.insert(test_symbol(0, 0, 4));
+        assert!(!set.set_block_k(0, 0));
+        assert!(!set.threshold_reached(0));
+    }
+
+    #[test]
+    fn threshold_calculation_saturates_min_overhead() {
+        let config = ThresholdConfig::new(1.0, usize::MAX, 0);
+        let mut set = SymbolSet::with_config(config);
+        let _ = set.insert(test_symbol(0, 0, 4));
+        assert!(!set.set_block_k(0, 2));
+        assert!(!set.threshold_reached(0));
     }
 
     // =========================================================================

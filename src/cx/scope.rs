@@ -1150,9 +1150,7 @@ impl<P: Policy> Scope<'_, P> {
     ) -> Result<(T, usize), JoinError> {
         let mut handles = handles;
         if handles.is_empty() {
-            return Err(JoinError::Cancelled(CancelReason::user(
-                "race_all requires at least one handle",
-            )));
+            return std::future::pending().await;
         }
 
         let mut futures: Vec<_> = handles
@@ -2316,16 +2314,17 @@ mod tests {
     }
 
     #[test]
-    fn race_all_empty_fails_fast() {
+    fn race_all_empty_is_pending() {
         let mut state = RuntimeState::new();
         let cx = test_cx();
         let region = state.create_root_region(Budget::INFINITE);
         let scope = test_scope(region, Budget::INFINITE);
 
-        let result = block_on(scope.race_all::<i32>(&cx, vec![]));
-        assert!(matches!(
-            result,
-            Err(JoinError::Cancelled(reason)) if reason.kind == CancelKind::User
-        ));
+        let mut fut = scope.race_all::<i32>(&cx, vec![]);
+        let waker = std::task::Waker::noop();
+        let mut poll_cx = std::task::Context::from_waker(&waker);
+        let pinned = std::pin::pin!(fut);
+        let status = std::future::Future::poll(pinned, &mut poll_cx);
+        assert!(status.is_pending());
     }
 }

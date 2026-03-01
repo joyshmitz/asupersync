@@ -4,10 +4,11 @@
 use asupersync::Time;
 use asupersync::cli::{
     CliError, ColorChoice, CommonArgs, CoreDiagnosticsReportBundle, ExitCode,
-    OperatorModelContract, Output, OutputFormat, Outputtable, ScreenEngineContract,
-    StructuredLoggingContract, WorkspaceScanReport, core_diagnostics_report_bundle,
-    operator_model_contract, parse_color_choice, parse_output_format, scan_workspace,
-    screen_engine_contract, structured_logging_contract,
+    InvariantAnalyzerReport, LockContentionAnalyzerReport, OperatorModelContract, Output,
+    OutputFormat, Outputtable, ScreenEngineContract, StructuredLoggingContract,
+    WorkspaceScanReport, analyze_workspace_invariants, analyze_workspace_lock_contention,
+    core_diagnostics_report_bundle, operator_model_contract, parse_color_choice,
+    parse_output_format, scan_workspace, screen_engine_contract, structured_logging_contract,
 };
 use asupersync::trace::{
     CompressionMode, IssueSeverity, ReplayEvent, TRACE_FILE_VERSION, TRACE_MAGIC, TraceFileError,
@@ -232,6 +233,10 @@ struct DoctorArgs {
 enum DoctorCommand {
     /// Scan workspace topology and capability-flow surfaces
     ScanWorkspace(DoctorScanWorkspaceArgs),
+    /// Analyze runtime invariants over scanner output
+    AnalyzeInvariants(DoctorAnalyzeInvariantsArgs),
+    /// Analyze lock-order and contention risk over scanner output
+    AnalyzeLockContention(DoctorAnalyzeLockContentionArgs),
     /// Audit wasm-target dependency graph for forbidden runtime crates
     WasmDependencyAudit(DoctorWasmDependencyAuditArgs),
     /// Emit operator personas, missions, and decision loops contract
@@ -247,6 +252,20 @@ enum DoctorCommand {
 #[derive(Args, Debug)]
 struct DoctorScanWorkspaceArgs {
     /// Workspace root to scan
+    #[arg(long = "root", default_value = ".")]
+    root: PathBuf,
+}
+
+#[derive(Args, Debug)]
+struct DoctorAnalyzeInvariantsArgs {
+    /// Workspace root to scan and analyze
+    #[arg(long = "root", default_value = ".")]
+    root: PathBuf,
+}
+
+#[derive(Args, Debug)]
+struct DoctorAnalyzeLockContentionArgs {
+    /// Workspace root to scan and analyze
     #[arg(long = "root", default_value = ".")]
     root: PathBuf,
 }
@@ -614,6 +633,12 @@ fn run_lab(args: LabArgs, output: &mut Output) -> Result<(), CliError> {
 fn run_doctor(args: DoctorArgs, output: &mut Output) -> Result<(), CliError> {
     match args.command {
         DoctorCommand::ScanWorkspace(scan_args) => doctor_scan_workspace(&scan_args, output),
+        DoctorCommand::AnalyzeInvariants(analyze_args) => {
+            doctor_analyze_invariants(&analyze_args, output)
+        }
+        DoctorCommand::AnalyzeLockContention(analyze_args) => {
+            doctor_analyze_lock_contention(&analyze_args, output)
+        }
         DoctorCommand::WasmDependencyAudit(audit_args) => {
             doctor_wasm_dependency_audit(&audit_args, output)
         }
@@ -636,6 +661,46 @@ fn doctor_scan_workspace(
     })?;
 
     output.write(&report).map_err(|err| {
+        CliError::new("output_error", "Failed to write output").detail(err.to_string())
+    })?;
+    Ok(())
+}
+
+fn doctor_analyze_invariants(
+    args: &DoctorAnalyzeInvariantsArgs,
+    output: &mut Output,
+) -> Result<(), CliError> {
+    let report: WorkspaceScanReport = scan_workspace(&args.root).map_err(|err| {
+        CliError::new(
+            "doctor_scan_error",
+            "Failed to scan workspace for invariant analysis",
+        )
+        .detail(err.to_string())
+        .context("root", args.root.display().to_string())
+        .exit_code(ExitCode::RUNTIME_ERROR)
+    })?;
+    let analysis: InvariantAnalyzerReport = analyze_workspace_invariants(&report);
+    output.write(&analysis).map_err(|err| {
+        CliError::new("output_error", "Failed to write output").detail(err.to_string())
+    })?;
+    Ok(())
+}
+
+fn doctor_analyze_lock_contention(
+    args: &DoctorAnalyzeLockContentionArgs,
+    output: &mut Output,
+) -> Result<(), CliError> {
+    let report: WorkspaceScanReport = scan_workspace(&args.root).map_err(|err| {
+        CliError::new(
+            "doctor_scan_error",
+            "Failed to scan workspace for lock-contention analysis",
+        )
+        .detail(err.to_string())
+        .context("root", args.root.display().to_string())
+        .exit_code(ExitCode::RUNTIME_ERROR)
+    })?;
+    let analysis: LockContentionAnalyzerReport = analyze_workspace_lock_contention(&report);
+    output.write(&analysis).map_err(|err| {
         CliError::new("output_error", "Failed to write output").detail(err.to_string())
     })?;
     Ok(())

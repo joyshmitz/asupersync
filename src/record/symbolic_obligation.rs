@@ -118,12 +118,16 @@ impl FulfillmentProgress {
 
     /// Increments the fulfilled count by one.
     pub fn increment(&self) {
-        self.fulfilled.fetch_add(1, Ordering::Relaxed);
+        self.add(1);
     }
 
     /// Increments by a specific amount.
     pub fn add(&self, count: u32) {
-        self.fulfilled.fetch_add(count, Ordering::Relaxed);
+        let _ = self
+            .fulfilled
+            .fetch_update(Ordering::Relaxed, Ordering::Relaxed, |current| {
+                Some(current.saturating_add(count))
+            });
     }
 
     /// Returns the total required.
@@ -775,7 +779,9 @@ impl SymbolicObligationRegistry {
 
     fn allocate_id(&self) -> ObligationId {
         let raw = self.next_id.fetch_add(1, Ordering::Relaxed);
-        ObligationId::from_arena(ArenaIndex::new(raw as u32, 0))
+        let index = u32::try_from(raw)
+            .expect("symbolic obligation id overflow: arena index exhausted for obligations");
+        ObligationId::from_arena(ArenaIndex::new(index, 0))
     }
 
     fn register(
@@ -935,6 +941,18 @@ mod tests {
     }
 
     #[test]
+    fn fulfillment_progress_saturates_on_overflow() {
+        let progress = FulfillmentProgress::new(u32::MAX);
+        progress.add(u32::MAX);
+        assert_eq!(progress.fulfilled(), u32::MAX);
+
+        // Increment past the bound should saturate instead of wrapping.
+        progress.increment();
+        assert_eq!(progress.fulfilled(), u32::MAX);
+        assert!(progress.is_complete());
+    }
+
+    #[test]
     fn obligation_kind_display() {
         assert_eq!(SymbolicObligationKind::SendObject.as_str(), "send_object");
         assert_eq!(
@@ -1048,6 +1066,23 @@ mod tests {
         assert_eq!(obligation.progress().total, 8);
 
         obligation.abort();
+    }
+
+    #[test]
+    #[should_panic(expected = "symbolic obligation id overflow")]
+    fn registry_panics_on_obligation_id_overflow() {
+        let registry = SymbolicObligationRegistry::new();
+        registry
+            .next_id
+            .store(u64::from(u32::MAX) + 1, Ordering::Relaxed);
+
+        let _ = registry.create_decode(
+            test_object_id(),
+            1,
+            test_task_id(),
+            test_region_id(),
+            Time::ZERO,
+        );
     }
 
     #[test]

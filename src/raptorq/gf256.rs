@@ -255,9 +255,9 @@ struct Gf256Dispatch {
 
 static DISPATCH: std::sync::OnceLock<Gf256Dispatch> = std::sync::OnceLock::new();
 static DUAL_POLICY: std::sync::OnceLock<DualKernelPolicy> = std::sync::OnceLock::new();
-const GF256_PROFILE_PACK_SCHEMA_VERSION: &str = "raptorq-gf256-profile-pack-v2";
-const GF256_PROFILE_PACK_MANIFEST_SCHEMA_VERSION: &str = "raptorq-gf256-profile-pack-manifest-v2";
-const GF256_PROFILE_PACK_REPLAY_POINTER: &str = "replay:rq-e-gf256-profile-pack-v2";
+const GF256_PROFILE_PACK_SCHEMA_VERSION: &str = "raptorq-gf256-profile-pack-v3";
+const GF256_PROFILE_PACK_MANIFEST_SCHEMA_VERSION: &str = "raptorq-gf256-profile-pack-manifest-v3";
+const GF256_PROFILE_PACK_REPLAY_POINTER: &str = "replay:rq-e-gf256-profile-pack-v3";
 const GF256_PROFILE_PACK_COMMAND_BUNDLE: &str =
     "rch exec -- cargo bench --bench raptorq_benchmark -- gf256_primitives";
 const GF256_PROFILE_TUNING_CORPUS_ID: &str = "raptorq-gf256-profile-corpus-v1";
@@ -420,6 +420,8 @@ pub struct DualKernelPolicySnapshot {
     pub command_bundle: &'static str,
     /// Effective policy mode.
     pub mode: DualKernelMode,
+    /// Bitmask describing which policy knobs were explicitly overridden via env vars.
+    pub override_mask: DualKernelOverrideMask,
     /// Inclusive minimum total lane bytes for fused dual-mul path in auto mode.
     pub mul_min_total: usize,
     /// Inclusive maximum total lane bytes for fused dual-mul path in auto mode.
@@ -523,6 +525,114 @@ pub enum Gf256ProfileFallbackReason {
     UnsupportedProfileForHost,
 }
 
+/// Bitmask reporting which dual-policy fields were overridden by environment variables.
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+pub struct DualKernelOverrideMask(u8);
+
+impl DualKernelOverrideMask {
+    const PROFILE_PACK_ENV_REQUESTED: u8 = 1 << 0;
+    const MUL_MIN_TOTAL_ENV_OVERRIDE: u8 = 1 << 1;
+    const MUL_MAX_TOTAL_ENV_OVERRIDE: u8 = 1 << 2;
+    const ADDMUL_MIN_TOTAL_ENV_OVERRIDE: u8 = 1 << 3;
+    const ADDMUL_MAX_TOTAL_ENV_OVERRIDE: u8 = 1 << 4;
+    const ADDMUL_MIN_LANE_ENV_OVERRIDE: u8 = 1 << 5;
+    const MAX_LANE_RATIO_ENV_OVERRIDE: u8 = 1 << 6;
+
+    /// Returns an empty override mask.
+    #[must_use]
+    pub const fn empty() -> Self {
+        Self(0)
+    }
+
+    /// Returns raw bit representation for structured logging/debug artifacts.
+    #[must_use]
+    pub const fn bits(self) -> u8 {
+        self.0
+    }
+
+    #[inline]
+    fn insert_flag(&mut self, flag: u8) {
+        self.0 |= flag;
+    }
+
+    #[inline]
+    fn set_profile_pack_env_requested(&mut self) {
+        self.insert_flag(Self::PROFILE_PACK_ENV_REQUESTED);
+    }
+
+    #[inline]
+    fn set_mul_min_total_env_override(&mut self) {
+        self.insert_flag(Self::MUL_MIN_TOTAL_ENV_OVERRIDE);
+    }
+
+    #[inline]
+    fn set_mul_max_total_env_override(&mut self) {
+        self.insert_flag(Self::MUL_MAX_TOTAL_ENV_OVERRIDE);
+    }
+
+    #[inline]
+    fn set_addmul_min_total_env_override(&mut self) {
+        self.insert_flag(Self::ADDMUL_MIN_TOTAL_ENV_OVERRIDE);
+    }
+
+    #[inline]
+    fn set_addmul_max_total_env_override(&mut self) {
+        self.insert_flag(Self::ADDMUL_MAX_TOTAL_ENV_OVERRIDE);
+    }
+
+    #[inline]
+    fn set_addmul_min_lane_env_override(&mut self) {
+        self.insert_flag(Self::ADDMUL_MIN_LANE_ENV_OVERRIDE);
+    }
+
+    #[inline]
+    fn set_max_lane_ratio_env_override(&mut self) {
+        self.insert_flag(Self::MAX_LANE_RATIO_ENV_OVERRIDE);
+    }
+
+    /// Whether `ASUPERSYNC_GF256_PROFILE_PACK` was provided for this policy selection.
+    #[must_use]
+    pub const fn profile_pack_env_requested(self) -> bool {
+        (self.0 & Self::PROFILE_PACK_ENV_REQUESTED) != 0
+    }
+
+    /// Whether `ASUPERSYNC_GF256_DUAL_MUL_MIN_TOTAL` overrode catalog defaults.
+    #[must_use]
+    pub const fn mul_min_total_env_override(self) -> bool {
+        (self.0 & Self::MUL_MIN_TOTAL_ENV_OVERRIDE) != 0
+    }
+
+    /// Whether `ASUPERSYNC_GF256_DUAL_MUL_MAX_TOTAL` overrode catalog defaults.
+    #[must_use]
+    pub const fn mul_max_total_env_override(self) -> bool {
+        (self.0 & Self::MUL_MAX_TOTAL_ENV_OVERRIDE) != 0
+    }
+
+    /// Whether `ASUPERSYNC_GF256_DUAL_ADDMUL_MIN_TOTAL` overrode catalog defaults.
+    #[must_use]
+    pub const fn addmul_min_total_env_override(self) -> bool {
+        (self.0 & Self::ADDMUL_MIN_TOTAL_ENV_OVERRIDE) != 0
+    }
+
+    /// Whether `ASUPERSYNC_GF256_DUAL_ADDMUL_MAX_TOTAL` overrode catalog defaults.
+    #[must_use]
+    pub const fn addmul_max_total_env_override(self) -> bool {
+        (self.0 & Self::ADDMUL_MAX_TOTAL_ENV_OVERRIDE) != 0
+    }
+
+    /// Whether `ASUPERSYNC_GF256_DUAL_ADDMUL_MIN_LANE` overrode catalog defaults.
+    #[must_use]
+    pub const fn addmul_min_lane_env_override(self) -> bool {
+        (self.0 & Self::ADDMUL_MIN_LANE_ENV_OVERRIDE) != 0
+    }
+
+    /// Whether `ASUPERSYNC_GF256_DUAL_MAX_LANE_RATIO` overrode catalog defaults.
+    #[must_use]
+    pub const fn max_lane_ratio_env_override(self) -> bool {
+        (self.0 & Self::MAX_LANE_RATIO_ENV_OVERRIDE) != 0
+    }
+}
+
 impl Gf256ProfileFallbackReason {
     /// Stable machine-readable identifier for structured logs.
     #[must_use]
@@ -587,13 +697,13 @@ pub struct Gf256TuningCandidateMetadata {
 }
 
 const SCALAR_SELECTED_TUNING_CANDIDATE: &str = "scalar-t16-u1-pf0-fused-off-v1";
-const X86_SELECTED_TUNING_CANDIDATE: &str = "x86-avx2-t32-u2-pf64-fused-balanced-v1";
+const X86_SELECTED_TUNING_CANDIDATE: &str = "x86-avx2-t32-u4-pf64-split-balanced-v1";
 const AARCH64_SELECTED_TUNING_CANDIDATE: &str = "aarch64-neon-t32-u2-pf32-fused-balanced-v1";
 
 const SCALAR_REJECTED_TUNING_CANDIDATES: &[&str] = &["scalar-t8-u1-pf0-fused-off-v1"];
 const X86_REJECTED_TUNING_CANDIDATES: &[&str] = &[
+    "x86-avx2-t32-u2-pf64-fused-balanced-v1",
     "x86-avx2-t16-u2-pf32-fused-balanced-v1",
-    "x86-avx2-t32-u4-pf64-split-balanced-v1",
 ];
 const AARCH64_REJECTED_TUNING_CANDIDATES: &[&str] = &[
     "aarch64-neon-t16-u2-pf16-fused-balanced-v1",
@@ -633,9 +743,10 @@ const GF256_PROFILE_PACK_CATALOG: [Gf256ProfilePackMetadata; 3] = [
         tuning_corpus_id: GF256_PROFILE_TUNING_CORPUS_ID,
         selected_tuning_candidate_id: X86_SELECTED_TUNING_CANDIDATE,
         rejected_tuning_candidate_ids: X86_REJECTED_TUNING_CANDIDATES,
-        // Conservative tuned windows from Track-E benchmark evidence.
-        mul_min_total: 8 * 1024,
-        mul_max_total: 24 * 1024,
+        // Split-biased policy: keep dual-mul on sequential by default because
+        // recent same-session Track-E evidence showed mixed/negative dual-mul deltas.
+        mul_min_total: usize::MAX,
+        mul_max_total: 0,
         // Keep 4KiB+4KiB lanes on the sequential path; Track-E evidence
         // showed fused addmul regressed at that footprint.
         addmul_min_total: 12 * 1024,
@@ -698,27 +809,27 @@ const GF256_TUNING_CANDIDATE_CATALOG: [Gf256TuningCandidateMetadata; 8] = [
         architecture_class: Gf256ArchitectureClass::X86Avx2,
         profile_pack: Gf256ProfilePackId::X86Avx2BalancedV1,
         tile_bytes: 32,
-        unroll: 2,
+        unroll: 4,
         prefetch_distance: 64,
-        fusion_shape: "fused-balanced",
+        fusion_shape: "split-balanced",
     },
     Gf256TuningCandidateMetadata {
         candidate_id: X86_REJECTED_TUNING_CANDIDATES[0],
         architecture_class: Gf256ArchitectureClass::X86Avx2,
         profile_pack: Gf256ProfilePackId::X86Avx2BalancedV1,
-        tile_bytes: 16,
+        tile_bytes: 32,
         unroll: 2,
-        prefetch_distance: 32,
+        prefetch_distance: 64,
         fusion_shape: "fused-balanced",
     },
     Gf256TuningCandidateMetadata {
         candidate_id: X86_REJECTED_TUNING_CANDIDATES[1],
         architecture_class: Gf256ArchitectureClass::X86Avx2,
         profile_pack: Gf256ProfilePackId::X86Avx2BalancedV1,
-        tile_bytes: 32,
-        unroll: 4,
-        prefetch_distance: 64,
-        fusion_shape: "split-balanced",
+        tile_bytes: 16,
+        unroll: 2,
+        prefetch_distance: 32,
+        fusion_shape: "fused-balanced",
     },
     Gf256TuningCandidateMetadata {
         candidate_id: AARCH64_SELECTED_TUNING_CANDIDATE,
@@ -831,6 +942,7 @@ struct DualKernelPolicy {
     replay_pointer: &'static str,
     command_bundle: &'static str,
     mode: DualKernelOverride,
+    override_mask: DualKernelOverrideMask,
     mul_min_total: usize,
     mul_max_total: usize,
     addmul_min_total: usize,
@@ -955,6 +1067,10 @@ fn detect_dual_policy() -> DualKernelPolicy {
 
     let selection = select_profile_pack(dispatch().kind, requested_profile);
     let metadata = profile_pack_metadata(selection.profile_pack);
+    let mut override_mask = DualKernelOverrideMask::empty();
+    if requested_profile_raw.is_some() {
+        override_mask.set_profile_pack_env_requested();
+    }
 
     let mut policy = DualKernelPolicy {
         profile_pack: metadata.profile_pack,
@@ -967,6 +1083,7 @@ fn detect_dual_policy() -> DualKernelPolicy {
         replay_pointer: metadata.replay_pointer,
         command_bundle: metadata.command_bundle,
         mode,
+        override_mask,
         mul_min_total: metadata.mul_min_total,
         mul_max_total: metadata.mul_max_total,
         addmul_min_total: metadata.addmul_min_total,
@@ -976,21 +1093,27 @@ fn detect_dual_policy() -> DualKernelPolicy {
     };
 
     if let Some(v) = parse_usize_env("ASUPERSYNC_GF256_DUAL_MUL_MIN_TOTAL") {
+        policy.override_mask.set_mul_min_total_env_override();
         policy.mul_min_total = v;
     }
     if let Some(v) = parse_usize_env("ASUPERSYNC_GF256_DUAL_MUL_MAX_TOTAL") {
+        policy.override_mask.set_mul_max_total_env_override();
         policy.mul_max_total = v;
     }
     if let Some(v) = parse_usize_env("ASUPERSYNC_GF256_DUAL_ADDMUL_MIN_TOTAL") {
+        policy.override_mask.set_addmul_min_total_env_override();
         policy.addmul_min_total = v;
     }
     if let Some(v) = parse_usize_env("ASUPERSYNC_GF256_DUAL_ADDMUL_MAX_TOTAL") {
+        policy.override_mask.set_addmul_max_total_env_override();
         policy.addmul_max_total = v;
     }
     if let Some(v) = parse_usize_env("ASUPERSYNC_GF256_DUAL_ADDMUL_MIN_LANE") {
+        policy.override_mask.set_addmul_min_lane_env_override();
         policy.addmul_min_lane = v;
     }
     if let Some(v) = parse_usize_env("ASUPERSYNC_GF256_DUAL_MAX_LANE_RATIO") {
+        policy.override_mask.set_max_lane_ratio_env_override();
         policy.max_lane_ratio = v.max(1);
     }
 
@@ -1144,6 +1267,7 @@ pub fn dual_kernel_policy_snapshot() -> DualKernelPolicySnapshot {
         replay_pointer: policy.replay_pointer,
         command_bundle: policy.command_bundle,
         mode: to_public_mode(policy.mode),
+        override_mask: policy.override_mask,
         mul_min_total: policy.mul_min_total,
         mul_max_total: policy.mul_max_total,
         addmul_min_total: policy.addmul_min_total,
@@ -2839,6 +2963,7 @@ mod tests {
             replay_pointer: GF256_PROFILE_PACK_REPLAY_POINTER,
             command_bundle: GF256_PROFILE_PACK_COMMAND_BUNDLE,
             mode: DualKernelOverride::Auto,
+            override_mask: DualKernelOverrideMask::empty(),
             mul_min_total: 8 * 1024,
             mul_max_total: 24 * 1024,
             addmul_min_total: 12 * 1024,
@@ -2879,6 +3004,7 @@ mod tests {
             replay_pointer: GF256_PROFILE_PACK_REPLAY_POINTER,
             command_bundle: GF256_PROFILE_PACK_COMMAND_BUNDLE,
             mode: DualKernelOverride::Auto,
+            override_mask: DualKernelOverrideMask::empty(),
             mul_min_total: 8 * 1024,
             mul_max_total: 24 * 1024,
             addmul_min_total: 12 * 1024,
@@ -3158,6 +3284,7 @@ mod tests {
             replay_pointer: GF256_PROFILE_PACK_REPLAY_POINTER,
             command_bundle: GF256_PROFILE_PACK_COMMAND_BUNDLE,
             mode: DualKernelMode::Auto,
+            override_mask: DualKernelOverrideMask::empty(),
             mul_min_total: 8192,
             mul_max_total: 24576,
             addmul_min_total: 12288,
@@ -3234,6 +3361,28 @@ mod tests {
             assert_eq!(metadata.addmul_min_lane, 2 * 1024);
             assert!(metadata.addmul_min_lane > 1536);
         }
+    }
+
+    #[test]
+    fn x86_profile_pack_prefers_split_candidate_and_disables_mul_auto_window() {
+        let x86 = gf256_profile_pack_catalog()
+            .iter()
+            .find(|metadata| metadata.profile_pack == Gf256ProfilePackId::X86Avx2BalancedV1)
+            .expect("x86 profile pack must exist");
+        assert_eq!(
+            x86.selected_tuning_candidate_id,
+            X86_SELECTED_TUNING_CANDIDATE
+        );
+        assert_ne!(
+            x86.selected_tuning_candidate_id,
+            X86_REJECTED_TUNING_CANDIDATES[0]
+        );
+        assert!(
+            x86.mul_min_total > x86.mul_max_total,
+            "x86 dual-mul auto window should be disabled by default",
+        );
+        assert_eq!(x86.addmul_min_total, 12 * 1024);
+        assert_eq!(x86.addmul_max_total, 16 * 1024);
     }
 
     #[test]

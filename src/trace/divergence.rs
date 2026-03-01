@@ -298,10 +298,19 @@ pub fn diagnose_divergence(
     let trace_len = trace.events.len();
 
     // Category
-    let category = classify_divergence(&error.expected, &error.actual);
+    let category = classify_divergence(error.expected.as_ref(), &error.actual);
 
     // Summaries
-    let expected = EventSummary::from_event(idx, &error.expected);
+    let expected = error.expected.as_ref().map_or_else(
+        || EventSummary {
+            index: idx,
+            event_type: "TraceExhausted".to_string(),
+            details: "recorded trace ended before this event".to_string(),
+            task_id: None,
+            region_id: None,
+        },
+        |event| EventSummary::from_event(idx, event),
+    );
     let actual = EventSummary::from_event(idx, &error.actual);
 
     // Context windows
@@ -309,10 +318,10 @@ pub fn diagnose_divergence(
     let context_after = build_context_after(&trace.events, idx, config.context_after);
 
     // Affected entities
-    let affected = extract_affected_entities(&error.expected, &error.actual);
+    let affected = extract_affected_entities(error.expected.as_ref(), &error.actual);
 
     // Explanation and suggestion
-    let explanation = build_explanation(category, &error.expected, &error.actual);
+    let explanation = build_explanation(category, error.expected.as_ref(), &error.actual);
     let suggestion = build_suggestion(category, &affected);
 
     // Minimal prefix length
@@ -513,8 +522,12 @@ fn slice_trace(source: &ReplayTrace, len: usize) -> ReplayTrace {
 // =============================================================================
 
 /// Classify a divergence by comparing expected and actual events.
-fn classify_divergence(expected: &ReplayEvent, actual: &ReplayEvent) -> DivergenceCategory {
+fn classify_divergence(expected: Option<&ReplayEvent>, actual: &ReplayEvent) -> DivergenceCategory {
     use std::mem::discriminant;
+
+    let Some(expected) = expected else {
+        return DivergenceCategory::LengthMismatch;
+    };
 
     if discriminant(expected) != discriminant(actual) {
         return DivergenceCategory::EventTypeMismatch;
@@ -594,24 +607,26 @@ fn build_context_after(events: &[ReplayEvent], idx: usize, count: usize) -> Vec<
 // Entity Extraction
 // =============================================================================
 
-fn extract_affected_entities(expected: &ReplayEvent, actual: &ReplayEvent) -> AffectedEntities {
+fn extract_affected_entities(
+    expected: Option<&ReplayEvent>,
+    actual: &ReplayEvent,
+) -> AffectedEntities {
     let mut tasks = BTreeSet::new();
     let mut regions = BTreeSet::new();
     let mut timers = BTreeSet::new();
     let mut lane = None;
 
-    collect_event_entities(expected, &mut tasks, &mut regions, &mut timers);
+    if let Some(expected_event) = expected {
+        collect_event_entities(expected_event, &mut tasks, &mut regions, &mut timers);
+    }
     collect_event_entities(actual, &mut tasks, &mut regions, &mut timers);
 
     // Determine scheduler lane from scheduling events
-    if let (
-        ReplayEvent::TaskScheduled { task: e, .. },
-        ReplayEvent::TaskScheduled { task: a, .. },
-    ) = (expected, actual)
+    if let Some(ReplayEvent::TaskScheduled { task: e, .. }) = expected
+        && let ReplayEvent::TaskScheduled { task: a, .. } = actual
+        && e != a
     {
-        if e != a {
-            lane = Some(format!("ready (expected task {e:?}, got {a:?})"));
-        }
+        lane = Some(format!("ready (expected task {e:?}, got {a:?})"));
     }
 
     AffectedEntities {
@@ -676,9 +691,15 @@ fn collect_event_entities(
 #[allow(clippy::too_many_lines)]
 fn build_explanation(
     category: DivergenceCategory,
-    expected: &ReplayEvent,
+    expected: Option<&ReplayEvent>,
     actual: &ReplayEvent,
 ) -> String {
+    if expected.is_none() {
+        return "Recorded trace is exhausted but execution continued. This indicates extra runtime activity beyond the captured trace boundary.".to_string();
+    }
+
+    let expected = expected.expect("checked above");
+
     match category {
         DivergenceCategory::SchedulingOrder => {
             if let (
@@ -1065,7 +1086,7 @@ mod tests {
     fn make_error(index: usize, expected: ReplayEvent, actual: ReplayEvent) -> DivergenceError {
         DivergenceError {
             index,
-            expected,
+            expected: Some(expected),
             actual,
             context: String::new(),
         }
@@ -1078,10 +1099,10 @@ mod tests {
     #[test]
     fn classify_scheduling_order() {
         let cat = classify_divergence(
-            &ReplayEvent::TaskScheduled {
+            Some(&ReplayEvent::TaskScheduled {
                 task: CompactTaskId(1),
                 at_tick: 0,
-            },
+            }),
             &ReplayEvent::TaskScheduled {
                 task: CompactTaskId(2),
                 at_tick: 0,
@@ -1093,10 +1114,10 @@ mod tests {
     #[test]
     fn classify_outcome_mismatch() {
         let cat = classify_divergence(
-            &ReplayEvent::TaskCompleted {
+            Some(&ReplayEvent::TaskCompleted {
                 task: CompactTaskId(1),
                 outcome: 0,
-            },
+            }),
             &ReplayEvent::TaskCompleted {
                 task: CompactTaskId(1),
                 outcome: 2,
@@ -1108,7 +1129,7 @@ mod tests {
     #[test]
     fn classify_event_type_mismatch() {
         let cat = classify_divergence(
-            &ReplayEvent::RngSeed { seed: 42 },
+            Some(&ReplayEvent::RngSeed { seed: 42 }),
             &ReplayEvent::TaskScheduled {
                 task: CompactTaskId(1),
                 at_tick: 0,
@@ -1120,10 +1141,10 @@ mod tests {
     #[test]
     fn classify_time_divergence() {
         let cat = classify_divergence(
-            &ReplayEvent::TimeAdvanced {
+            Some(&ReplayEvent::TimeAdvanced {
                 from_nanos: 0,
                 to_nanos: 1000,
-            },
+            }),
             &ReplayEvent::TimeAdvanced {
                 from_nanos: 0,
                 to_nanos: 2000,
@@ -1135,7 +1156,7 @@ mod tests {
     #[test]
     fn classify_rng_mismatch() {
         let cat = classify_divergence(
-            &ReplayEvent::RngSeed { seed: 42 },
+            Some(&ReplayEvent::RngSeed { seed: 42 }),
             &ReplayEvent::RngSeed { seed: 99 },
         );
         assert_eq!(cat, DivergenceCategory::RngMismatch);
@@ -1144,12 +1165,12 @@ mod tests {
     #[test]
     fn classify_checkpoint_mismatch() {
         let cat = classify_divergence(
-            &ReplayEvent::Checkpoint {
+            Some(&ReplayEvent::Checkpoint {
                 sequence: 1,
                 time_nanos: 100,
                 active_tasks: 3,
                 active_regions: 1,
-            },
+            }),
             &ReplayEvent::Checkpoint {
                 sequence: 1,
                 time_nanos: 100,
@@ -1454,10 +1475,10 @@ mod tests {
     #[test]
     fn extract_task_entities() {
         let affected = extract_affected_entities(
-            &ReplayEvent::TaskScheduled {
+            Some(&ReplayEvent::TaskScheduled {
                 task: CompactTaskId(1),
                 at_tick: 0,
-            },
+            }),
             &ReplayEvent::TaskScheduled {
                 task: CompactTaskId(2),
                 at_tick: 0,
@@ -1472,11 +1493,11 @@ mod tests {
     #[test]
     fn extract_region_entities() {
         let affected = extract_affected_entities(
-            &ReplayEvent::RegionCreated {
+            Some(&ReplayEvent::RegionCreated {
                 region: CompactRegionId(10),
                 parent: Some(CompactRegionId(5)),
                 at_tick: 0,
-            },
+            }),
             &ReplayEvent::RegionCreated {
                 region: CompactRegionId(10),
                 parent: None,
@@ -1492,7 +1513,7 @@ mod tests {
     #[test]
     fn extract_timer_entities() {
         let affected = extract_affected_entities(
-            &ReplayEvent::TimerFired { timer_id: 42 },
+            Some(&ReplayEvent::TimerFired { timer_id: 42 }),
             &ReplayEvent::TimerFired { timer_id: 99 },
         );
 

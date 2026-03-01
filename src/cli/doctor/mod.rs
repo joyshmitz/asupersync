@@ -1671,6 +1671,62 @@ impl Outputtable for WorkspaceScanReport {
     }
 }
 
+impl Outputtable for InvariantAnalyzerReport {
+    fn human_format(&self) -> String {
+        let mut lines = Vec::new();
+        lines.push(format!("Analyzer version: {}", self.analyzer_version));
+        lines.push(format!("Scanner version: {}", self.scanner_version));
+        lines.push(format!("Taxonomy version: {}", self.taxonomy_version));
+        lines.push(format!("Correlation id: {}", self.correlation_id));
+        lines.push(format!("Members evaluated: {}", self.member_count));
+        lines.push(format!("Findings: {}", self.finding_count));
+        lines.push(format!("Rule traces: {}", self.rule_traces.len()));
+        for finding in &self.findings {
+            lines.push(format!(
+                "- [{}] {} (rule={}, confidence={})",
+                finding.severity, finding.summary, finding.rule_id, finding.confidence
+            ));
+        }
+        lines.join("\n")
+    }
+}
+
+impl Outputtable for LockContentionAnalyzerReport {
+    fn human_format(&self) -> String {
+        let mut lines = Vec::new();
+        lines.push(format!("Analyzer version: {}", self.analyzer_version));
+        lines.push(format!("Scanner version: {}", self.scanner_version));
+        lines.push(format!("Correlation id: {}", self.correlation_id));
+        lines.push(format!("Members evaluated: {}", self.member_count));
+        lines.push(format!("Hotspots: {}", self.hotspot_count));
+        lines.push(format!("Violations: {}", self.violation_count));
+        lines.push(format!(
+            "Deadlock risk patterns: {}",
+            self.deadlock_risk_patterns.len()
+        ));
+        lines.push(format!("Rule traces: {}", self.rule_traces.len()));
+        for hotspot in &self.hotspots {
+            lines.push(format!(
+                "- [{}] {} (score={}, confidence={}, locks={}, contention={}, violations={})",
+                hotspot.risk_level,
+                hotspot.path,
+                hotspot.risk_score,
+                hotspot.confidence,
+                hotspot.lock_acquisitions,
+                hotspot.contention_markers,
+                hotspot.violation_count
+            ));
+        }
+        for violation in &self.violations {
+            lines.push(format!(
+                "- [violation] {} :: {} ({})",
+                violation.path, violation.observed_transition, violation.function_name
+            ));
+        }
+        lines.join("\n")
+    }
+}
+
 impl Outputtable for OperatorModelContract {
     fn human_format(&self) -> String {
         let mut lines = Vec::new();
@@ -2137,6 +2193,155 @@ pub struct CapabilityEdge {
     pub sample_files: Vec<String>,
 }
 
+/// Deterministic invariant-analyzer report over a workspace scan.
+#[derive(Debug, Clone, Serialize, PartialEq, Eq)]
+pub struct InvariantAnalyzerReport {
+    /// Analyzer schema version for downstream consumers.
+    pub analyzer_version: String,
+    /// Scanner version used to generate the source report.
+    pub scanner_version: String,
+    /// Taxonomy version used to classify surfaces.
+    pub taxonomy_version: String,
+    /// Stable correlation identifier for linking analyzer traces/findings.
+    pub correlation_id: String,
+    /// Number of members evaluated.
+    pub member_count: usize,
+    /// Number of emitted findings.
+    pub finding_count: usize,
+    /// Findings in deterministic order.
+    pub findings: Vec<InvariantFinding>,
+    /// Rule-level evaluation traces in deterministic order.
+    pub rule_traces: Vec<InvariantRuleTrace>,
+}
+
+/// One invariant finding produced by [`analyze_workspace_invariants`].
+#[derive(Debug, Clone, Serialize, PartialEq, Eq)]
+pub struct InvariantFinding {
+    /// Stable finding identifier.
+    pub finding_id: String,
+    /// Rule identifier that emitted this finding.
+    pub rule_id: String,
+    /// Severity (`warn` or `error`).
+    pub severity: String,
+    /// Human-readable summary.
+    pub summary: String,
+    /// Confidence score in range `0..=100`.
+    pub confidence: u8,
+    /// Deterministic evidence lines supporting the finding.
+    pub evidence: Vec<String>,
+    /// Remediation guidance consumable by follow-up fix pipelines.
+    pub remediation_guidance: String,
+}
+
+/// One rule-level trace entry emitted by the invariant analyzer.
+#[derive(Debug, Clone, Serialize, PartialEq, Eq)]
+pub struct InvariantRuleTrace {
+    /// Stable rule identifier.
+    pub rule_id: String,
+    /// Correlation identifier inherited from the analyzer report.
+    pub correlation_id: String,
+    /// Evaluation outcome (`pass`, `fail`, or `suppressed`).
+    pub outcome: String,
+    /// Confidence score in range `0..=100`.
+    pub confidence: u8,
+    /// Deterministic evidence lines used by the rule.
+    pub evidence: Vec<String>,
+    /// Optional suppression rationale.
+    pub suppressed_reason: Option<String>,
+}
+
+/// Deterministic lock-order/contention analyzer report over a workspace scan.
+#[derive(Debug, Clone, Serialize, PartialEq, Eq)]
+pub struct LockContentionAnalyzerReport {
+    /// Analyzer schema version for downstream consumers.
+    pub analyzer_version: String,
+    /// Scanner version used to generate the source report.
+    pub scanner_version: String,
+    /// Stable correlation identifier for linking analyzer traces/findings.
+    pub correlation_id: String,
+    /// Number of members evaluated.
+    pub member_count: usize,
+    /// Number of emitted contention hotspots.
+    pub hotspot_count: usize,
+    /// Number of emitted lock-order violations.
+    pub violation_count: usize,
+    /// Unique deadlock-risk lock-order inversion patterns observed.
+    pub deadlock_risk_patterns: Vec<String>,
+    /// Ranked contention hotspots in deterministic order.
+    pub hotspots: Vec<LockContentionHotspot>,
+    /// Lock-order violations in deterministic order.
+    pub violations: Vec<LockOrderViolation>,
+    /// Rule-level evaluation traces in deterministic order.
+    pub rule_traces: Vec<LockContentionRuleTrace>,
+    /// Reproducible command pointers for this analyzer pass.
+    pub reproduction_commands: Vec<String>,
+}
+
+/// One lock-order contention hotspot ranked by deterministic score.
+#[derive(Debug, Clone, Serialize, PartialEq, Eq)]
+pub struct LockContentionHotspot {
+    /// Stable hotspot identifier.
+    pub hotspot_id: String,
+    /// Path where this hotspot was observed (relative to workspace root).
+    pub path: String,
+    /// Count of lock acquisition callsites in this file.
+    pub lock_acquisitions: u32,
+    /// Count of contention markers (`lock_wait_ns`, `ContendedMutex`, etc.).
+    pub contention_markers: u32,
+    /// Count of lock-order violations detected in this file.
+    pub violation_count: u32,
+    /// Composite deterministic risk score.
+    pub risk_score: u32,
+    /// Risk level (`low`, `medium`, `high`, `critical`).
+    pub risk_level: String,
+    /// Confidence score in range `0..=100`.
+    pub confidence: u8,
+    /// Deterministic evidence snippets for operator triage.
+    pub evidence: Vec<String>,
+    /// Deterministic remediation guidance tied to this hotspot.
+    pub remediation_guidance: String,
+}
+
+/// One lock-order violation discovered by the analyzer.
+#[derive(Debug, Clone, Serialize, PartialEq, Eq)]
+pub struct LockOrderViolation {
+    /// Stable violation identifier.
+    pub violation_id: String,
+    /// Path where the violation was observed.
+    pub path: String,
+    /// Function context where the transition was observed.
+    pub function_name: String,
+    /// Canonical required order for multi-lock acquisition.
+    pub expected_order: String,
+    /// Observed lock transition that violated canonical ordering.
+    pub observed_transition: String,
+    /// Severity (`warn` or `error`).
+    pub severity: String,
+    /// Confidence score in range `0..=100`.
+    pub confidence: u8,
+    /// Deterministic evidence snippets supporting the violation.
+    pub evidence: Vec<String>,
+    /// Deterministic remediation guidance.
+    pub remediation_guidance: String,
+}
+
+/// One rule-level trace entry emitted by the lock/contention analyzer.
+#[derive(Debug, Clone, Serialize, PartialEq, Eq)]
+pub struct LockContentionRuleTrace {
+    /// Stable rule identifier.
+    pub rule_id: String,
+    /// Correlation identifier inherited from the analyzer report.
+    pub correlation_id: String,
+    /// Evaluation outcome (`pass`, `fail`, or `suppressed`).
+    pub outcome: String,
+    /// Confidence score in range `0..=100`.
+    pub confidence: u8,
+    /// Deterministic evidence lines used by the rule.
+    pub evidence: Vec<String>,
+    /// Optional suppression rationale.
+    pub suppressed_reason: Option<String>,
+}
+
 #[derive(Debug, Clone)]
 struct MemberScan {
     member: WorkspaceMember,
@@ -2177,6 +2382,45 @@ struct ParsedStringArray {
     malformed: bool,
 }
 
+#[derive(Debug, Clone, Copy, PartialEq, Eq, PartialOrd, Ord)]
+enum LockShard {
+    Config,
+    Instrumentation,
+    Regions,
+    Tasks,
+    Obligations,
+}
+
+impl LockShard {
+    fn rank(self) -> u8 {
+        match self {
+            Self::Config => 0,
+            Self::Instrumentation => 1,
+            Self::Regions => 2,
+            Self::Tasks => 3,
+            Self::Obligations => 4,
+        }
+    }
+
+    fn label(self) -> &'static str {
+        match self {
+            Self::Config => "E(Config)",
+            Self::Instrumentation => "D(Instrumentation)",
+            Self::Regions => "B(Regions)",
+            Self::Tasks => "A(Tasks)",
+            Self::Obligations => "C(Obligations)",
+        }
+    }
+}
+
+#[derive(Debug, Clone, Default)]
+struct LockHotspotAccumulator {
+    lock_acquisitions: u32,
+    contention_markers: u32,
+    violation_count: u32,
+    evidence: Vec<String>,
+}
+
 const SCANNER_VERSION: &str = "doctor-workspace-scan-v1";
 const TAXONOMY_VERSION: &str = "capability-surfaces-v1";
 const OPERATOR_MODEL_VERSION: &str = "doctor-operator-model-v1";
@@ -2194,6 +2438,10 @@ const AGENT_MAIL_PANE_CONTRACT_VERSION: &str = "doctor-agent-mail-pane-v1";
 const CORE_DIAGNOSTICS_REPORT_VERSION: &str = "doctor-core-report-v1";
 const ADVANCED_DIAGNOSTICS_REPORT_VERSION: &str = "doctor-advanced-report-v1";
 const VISUAL_LANGUAGE_VERSION: &str = "doctor-visual-language-v1";
+const INVARIANT_ANALYZER_VERSION: &str = "doctor-invariant-analyzer-v1";
+const LOCK_CONTENTION_ANALYZER_VERSION: &str = "doctor-lock-contention-analyzer-v1";
+const LOCK_ORDER_CANONICAL: &str =
+    "E(Config) -> D(Instrumentation) -> B(Regions) -> A(Tasks) -> C(Obligations)";
 const DEFAULT_VISUAL_VIEWPORT_WIDTH: u16 = 132;
 const DEFAULT_VISUAL_VIEWPORT_HEIGHT: u16 = 44;
 const MIN_VISUAL_VIEWPORT_WIDTH: u16 = 110;
@@ -11226,6 +11474,907 @@ pub fn scan_workspace(root: &Path) -> io::Result<WorkspaceScanReport> {
     })
 }
 
+/// Analyze high-signal runtime invariants from a workspace scan report.
+///
+/// This pass is intentionally deterministic and conservative: it only emits
+/// findings that can be justified from scanner facts, warnings, and lifecycle
+/// events without guessing hidden runtime behavior.
+#[must_use]
+pub fn analyze_workspace_invariants(report: &WorkspaceScanReport) -> InvariantAnalyzerReport {
+    let correlation_id = format!(
+        "doctor-invariant:{}:{}:{}",
+        INVARIANT_ANALYZER_VERSION, report.scanner_version, report.workspace_manifest
+    );
+    let detected_surfaces = report
+        .capability_edges
+        .iter()
+        .map(|edge| edge.surface.as_str())
+        .collect::<BTreeSet<_>>();
+    let detected_surface_text = if detected_surfaces.is_empty() {
+        "<none>".to_string()
+    } else {
+        detected_surfaces
+            .iter()
+            .copied()
+            .collect::<Vec<_>>()
+            .join(", ")
+    };
+    let no_members_discovered = report.members.is_empty();
+    let mut findings = Vec::new();
+    let mut rule_traces = Vec::new();
+
+    let mut push_finding = |rule_id: &str,
+                            finding_id: &str,
+                            severity: &str,
+                            summary: String,
+                            confidence: u8,
+                            evidence: Vec<String>,
+                            remediation_guidance: &str| {
+        findings.push(InvariantFinding {
+            finding_id: finding_id.to_string(),
+            rule_id: rule_id.to_string(),
+            severity: severity.to_string(),
+            summary,
+            confidence,
+            evidence,
+            remediation_guidance: remediation_guidance.to_string(),
+        });
+    };
+
+    let structured_rule_id = "structured_concurrency_surface";
+    let missing_structured = ["cx", "scope"]
+        .into_iter()
+        .filter(|required| !detected_surfaces.contains(required))
+        .map(str::to_string)
+        .collect::<Vec<_>>();
+    if no_members_discovered {
+        rule_traces.push(InvariantRuleTrace {
+            rule_id: structured_rule_id.to_string(),
+            correlation_id: correlation_id.clone(),
+            outcome: "suppressed".to_string(),
+            confidence: 100,
+            evidence: vec!["no members discovered in workspace scan".to_string()],
+            suppressed_reason: Some("no members discovered".to_string()),
+        });
+    } else if missing_structured.is_empty() {
+        rule_traces.push(InvariantRuleTrace {
+            rule_id: structured_rule_id.to_string(),
+            correlation_id: correlation_id.clone(),
+            outcome: "pass".to_string(),
+            confidence: 95,
+            evidence: vec![format!("detected surfaces: {detected_surface_text}")],
+            suppressed_reason: None,
+        });
+    } else {
+        let evidence = vec![
+            format!(
+                "missing required structured-concurrency surfaces: {}",
+                missing_structured.join(", ")
+            ),
+            format!("detected surfaces: {detected_surface_text}"),
+        ];
+        push_finding(
+            structured_rule_id,
+            "structured_concurrency_surface_missing",
+            "error",
+            format!(
+                "workspace scan is missing structured-concurrency evidence ({})",
+                missing_structured.join(", ")
+            ),
+            95,
+            evidence.clone(),
+            "Add explicit `Cx` and `Scope` usage (or their canonical markers) to runtime entry points so structured-concurrency ownership is analyzable.",
+        );
+        rule_traces.push(InvariantRuleTrace {
+            rule_id: structured_rule_id.to_string(),
+            correlation_id: correlation_id.clone(),
+            outcome: "fail".to_string(),
+            confidence: 95,
+            evidence,
+            suppressed_reason: None,
+        });
+    }
+
+    let cancel_rule_id = "cancel_phase_surface";
+    if no_members_discovered {
+        rule_traces.push(InvariantRuleTrace {
+            rule_id: cancel_rule_id.to_string(),
+            correlation_id: correlation_id.clone(),
+            outcome: "suppressed".to_string(),
+            confidence: 100,
+            evidence: vec!["no members discovered in workspace scan".to_string()],
+            suppressed_reason: Some("no members discovered".to_string()),
+        });
+    } else if detected_surfaces.contains("cancel") {
+        rule_traces.push(InvariantRuleTrace {
+            rule_id: cancel_rule_id.to_string(),
+            correlation_id: correlation_id.clone(),
+            outcome: "pass".to_string(),
+            confidence: 90,
+            evidence: vec!["detected cancellation surface marker: cancel".to_string()],
+            suppressed_reason: None,
+        });
+    } else {
+        let evidence = vec![
+            "missing cancellation surface marker: cancel".to_string(),
+            format!("detected surfaces: {detected_surface_text}"),
+        ];
+        push_finding(
+            cancel_rule_id,
+            "cancel_phase_surface_missing",
+            "warn",
+            "workspace scan did not observe cancellation-phase markers".to_string(),
+            90,
+            evidence.clone(),
+            "Add explicit cancellation protocol markers (`CancelKind`, `CancelReason`, or `asupersync::cancel`) to the scanned member surfaces.",
+        );
+        rule_traces.push(InvariantRuleTrace {
+            rule_id: cancel_rule_id.to_string(),
+            correlation_id: correlation_id.clone(),
+            outcome: "fail".to_string(),
+            confidence: 90,
+            evidence,
+            suppressed_reason: None,
+        });
+    }
+
+    let obligation_rule_id = "obligation_surface";
+    if no_members_discovered {
+        rule_traces.push(InvariantRuleTrace {
+            rule_id: obligation_rule_id.to_string(),
+            correlation_id: correlation_id.clone(),
+            outcome: "suppressed".to_string(),
+            confidence: 100,
+            evidence: vec!["no members discovered in workspace scan".to_string()],
+            suppressed_reason: Some("no members discovered".to_string()),
+        });
+    } else if detected_surfaces.contains("obligation") {
+        rule_traces.push(InvariantRuleTrace {
+            rule_id: obligation_rule_id.to_string(),
+            correlation_id: correlation_id.clone(),
+            outcome: "pass".to_string(),
+            confidence: 90,
+            evidence: vec!["detected obligation surface marker: obligation".to_string()],
+            suppressed_reason: None,
+        });
+    } else {
+        let evidence = vec![
+            "missing obligation surface marker: obligation".to_string(),
+            format!("detected surfaces: {detected_surface_text}"),
+        ];
+        push_finding(
+            obligation_rule_id,
+            "obligation_surface_missing",
+            "warn",
+            "workspace scan did not observe obligation-accounting markers".to_string(),
+            90,
+            evidence.clone(),
+            "Add explicit obligation protocol markers (`Obligation`, `asupersync::obligation`, `reserve(`, `commit(`) where ownership is enforced.",
+        );
+        rule_traces.push(InvariantRuleTrace {
+            rule_id: obligation_rule_id.to_string(),
+            correlation_id: correlation_id.clone(),
+            outcome: "fail".to_string(),
+            confidence: 90,
+            evidence,
+            suppressed_reason: None,
+        });
+    }
+
+    let lifecycle_rule_id = "scan_lifecycle_events";
+    let event_phases = report
+        .events
+        .iter()
+        .map(|event| event.phase.as_str())
+        .collect::<BTreeSet<_>>();
+    let mut missing_phases = Vec::new();
+    for required in ["scan_start", "scan_complete"] {
+        if !event_phases.contains(required) {
+            missing_phases.push(required.to_string());
+        }
+    }
+    if missing_phases.is_empty() {
+        rule_traces.push(InvariantRuleTrace {
+            rule_id: lifecycle_rule_id.to_string(),
+            correlation_id: correlation_id.clone(),
+            outcome: "pass".to_string(),
+            confidence: 100,
+            evidence: vec!["scan_start and scan_complete events are present".to_string()],
+            suppressed_reason: None,
+        });
+    } else {
+        let evidence = vec![
+            format!("missing phases: {}", missing_phases.join(", ")),
+            format!(
+                "observed phases: {}",
+                event_phases.into_iter().collect::<Vec<_>>().join(", ")
+            ),
+        ];
+        push_finding(
+            lifecycle_rule_id,
+            "scan_lifecycle_events_missing",
+            "error",
+            "scanner lifecycle events are incomplete".to_string(),
+            100,
+            evidence.clone(),
+            "Ensure scanner emits both `scan_start` and `scan_complete` events so downstream replay/diagnostics remain deterministic.",
+        );
+        rule_traces.push(InvariantRuleTrace {
+            rule_id: lifecycle_rule_id.to_string(),
+            correlation_id: correlation_id.clone(),
+            outcome: "fail".to_string(),
+            confidence: 100,
+            evidence,
+            suppressed_reason: None,
+        });
+    }
+
+    let warnings_rule_id = "scanner_warning_integrity";
+    if report.warnings.is_empty() {
+        rule_traces.push(InvariantRuleTrace {
+            rule_id: warnings_rule_id.to_string(),
+            correlation_id: correlation_id.clone(),
+            outcome: "pass".to_string(),
+            confidence: 85,
+            evidence: vec!["workspace scan emitted no warnings".to_string()],
+            suppressed_reason: None,
+        });
+    } else {
+        let mut warning_evidence = report.warnings.clone();
+        warning_evidence.sort();
+        push_finding(
+            warnings_rule_id,
+            "scanner_warning_signal_present",
+            "warn",
+            format!(
+                "workspace scan emitted {} warning(s) requiring triage",
+                warning_evidence.len()
+            ),
+            85,
+            warning_evidence.clone(),
+            "Triage scanner warnings before remediation generation so analyzer confidence remains high.",
+        );
+        rule_traces.push(InvariantRuleTrace {
+            rule_id: warnings_rule_id.to_string(),
+            correlation_id: correlation_id.clone(),
+            outcome: "fail".to_string(),
+            confidence: 85,
+            evidence: warning_evidence,
+            suppressed_reason: None,
+        });
+    }
+
+    findings.sort_by(|a, b| {
+        a.rule_id
+            .cmp(&b.rule_id)
+            .then_with(|| a.finding_id.cmp(&b.finding_id))
+    });
+    rule_traces.sort_by(|a, b| a.rule_id.cmp(&b.rule_id));
+
+    InvariantAnalyzerReport {
+        analyzer_version: INVARIANT_ANALYZER_VERSION.to_string(),
+        scanner_version: report.scanner_version.clone(),
+        taxonomy_version: report.taxonomy_version.clone(),
+        correlation_id,
+        member_count: report.members.len(),
+        finding_count: findings.len(),
+        findings,
+        rule_traces,
+    }
+}
+
+/// Analyze lock-order and contention risk over a workspace scan report.
+///
+/// This analyzer combines static lock-acquisition sequence checks with
+/// contention-marker density scoring to produce deterministic hotspot rankings.
+#[must_use]
+pub fn analyze_workspace_lock_contention(
+    report: &WorkspaceScanReport,
+) -> LockContentionAnalyzerReport {
+    let correlation_id = format!(
+        "doctor-lock-contention:{}:{}:{}",
+        LOCK_CONTENTION_ANALYZER_VERSION, report.scanner_version, report.workspace_manifest
+    );
+    let root = Path::new(&report.root);
+    let mut hotspots: BTreeMap<String, LockHotspotAccumulator> = BTreeMap::new();
+    let mut violations = Vec::new();
+    let mut violation_counter: u32 = 0;
+    let mut rule_traces = Vec::new();
+
+    for member in &report.members {
+        let member_root = root.join(&member.relative_path);
+        let source_root = member_root.join("src");
+        let rust_files = collect_rust_files(&source_root).unwrap_or_default();
+        for file in rust_files {
+            let source = match fs::read_to_string(&file) {
+                Ok(source) => source,
+                Err(_) => continue,
+            };
+            let relative_path = relative_to(root, &file);
+            let accumulator = hotspots.entry(relative_path.clone()).or_default();
+            let mut current_function = "<module>".to_string();
+            let mut previous_lock: Option<(LockShard, usize)> = None;
+
+            for (line_index, line) in source.lines().enumerate() {
+                let line_number = line_index + 1;
+                let trimmed = line.trim();
+                let sanitized = sanitize_line_for_lock_analysis(trimmed);
+                let sanitized_trimmed = sanitized.trim();
+
+                if let Some(function_name) = parse_function_name(sanitized_trimmed) {
+                    current_function = function_name;
+                    previous_lock = None;
+                }
+
+                if sanitized_trimmed.is_empty() {
+                    continue;
+                }
+
+                if sanitized_trimmed.contains(".lock(") {
+                    accumulator.lock_acquisitions = accumulator.lock_acquisitions.saturating_add(1);
+                    push_unique_evidence(
+                        &mut accumulator.evidence,
+                        format!("{relative_path}:{line_number}: lock-acquire `{trimmed}`"),
+                        12,
+                    );
+                }
+
+                if has_contention_marker(sanitized_trimmed) {
+                    accumulator.contention_markers =
+                        accumulator.contention_markers.saturating_add(1);
+                    push_unique_evidence(
+                        &mut accumulator.evidence,
+                        format!("{relative_path}:{line_number}: contention-marker `{trimmed}`"),
+                        12,
+                    );
+                }
+
+                if let Some(current_shard) = detect_lock_shard(sanitized_trimmed) {
+                    if let Some((previous_shard, previous_line)) = previous_lock {
+                        if current_shard.rank() < previous_shard.rank() {
+                            violation_counter = violation_counter.saturating_add(1);
+                            accumulator.violation_count =
+                                accumulator.violation_count.saturating_add(1);
+                            let evidence = vec![
+                                format!(
+                                    "{relative_path}:{previous_line}: previous lock {}",
+                                    previous_shard.label()
+                                ),
+                                format!(
+                                    "{relative_path}:{line_number}: current lock {}",
+                                    current_shard.label()
+                                ),
+                                format!("observed snippet: `{trimmed}`"),
+                            ];
+                            violations.push(LockOrderViolation {
+                                violation_id: format!("lock-order-{violation_counter:03}"),
+                                path: relative_path.clone(),
+                                function_name: current_function.clone(),
+                                expected_order: LOCK_ORDER_CANONICAL.to_string(),
+                                observed_transition: format!(
+                                    "{} -> {}",
+                                    previous_shard.label(),
+                                    current_shard.label()
+                                ),
+                                severity: "error".to_string(),
+                                confidence: 90,
+                                evidence,
+                                remediation_guidance: "Acquire sharded runtime locks in canonical order E(Config) -> D(Instrumentation) -> B(Regions) -> A(Tasks) -> C(Obligations).".to_string(),
+                            });
+                        }
+                    }
+                    previous_lock = Some((current_shard, line_number));
+                }
+            }
+        }
+    }
+
+    let mut hotspot_entries = hotspots
+        .into_iter()
+        .filter_map(|(path, accumulator)| {
+            let risk_score = compute_lock_hotspot_risk(&accumulator);
+            if risk_score == 0 {
+                return None;
+            }
+            Some((path, accumulator, risk_score))
+        })
+        .collect::<Vec<_>>();
+
+    hotspot_entries.sort_by(|left, right| {
+        right
+            .2
+            .cmp(&left.2)
+            .then_with(|| left.0.cmp(&right.0))
+            .then_with(|| right.1.violation_count.cmp(&left.1.violation_count))
+    });
+
+    let mut ranked_hotspots = Vec::with_capacity(hotspot_entries.len());
+    for (index, (path, accumulator, risk_score)) in hotspot_entries.into_iter().enumerate() {
+        ranked_hotspots.push(LockContentionHotspot {
+            hotspot_id: format!("lock-hotspot-{:03}", index + 1),
+            path,
+            lock_acquisitions: accumulator.lock_acquisitions,
+            contention_markers: accumulator.contention_markers,
+            violation_count: accumulator.violation_count,
+            risk_score,
+            risk_level: classify_lock_hotspot_risk(risk_score).to_string(),
+            confidence: compute_lock_hotspot_confidence(&accumulator),
+            evidence: accumulator.evidence,
+            remediation_guidance: "Review lock-heavy paths for deterministic shard-order compliance and trim unnecessary lock scope or hold duration.".to_string(),
+        });
+    }
+
+    violations.sort_by(|left, right| {
+        left.path
+            .cmp(&right.path)
+            .then_with(|| left.function_name.cmp(&right.function_name))
+            .then_with(|| left.violation_id.cmp(&right.violation_id))
+    });
+    let mut deadlock_pattern_counts: BTreeMap<String, u32> = BTreeMap::new();
+    for violation in &violations {
+        *deadlock_pattern_counts
+            .entry(violation.observed_transition.clone())
+            .or_insert(0) += 1;
+    }
+    let deadlock_risk_patterns = deadlock_pattern_counts.keys().cloned().collect::<Vec<_>>();
+
+    let rule_id = "lock_order_consistency";
+    if report.members.is_empty() {
+        rule_traces.push(LockContentionRuleTrace {
+            rule_id: rule_id.to_string(),
+            correlation_id: correlation_id.clone(),
+            outcome: "suppressed".to_string(),
+            confidence: 100,
+            evidence: vec!["no members discovered in workspace scan".to_string()],
+            suppressed_reason: Some("no members discovered".to_string()),
+        });
+    } else if violations.is_empty() {
+        rule_traces.push(LockContentionRuleTrace {
+            rule_id: rule_id.to_string(),
+            correlation_id: correlation_id.clone(),
+            outcome: "pass".to_string(),
+            confidence: 90,
+            evidence: vec![
+                "no lock-order inversions observed in scanned member sources".to_string(),
+            ],
+            suppressed_reason: None,
+        });
+    } else {
+        let evidence = violations
+            .iter()
+            .take(3)
+            .map(|violation| {
+                format!(
+                    "{}:{} ({})",
+                    violation.path, violation.observed_transition, violation.function_name
+                )
+            })
+            .collect::<Vec<_>>();
+        rule_traces.push(LockContentionRuleTrace {
+            rule_id: rule_id.to_string(),
+            correlation_id: correlation_id.clone(),
+            outcome: "fail".to_string(),
+            confidence: 90,
+            evidence,
+            suppressed_reason: None,
+        });
+    }
+
+    let hotspot_rule_id = "contention_hotspot_ranking";
+    if ranked_hotspots.is_empty() {
+        rule_traces.push(LockContentionRuleTrace {
+            rule_id: hotspot_rule_id.to_string(),
+            correlation_id: correlation_id.clone(),
+            outcome: "suppressed".to_string(),
+            confidence: 80,
+            evidence: vec![
+                "no lock/contention markers observed in scanned member sources".to_string(),
+            ],
+            suppressed_reason: Some("no lock/contention markers".to_string()),
+        });
+    } else {
+        let evidence = ranked_hotspots
+            .iter()
+            .take(5)
+            .map(|hotspot| {
+                format!(
+                    "{} score={} locks={} contention={} violations={}",
+                    hotspot.path,
+                    hotspot.risk_score,
+                    hotspot.lock_acquisitions,
+                    hotspot.contention_markers,
+                    hotspot.violation_count
+                )
+            })
+            .collect::<Vec<_>>();
+        rule_traces.push(LockContentionRuleTrace {
+            rule_id: hotspot_rule_id.to_string(),
+            correlation_id: correlation_id.clone(),
+            outcome: "pass".to_string(),
+            confidence: 85,
+            evidence,
+            suppressed_reason: None,
+        });
+    }
+
+    let deadlock_rule_id = "deadlock_risk_patterns";
+    if report.members.is_empty() {
+        rule_traces.push(LockContentionRuleTrace {
+            rule_id: deadlock_rule_id.to_string(),
+            correlation_id: correlation_id.clone(),
+            outcome: "suppressed".to_string(),
+            confidence: 100,
+            evidence: vec!["no members discovered in workspace scan".to_string()],
+            suppressed_reason: Some("no members discovered".to_string()),
+        });
+    } else if deadlock_pattern_counts.is_empty() {
+        rule_traces.push(LockContentionRuleTrace {
+            rule_id: deadlock_rule_id.to_string(),
+            correlation_id: correlation_id.clone(),
+            outcome: "pass".to_string(),
+            confidence: 90,
+            evidence: vec!["no deadlock-risk inversion patterns observed".to_string()],
+            suppressed_reason: None,
+        });
+    } else {
+        let evidence = deadlock_pattern_counts
+            .iter()
+            .take(5)
+            .map(|(pattern, count)| format!("{pattern} count={count}"))
+            .collect::<Vec<_>>();
+        rule_traces.push(LockContentionRuleTrace {
+            rule_id: deadlock_rule_id.to_string(),
+            correlation_id: correlation_id.clone(),
+            outcome: "fail".to_string(),
+            confidence: 90,
+            evidence,
+            suppressed_reason: None,
+        });
+    }
+
+    rule_traces.sort_by(|left, right| left.rule_id.cmp(&right.rule_id));
+
+    LockContentionAnalyzerReport {
+        analyzer_version: LOCK_CONTENTION_ANALYZER_VERSION.to_string(),
+        scanner_version: report.scanner_version.clone(),
+        correlation_id,
+        member_count: report.members.len(),
+        hotspot_count: ranked_hotspots.len(),
+        violation_count: violations.len(),
+        deadlock_risk_patterns,
+        hotspots: ranked_hotspots,
+        violations,
+        rule_traces,
+        reproduction_commands: vec![
+            format!(
+                "asupersync doctor analyze-lock-contention --root {}",
+                report.root
+            ),
+            "rch exec -- cargo test --lib cli::doctor::tests::analyze_workspace_lock_contention_is_deterministic".to_string(),
+        ],
+    }
+}
+
+/// Emit deterministic structured events for lock-order/contention analyzer results.
+///
+/// # Errors
+///
+/// Returns `Err` when event envelopes violate the structured logging contract.
+pub fn emit_lock_contention_structured_events(
+    analysis: &LockContentionAnalyzerReport,
+    run_id: &str,
+    scenario_id: &str,
+) -> Result<Vec<StructuredLogEvent>, String> {
+    let contract = structured_logging_contract();
+    let normalized_run_id = if run_id.trim().is_empty() {
+        "run-lock-contention".to_string()
+    } else {
+        run_id.trim().to_string()
+    };
+    let normalized_scenario_id = if scenario_id.trim().is_empty() {
+        "doctor-lock-contention".to_string()
+    } else {
+        scenario_id.trim().to_string()
+    };
+    let trace_suffix = normalized_run_id
+        .strip_prefix("run-")
+        .unwrap_or(&normalized_run_id);
+    let command_provenance = analysis
+        .reproduction_commands
+        .first()
+        .cloned()
+        .unwrap_or_else(|| "asupersync doctor analyze-lock-contention --root .".to_string());
+
+    let mut events = Vec::new();
+    for hotspot in analysis.hotspots.iter().take(5) {
+        let mut fields = BTreeMap::new();
+        fields.insert(
+            "artifact_pointer".to_string(),
+            format!(
+                "artifacts/{normalized_run_id}/integration/{}.json",
+                hotspot.hotspot_id
+            ),
+        );
+        fields.insert("command_provenance".to_string(), command_provenance.clone());
+        fields.insert("flow_id".to_string(), "integration".to_string());
+        fields.insert(
+            "outcome_class".to_string(),
+            if hotspot.violation_count > 0 {
+                "failed".to_string()
+            } else {
+                "success".to_string()
+            },
+        );
+        fields.insert("run_id".to_string(), normalized_run_id.clone());
+        fields.insert("scenario_id".to_string(), normalized_scenario_id.clone());
+        fields.insert(
+            "trace_id".to_string(),
+            format!("trace-{trace_suffix}-{}", hotspot.hotspot_id),
+        );
+        fields.insert(
+            "integration_target".to_string(),
+            "lock_order_contention_analyzer".to_string(),
+        );
+        fields.insert("risk_score".to_string(), hotspot.risk_score.to_string());
+        fields.insert("risk_level".to_string(), hotspot.risk_level.clone());
+        fields.insert("confidence".to_string(), hotspot.confidence.to_string());
+        fields.insert(
+            "lock_acquisition_count".to_string(),
+            hotspot.lock_acquisitions.to_string(),
+        );
+        fields.insert(
+            "contention_marker_count".to_string(),
+            hotspot.contention_markers.to_string(),
+        );
+        fields.insert(
+            "violation_count".to_string(),
+            hotspot.violation_count.to_string(),
+        );
+        fields.insert(
+            "threshold_explanation".to_string(),
+            lock_hotspot_threshold_explanation(hotspot.risk_score).to_string(),
+        );
+        fields.insert(
+            "lock_sequence".to_string(),
+            hotspot.evidence.first().cloned().unwrap_or_default(),
+        );
+        let event =
+            emit_structured_log_event(&contract, "integration", "integration_sync", &fields)?;
+        events.push(event);
+    }
+
+    let mut summary_fields = BTreeMap::new();
+    summary_fields.insert(
+        "artifact_pointer".to_string(),
+        format!("artifacts/{normalized_run_id}/integration/verification_summary.json"),
+    );
+    summary_fields.insert("command_provenance".to_string(), command_provenance);
+    summary_fields.insert("flow_id".to_string(), "integration".to_string());
+    summary_fields.insert(
+        "outcome_class".to_string(),
+        if analysis.violation_count > 0 {
+            "failed".to_string()
+        } else {
+            "success".to_string()
+        },
+    );
+    summary_fields.insert("run_id".to_string(), normalized_run_id.clone());
+    summary_fields.insert("scenario_id".to_string(), normalized_scenario_id);
+    summary_fields.insert(
+        "trace_id".to_string(),
+        format!("trace-{trace_suffix}-verification"),
+    );
+    summary_fields.insert(
+        "integration_target".to_string(),
+        "lock_order_contention_analyzer".to_string(),
+    );
+    summary_fields.insert(
+        "violation_count".to_string(),
+        analysis.violation_count.to_string(),
+    );
+    summary_fields.insert(
+        "hotspot_count".to_string(),
+        analysis.hotspot_count.to_string(),
+    );
+    summary_fields.insert(
+        "deadlock_risk_pattern_count".to_string(),
+        analysis.deadlock_risk_patterns.len().to_string(),
+    );
+    events.push(emit_structured_log_event(
+        &contract,
+        "integration",
+        "verification_summary",
+        &summary_fields,
+    )?);
+
+    events.sort_by(|left, right| {
+        (
+            left.flow_id.as_str(),
+            left.event_kind.as_str(),
+            left.fields
+                .get("trace_id")
+                .map(String::as_str)
+                .unwrap_or_default(),
+        )
+            .cmp(&(
+                right.flow_id.as_str(),
+                right.event_kind.as_str(),
+                right
+                    .fields
+                    .get("trace_id")
+                    .map(String::as_str)
+                    .unwrap_or_default(),
+            ))
+    });
+
+    Ok(events)
+}
+
+fn compute_lock_hotspot_risk(accumulator: &LockHotspotAccumulator) -> u32 {
+    accumulator
+        .lock_acquisitions
+        .saturating_mul(2)
+        .saturating_add(accumulator.contention_markers.saturating_mul(12))
+        .saturating_add(accumulator.violation_count.saturating_mul(40))
+}
+
+fn compute_lock_hotspot_confidence(accumulator: &LockHotspotAccumulator) -> u8 {
+    let mut confidence = 70;
+    if accumulator.lock_acquisitions >= 2 {
+        confidence += 5;
+    }
+    if accumulator.contention_markers >= 1 {
+        confidence += 10;
+    }
+    if accumulator.violation_count >= 1 {
+        confidence += 15;
+    }
+    confidence.min(95)
+}
+
+fn lock_hotspot_threshold_explanation(score: u32) -> &'static str {
+    if score >= 160 {
+        "critical: score >= 160 (high contention and/or repeated lock-order inversions)"
+    } else if score >= 90 {
+        "high: score in [90, 159] (strong contention signal with elevated deadlock risk)"
+    } else if score >= 40 {
+        "medium: score in [40, 89] (moderate lock pressure; monitor lock scope/hold time)"
+    } else {
+        "low: score < 40 (baseline lock pressure)"
+    }
+}
+
+fn classify_lock_hotspot_risk(score: u32) -> &'static str {
+    if score >= 160 {
+        "critical"
+    } else if score >= 90 {
+        "high"
+    } else if score >= 40 {
+        "medium"
+    } else {
+        "low"
+    }
+}
+
+fn parse_function_name(line: &str) -> Option<String> {
+    let trimmed = line.trim_start();
+    let function_start = trimmed.find("fn ")?;
+    let remainder = &trimmed[function_start + 3..];
+    let identifier = remainder
+        .chars()
+        .take_while(|ch| ch.is_ascii_alphanumeric() || *ch == '_')
+        .collect::<String>();
+    if identifier.is_empty() {
+        None
+    } else {
+        Some(identifier)
+    }
+}
+
+fn sanitize_line_for_lock_analysis(line: &str) -> String {
+    let mut sanitized = String::with_capacity(line.len());
+    let mut chars = line.chars().peekable();
+    let mut in_string = false;
+    let mut in_char = false;
+    let mut escaped = false;
+
+    while let Some(ch) = chars.next() {
+        if in_string {
+            if escaped {
+                escaped = false;
+                sanitized.push(' ');
+                continue;
+            }
+            if ch == '\\' {
+                escaped = true;
+                sanitized.push(' ');
+                continue;
+            }
+            if ch == '"' {
+                in_string = false;
+            }
+            sanitized.push(' ');
+            continue;
+        }
+
+        if in_char {
+            if escaped {
+                escaped = false;
+                sanitized.push(' ');
+                continue;
+            }
+            if ch == '\\' {
+                escaped = true;
+                sanitized.push(' ');
+                continue;
+            }
+            if ch == '\'' {
+                in_char = false;
+            }
+            sanitized.push(' ');
+            continue;
+        }
+
+        if ch == '"' {
+            in_string = true;
+            sanitized.push(' ');
+            continue;
+        }
+        if ch == '\'' {
+            in_char = true;
+            sanitized.push(' ');
+            continue;
+        }
+        if ch == '/' && chars.peek().copied() == Some('/') {
+            break;
+        }
+        sanitized.push(ch);
+    }
+
+    sanitized
+}
+
+fn detect_lock_shard(line: &str) -> Option<LockShard> {
+    if !line.contains(".lock(") {
+        return None;
+    }
+    let normalized = line.replace(' ', "");
+    if normalized.contains(".config.lock(") {
+        Some(LockShard::Config)
+    } else if normalized.contains(".instrumentation.lock(") {
+        Some(LockShard::Instrumentation)
+    } else if normalized.contains(".regions.lock(") {
+        Some(LockShard::Regions)
+    } else if normalized.contains(".tasks.lock(") {
+        Some(LockShard::Tasks)
+    } else if normalized.contains(".obligations.lock(") {
+        Some(LockShard::Obligations)
+    } else {
+        None
+    }
+}
+
+fn has_contention_marker(line: &str) -> bool {
+    [
+        "ContendedMutex",
+        "lock-metrics",
+        "lock_wait_ns",
+        "lock_hold_ns",
+        "contention",
+        "try_lock(",
+        "parking_lot::",
+    ]
+    .iter()
+    .any(|marker| line.contains(marker))
+}
+
+fn push_unique_evidence(evidence: &mut Vec<String>, entry: String, limit: usize) {
+    if evidence.len() >= limit || evidence.iter().any(|existing| existing == &entry) {
+        return;
+    }
+    evidence.push(entry);
+}
+
 fn resolve_member_dirs(
     root: &Path,
     workspace_members: &[String],
@@ -11642,6 +12791,27 @@ mod tests {
         fs::write(path, content).expect("write file");
     }
 
+    fn make_single_member_workspace_report(source: &str) -> WorkspaceScanReport {
+        let temp = tempdir().expect("temp dir");
+        let root = temp.path();
+        write_file(
+            &root.join("Cargo.toml"),
+            r#"[workspace]
+members = ["crate_a"]
+"#,
+        );
+        write_file(
+            &root.join("crate_a/Cargo.toml"),
+            r#"[package]
+name = "crate_a"
+version = "0.1.0"
+edition = "2024"
+"#,
+        );
+        write_file(&root.join("crate_a/src/lib.rs"), source);
+        scan_workspace(root).expect("scan workspace")
+    }
+
     #[test]
     fn scan_workspace_discovers_members_and_surfaces() {
         let temp = tempdir().expect("temp dir");
@@ -11853,6 +13023,265 @@ edition = "2024"
                 .warnings
                 .iter()
                 .any(|warning| warning.contains("malformed package name"))
+        );
+    }
+
+    #[test]
+    fn analyze_workspace_invariants_flags_missing_cancel_and_obligation_markers() {
+        let report =
+            make_single_member_workspace_report("use asupersync::Cx;\nuse asupersync::Scope;\n");
+        let analysis = analyze_workspace_invariants(&report);
+
+        assert_eq!(analysis.analyzer_version, INVARIANT_ANALYZER_VERSION);
+        assert_eq!(analysis.member_count, 1);
+        assert_eq!(analysis.finding_count, analysis.findings.len());
+
+        let finding_rule_ids = analysis
+            .findings
+            .iter()
+            .map(|finding| finding.rule_id.as_str())
+            .collect::<BTreeSet<_>>();
+        assert!(finding_rule_ids.contains("cancel_phase_surface"));
+        assert!(finding_rule_ids.contains("obligation_surface"));
+        assert!(!finding_rule_ids.contains("scan_lifecycle_events"));
+
+        let lifecycle_trace = analysis
+            .rule_traces
+            .iter()
+            .find(|trace| trace.rule_id == "scan_lifecycle_events")
+            .expect("lifecycle trace");
+        assert_eq!(lifecycle_trace.outcome, "pass");
+    }
+
+    #[test]
+    fn analyze_workspace_invariants_flags_missing_scan_complete_event() {
+        let report = make_single_member_workspace_report(
+            "use asupersync::Cx;\nuse asupersync::Scope;\nuse asupersync::cancel::CancelReason;\nuse asupersync::obligation::Obligation;\n",
+        );
+        let mut broken = report.clone();
+        broken.events.retain(|event| event.phase != "scan_complete");
+
+        let analysis = analyze_workspace_invariants(&broken);
+        let finding = analysis
+            .findings
+            .iter()
+            .find(|candidate| candidate.rule_id == "scan_lifecycle_events")
+            .expect("lifecycle finding");
+        assert_eq!(finding.severity, "error");
+        assert!(
+            finding
+                .evidence
+                .iter()
+                .any(|line| line.contains("scan_complete"))
+        );
+    }
+
+    #[test]
+    fn analyze_workspace_invariants_suppresses_surface_rules_without_members() {
+        let temp = tempdir().expect("temp dir");
+        let root = temp.path();
+        write_file(
+            &root.join("Cargo.toml"),
+            r#"[workspace]
+members = ["missing_member"]
+"#,
+        );
+        let report = scan_workspace(root).expect("scan workspace");
+        assert!(report.members.is_empty());
+
+        let analysis = analyze_workspace_invariants(&report);
+        for suppressed_rule in [
+            "cancel_phase_surface",
+            "obligation_surface",
+            "structured_concurrency_surface",
+        ] {
+            let trace = analysis
+                .rule_traces
+                .iter()
+                .find(|candidate| candidate.rule_id == suppressed_rule)
+                .expect("suppressed trace");
+            assert_eq!(trace.outcome, "suppressed");
+            assert_eq!(
+                trace.suppressed_reason.as_deref(),
+                Some("no members discovered")
+            );
+        }
+        assert!(
+            analysis
+                .findings
+                .iter()
+                .any(|finding| finding.rule_id == "scanner_warning_integrity")
+        );
+    }
+
+    #[test]
+    fn analyze_workspace_invariants_is_deterministic() {
+        let report = make_single_member_workspace_report(
+            "use asupersync::Cx;\nuse asupersync::Scope;\nuse asupersync::cancel::CancelReason;\nuse asupersync::obligation::Obligation;\n",
+        );
+        let first = analyze_workspace_invariants(&report);
+        let second = analyze_workspace_invariants(&report);
+        assert_eq!(first, second);
+        assert_eq!(first.rule_traces.len(), 5);
+        assert!(
+            first
+                .rule_traces
+                .iter()
+                .any(|trace| trace.rule_id == "structured_concurrency_surface"
+                    && trace.outcome == "pass")
+        );
+        assert!(
+            first
+                .rule_traces
+                .iter()
+                .any(|trace| trace.rule_id == "scan_lifecycle_events" && trace.outcome == "pass")
+        );
+    }
+
+    #[test]
+    fn analyze_workspace_lock_contention_detects_violation_and_hotspots() {
+        let report = make_single_member_workspace_report(
+            r#"
+struct RuntimeState;
+impl RuntimeState {
+    fn bad_order(&self) {
+        let _tasks = self.tasks.lock();
+        let _regions = self.regions.lock();
+        let _obligations = self.obligations.lock();
+    }
+
+    fn contention_marker(&self) {
+        let _instrumentation = self.instrumentation.lock();
+        // lock_wait_ns and lock_hold_ns are emitted by lock metrics.
+    }
+}
+"#,
+        );
+        let analysis = analyze_workspace_lock_contention(&report);
+        assert_eq!(analysis.analyzer_version, LOCK_CONTENTION_ANALYZER_VERSION);
+        assert!(analysis.hotspot_count >= 1);
+        assert!(analysis.violation_count >= 1);
+        assert!(
+            analysis
+                .deadlock_risk_patterns
+                .iter()
+                .any(|pattern| pattern.contains("A(Tasks) -> B(Regions)"))
+        );
+        assert!(analysis.violations.iter().any(|violation| {
+            violation
+                .observed_transition
+                .contains("A(Tasks) -> B(Regions)")
+        }));
+        let lock_rule = analysis
+            .rule_traces
+            .iter()
+            .find(|trace| trace.rule_id == "lock_order_consistency")
+            .expect("lock-order trace");
+        assert_eq!(lock_rule.outcome, "fail");
+        let deadlock_rule = analysis
+            .rule_traces
+            .iter()
+            .find(|trace| trace.rule_id == "deadlock_risk_patterns")
+            .expect("deadlock trace");
+        assert_eq!(deadlock_rule.outcome, "fail");
+    }
+
+    #[test]
+    fn analyze_workspace_lock_contention_ignores_comments_and_string_literals() {
+        let report = make_single_member_workspace_report(
+            r#"
+impl RuntimeState {
+    fn comments_and_strings_only(&self) {
+        // let _tasks = self.tasks.lock();
+        let _text = "self.regions.lock(); lock_wait_ns";
+        let _char = '.';
+    }
+}
+"#,
+        );
+        let analysis = analyze_workspace_lock_contention(&report);
+        assert_eq!(analysis.hotspot_count, 0);
+        assert_eq!(analysis.violation_count, 0);
+        assert!(analysis.deadlock_risk_patterns.is_empty());
+        let hotspot_rule = analysis
+            .rule_traces
+            .iter()
+            .find(|trace| trace.rule_id == "contention_hotspot_ranking")
+            .expect("hotspot trace");
+        assert_eq!(hotspot_rule.outcome, "suppressed");
+    }
+
+    #[test]
+    fn analyze_workspace_lock_contention_is_deterministic() {
+        let report = make_single_member_workspace_report(
+            r#"
+impl RuntimeState {
+    fn deterministic_lock_path(&self) {
+        let _config = self.config.lock();
+        let _instrumentation = self.instrumentation.lock();
+        let _regions = self.regions.lock();
+        let _tasks = self.tasks.lock();
+        let _obligations = self.obligations.lock();
+    }
+}
+"#,
+        );
+        let first = analyze_workspace_lock_contention(&report);
+        let second = analyze_workspace_lock_contention(&report);
+        assert_eq!(first, second);
+        assert!(
+            first
+                .rule_traces
+                .iter()
+                .any(|trace| trace.rule_id == "contention_hotspot_ranking")
+        );
+        assert!(
+            first
+                .rule_traces
+                .iter()
+                .any(|trace| trace.rule_id == "deadlock_risk_patterns")
+        );
+    }
+
+    #[test]
+    fn emit_lock_contention_structured_events_are_valid_and_deterministic() {
+        let report = make_single_member_workspace_report(
+            r#"
+impl RuntimeState {
+    fn lock_path(&self) {
+        let _tasks = self.tasks.lock();
+        let _regions = self.regions.lock();
+        // contention marker for scoring
+        let _ = "lock_wait_ns";
+    }
+}
+"#,
+        );
+        let analysis = analyze_workspace_lock_contention(&report);
+        let first = emit_lock_contention_structured_events(
+            &analysis,
+            "run-lock-contention-smoke",
+            "doctor-lock-contention-smoke",
+        )
+        .expect("first events");
+        let second = emit_lock_contention_structured_events(
+            &analysis,
+            "run-lock-contention-smoke",
+            "doctor-lock-contention-smoke",
+        )
+        .expect("second events");
+        assert_eq!(first, second);
+        let contract = structured_logging_contract();
+        validate_structured_logging_event_stream(&contract, &first).expect("valid event stream");
+        assert!(
+            first
+                .iter()
+                .any(|event| event.fields.get("risk_score").is_some())
+        );
+        assert!(
+            first
+                .iter()
+                .any(|event| event.fields.get("threshold_explanation").is_some())
         );
     }
 

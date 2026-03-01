@@ -721,12 +721,18 @@ impl DistributedHarness {
 
     /// Delivers packets from the simulated network to the appropriate nodes.
     fn deliver_packets(&mut self) {
-        // Phase 1: Collect raw payloads without borrowing &mut self.
+        // Phase 1: Drain raw payloads without borrowing `self.nodes` and
+        // `self.network` in conflicting ways.
         let mut raw_payloads: Vec<(NodeId, Bytes)> = Vec::new();
-        for (node_id, node) in &self.nodes {
-            if let Some(packets) = self.network.inbox(node.host_id) {
+        let node_hosts: Vec<(NodeId, HostId)> = self
+            .nodes
+            .iter()
+            .map(|(node_id, node)| (node_id.clone(), node.host_id))
+            .collect();
+        for (node_id, host_id) in node_hosts {
+            if let Some(packets) = self.network.take_inbox(host_id) {
                 for packet in packets {
-                    raw_payloads.push((node_id.clone(), packet.payload.clone()));
+                    raw_payloads.push((node_id.clone(), packet.payload));
                 }
             }
         }
@@ -1202,6 +1208,21 @@ mod tests {
         let run1 = run_scenario();
         let run2 = run_scenario();
         assert_eq!(run1, run2, "Replay should be deterministic");
+    }
+
+    #[test]
+    fn harness_drains_network_inboxes_after_delivery() {
+        let (mut harness, a, b) = setup_harness();
+        let task_id = RemoteTaskId::next();
+        harness.inject_spawn(&a, &b, task_id);
+
+        // Long enough for spawn, ack, execution, and result exchange.
+        harness.run_for(Duration::from_millis(1000));
+
+        let host_a = harness.node(&a).unwrap().host_id;
+        let host_b = harness.node(&b).unwrap().host_id;
+        assert!(harness.network.inbox(host_a).unwrap().is_empty());
+        assert!(harness.network.inbox(host_b).unwrap().is_empty());
     }
 
     #[test]

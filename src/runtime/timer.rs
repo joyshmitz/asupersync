@@ -222,7 +222,12 @@ mod tests {
 
         heap.clear();
         crate::assert_with_log!(heap.is_empty(), "empty after clear", true, heap.is_empty());
-        crate::assert_with_log!(heap.is_empty(), "len after clear", 0, heap.len());
+        crate::assert_with_log!(
+            heap.is_empty(),
+            "heap empty after clear",
+            true,
+            heap.is_empty()
+        );
         let none = heap.peek_deadline().is_none();
         crate::assert_with_log!(none, "no deadline after clear", true, none);
         crate::test_complete!("clear_empties_heap");

@@ -73,11 +73,14 @@ pub use browser_stream::{
 pub use buf_reader::BufReader;
 pub use buf_writer::BufWriter;
 pub use cap::{
-    BrowserFetchIoCap, BrowserStorageIoCap, FetchAuthority, FetchCancellationPolicy, FetchIoCap,
-    FetchMethod, FetchPolicyError, FetchRequest, FetchStreamPolicy, FetchTimeoutPolicy, IoCap,
-    IoNotAvailable, LabIoCap, StorageAuthority, StorageBackend, StorageConsistencyPolicy,
-    StorageIoCap, StorageOperation, StoragePolicyError, StorageQuotaPolicy, StorageRedactionPolicy,
-    StorageRequest,
+    BrowserFetchIoCap, BrowserStorageIoCap, BrowserTransportAuthority,
+    BrowserTransportCancellationPolicy, BrowserTransportIoCap, BrowserTransportKind,
+    BrowserTransportPolicyError, BrowserTransportReconnectPolicy, BrowserTransportRequest,
+    BrowserTransportSupport, FetchAuthority, FetchCancellationPolicy, FetchIoCap, FetchMethod,
+    FetchPolicyError, FetchRequest, FetchStreamPolicy, FetchTimeoutPolicy, IoCap, IoNotAvailable,
+    LabIoCap, StorageAuthority, StorageBackend, StorageConsistencyPolicy, StorageIoCap,
+    StorageOperation, StoragePolicyError, StorageQuotaPolicy, StorageRedactionPolicy,
+    StorageRequest, TransportIoCap,
 };
 pub use lines::Lines;
 pub use std::io::SeekFrom;

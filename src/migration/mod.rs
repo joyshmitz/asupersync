@@ -277,10 +277,10 @@ impl<T: Clone + Serialize + DeserializeOwned> DualValue<T> {
     ///
     /// The `_config` parameter is reserved for future use with actual
     /// RaptorQ encoding configuration.
-    pub fn ensure_symbols(&mut self, _config: &EncodingConfig) {
+    pub fn ensure_symbols(&mut self, _config: &EncodingConfig) -> Result<(), DualValueError> {
         if let Self::Traditional(v) = self {
-            let serialized =
-                serde_json::to_vec(v).expect("serialization of existing value should succeed");
+            let serialized = serde_json::to_vec(v)
+                .map_err(|e| DualValueError::SerializationFailed(e.to_string()))?;
             let object_id = ObjectId::new_for_test(0);
             *self = Self::SymbolNative {
                 serialized,
@@ -288,6 +288,7 @@ impl<T: Clone + Serialize + DeserializeOwned> DualValue<T> {
                 _phantom: PhantomData,
             };
         }
+        Ok(())
     }
 }
 
@@ -329,7 +330,7 @@ mod tests {
         let config = EncodingConfig::default();
 
         // Convert to symbol-native
-        value.ensure_symbols(&config);
+        value.ensure_symbols(&config).unwrap();
         assert!(matches!(value, DualValue::SymbolNative { .. }));
 
         // Still get same value
@@ -443,7 +444,7 @@ mod tests {
     fn dual_value_uses_raptorq_after_ensure_symbols() {
         let mut val = DualValue::Traditional(42u32);
         let config = EncodingConfig::default();
-        val.ensure_symbols(&config);
+        val.ensure_symbols(&config).unwrap();
         assert!(val.uses_raptorq());
         assert!(!val.is_traditional());
     }
@@ -452,10 +453,10 @@ mod tests {
     fn dual_value_ensure_symbols_idempotent() {
         let mut val = DualValue::Traditional(42u32);
         let config = EncodingConfig::default();
-        val.ensure_symbols(&config);
+        val.ensure_symbols(&config).unwrap();
         assert!(val.uses_raptorq());
         // Second call should be a no-op (already SymbolNative)
-        val.ensure_symbols(&config);
+        val.ensure_symbols(&config).unwrap();
         assert!(val.uses_raptorq());
         assert_eq!(val.get().unwrap(), 42u32);
     }
@@ -484,10 +485,43 @@ mod tests {
     fn dual_value_debug_symbol_native() {
         let mut val = DualValue::Traditional("hello".to_string());
         let config = EncodingConfig::default();
-        val.ensure_symbols(&config);
+        val.ensure_symbols(&config).unwrap();
         let dbg = format!("{val:?}");
         assert!(dbg.contains("SymbolNative"), "{dbg}");
         assert!(dbg.contains("bytes"), "{dbg}");
+    }
+
+    #[test]
+    fn dual_value_ensure_symbols_serialization_failure() {
+        #[derive(Clone)]
+        struct FailingSerialize;
+
+        impl Serialize for FailingSerialize {
+            fn serialize<S>(&self, _serializer: S) -> Result<S::Ok, S::Error>
+            where
+                S: serde::Serializer,
+            {
+                Err(serde::ser::Error::custom("forced serialization failure"))
+            }
+        }
+
+        impl<'de> serde::Deserialize<'de> for FailingSerialize {
+            fn deserialize<D>(_deserializer: D) -> Result<Self, D::Error>
+            where
+                D: serde::Deserializer<'de>,
+            {
+                Ok(Self)
+            }
+        }
+
+        let mut val = DualValue::Traditional(FailingSerialize);
+        let config = EncodingConfig::default();
+        let err = val.ensure_symbols(&config).unwrap_err();
+        assert!(matches!(err, DualValueError::SerializationFailed(_)));
+        assert!(
+            val.is_traditional(),
+            "failed conversion should preserve original"
+        );
     }
 
     // ---- MigrationConfig ----

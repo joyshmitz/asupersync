@@ -156,6 +156,7 @@ pub struct ProgressReporter {
     writer: Box<dyn Write>,
     operation: Option<String>,
     last_line_length: usize,
+    update_line_active: bool,
 }
 
 impl ProgressReporter {
@@ -169,6 +170,7 @@ impl ProgressReporter {
             writer: Box::new(io::stderr()),
             operation: None,
             last_line_length: 0,
+            update_line_active: false,
         }
     }
 
@@ -182,6 +184,7 @@ impl ProgressReporter {
             writer: Box::new(writer),
             operation: None,
             last_line_length: 0,
+            update_line_active: false,
         }
     }
 
@@ -225,8 +228,9 @@ impl ProgressReporter {
     fn report_human(&mut self, event: &ProgressEvent) -> io::Result<()> {
         let use_color = self.color.should_colorize();
 
-        // Clear previous line for updates (carriage return)
-        if event.kind == ProgressKind::Update && self.last_line_length > 0 {
+        // Clear the currently rendered in-place update line before rewriting
+        // another update or emitting a terminal status line.
+        if self.update_line_active {
             write!(self.writer, "\r{}\r", " ".repeat(self.last_line_length))?;
         }
 
@@ -297,13 +301,15 @@ impl ProgressReporter {
             }
         }
 
-        self.last_line_length = line.len();
-
         // Use newline for terminal states, just carriage return for updates
         if event.kind == ProgressKind::Update {
             write!(self.writer, "{line}")?;
+            self.last_line_length = line.len();
+            self.update_line_active = true;
         } else {
             writeln!(self.writer, "{line}")?;
+            self.last_line_length = 0;
+            self.update_line_active = false;
         }
 
         self.writer.flush()
@@ -403,7 +409,28 @@ impl ProgressReporter {
 #[cfg(test)]
 mod tests {
     use super::*;
-    use std::io::Cursor;
+    use std::io::{self, Cursor, Write};
+    use std::sync::{Arc, Mutex};
+
+    #[derive(Clone, Default)]
+    struct SharedBuffer(Arc<Mutex<Vec<u8>>>);
+
+    impl SharedBuffer {
+        fn snapshot(&self) -> Vec<u8> {
+            self.0.lock().unwrap().clone()
+        }
+    }
+
+    impl Write for SharedBuffer {
+        fn write(&mut self, buf: &[u8]) -> io::Result<usize> {
+            self.0.lock().unwrap().extend_from_slice(buf);
+            Ok(buf.len())
+        }
+
+        fn flush(&mut self) -> io::Result<()> {
+            Ok(())
+        }
+    }
 
     fn init_test(name: &str) {
         crate::test_utils::init_test_logging();
@@ -709,6 +736,32 @@ mod tests {
         reporter.update(15, 10, "over-complete").unwrap();
         reporter.complete("done").unwrap();
         crate::test_complete!("progress_reporter_human_clamps_over_100_percent");
+    }
+
+    #[test]
+    fn progress_reporter_human_terminal_event_replaces_update_line() {
+        init_test("progress_reporter_human_terminal_event_replaces_update_line");
+        let shared = SharedBuffer::default();
+        let inspector = shared.clone();
+        let mut reporter = ProgressReporter::with_writer(OutputFormat::Human, shared);
+        reporter.start("begin").unwrap();
+        reporter.update(5, 10, "half").unwrap();
+        reporter.complete("end").unwrap();
+
+        let output = String::from_utf8(inspector.snapshot()).unwrap();
+        crate::assert_with_log!(
+            output.contains("half\r"),
+            "update line terminated with carriage return",
+            "contains `half\\r`",
+            output.clone()
+        );
+        crate::assert_with_log!(
+            !output.contains("half✓"),
+            "terminal line not concatenated to update line",
+            "does not contain `half✓`",
+            output.clone()
+        );
+        crate::test_complete!("progress_reporter_human_terminal_event_replaces_update_line");
     }
 
     #[test]

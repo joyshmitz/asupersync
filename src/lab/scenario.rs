@@ -568,12 +568,44 @@ impl Scenario {
     }
 
     fn validate_network(&self, errors: &mut Vec<ValidationError>) {
-        for key in self.network.links.keys() {
-            if !key.contains("->") {
+        for (key, link) in &self.network.links {
+            let key_valid = key
+                .split_once("->")
+                .is_some_and(|(from, to)| !from.is_empty() && !to.is_empty() && !to.contains("->"));
+            if !key_valid {
                 errors.push(ValidationError {
                     field: format!("network.links.{key}"),
                     message: "link key must be in format \"from->to\"".into(),
                 });
+            }
+
+            for (name, value) in [
+                ("packet_loss", link.packet_loss),
+                ("packet_corrupt", link.packet_corrupt),
+                ("packet_duplicate", link.packet_duplicate),
+                ("packet_reorder", link.packet_reorder),
+            ] {
+                if let Some(probability) = value {
+                    if !probability.is_finite() || !(0.0..=1.0).contains(&probability) {
+                        errors.push(ValidationError {
+                            field: format!("network.links.{key}.{name}"),
+                            message: format!(
+                                "probability must be finite and in [0.0, 1.0], got {probability}"
+                            ),
+                        });
+                    }
+                }
+            }
+
+            if let Some(LatencySpec::Uniform { min_ms, max_ms }) = &link.latency {
+                if min_ms > max_ms {
+                    errors.push(ValidationError {
+                        field: format!("network.links.{key}.latency"),
+                        message: format!(
+                            "uniform latency min_ms ({min_ms}) must be <= max_ms ({max_ms})"
+                        ),
+                    });
+                }
             }
         }
     }
@@ -849,6 +881,46 @@ mod tests {
         let s: Scenario = serde_json::from_str(json).unwrap();
         let errors = s.validate();
         assert!(errors.iter().any(|e| e.field.contains("network.links")));
+    }
+
+    #[test]
+    fn validate_link_probability_out_of_range() {
+        let json = r#"{
+            "id": "x",
+            "network": {
+                "links": {
+                    "alice->bob": { "packet_loss": 1.5 }
+                }
+            }
+        }"#;
+        let s: Scenario = serde_json::from_str(json).unwrap();
+        let errors = s.validate();
+        assert!(
+            errors
+                .iter()
+                .any(|e| e.field == "network.links.alice->bob.packet_loss")
+        );
+    }
+
+    #[test]
+    fn validate_uniform_latency_min_max_order() {
+        let json = r#"{
+            "id": "x",
+            "network": {
+                "links": {
+                    "alice->bob": {
+                        "latency": { "model": "uniform", "min_ms": 20, "max_ms": 10 }
+                    }
+                }
+            }
+        }"#;
+        let s: Scenario = serde_json::from_str(json).unwrap();
+        let errors = s.validate();
+        assert!(
+            errors
+                .iter()
+                .any(|e| e.field == "network.links.alice->bob.latency")
+        );
     }
 
     #[test]

@@ -419,10 +419,8 @@ mod tests {
         crate::test_complete!("test_default_config_sane");
     }
 
-    #[test]
-    fn test_normalize_enforces_minimums() {
-        init_test("test_normalize_enforces_minimums");
-        let mut config = RuntimeConfig {
+    fn zero_minimums_config() -> RuntimeConfig {
+        RuntimeConfig {
             worker_threads: 0,
             thread_stack_size: 0,
             thread_name_prefix: String::new(),
@@ -459,9 +457,10 @@ mod tests {
             governor_interval: 0,
             enable_adaptive_cancel_streak: false,
             adaptive_cancel_streak_epoch_steps: 0,
-        };
+        }
+    }
 
-        config.normalize();
+    fn assert_normalized_minimums(config: &RuntimeConfig) {
         crate::assert_with_log!(
             config.worker_threads == 1,
             "worker_threads",
@@ -540,6 +539,15 @@ mod tests {
             config.blocking.min_threads,
             config.blocking.max_threads
         );
+    }
+
+    #[test]
+    fn test_normalize_enforces_minimums() {
+        init_test("test_normalize_enforces_minimums");
+        let mut config = zero_minimums_config();
+
+        config.normalize();
+        assert_normalized_minimums(&config);
         crate::test_complete!("test_normalize_enforces_minimums");
     }
 

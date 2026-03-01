@@ -298,6 +298,7 @@ impl RestorableSnapshot {
         stats.region_count = self.snapshot.regions.len();
         stats.task_count = self.snapshot.tasks.len();
         stats.obligation_count = self.snapshot.obligations.len();
+        let snapshot_time = self.snapshot.timestamp;
 
         // Check for duplicate region IDs
         if region_ids.len() != self.snapshot.regions.len() {
@@ -341,6 +342,13 @@ impl RestorableSnapshot {
 
         // Validate tasks reference valid regions
         for task in &self.snapshot.tasks {
+            if task.created_at > snapshot_time {
+                errors.push(RestoreError::InvalidTimestamp {
+                    snapshot_time,
+                    entity_time: task.created_at,
+                    entity: format!("task {} created_at", task.id.index),
+                });
+            }
             if !region_ids.contains(&task.region_id.index) {
                 errors.push(RestoreError::OrphanTask {
                     task_id: task.id.index,
@@ -354,6 +362,13 @@ impl RestorableSnapshot {
 
         // Validate obligations reference valid tasks
         for obligation in &self.snapshot.obligations {
+            if obligation.created_at > snapshot_time {
+                errors.push(RestoreError::InvalidTimestamp {
+                    snapshot_time,
+                    entity_time: obligation.created_at,
+                    entity: format!("obligation {} created_at", obligation.id.index),
+                });
+            }
             if !task_ids.contains(&obligation.holder_task.index) {
                 errors.push(RestoreError::OrphanObligation {
                     obligation_id: obligation.id.index,
@@ -997,6 +1012,62 @@ mod tests {
             result.stats.resolved_obligation_count
         );
         crate::test_complete!("resolved_obligation_stats_computed");
+    }
+
+    #[test]
+    fn task_timestamp_after_snapshot_detected() {
+        init_test("task_timestamp_after_snapshot_detected");
+        let mut snapshot = make_snapshot(
+            vec![make_region(0, None, RegionStateSnapshot::Open)],
+            vec![make_task(0, 0, TaskStateSnapshot::Running)],
+            Vec::new(),
+        );
+        snapshot.snapshot.tasks[0].created_at = snapshot.snapshot.timestamp + 1;
+
+        let result = snapshot.validate();
+        let has_error = result.errors.iter().any(|e| {
+            matches!(
+                e,
+                RestoreError::InvalidTimestamp {
+                    entity, ..
+                } if entity.contains("task 0 created_at")
+            )
+        });
+        crate::assert_with_log!(
+            has_error,
+            "task invalid timestamp detected",
+            true,
+            has_error
+        );
+        crate::test_complete!("task_timestamp_after_snapshot_detected");
+    }
+
+    #[test]
+    fn obligation_timestamp_after_snapshot_detected() {
+        init_test("obligation_timestamp_after_snapshot_detected");
+        let mut snapshot = make_snapshot(
+            vec![make_region(0, None, RegionStateSnapshot::Open)],
+            vec![make_task(0, 0, TaskStateSnapshot::Running)],
+            vec![make_obligation(0, 0, ObligationStateSnapshot::Reserved)],
+        );
+        snapshot.snapshot.obligations[0].created_at = snapshot.snapshot.timestamp + 1;
+
+        let result = snapshot.validate();
+        let has_error = result.errors.iter().any(|e| {
+            matches!(
+                e,
+                RestoreError::InvalidTimestamp {
+                    entity, ..
+                } if entity.contains("obligation 0 created_at")
+            )
+        });
+        crate::assert_with_log!(
+            has_error,
+            "obligation invalid timestamp detected",
+            true,
+            has_error
+        );
+        crate::test_complete!("obligation_timestamp_after_snapshot_detected");
     }
 
     // ── derive-trait coverage (wave 73) ──────────────────────────────────

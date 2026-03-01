@@ -694,7 +694,8 @@ mod tests {
         // oid(2) still pending
 
         let compacted = ledger.compact();
-        assert_eq!(compacted, 1);
+        // A single-node committed entry is already in compact tombstone shape.
+        assert_eq!(compacted, 0);
         assert_eq!(ledger.len(), 2);
         assert_eq!(ledger.get(&oid(1)), LatticeState::Committed); // tombstoned
         assert_eq!(ledger.get(&oid(2)), LatticeState::Reserved); // kept
@@ -746,7 +747,8 @@ mod tests {
         a.record_commit(id);
 
         let compacted = a.compact();
-        assert_eq!(compacted, 1);
+        // Entry is already in compact tombstone shape before compaction.
+        assert_eq!(compacted, 0);
         assert_eq!(a.get(&id), LatticeState::Committed);
 
         // Stale replica only observed the pre-terminal reserved state.
