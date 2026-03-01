@@ -155,6 +155,16 @@ impl RegionTreeOracle {
     /// This method tracks the region and its parent relationship. It also
     /// automatically updates the parent's subregions set.
     pub fn on_region_create(&mut self, region: RegionId, parent: Option<RegionId>, time: Time) {
+        // If this region already existed with a different parent, remove the
+        // stale edge from the old parent's subregion set.
+        if let Some(previous_parent) = self.regions.get(&region).and_then(|entry| entry.parent) {
+            if previous_parent != parent {
+                if let Some(previous_parent_entry) = self.regions.get_mut(&previous_parent) {
+                    previous_parent_entry.subregions.remove(&region);
+                }
+            }
+        }
+
         // Create entry for this region
         self.regions.insert(
             region,
@@ -266,10 +276,19 @@ impl RegionTreeOracle {
             let mut children: Vec<RegionId> = entry.subregions.iter().copied().collect();
             children.sort();
             for child in children {
-                if !self.regions.contains_key(&child) {
+                let Some(child_entry) = self.regions.get(&child) else {
                     return Err(RegionTreeViolation::PhantomSubregion {
                         parent: *parent,
                         phantom_child: child,
+                    });
+                };
+
+                // Reverse-edge consistency: if parent lists child, child must
+                // also claim this parent.
+                if child_entry.parent != Some(*parent) {
+                    return Err(RegionTreeViolation::ParentChildMismatch {
+                        region: child,
+                        parent: *parent,
                     });
                 }
             }
@@ -651,6 +670,33 @@ mod tests {
         crate::test_complete!("parent_child_mismatch_fails");
     }
 
+    #[test]
+    fn stale_parent_subregion_edge_fails() {
+        init_test("stale_parent_subregion_edge_fails");
+        let mut oracle = RegionTreeOracle::new();
+
+        oracle.on_region_create(region(0), None, t(10));
+        oracle.on_region_create(region(2), Some(region(0)), t(20));
+        oracle.on_region_create(region(1), Some(region(0)), t(30));
+
+        // Simulate a reparent where old parent->child edge was not cleaned.
+        if let Some(entry) = oracle.regions.get_mut(&region(1)) {
+            entry.parent = Some(region(2));
+        }
+        oracle.on_subregion_add(region(2), region(1));
+
+        let result = oracle.check();
+        assert!(result.is_err());
+        match result.unwrap_err() {
+            RegionTreeViolation::ParentChildMismatch { region: r, parent } => {
+                assert_eq!(r, region(1));
+                assert_eq!(parent, region(0));
+            }
+            other => panic!("Expected ParentChildMismatch, got {other:?}"),
+        }
+        crate::test_complete!("stale_parent_subregion_edge_fails");
+    }
+
     // === Cycle Detection ===
 
     #[test]
@@ -886,6 +932,23 @@ mod tests {
         let ok = oracle.check().is_ok();
         crate::assert_with_log!(ok, "ok", true, ok);
         crate::test_complete!("late_parent_creation_handled");
+    }
+
+    #[test]
+    fn duplicate_region_create_reparents_cleanly() {
+        init_test("duplicate_region_create_reparents_cleanly");
+        let mut oracle = RegionTreeOracle::new();
+
+        oracle.on_region_create(region(0), None, t(0));
+        oracle.on_region_create(region(2), Some(region(0)), t(1));
+        oracle.on_region_create(region(1), Some(region(0)), t(2));
+
+        // Re-create region(1) with a new parent. Oracle should remove stale
+        // region(0) -> region(1) edge automatically.
+        oracle.on_region_create(region(1), Some(region(2)), t(3));
+
+        assert!(oracle.check().is_ok());
+        crate::test_complete!("duplicate_region_create_reparents_cleanly");
     }
 
     #[test]

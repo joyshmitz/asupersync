@@ -342,9 +342,9 @@ impl CompatReader {
 
             // Read event length
             let mut len_bytes = [0u8; 4];
-            if self.reader.read_exact(&mut len_bytes).is_err() {
-                return Ok(None);
-            }
+            self.reader
+                .read_exact(&mut len_bytes)
+                .map_err(TraceFileError::Io)?;
             let len = u32::from_le_bytes(len_bytes) as usize;
 
             // Read event data
@@ -386,9 +386,9 @@ impl CompatReader {
 
         // Read event length
         let mut len_bytes = [0u8; 4];
-        if self.reader.read_exact(&mut len_bytes).is_err() {
-            return Ok(None);
-        }
+        self.reader
+            .read_exact(&mut len_bytes)
+            .map_err(TraceFileError::Io)?;
         let len = u32::from_le_bytes(len_bytes) as usize;
 
         // Read event data
@@ -469,9 +469,6 @@ impl Iterator for CompatEventIterator {
             // Read event length
             let mut len_bytes = [0u8; 4];
             if let Err(e) = self.reader.read_exact(&mut len_bytes) {
-                if e.kind() == std::io::ErrorKind::UnexpectedEof {
-                    return None;
-                }
                 return Some(Err(TraceFileError::Io(e)));
             }
             let len = u32::from_le_bytes(len_bytes) as usize;
@@ -891,6 +888,82 @@ mod tests {
             }
             CompatEvent::Event(_) => panic!("expected skipped event"),
         }
+    }
+
+    fn write_header_with_metadata(file: &mut std::fs::File) {
+        use std::io::Write;
+        file.write_all(super::TRACE_MAGIC).expect("write magic");
+        file.write_all(&super::TRACE_FILE_VERSION.to_le_bytes())
+            .expect("write version");
+        file.write_all(&0u16.to_le_bytes()).expect("write flags");
+        file.write_all(&[0u8]).expect("write compression byte");
+
+        let metadata = TraceMetadata::new(42);
+        let meta_bytes = rmp_serde::to_vec(&metadata).expect("serialize metadata");
+        file.write_all(&(meta_bytes.len() as u32).to_le_bytes())
+            .expect("write meta len");
+        file.write_all(&meta_bytes).expect("write metadata");
+    }
+
+    #[test]
+    fn compat_reader_read_event_errors_on_truncated_stream() {
+        use std::io::Write;
+        let temp = NamedTempFile::new().expect("create temp file");
+        let path = temp.path();
+        let mut file = std::fs::File::create(path).expect("create file");
+        write_header_with_metadata(&mut file);
+        // Declare one event but write none.
+        file.write_all(&1u64.to_le_bytes())
+            .expect("write event count");
+        file.flush().expect("flush");
+        drop(file);
+
+        let mut reader = CompatReader::open(path).expect("open reader");
+        let err = reader.read_event().expect_err("truncated event stream must error");
+        assert!(matches!(err, TraceFileError::Io(_)), "got: {err:?}");
+    }
+
+    #[test]
+    fn compat_reader_read_event_compat_errors_on_truncated_stream() {
+        use std::io::Write;
+        let temp = NamedTempFile::new().expect("create temp file");
+        let path = temp.path();
+        let mut file = std::fs::File::create(path).expect("create file");
+        write_header_with_metadata(&mut file);
+        // Declare one event but write none.
+        file.write_all(&1u64.to_le_bytes())
+            .expect("write event count");
+        file.flush().expect("flush");
+        drop(file);
+
+        let mut reader = CompatReader::open(path).expect("open reader");
+        let err = reader
+            .read_event_compat()
+            .expect_err("truncated event stream must error");
+        assert!(matches!(err, TraceFileError::Io(_)), "got: {err:?}");
+    }
+
+    #[test]
+    fn compat_event_iterator_errors_on_truncated_stream() {
+        use std::io::Write;
+        let temp = NamedTempFile::new().expect("create temp file");
+        let path = temp.path();
+        let mut file = std::fs::File::create(path).expect("create file");
+        write_header_with_metadata(&mut file);
+        // Declare one event but write none.
+        file.write_all(&1u64.to_le_bytes())
+            .expect("write event count");
+        file.flush().expect("flush");
+        drop(file);
+
+        let mut iter = CompatReader::open(path).expect("open reader").events();
+        let first = iter
+            .next()
+            .expect("iterator should emit an error for the missing event");
+        assert!(
+            matches!(first, Err(TraceFileError::Io(_))),
+            "got: {first:?}"
+        );
     }
 
     #[test]

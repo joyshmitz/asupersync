@@ -758,6 +758,164 @@ pub struct StructuredLogEvent {
     pub fields: BTreeMap<String, String>,
 }
 
+/// Machine-readable remediation recipe DSL contract for doctor workflows.
+#[derive(Debug, Clone, Serialize, Deserialize, PartialEq, Eq)]
+pub struct RemediationRecipeContract {
+    /// Contract version for compatibility checks.
+    pub contract_version: String,
+    /// Required upstream logging contract dependency.
+    pub logging_contract_version: String,
+    /// Required top-level recipe fields in lexical order.
+    pub required_recipe_fields: Vec<String>,
+    /// Required precondition fields in lexical order.
+    pub required_precondition_fields: Vec<String>,
+    /// Required rollback-plan fields in lexical order.
+    pub required_rollback_fields: Vec<String>,
+    /// Required confidence-input fields in lexical order.
+    pub required_confidence_input_fields: Vec<String>,
+    /// Allowed fix-intent identifiers in lexical order.
+    pub allowed_fix_intents: Vec<String>,
+    /// Allowed precondition predicates in lexical order.
+    pub allowed_precondition_predicates: Vec<String>,
+    /// Allowed rollback strategies in lexical order.
+    pub allowed_rollback_strategies: Vec<String>,
+    /// Confidence-input weights in lexical key order.
+    pub confidence_weights: Vec<RemediationConfidenceWeight>,
+    /// Risk-band policy in lexical band-id order.
+    pub risk_bands: Vec<RemediationRiskBand>,
+    /// Compatibility/versioning guidance for readers and writers.
+    pub compatibility: ContractCompatibility,
+}
+
+/// One weighted confidence input used by the remediation scoring model.
+#[derive(Debug, Clone, Serialize, Deserialize, PartialEq, Eq)]
+pub struct RemediationConfidenceWeight {
+    /// Stable confidence input key.
+    pub key: String,
+    /// Weight in basis points (0..=10_000).
+    pub weight_bps: u16,
+    /// Human-readable rationale for this signal.
+    pub rationale: String,
+}
+
+/// One risk band used to classify confidence scores.
+#[derive(Debug, Clone, Serialize, Deserialize, PartialEq, Eq)]
+pub struct RemediationRiskBand {
+    /// Stable risk-band identifier.
+    pub band_id: String,
+    /// Inclusive lower score bound.
+    pub min_score_inclusive: u8,
+    /// Inclusive upper score bound.
+    pub max_score_inclusive: u8,
+    /// Whether human approval is mandatory for this band.
+    pub requires_human_approval: bool,
+    /// Whether auto-apply is allowed for this band.
+    pub allow_auto_apply: bool,
+}
+
+/// One remediation recipe expressed against the DSL contract.
+#[derive(Debug, Clone, Serialize, Deserialize, PartialEq, Eq)]
+pub struct RemediationRecipe {
+    /// Stable recipe identifier.
+    pub recipe_id: String,
+    /// Target finding identifier.
+    pub finding_id: String,
+    /// Fix-intent identifier from contract allowlist.
+    pub fix_intent: String,
+    /// Preconditions in lexical key order.
+    pub preconditions: Vec<RemediationPrecondition>,
+    /// Rollback strategy for this recipe.
+    pub rollback: RemediationRollbackPlan,
+    /// Confidence inputs in lexical key order.
+    pub confidence_inputs: Vec<RemediationConfidenceInput>,
+    /// Optional override rationale for forced apply.
+    pub override_justification: Option<String>,
+}
+
+/// One recipe precondition.
+#[derive(Debug, Clone, Serialize, Deserialize, PartialEq, Eq)]
+pub struct RemediationPrecondition {
+    /// Stable precondition key.
+    pub key: String,
+    /// Predicate identifier from contract allowlist.
+    pub predicate: String,
+    /// Expected value encoded as a stable scalar string.
+    pub expected_value: String,
+    /// Evidence reference supporting this precondition.
+    pub evidence_ref: String,
+    /// Whether this precondition is mandatory.
+    pub required: bool,
+}
+
+/// Rollback-plan surface for one recipe.
+#[derive(Debug, Clone, Serialize, Deserialize, PartialEq, Eq)]
+pub struct RemediationRollbackPlan {
+    /// Rollback strategy identifier from contract allowlist.
+    pub strategy: String,
+    /// Rollback command to revert an applied change.
+    pub rollback_command: String,
+    /// Verification command proving rollback success.
+    pub verify_command: String,
+    /// Timeout budget in seconds.
+    pub timeout_secs: u32,
+}
+
+/// One confidence input value captured for a recipe instance.
+#[derive(Debug, Clone, Serialize, Deserialize, PartialEq, Eq)]
+pub struct RemediationConfidenceInput {
+    /// Confidence input key from contract weights.
+    pub key: String,
+    /// Input score (`0..=100`).
+    pub score: u8,
+    /// Input rationale.
+    pub rationale: String,
+    /// Evidence reference backing this score.
+    pub evidence_ref: String,
+}
+
+/// Deterministic confidence-score output for one remediation recipe.
+#[derive(Debug, Clone, Serialize, Deserialize, PartialEq, Eq)]
+pub struct RemediationConfidenceScore {
+    /// Recipe identifier.
+    pub recipe_id: String,
+    /// Computed confidence score (`0..=100`).
+    pub confidence_score: u8,
+    /// Classified risk band.
+    pub risk_band: String,
+    /// Whether human approval is required.
+    pub requires_human_approval: bool,
+    /// Whether auto-apply is allowed.
+    pub allow_auto_apply: bool,
+    /// Deterministic weighted contribution trace.
+    pub weighted_contributions: Vec<String>,
+}
+
+/// Deterministic fixture for remediation DSL validation/scoring.
+#[derive(Debug, Clone, Serialize, Deserialize, PartialEq, Eq)]
+pub struct RemediationRecipeFixture {
+    /// Stable fixture identifier.
+    pub fixture_id: String,
+    /// Human-readable fixture description.
+    pub description: String,
+    /// Canonical recipe payload.
+    pub recipe: RemediationRecipe,
+    /// Expected confidence score.
+    pub expected_confidence_score: u8,
+    /// Expected risk band id.
+    pub expected_risk_band: String,
+    /// Expected deterministic decision class.
+    pub expected_decision: String,
+}
+
+/// Serializable bundle containing the remediation contract and fixtures.
+#[derive(Debug, Clone, Serialize, Deserialize, PartialEq, Eq)]
+pub struct RemediationRecipeBundle {
+    /// Remediation recipe DSL contract.
+    pub contract: RemediationRecipeContract,
+    /// Deterministic fixture set.
+    pub fixtures: Vec<RemediationRecipeFixture>,
+}
+
 /// Deterministic rch-backed execution-adapter contract for doctor orchestration.
 #[derive(Debug, Clone, Serialize, Deserialize, PartialEq, Eq)]
 pub struct ExecutionAdapterContract {
@@ -1872,6 +2030,65 @@ impl Outputtable for StructuredLoggingContract {
     }
 }
 
+impl Outputtable for RemediationRecipeContract {
+    fn human_format(&self) -> String {
+        let mut lines = Vec::new();
+        lines.push(format!("Contract version: {}", self.contract_version));
+        lines.push(format!(
+            "Logging contract dependency: {}",
+            self.logging_contract_version
+        ));
+        lines.push(format!(
+            "Required recipe fields: {}",
+            self.required_recipe_fields.join(", ")
+        ));
+        lines.push(format!(
+            "Allowed fix intents: {}",
+            self.allowed_fix_intents.join(", ")
+        ));
+        lines.push(format!(
+            "Allowed predicates: {}",
+            self.allowed_precondition_predicates.join(", ")
+        ));
+        lines.push(format!(
+            "Allowed rollback strategies: {}",
+            self.allowed_rollback_strategies.join(", ")
+        ));
+        lines.push(format!("Confidence weights: {}", self.confidence_weights.len()));
+        lines.push(format!("Risk bands: {}", self.risk_bands.len()));
+        for band in &self.risk_bands {
+            lines.push(format!(
+                "- {} [{}-{}] approval={} auto_apply={}",
+                band.band_id,
+                band.min_score_inclusive,
+                band.max_score_inclusive,
+                band.requires_human_approval,
+                band.allow_auto_apply
+            ));
+        }
+        lines.join("\n")
+    }
+}
+
+impl Outputtable for RemediationRecipeBundle {
+    fn human_format(&self) -> String {
+        let mut lines = Vec::new();
+        lines.push(self.contract.human_format());
+        lines.push(format!("Fixtures: {}", self.fixtures.len()));
+        for fixture in &self.fixtures {
+            lines.push(format!(
+                "- {} [{}] score={} band={} decision={}",
+                fixture.fixture_id,
+                fixture.recipe.fix_intent,
+                fixture.expected_confidence_score,
+                fixture.expected_risk_band,
+                fixture.expected_decision
+            ));
+        }
+        lines.join("\n")
+    }
+}
+
 impl Outputtable for ExecutionAdapterContract {
     fn human_format(&self) -> String {
         let mut lines = Vec::new();
@@ -2430,6 +2647,7 @@ const UX_BASELINE_MATRIX_VERSION: &str = "doctor-ux-acceptance-matrix-v0";
 const SCREEN_ENGINE_CONTRACT_VERSION: &str = "doctor-screen-engine-v1";
 const EVIDENCE_SCHEMA_VERSION: &str = "doctor-evidence-v1";
 const STRUCTURED_LOGGING_CONTRACT_VERSION: &str = "doctor-logging-v1";
+const REMEDIATION_RECIPE_CONTRACT_VERSION: &str = "doctor-remediation-recipe-v1";
 const EXECUTION_ADAPTER_CONTRACT_VERSION: &str = "doctor-exec-adapter-v1";
 const SCENARIO_COMPOSER_CONTRACT_VERSION: &str = "doctor-scenario-composer-v1";
 const E2E_HARNESS_CONTRACT_VERSION: &str = "doctor-e2e-harness-v1";
