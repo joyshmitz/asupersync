@@ -9,7 +9,7 @@ use crate::codec::Framed;
 use crate::cx::Cx;
 use crate::http::h1::codec::{Http1Codec, HttpError};
 use crate::http::h1::types::{Request, Response, Version};
-use crate::io::{AsyncRead, AsyncWrite};
+use crate::io::{AsyncRead, AsyncWrite, AsyncWriteExt};
 use crate::server::shutdown::ShutdownSignal;
 use crate::stream::Stream;
 use crate::time::{timeout, wall_now};
@@ -369,6 +369,10 @@ where
                 break;
             }
         }
+
+        // Gracefully shutdown the connection
+        let mut io = framed.into_inner();
+        let _ = io.shutdown().await;
 
         Ok(state)
     }

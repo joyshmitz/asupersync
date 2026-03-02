@@ -503,8 +503,18 @@ where
             }
         }
 
-        // 2. If read from A is done and buffer is empty, shutdown B and finish
+        // 2. If read from A is done and buffer is empty, flush B, shutdown B and finish
         if state.read_done {
+            if state.need_flush {
+                match Pin::new(&mut *self.b).poll_flush(cx) {
+                    Poll::Pending => return TransferResult::Pending,
+                    Poll::Ready(Err(err)) => return TransferResult::Error(err),
+                    Poll::Ready(Ok(())) => {
+                        state.need_flush = false;
+                        return TransferResult::Progress;
+                    }
+                }
+            }
             if !state.shutdown_done {
                 match Pin::new(&mut *self.b).poll_shutdown(cx) {
                     Poll::Pending => return TransferResult::Pending,
@@ -574,8 +584,18 @@ where
             }
         }
 
-        // 2. If read from B is done and buffer is empty, shutdown A and finish
+        // 2. If read from B is done and buffer is empty, flush A, shutdown A and finish
         if state.read_done {
+            if state.need_flush {
+                match Pin::new(&mut *self.a).poll_flush(cx) {
+                    Poll::Pending => return TransferResult::Pending,
+                    Poll::Ready(Err(err)) => return TransferResult::Error(err),
+                    Poll::Ready(Ok(())) => {
+                        state.need_flush = false;
+                        return TransferResult::Progress;
+                    }
+                }
+            }
             if !state.shutdown_done {
                 match Pin::new(&mut *self.a).poll_shutdown(cx) {
                     Poll::Pending => return TransferResult::Pending,

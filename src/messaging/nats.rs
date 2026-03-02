@@ -1096,8 +1096,7 @@ impl NatsClient {
     }
 
     /// Close the connection.
-    #[allow(clippy::unused_async)]
-    pub async fn close(&mut self, cx: &Cx) -> Result<(), NatsError> {
+    pub fn close(&mut self, cx: &Cx) -> Result<(), NatsError> {
         cx.checkpoint().map_err(|_| NatsError::Cancelled)?;
 
         self.state.closed.store(true, Ordering::Release);
@@ -1108,6 +1107,9 @@ impl NatsClient {
             subs.clear();
         }
 
+        if self.connected {
+            let _ = self.stream.shutdown(std::net::Shutdown::Both);
+        }
         self.connected = false;
         Ok(())
     }

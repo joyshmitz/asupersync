@@ -535,7 +535,7 @@ impl TimerWheel {
         for (idx, level) in self.levels.iter().enumerate() {
             let shift = idx * 8;
             let level_tick = self.current_tick >> shift;
-            let current_slot = (level_tick as usize) % SLOTS_PER_LEVEL;
+            let current_slot = (level_tick % (SLOTS_PER_LEVEL as u64)) as usize;
 
             for i in 0..SLOTS_PER_LEVEL {
                 let slot = (current_slot + i) % SLOTS_PER_LEVEL;
@@ -612,7 +612,7 @@ impl TimerWheel {
                     }
                 }
 
-                let slot = (tick as usize) % SLOTS_PER_LEVEL;
+                let slot = (tick % (SLOTS_PER_LEVEL as u64)) as usize;
                 level.slots[slot].push(entry);
                 level.set_occupied(slot);
                 return;
@@ -774,7 +774,7 @@ impl TimerWheel {
                 continue;
             }
 
-            let current_slot = (level_tick_current as usize) % SLOTS_PER_LEVEL;
+            let current_slot = (level_tick_current % (SLOTS_PER_LEVEL as u64)) as usize;
             let mut diff = (level_tick_boundary - level_tick_current) as usize;
             if diff >= SLOTS_PER_LEVEL {
                 diff = SLOTS_PER_LEVEL - 1;

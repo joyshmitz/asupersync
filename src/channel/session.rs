@@ -147,11 +147,19 @@ pub struct TrackedPermit<'a, T> {
 
 impl<T> TrackedPermit<'_, T> {
     /// Sends a value, consuming the permit and returning a [`CommittedProof`].
-    #[must_use]
-    pub fn send(self, value: T) -> CommittedProof<SendPermit> {
+    ///
+    /// # Errors
+    ///
+    /// Returns an error if the receiver was dropped before the value could be sent.
+    pub fn send(self, value: T) -> Result<CommittedProof<SendPermit>, mpsc::SendError<T>> {
         let Self { permit, obligation } = self;
-        permit.send(value);
-        obligation.commit()
+        match permit.try_send(value) {
+            Ok(()) => Ok(obligation.commit()),
+            Err(e) => {
+                let _aborted = obligation.abort();
+                Err(e)
+            }
+        }
     }
 
     /// Sends a value, returning an error if the receiver was dropped.
@@ -372,7 +380,7 @@ mod tests {
         let (tx, mut rx) = tracked_channel::<i32>(10);
 
         let permit = block_on(tx.reserve(&cx)).expect("reserve failed");
-        let proof = permit.send(42);
+        let proof = permit.send(42).unwrap();
 
         crate::assert_with_log!(
             proof.kind() == crate::record::ObligationKind::SendPermit,
@@ -406,7 +414,7 @@ mod tests {
 
         // Slot was released — we can reserve again.
         let permit2 = block_on(tx.reserve(&cx)).expect("second reserve failed");
-        let _ = permit2.send(99);
+        let _ = permit2.send(99).unwrap();
 
         let value = block_on(rx.recv(&cx)).expect("recv failed");
         crate::assert_with_log!(value == 99, "recv value after abort", 99, value);
@@ -434,7 +442,7 @@ mod tests {
         let (tx, mut rx) = tracked_channel::<i32>(10);
 
         let permit = tx.try_reserve().expect("try_reserve failed");
-        let proof = permit.send(7);
+        let proof = permit.send(7).unwrap();
 
         crate::assert_with_log!(
             proof.kind() == crate::record::ObligationKind::SendPermit,

@@ -2486,7 +2486,11 @@ mod tests {
         // Note: RT severity mapping differs from contract (RT groups by operational category).
         // The contract requires each extension maps to {0..5}; the canonical 5 anchor the scale.
         assert_eq!(CancelKind::User.severity(), 0, "User must be severity 0");
-        assert_eq!(CancelKind::Shutdown.severity(), 5, "Shutdown must be severity 5");
+        assert_eq!(
+            CancelKind::Shutdown.severity(),
+            5,
+            "Shutdown must be severity 5"
+        );
 
         // Verify no duplicate severity holes — every level 0..=5 has at least one kind
         let mut covered = [false; 6];
@@ -2494,10 +2498,7 @@ mod tests {
             covered[kind.severity() as usize] = true;
         }
         for (level, &has_kind) in covered.iter().enumerate() {
-            assert!(
-                has_kind,
-                "Severity level {level} has no CancelKind mapping"
-            );
+            assert!(has_kind, "Severity level {level} has no CancelKind mapping");
         }
 
         // Verify strengthen monotonicity: strengthening always produces >= severity

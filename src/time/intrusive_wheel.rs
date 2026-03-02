@@ -395,7 +395,7 @@ impl<const SLOTS: usize> TimerWheel<SLOTS> {
         let elapsed = deadline.saturating_duration_since(self.base_time);
         let ticks = elapsed.as_nanos() / self.resolution.as_nanos().max(1);
         let safe_ticks = ticks.max(u128::from(self.current_tick));
-        (safe_ticks as usize) % SLOTS
+        (safe_ticks % (SLOTS as u128)) as usize
     }
 
     /// Inserts a timer node with the given deadline.
@@ -485,9 +485,9 @@ impl<const SLOTS: usize> TimerWheel<SLOTS> {
                 self.count = self.count.saturating_sub(wakers.len());
                 all_wakers.extend(wakers);
             }
-            self.current = (target_tick_u64 as usize) % SLOTS;
+            self.current = (target_tick_u64 % (SLOTS as u64)) as usize;
         } else {
-            let target_slot = (target_tick_u64 as usize) % SLOTS;
+            let target_slot = (target_tick_u64 % (SLOTS as u64)) as usize;
 
             // Process slots until we reach target (handling wrap-around)
             while self.current != target_slot {
