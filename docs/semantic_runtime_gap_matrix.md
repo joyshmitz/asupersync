@@ -39,16 +39,16 @@ gap classification, and required action.
 | 2 | `rule.cancel.acknowledge` | ALIGNED | `cancel.rs:acknowledge()` | unit + oracle | ALIGNED | None |
 | 3 | `rule.cancel.drain` | ALIGNED | `cancel.rs:drain_complete()` | unit + oracle | ALIGNED | None |
 | 4 | `rule.cancel.finalize` | ALIGNED | `cancel.rs:finalize()` | unit + oracle | ALIGNED | None |
-| 5 | `inv.cancel.idempotence` | ALIGNED | `cancel.rs:strengthen()` | unit | DOC-GAP | Add rule-ID comment |
-| 6 | `inv.cancel.propagates_down` | ALIGNED | `region.rs:cancel_children()` | unit | DOC-GAP | Add rule-ID comment |
-| 7 | `def.cancel.reason_kinds` | ALIGNED | `cancel.rs:CancelKind` enum | — | TEST-GAP | Add canonical-5 mapping test |
+| 5 | `inv.cancel.idempotence` | ALIGNED | `cancel.rs:strengthen()` | unit | ALIGNED | SEM-08.3 |
+| 6 | `inv.cancel.propagates_down` | ALIGNED | `state.rs:cancel_sibling_tasks()` | unit | ALIGNED | SEM-08.3 |
+| 7 | `def.cancel.reason_kinds` | ALIGNED | `cancel.rs:CancelKind` enum | unit | ALIGNED | SEM-08.5 |
 | 8 | `def.cancel.severity_ordering` | ALIGNED | `cancel.rs:severity()` | unit | ALIGNED | None |
 | 9 | `prog.cancel.drains` | ALIGNED | cancel protocol impl | oracle | ALIGNED | None |
-| 10 | `rule.cancel.checkpoint_masked` | ALIGNED | `cancel.rs:checkpoint()` | unit | DOC-GAP | Add rule-ID comment |
-| 11 | `inv.cancel.mask_bounded` | ALIGNED | mask_depth is u32 | unit | ALIGNED | None |
-| 12 | `inv.cancel.mask_monotone` | ALIGNED | checkpoint decrements only | unit | DOC-GAP | Add rule-ID comment |
+| 10 | `rule.cancel.checkpoint_masked` | ALIGNED | `cx.rs:checkpoint()` | unit | ALIGNED | SEM-08.3 |
+| 11 | `inv.cancel.mask_bounded` | ALIGNED | `cx.rs:masked()` assert | unit | ALIGNED | None |
+| 12 | `inv.cancel.mask_monotone` | ALIGNED | `cx.rs:MaskGuard::drop()` | unit | ALIGNED | SEM-08.3 |
 
-**Summary**: 12/12 implemented. 4 DOC-GAPs (missing rule-ID annotations), 1 TEST-GAP.
+**Summary**: 12/12 implemented. 0 gaps.
 
 ---
 
@@ -61,12 +61,12 @@ gap classification, and required action.
 | 15 | `rule.obligation.abort` | ALIGNED | `obligation.rs:abort()` | unit | ALIGNED | None |
 | 16 | `rule.obligation.leak` | ALIGNED | `obligation.rs:leak detection` | unit + oracle | ALIGNED | None |
 | 17 | `inv.obligation.no_leak` | ALIGNED | region close check | unit + oracle | ALIGNED | None |
-| 18 | `inv.obligation.linear` | ALIGNED | state machine enforced | unit | DOC-GAP | Add rule-ID comment |
-| 19 | `inv.obligation.bounded` | ALIGNED | bounded by region tasks | — | TEST-GAP | Add bounded count test |
+| 18 | `inv.obligation.linear` | ALIGNED | `obligation.rs:ObligationState` | unit | ALIGNED | SEM-08.3 |
+| 19 | `inv.obligation.bounded` | ALIGNED | `region.rs:max_obligations` | unit | ALIGNED | SEM-08.5 |
 | 20 | `inv.obligation.ledger_empty_on_close` | ALIGNED | `region.rs:is_quiescent()` | unit | ALIGNED | None |
 | 21 | `prog.obligation.resolves` | ALIGNED | cancel protocol ensures resolution | oracle | ALIGNED | None |
 
-**Summary**: 9/9 implemented. 1 DOC-GAP, 1 TEST-GAP.
+**Summary**: 9/9 implemented. 0 gaps.
 
 ---
 
@@ -77,12 +77,12 @@ gap classification, and required action.
 | 22 | `rule.region.close_begin` | ALIGNED | `region.rs:close()` | unit + e2e | ALIGNED | None |
 | 23 | `rule.region.close_cancel_children` | ALIGNED | `region.rs:cancel_children()` | unit + e2e | ALIGNED | None |
 | 24 | `rule.region.close_children_done` | ALIGNED | `region.rs:check_quiescence()` | unit | ALIGNED | None |
-| 25 | `rule.region.close_run_finalizer` | ALIGNED | `region.rs:run_finalizer()` | unit | DOC-GAP | Add rule-ID + ADR-004 ref |
+| 25 | `rule.region.close_run_finalizer` | ALIGNED | `region.rs:Finalizing` + ADR-004 | unit | ALIGNED | SEM-08.3 |
 | 26 | `rule.region.close_complete` | ALIGNED | `region.rs:complete()` | unit + e2e | ALIGNED | None |
 | 27 | `inv.region.quiescence` | ALIGNED | `region.rs:is_quiescent()` | unit + oracle | ALIGNED | None |
 | 28 | `prog.region.close_terminates` | ALIGNED | bounded by cancel drain | oracle | ALIGNED | None |
 
-**Summary**: 7/7 implemented. 1 DOC-GAP.
+**Summary**: 7/7 implemented. 0 DOC-GAPs (resolved by SEM-08.3).
 
 ---
 
@@ -92,10 +92,10 @@ gap classification, and required action.
 |---|---------|-----------|--------|-------|-----|--------|
 | 29 | `def.outcome.four_valued` | ALIGNED | `outcome.rs:Outcome` enum | unit | ALIGNED | None |
 | 30 | `def.outcome.severity_lattice` | ALIGNED | `outcome.rs:severity()` | unit | ALIGNED | None |
-| 31 | `def.outcome.join_semantics` | ALIGNED | `outcome.rs:join()` | unit | DOC-GAP | Add left-bias note |
+| 31 | `def.outcome.join_semantics` | ALIGNED | `outcome.rs:join()` + left-bias | unit | ALIGNED | SEM-08.3 |
 | 32 | `def.cancel.reason_ordering` | ALIGNED | `cancel.rs:severity()` | unit | ALIGNED | None |
 
-**Summary**: 4/4 implemented. 1 DOC-GAP.
+**Summary**: 4/4 implemented. 0 DOC-GAPs (resolved by SEM-08.3).
 
 ---
 
@@ -119,12 +119,12 @@ gap classification, and required action.
 | 37 | `comb.join` | ALIGNED | `combinator/join.rs:JoinAll` | unit + e2e | ALIGNED | None |
 | 38 | `comb.race` | ALIGNED | `combinator/race.rs:RaceAll` | unit + e2e | ALIGNED | None |
 | 39 | `comb.timeout` | ALIGNED | `combinator/timeout.rs` | unit + e2e | ALIGNED | None |
-| 40 | `inv.combinator.loser_drained` | ALIGNED | oracle: `loser_drain.rs` | oracle | TEST-GAP | Add metamorphic tests (ADR-001) |
-| 41 | `law.race.never_abandon` | ALIGNED | oracle check | oracle | TEST-GAP | Add property test |
-| 42 | `law.join.assoc` | ALIGNED | severity-based join | — | TEST-GAP | Add property test for associativity |
-| 43 | `law.race.comm` | ALIGNED | index-based winner | — | TEST-GAP | Add property test for commutativity |
+| 40 | `inv.combinator.loser_drained` | ALIGNED | oracle: `loser_drain.rs` | oracle + metamorphic | ALIGNED | Pre-existing metamorphic |
+| 41 | `law.race.never_abandon` | ALIGNED | oracle check | property + exhaustive | ALIGNED | SEM-08.5 |
+| 42 | `law.join.assoc` | ALIGNED | severity-based join | proptest | ALIGNED | Pre-existing proptest |
+| 43 | `law.race.comm` | ALIGNED | index-based winner | proptest | ALIGNED | Pre-existing proptest |
 
-**Summary**: 7/7 implemented. 4 TEST-GAPs (laws need property tests, drain needs metamorphic).
+**Summary**: 7/7 implemented. 0 gaps.
 
 ---
 
@@ -154,18 +154,20 @@ gap classification, and required action.
 
 | Gap Class | Count | Rules |
 |-----------|:-----:|-------|
-| ALIGNED | 32 | #1-4, #8-9, #11, #13-17, #20-24, #26-30, #32-39, #46-47 |
-| DOC-GAP | 7 | #5, #6, #10, #12, #18, #25, #31 |
-| TEST-GAP | 6 | #7, #19, #40, #41, #42, #43 |
+| ALIGNED | 45 | #1-43, #46-47 |
+| DOC-GAP | 0 | — (all 7 resolved by SEM-08.3) |
+| TEST-GAP | 0 | — (all 6 resolved by SEM-08.5 + pre-existing) |
 | CODE-GAP | 0 | — |
 | SCOPE-OUT | 2 | #44, #45 |
 | **Total** | **47** | |
 
 ### Key Finding
 
-**Zero code gaps.** The RT implementation already matches all 47 contract rules.
-The gaps are documentation annotations (7 rules) and test coverage (6 rules).
-No code-level changes are required for semantic alignment.
+**All 45 RT-applicable rules are fully ALIGNED.** Zero code gaps, zero doc gaps,
+zero test gaps. The remaining 2 rules (#44, #45) are SCOPE-OUT (Rust type system).
+- DOC-GAPs resolved by SEM-08.3 (2026-03-02): #5, #6, #10, #12, #18, #25, #31.
+- TEST-GAPs resolved by SEM-08.5 (2026-03-02): #7, #19, #41.
+- TEST-GAPs pre-existing: #40 (metamorphic), #42 (proptest), #43 (proptest).
 
 ---
 
@@ -173,40 +175,38 @@ No code-level changes are required for semantic alignment.
 
 | Gap | Risk | Impact if Unresolved |
 |-----|:----:|---------------------|
-| DOC-GAP (#5,6,10,12,18,25,31) | LOW | Traceability loss; harder CI auditing |
-| TEST-GAP #7 (canonical-5 mapping) | LOW | Extension policy violations undetected |
-| TEST-GAP #19 (obligation bounded) | LOW | Unbounded obligation count undetected |
-| TEST-GAP #40 (loser drain metamorphic) | MEDIUM | ADR-001 oracle coverage insufficient |
-| TEST-GAP #41-43 (law property tests) | MEDIUM | ADR-005 coverage gap before Lean proofs |
+| ~~DOC-GAP (#5,6,10,12,18,25,31)~~ | ~~LOW~~ | RESOLVED by SEM-08.3 |
+| ~~TEST-GAP #7 (canonical-5 mapping)~~ | ~~LOW~~ | RESOLVED by SEM-08.5 |
+| ~~TEST-GAP #19 (obligation bounded)~~ | ~~LOW~~ | RESOLVED by SEM-08.5 |
+| ~~TEST-GAP #40 (loser drain metamorphic)~~ | ~~MEDIUM~~ | RESOLVED (pre-existing metamorphic) |
+| ~~TEST-GAP #41-43 (law property tests)~~ | ~~MEDIUM~~ | RESOLVED by SEM-08.5 + pre-existing proptest |
 
 ---
 
 ## 13. Required Actions by Priority
 
-### Priority 1: Test Gaps for ADR-001/005 (MEDIUM risk)
+### ~~Priority 1: Test Gaps for ADR-001/005~~ (RESOLVED)
 
-| Action | Rule IDs | Type | Estimate |
-|--------|----------|------|:--------:|
-| Add metamorphic tests for loser drain | #40 | Metamorphic | 2h |
-| Add property test for join associativity | #42 | Property | 1h |
-| Add property test for race commutativity | #43 | Property | 1h |
-| Add property test for race never-abandon | #41 | Property | 1h |
+- #40: Pre-existing metamorphic tests in `lab/meta/mutation.rs`
+- #42: Pre-existing proptest in `tests/algebraic_laws.rs:480`
+- #43: Pre-existing proptest in `tests/algebraic_laws.rs:529`
+- #41: Property + exhaustive tests added by SEM-08.5 in `tests/algebraic_laws.rs`
 
-### Priority 2: Test Gaps (LOW risk)
+### ~~Priority 2: Test Gaps~~ (RESOLVED)
 
-| Action | Rule IDs | Type | Estimate |
-|--------|----------|------|:--------:|
-| Add canonical-5 mapping test | #7 | Unit | 30m |
-| Add obligation bounded count test | #19 | Unit | 30m |
+- #7: Unit test added by SEM-08.5 in `types/cancel.rs:canonical_5_mapping_and_extension_policy`
+- #19: Unit test added by SEM-08.5 in `record/region.rs:obligation_bounded_by_region_limit`
 
-### Priority 3: Documentation Annotations
+### ~~Priority 3: Documentation Annotations~~ (RESOLVED)
 
-| Action | Rule IDs | Estimate |
-|--------|----------|:--------:|
-| Add rule-ID comments to cancel module | #5, #6, #10, #12 | 1h |
-| Add rule-ID comment to obligation linear | #18 | 15m |
-| Add rule-ID + ADR-004 ref to finalizer | #25 | 15m |
-| Add left-bias note to outcome join | #31 | 15m |
+All 7 DOC-GAPs resolved by SEM-08.3 (2026-03-02):
+- #5: `cancel.rs:strengthen()` — `inv.cancel.idempotence` annotation
+- #6: `state.rs:cancel_sibling_tasks()` — `inv.cancel.propagates_down` annotation
+- #10: `cx.rs:checkpoint()` — `rule.cancel.checkpoint_masked` annotation
+- #12: `cx.rs:masked()/MaskGuard::drop()` — `inv.cancel.mask_monotone` annotation
+- #18: `obligation.rs:ObligationState` — `inv.obligation.linear` annotation
+- #25: `region.rs:Finalizing` — `rule.region.close_run_finalizer` + ADR-004 annotation
+- #31: `outcome.rs:join()` — `def.outcome.join_semantics` + left-bias annotation
 
 ### CI Gate Actions
 

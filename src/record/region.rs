@@ -2285,4 +2285,52 @@ mod tests {
         let cloned = l.clone();
         assert_eq!(l, cloned);
     }
+
+    /// SEM-08.5 TEST-GAP #19: `inv.obligation.bounded` — obligation count bounded per region.
+    ///
+    /// Verifies that when max_obligations is set, the region enforces the bound
+    /// and rejects further reservations once the limit is reached. Also verifies
+    /// that resolving obligations frees capacity.
+    #[test]
+    fn obligation_bounded_by_region_limit() {
+        crate::test_utils::init_test_logging();
+        crate::test_phase!("obligation_bounded_by_region_limit");
+        let region = RegionRecord::new(test_region_id(), None, Budget::default());
+        let bound: usize = 5;
+        region.set_limits(RegionLimits {
+            max_obligations: Some(bound),
+            ..RegionLimits::unlimited()
+        });
+
+        // Reserve up to the bound — all should succeed
+        for i in 0..bound {
+            assert!(
+                region.try_reserve_obligation().is_ok(),
+                "reserve {i} should succeed within bound {bound}"
+            );
+        }
+        assert_eq!(region.pending_obligations(), bound);
+
+        // The (bound+1)-th reservation must fail
+        let err = region
+            .try_reserve_obligation()
+            .expect_err("expected rejection at bound");
+        match err {
+            AdmissionError::LimitReached { kind, limit, live } => {
+                assert_eq!(kind, AdmissionKind::Obligation);
+                assert_eq!(limit, bound);
+                assert_eq!(live, bound);
+            }
+            AdmissionError::Closed => unreachable!("expected LimitReached, got Closed"),
+        }
+
+        // Resolving one obligation should free one slot
+        region.resolve_obligation();
+        assert_eq!(region.pending_obligations(), bound - 1);
+        assert!(
+            region.try_reserve_obligation().is_ok(),
+            "should succeed after resolving one"
+        );
+        assert_eq!(region.pending_obligations(), bound);
+    }
 }

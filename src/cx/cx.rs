@@ -220,6 +220,8 @@ struct MaskGuard<'a> {
 }
 
 impl Drop for MaskGuard<'_> {
+    /// Implements `inv.cancel.mask_monotone` (#12): mask_depth only decreases
+    /// during cancel processing. `saturating_sub` ensures no underflow.
     fn drop(&mut self) {
         let mut inner = self.inner.write();
         inner.mask_depth = inner.mask_depth.saturating_sub(1);
@@ -1108,6 +1110,9 @@ impl<Caps> Cx<Caps> {
     ///     Ok(())
     /// }
     /// ```
+    /// Implements `rule.cancel.checkpoint_masked` (#10):
+    /// if cancel_requested and mask_depth == 0, acknowledge cancellation.
+    /// If mask_depth > 0, cancel remains deferred until mask is unwound.
     #[allow(clippy::result_large_err)]
     pub fn checkpoint(&self) -> Result<(), crate::error::Error> {
         // Record progress checkpoint and check cancellation under a single lock
@@ -1378,6 +1383,11 @@ impl<Caps> Cx<Caps> {
     /// Use masking sparingly. Long-masked sections defeat the purpose of
     /// responsive cancellation. Prefer short critical sections followed
     /// by a checkpoint.
+    ///
+    /// Invariant `inv.cancel.mask_monotone` (#12): mask_depth is monotonically
+    /// non-increasing during cancel processing. The increment here occurs before
+    /// cancel acknowledgement; `MaskGuard::drop` decrements via `saturating_sub(1)`.
+    /// Invariant `inv.cancel.mask_bounded` (#11): mask_depth <= MAX_MASK_DEPTH.
     pub fn masked<F, R>(&self, f: F) -> R
     where
         F: FnOnce() -> R,
