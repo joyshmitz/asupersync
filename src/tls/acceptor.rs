@@ -30,7 +30,7 @@ use std::sync::Arc;
 ///     .alpn_http()
 ///     .build()?;
 ///
-/// let tls_stream = acceptor.accept(tcp_stream).await?;
+/// let tls_stream = acceptor.accept(&cx, tcp_stream).await?;
 /// ```
 #[derive(Clone)]
 pub struct TlsAcceptor {
@@ -97,12 +97,8 @@ impl TlsAcceptor {
             .map_err(|e| TlsError::Configuration(e.to_string()))?;
         let mut stream = TlsStream::new_server(io, conn);
         if let Some(timeout) = self.handshake_timeout {
-            match crate::time::timeout(
-                cx.now(),
-                timeout,
-                poll_fn(|cx| stream.poll_handshake(cx)),
-            )
-            .await
+            match crate::time::timeout(cx.now(), timeout, poll_fn(|cx| stream.poll_handshake(cx)))
+                .await
             {
                 Ok(result) => result?,
                 Err(_) => return Err(TlsError::Timeout(timeout)),
@@ -491,10 +487,10 @@ SrXuVI5uunTgPWuOtJOP+KM=
     #[test]
     fn test_connect_accept_handshake() {
         use crate::net::tcp::VirtualTcpStream;
-        use crate::test_utils::run_test;
+        use crate::test_utils::run_test_with_cx;
         use futures_lite::future::zip;
 
-        run_test(|| async {
+        run_test_with_cx(|cx| async move {
             let chain = CertificateChain::from_pem(TEST_CERT_PEM).unwrap();
             let key = PrivateKey::from_pem(TEST_KEY_PEM).unwrap();
             let acceptor = TlsAcceptorBuilder::new(chain, key)
@@ -515,8 +511,8 @@ SrXuVI5uunTgPWuOtJOP+KM=
             );
 
             let (client_res, server_res) = zip(
-                connector.connect("localhost", client_io),
-                acceptor.accept(server_io),
+                connector.connect(&cx, "localhost", client_io),
+                acceptor.accept(&cx, server_io),
             )
             .await;
 
@@ -536,10 +532,10 @@ SrXuVI5uunTgPWuOtJOP+KM=
     #[test]
     fn test_alpn_server_preference_ordering() {
         use crate::net::tcp::VirtualTcpStream;
-        use crate::test_utils::run_test;
+        use crate::test_utils::run_test_with_cx;
         use futures_lite::future::zip;
 
-        run_test(|| async {
+        run_test_with_cx(|cx| async move {
             // Server prefers http/1.1 over h2; client prefers h2 over http/1.1.
             // Per TLS ALPN, the server selects from the intersection.
             let chain = CertificateChain::from_pem(TEST_CERT_PEM).unwrap();
@@ -562,8 +558,8 @@ SrXuVI5uunTgPWuOtJOP+KM=
             );
 
             let (client_res, server_res) = zip(
-                connector.connect("localhost", client_io),
-                acceptor.accept(server_io),
+                connector.connect(&cx, "localhost", client_io),
+                acceptor.accept(&cx, server_io),
             )
             .await;
 
@@ -579,10 +575,10 @@ SrXuVI5uunTgPWuOtJOP+KM=
     #[test]
     fn test_alpn_fallback_to_http11_when_server_h2_not_supported() {
         use crate::net::tcp::VirtualTcpStream;
-        use crate::test_utils::run_test;
+        use crate::test_utils::run_test_with_cx;
         use futures_lite::future::zip;
 
-        run_test(|| async {
+        run_test_with_cx(|cx| async move {
             // Server supports only http/1.1; client offers h2 + http/1.1.
             let chain = CertificateChain::from_pem(TEST_CERT_PEM).unwrap();
             let key = PrivateKey::from_pem(TEST_KEY_PEM).unwrap();
@@ -604,8 +600,8 @@ SrXuVI5uunTgPWuOtJOP+KM=
             );
 
             let (client_res, server_res) = zip(
-                connector.connect("localhost", client_io),
-                acceptor.accept(server_io),
+                connector.connect(&cx, "localhost", client_io),
+                acceptor.accept(&cx, server_io),
             )
             .await;
 
@@ -621,10 +617,10 @@ SrXuVI5uunTgPWuOtJOP+KM=
     #[test]
     fn test_alpn_none_when_server_has_no_alpn() {
         use crate::net::tcp::VirtualTcpStream;
-        use crate::test_utils::run_test;
+        use crate::test_utils::run_test_with_cx;
         use futures_lite::future::zip;
 
-        run_test(|| async {
+        run_test_with_cx(|cx| async move {
             // Server does not advertise ALPN; client offers h2 + http/1.1.
             // This should still succeed and return no negotiated ALPN.
             let chain = CertificateChain::from_pem(TEST_CERT_PEM).unwrap();
@@ -644,8 +640,8 @@ SrXuVI5uunTgPWuOtJOP+KM=
             );
 
             let (client_res, server_res) = zip(
-                connector.connect("localhost", client_io),
-                acceptor.accept(server_io),
+                connector.connect(&cx, "localhost", client_io),
+                acceptor.accept(&cx, server_io),
             )
             .await;
 
@@ -661,10 +657,10 @@ SrXuVI5uunTgPWuOtJOP+KM=
     #[test]
     fn test_alpn_required_client_errors_on_no_overlap() {
         use crate::net::tcp::VirtualTcpStream;
-        use crate::test_utils::run_test;
+        use crate::test_utils::run_test_with_cx;
         use futures_lite::future::zip;
 
-        run_test(|| async {
+        run_test_with_cx(|cx| async move {
             // Client requires h2; server only offers http/1.1 -> no overlap.
             let chain = CertificateChain::from_pem(TEST_CERT_PEM).unwrap();
             let key = PrivateKey::from_pem(TEST_KEY_PEM).unwrap();
@@ -686,8 +682,8 @@ SrXuVI5uunTgPWuOtJOP+KM=
             );
 
             let (client_res, server_res) = zip(
-                connector.connect("localhost", client_io),
-                acceptor.accept(server_io),
+                connector.connect(&cx, "localhost", client_io),
+                acceptor.accept(&cx, server_io),
             )
             .await;
 
@@ -705,10 +701,10 @@ SrXuVI5uunTgPWuOtJOP+KM=
     #[test]
     fn test_alpn_required_server_errors_when_client_offers_none() {
         use crate::net::tcp::VirtualTcpStream;
-        use crate::test_utils::run_test;
+        use crate::test_utils::run_test_with_cx;
         use futures_lite::future::zip;
 
-        run_test(|| async {
+        run_test_with_cx(|cx| async move {
             // Server requires h2; client does not offer ALPN -> no negotiation.
             let chain = CertificateChain::from_pem(TEST_CERT_PEM).unwrap();
             let key = PrivateKey::from_pem(TEST_KEY_PEM).unwrap();
@@ -729,8 +725,8 @@ SrXuVI5uunTgPWuOtJOP+KM=
             );
 
             let (client_res, server_res) = zip(
-                connector.connect("localhost", client_io),
-                acceptor.accept(server_io),
+                connector.connect(&cx, "localhost", client_io),
+                acceptor.accept(&cx, server_io),
             )
             .await;
 
@@ -748,9 +744,9 @@ SrXuVI5uunTgPWuOtJOP+KM=
     #[test]
     fn test_connect_timeout() {
         use crate::net::tcp::VirtualTcpStream;
-        use crate::test_utils::run_test;
+        use crate::test_utils::run_test_with_cx;
 
-        run_test(|| async {
+        run_test_with_cx(|cx| async move {
             let certs = Certificate::from_pem(TEST_CERT_PEM).unwrap();
             let connector = crate::tls::TlsConnectorBuilder::new()
                 .add_root_certificates(certs)
@@ -763,7 +759,10 @@ SrXuVI5uunTgPWuOtJOP+KM=
                 "127.0.0.1:5003".parse().unwrap(),
             );
 
-            let err = connector.connect("localhost", client_io).await.unwrap_err();
+            let err = connector
+                .connect(&cx, "localhost", client_io)
+                .await
+                .unwrap_err();
             assert!(matches!(err, TlsError::Timeout(_)));
         });
     }

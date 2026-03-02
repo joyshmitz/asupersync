@@ -32,7 +32,7 @@ use std::sync::Arc;
 ///     .alpn_http()
 ///     .build()?;
 ///
-/// let tls_stream = connector.connect("example.com", tcp_stream).await?;
+/// let tls_stream = connector.connect(&cx, "example.com", tcp_stream).await?;
 /// ```
 #[derive(Clone)]
 pub struct TlsConnector {
@@ -77,7 +77,12 @@ impl TlsConnector {
     /// # Cancel-Safety
     /// Handshake is NOT cancel-safe. If cancelled mid-handshake, drop the stream.
     #[cfg(feature = "tls")]
-    pub async fn connect<IO>(&self, domain: &str, io: IO) -> Result<TlsStream<IO>, TlsError>
+    pub async fn connect<IO>(
+        &self,
+        cx: &crate::cx::Cx,
+        domain: &str,
+        io: IO,
+    ) -> Result<TlsStream<IO>, TlsError>
     where
         IO: AsyncRead + AsyncWrite + Unpin,
     {
@@ -87,12 +92,8 @@ impl TlsConnector {
             .map_err(|e| TlsError::Configuration(e.to_string()))?;
         let mut stream = TlsStream::new_client(io, conn);
         if let Some(timeout) = self.handshake_timeout {
-            match crate::time::timeout(
-                super::wall_clock_now(),
-                timeout,
-                poll_fn(|cx| stream.poll_handshake(cx)),
-            )
-            .await
+            match crate::time::timeout(cx.now(), timeout, poll_fn(|cx| stream.poll_handshake(cx)))
+                .await
             {
                 Ok(result) => result?,
                 Err(_) => return Err(TlsError::Timeout(timeout)),
@@ -119,7 +120,12 @@ impl TlsConnector {
 
     /// Establish a TLS connection (disabled-mode fallback when TLS is disabled).
     #[cfg(not(feature = "tls"))]
-    pub async fn connect<IO>(&self, _domain: &str, _io: IO) -> Result<TlsStream<IO>, TlsError>
+    pub async fn connect<IO>(
+        &self,
+        _cx: &crate::cx::Cx,
+        _domain: &str,
+        _io: IO,
+    ) -> Result<TlsStream<IO>, TlsError>
     where
         IO: AsyncRead + AsyncWrite + Unpin,
     {
@@ -611,16 +617,16 @@ mod tests {
     #[test]
     fn test_connect_invalid_dns() {
         use crate::net::tcp::VirtualTcpStream;
-        use crate::test_utils::run_test;
+        use crate::test_utils::run_test_with_cx;
 
-        run_test(|| async {
+        run_test_with_cx(|cx| async move {
             let connector = TlsConnectorBuilder::new().build().unwrap();
             let (client_io, _server_io) = VirtualTcpStream::pair(
                 "127.0.0.1:5100".parse().unwrap(),
                 "127.0.0.1:5101".parse().unwrap(),
             );
             let err = connector
-                .connect("invalid domain with spaces", client_io)
+                .connect(&cx, "invalid domain with spaces", client_io)
                 .await
                 .unwrap_err();
             assert!(matches!(err, TlsError::InvalidDnsName(_)));
