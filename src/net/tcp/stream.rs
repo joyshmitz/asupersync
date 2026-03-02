@@ -270,12 +270,13 @@ impl TcpStream {
 
     #[inline]
     fn register_interest(&mut self, cx: &Context<'_>, interest: Interest) -> io::Result<()> {
+        let mut target_interest = interest;
         if let Some(registration) = &mut self.registration {
-            let combined = registration.interest() | interest;
+            target_interest = registration.interest() | interest;
             // Re-arm reactor interest and conditionally update the waker in a
             // single lock acquisition.  The waker clone is skipped when the
             // task's waker hasn't changed (will_wake guard).
-            match registration.rearm(combined, cx.waker()) {
+            match registration.rearm(target_interest, cx.waker()) {
                 Ok(true) => return Ok(()),
                 Ok(false) => {
                     // Slab slot gone — fall through to fresh registration.
@@ -299,7 +300,7 @@ impl TcpStream {
             return Ok(());
         };
 
-        match driver.register(&*self.inner, interest, cx.waker().clone()) {
+        match driver.register(&*self.inner, target_interest, cx.waker().clone()) {
             Ok(registration) => {
                 self.registration = Some(registration);
                 Ok(())
