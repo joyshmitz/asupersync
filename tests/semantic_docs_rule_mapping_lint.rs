@@ -59,10 +59,7 @@ const CANONICAL_RULE_IDS: [&str; 47] = [
 ];
 
 /// Rule IDs documented as gap (not mapped to FOS sections).
-const GAP_RULE_IDS: [&str; 2] = [
-    "inv.capability.no_ambient",
-    "def.capability.cx_scope",
-];
+const GAP_RULE_IDS: [&str; 2] = ["inv.capability.no_ambient", "def.capability.cx_scope"];
 
 fn load_mapping_doc() -> String {
     std::fs::read_to_string("docs/semantic_docs_rule_mapping.md")

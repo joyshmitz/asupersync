@@ -9,13 +9,11 @@
 use std::path::Path;
 
 fn load_lean_source() -> String {
-    std::fs::read_to_string("formal/lean/Asupersync.lean")
-        .expect("failed to load Lean source")
+    std::fs::read_to_string("formal/lean/Asupersync.lean").expect("failed to load Lean source")
 }
 
 fn load_lakefile() -> String {
-    std::fs::read_to_string("formal/lean/lakefile.lean")
-        .expect("failed to load lakefile")
+    std::fs::read_to_string("formal/lean/lakefile.lean").expect("failed to load lakefile")
 }
 
 fn load_runner_script() -> String {
@@ -45,10 +43,7 @@ fn lean_regression_script_is_bash() {
 #[test]
 fn lean_regression_script_supports_json_output() {
     let script = load_runner_script();
-    assert!(
-        script.contains("--json"),
-        "Script must support --json flag"
-    );
+    assert!(script.contains("--json"), "Script must support --json flag");
     assert!(
         script.contains("regression_report.json"),
         "Script must write JSON report"
@@ -115,7 +110,11 @@ fn lean_source_defines_core_types() {
     assert!(
         missing.is_empty(),
         "Lean source missing core type definitions:\n{}",
-        missing.iter().map(|t| format!("  - {t}")).collect::<Vec<_>>().join("\n")
+        missing
+            .iter()
+            .map(|t| format!("  - {t}"))
+            .collect::<Vec<_>>()
+            .join("\n")
     );
 }
 
@@ -156,11 +155,7 @@ fn lean_source_references_cancel_protocol() {
 
     // The Lean spec should model cancel protocol transitions
     // Lean uses camelCase constructors (e.g., cancelRequested)
-    let cancel_terms = [
-        "cancelRequested",
-        "cancelling",
-        "finalizing",
-    ];
+    let cancel_terms = ["cancelRequested", "cancelling", "finalizing"];
 
     let mut missing = Vec::new();
     for term in &cancel_terms {
@@ -172,7 +167,11 @@ fn lean_source_references_cancel_protocol() {
     assert!(
         missing.is_empty(),
         "Lean source missing cancel protocol states:\n{}",
-        missing.iter().map(|t| format!("  - {t}")).collect::<Vec<_>>().join("\n")
+        missing
+            .iter()
+            .map(|t| format!("  - {t}"))
+            .collect::<Vec<_>>()
+            .join("\n")
     );
 }
 

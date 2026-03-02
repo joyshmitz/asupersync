@@ -14,7 +14,7 @@
 mod common;
 
 use common::*;
-use serde_json::{json, Value};
+use serde_json::{Value, json};
 
 // ============================================================================
 // Schema Constants
@@ -145,7 +145,9 @@ fn validate_entry(entry: &Value) -> Vec<String> {
     // 1. schema_version
     match entry.get("schema_version").and_then(Value::as_str) {
         Some(v) if v == SCHEMA_VERSION => {}
-        Some(v) => violations.push(format!("schema_version must be {SCHEMA_VERSION:?}, got {v:?}")),
+        Some(v) => violations.push(format!(
+            "schema_version must be {SCHEMA_VERSION:?}, got {v:?}"
+        )),
         None => violations.push("missing required field: schema_version".to_string()),
     }
 
@@ -195,7 +197,9 @@ fn validate_entry(entry: &Value) -> Vec<String> {
     // 9. domain
     match entry.get("domain").and_then(Value::as_str) {
         Some(d) if VALID_DOMAINS.contains(&d) => {}
-        Some(d) => violations.push(format!("domain must be one of {VALID_DOMAINS:?}, got {d:?}")),
+        Some(d) => violations.push(format!(
+            "domain must be one of {VALID_DOMAINS:?}, got {d:?}"
+        )),
         None => violations.push("missing required field: domain".to_string()),
     }
 
@@ -217,7 +221,9 @@ fn validate_entry(entry: &Value) -> Vec<String> {
     let verdict = entry.get("verdict").and_then(Value::as_str);
     match verdict {
         Some(v) if VALID_VERDICTS.contains(&v) => {}
-        Some(v) => violations.push(format!("verdict must be one of {VALID_VERDICTS:?}, got {v:?}")),
+        Some(v) => violations.push(format!(
+            "verdict must be one of {VALID_VERDICTS:?}, got {v:?}"
+        )),
         None => violations.push("missing required field: verdict".to_string()),
     }
 
@@ -237,11 +243,7 @@ fn validate_entry(entry: &Value) -> Vec<String> {
         if entry.get("seed").and_then(Value::as_u64).is_none() {
             violations.push("seed required when verdict is not skip".to_string());
         }
-        if entry
-            .get("repro_command")
-            .and_then(Value::as_str)
-            .is_none()
-        {
+        if entry.get("repro_command").and_then(Value::as_str).is_none() {
             violations.push("repro_command required when verdict is not skip".to_string());
         }
     }
@@ -329,10 +331,7 @@ fn schema_oracle_mapping_valid() {
                 "oracle {oracle_name:?} maps to invalid rule number {n}"
             );
         }
-        assert!(
-            !oracle_name.is_empty(),
-            "oracle name must not be empty"
-        );
+        assert!(!oracle_name.is_empty(), "oracle name must not be empty");
     }
 }
 
@@ -625,11 +624,17 @@ fn schema_ndjson_format() {
     assert_eq!(entries.len(), 2);
     for entry in &entries {
         let violations = validate_entry(entry);
-        assert!(violations.is_empty(), "NDJSON entry must validate: {violations:?}");
+        assert!(
+            violations.is_empty(),
+            "NDJSON entry must validate: {violations:?}"
+        );
     }
 
     // Seq must be monotonically increasing
     let seq1 = entries[0]["seq"].as_u64().unwrap();
     let seq2 = entries[1]["seq"].as_u64().unwrap();
-    assert!(seq2 > seq1, "seq must be monotonically increasing in NDJSON");
+    assert!(
+        seq2 > seq1,
+        "seq must be monotonically increasing in NDJSON"
+    );
 }

@@ -9,13 +9,11 @@
 use std::path::Path;
 
 fn load_tla_spec() -> String {
-    std::fs::read_to_string("formal/tla/Asupersync.tla")
-        .expect("failed to load TLA+ spec")
+    std::fs::read_to_string("formal/tla/Asupersync.tla").expect("failed to load TLA+ spec")
 }
 
 fn load_tla_config() -> String {
-    std::fs::read_to_string("formal/tla/Asupersync_MC.cfg")
-        .expect("failed to load TLA+ config")
+    std::fs::read_to_string("formal/tla/Asupersync_MC.cfg").expect("failed to load TLA+ config")
 }
 
 fn load_runner_script() -> String {
@@ -59,10 +57,7 @@ fn tla_scenario_script_supports_scenarios() {
 fn tla_scenario_script_supports_json_output() {
     let script = load_runner_script();
 
-    assert!(
-        script.contains("--json"),
-        "Script must support --json flag"
-    );
+    assert!(script.contains("--json"), "Script must support --json flag");
     assert!(
         script.contains("scenario_report.json"),
         "Script must write JSON scenario report"
@@ -111,17 +106,14 @@ fn tla_spec_defines_state_machines() {
     let spec = load_tla_spec();
 
     // TLA+ spec uses abbreviated names (ObStates, not ObligationStates)
-    let state_sets = [
-        "TaskStates",
-        "RegionStates",
-        "ObStates",
-    ];
+    let state_sets = ["TaskStates", "RegionStates", "ObStates"];
 
     let expected_task_states = [
-        "Created",
+        "Spawned",
         "Running",
         "CancelRequested",
-        "Cancelling",
+        "CancelMasked",
+        "CancelAcknowledged",
         "Finalizing",
         "Completed",
     ];
@@ -129,8 +121,9 @@ fn tla_spec_defines_state_machines() {
     let expected_region_states = [
         "Open",
         "Closing",
-        "Draining",
+        "ChildrenDone",
         "Finalizing",
+        "Quiescent",
         "Closed",
     ];
 
@@ -157,6 +150,46 @@ fn tla_spec_defines_state_machines() {
 }
 
 #[test]
+fn tla_spec_aligns_close_cancel_children_with_canonical_rules() {
+    let spec = load_tla_spec();
+
+    assert!(
+        spec.contains(r#"CloseCancelChildren(r) =="#),
+        "TLA+ spec must define CloseCancelChildren action"
+    );
+    assert!(
+        spec.contains(r#"taskState[t] \in {"Spawned", "Running"}"#),
+        "CloseCancelChildren must only re-request cancel for Spawned/Running tasks"
+    );
+    assert!(
+        spec.contains(r#"ELSE taskMask[t]"#),
+        "CloseCancelChildren must preserve existing mask depth for in-flight cancel states"
+    );
+}
+
+#[test]
+fn tla_spec_aligns_reserve_obligation_guards_with_canonical_rules() {
+    let spec = load_tla_spec();
+
+    assert!(
+        spec.contains(r#"ReserveObligation(o, t, r) =="#),
+        "TLA+ spec must define ReserveObligation action"
+    );
+    assert!(
+        spec.contains(r#"taskState[t] \in {"Running", "CancelRequested", "CancelMasked"}"#),
+        "ReserveObligation must allow Running/CancelRequested/CancelMasked holders"
+    );
+    assert!(
+        spec.contains(r#"taskRegion[t] = r"#),
+        "ReserveObligation must bind obligation region to holder task region"
+    );
+    assert!(
+        spec.contains(r#"regionState[r] \in {"Open", "Closing"}"#),
+        "ReserveObligation must allow Open/Closing region states"
+    );
+}
+
+#[test]
 fn tla_spec_defines_invariants() {
     let spec = load_tla_spec();
 
@@ -166,6 +199,9 @@ fn tla_spec_defines_invariants() {
         "NoOrphanTasks",
         "NoLeakedObligations",
         "CloseImpliesQuiescent",
+        "MaskBoundedInvariant",
+        "MaskMonotoneInvariant",
+        "CancelIdempotenceStructural",
     ];
 
     let mut missing = Vec::new();
@@ -178,7 +214,11 @@ fn tla_spec_defines_invariants() {
     assert!(
         missing.is_empty(),
         "TLA+ spec missing invariant definitions:\n{}",
-        missing.iter().map(|i| format!("  - {i}")).collect::<Vec<_>>().join("\n")
+        missing
+            .iter()
+            .map(|i| format!("  - {i}"))
+            .collect::<Vec<_>>()
+            .join("\n")
     );
 }
 
@@ -187,9 +227,7 @@ fn tla_spec_defines_liveness() {
     let spec = load_tla_spec();
 
     assert!(
-        spec.contains("CancelTerminates")
-            || spec.contains("Liveness")
-            || spec.contains("TEMPORAL"),
+        spec.contains("CancelTerminates") || spec.contains("Liveness") || spec.contains("TEMPORAL"),
         "TLA+ spec must define at least one liveness property"
     );
 }
@@ -230,12 +268,7 @@ fn tla_config_exists_and_valid() {
 fn tla_spec_parameterized_by_constants() {
     let spec = load_tla_spec();
 
-    let required_constants = [
-        "TaskIds",
-        "RegionIds",
-        "RootRegion",
-        "MAX_MASK",
-    ];
+    let required_constants = ["TaskIds", "RegionIds", "RootRegion", "MAX_MASK"];
 
     let mut missing = Vec::new();
     for constant in &required_constants {
@@ -247,6 +280,10 @@ fn tla_spec_parameterized_by_constants() {
     assert!(
         missing.is_empty(),
         "TLA+ spec missing parameterized constants:\n{}",
-        missing.iter().map(|c| format!("  - {c}")).collect::<Vec<_>>().join("\n")
+        missing
+            .iter()
+            .map(|c| format!("  - {c}"))
+            .collect::<Vec<_>>()
+            .join("\n")
     );
 }

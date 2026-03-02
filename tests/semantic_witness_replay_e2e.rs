@@ -33,16 +33,16 @@
 #[macro_use]
 mod common;
 
-use asupersync::combinator::race::{race2_outcomes, RaceWinner};
+use asupersync::combinator::race::{RaceWinner, race2_outcomes};
 use asupersync::combinator::timeout::effective_deadline;
 use asupersync::lab::fuzz::{FuzzConfig, FuzzHarness};
 use asupersync::lab::oracle::LoserDrainOracle;
 use asupersync::lab::runtime::LabRuntime;
 use asupersync::types::cancel::{CancelKind, CancelReason};
-use asupersync::types::outcome::{join_outcomes, PanicPayload};
+use asupersync::types::outcome::{PanicPayload, join_outcomes};
 use asupersync::types::{Budget, Outcome, RegionId, TaskId, Time};
 use common::*;
-use serde_json::{json, Value};
+use serde_json::{Value, json};
 
 // ============================================================================
 // Schema Constants (from sem-verification-log-v1)
@@ -183,7 +183,10 @@ fn e2e_w1_1_race_loser_drain_runtime() {
         seed,
         "cargo test --test semantic_witness_replay_e2e e2e_w1_1",
     );
-    assert!(validate_entry_basic(&entry), "W1.1: log entry must validate");
+    assert!(
+        validate_entry_basic(&entry),
+        "W1.1: log entry must validate"
+    );
 }
 
 /// W1.1: Oracle-level verification with explicit event injection.
@@ -242,10 +245,7 @@ fn e2e_w1_3_undrained_loser_detected() {
     oracle.on_race_complete(race_id, fast, Time::from_nanos(200));
 
     let result = oracle.check();
-    assert!(
-        result.is_err(),
-        "W1.3: oracle MUST detect undrained loser"
-    );
+    assert!(result.is_err(), "W1.3: oracle MUST detect undrained loser");
 
     let mut log = LogEntryBuilder::new(E2E_SEED);
     // This is a PASS for the detection witness (oracle correctly found violation)
@@ -296,7 +296,10 @@ fn e2e_w5_1_join_associativity() {
         }
     }
 
-    assert_eq!(violations, 0, "W5.1: join must be associative on severity (0/64 violations)");
+    assert_eq!(
+        violations, 0,
+        "W5.1: join must be associative on severity (0/64 violations)"
+    );
 
     let mut log = LogEntryBuilder::new(E2E_SEED);
     let entry = log.entry(
@@ -486,8 +489,14 @@ fn e2e_w7_1_seed_equivalence() {
     let (hash1, steps1) = run(seed);
     let (hash2, steps2) = run(seed);
 
-    assert_eq!(hash1, hash2, "W7.1: same seed must produce same certificate hash");
-    assert_eq!(steps1, steps2, "W7.1: same seed must produce same step count");
+    assert_eq!(
+        hash1, hash2,
+        "W7.1: same seed must produce same certificate hash"
+    );
+    assert_eq!(
+        steps1, steps2,
+        "W7.1: same seed must produce same step count"
+    );
 
     // Different seed should differ
     let (hash3, _) = run(seed + 1);
@@ -540,13 +549,31 @@ fn e2e_cross_artifact_summary() {
 
     // Simulate collecting verdicts from all witnesses
     let witnesses = [
-        ("W1.1", "inv.combinator.loser_drained", 40, "combinator", "pass"),
-        ("W1.3", "inv.combinator.loser_drained", 40, "combinator", "pass"),
+        (
+            "W1.1",
+            "inv.combinator.loser_drained",
+            40,
+            "combinator",
+            "pass",
+        ),
+        (
+            "W1.3",
+            "inv.combinator.loser_drained",
+            40,
+            "combinator",
+            "pass",
+        ),
         ("W5.1", "law.join.assoc", 42, "combinator", "pass"),
         ("W5.2", "law.race.comm", 43, "combinator", "pass"),
         ("W5.3", "comb.timeout", 39, "combinator", "pass"),
         ("W2.1", "def.cancel.reason_kinds", 7, "cancel", "pass"),
-        ("W7.1", "inv.determinism.replayable", 46, "determinism", "pass"),
+        (
+            "W7.1",
+            "inv.determinism.replayable",
+            46,
+            "determinism",
+            "pass",
+        ),
     ];
 
     let mut entries = Vec::new();
@@ -561,7 +588,10 @@ fn e2e_cross_artifact_summary() {
             E2E_SEED,
             "cargo test --test semantic_witness_replay_e2e",
         );
-        assert!(validate_entry_basic(&entry), "entry for {scenario} must validate");
+        assert!(
+            validate_entry_basic(&entry),
+            "entry for {scenario} must validate"
+        );
         entries.push(entry);
     }
 
@@ -603,13 +633,14 @@ fn e2e_cross_artifact_summary() {
         .join("\n");
 
     let parsed_count = ndjson.lines().filter(|l| !l.is_empty()).count();
-    assert_eq!(parsed_count, witnesses.len(), "NDJSON must have one line per witness");
+    assert_eq!(
+        parsed_count,
+        witnesses.len(),
+        "NDJSON must have one line per witness"
+    );
 
     // Monotonic seq check
-    let seqs: Vec<u64> = entries
-        .iter()
-        .map(|e| e["seq"].as_u64().unwrap())
-        .collect();
+    let seqs: Vec<u64> = entries.iter().map(|e| e["seq"].as_u64().unwrap()).collect();
     for window in seqs.windows(2) {
         assert!(
             window[1] > window[0],
@@ -632,7 +663,9 @@ fn e2e_cross_artifact_summary() {
 fn e2e_multi_seed_race_stability() {
     init_test_logging();
 
-    let config = FuzzConfig::new(E2E_SEED, 50).worker_count(2).minimize(false);
+    let config = FuzzConfig::new(E2E_SEED, 50)
+        .worker_count(2)
+        .minimize(false);
     let harness = FuzzHarness::new(config);
 
     let report = harness.run(|runtime| {

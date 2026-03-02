@@ -30,17 +30,17 @@
 #[macro_use]
 mod common;
 
-use asupersync::combinator::race::{race2_outcomes, RaceWinner};
+use asupersync::combinator::race::{RaceWinner, race2_outcomes};
 use asupersync::combinator::timeout::effective_deadline;
 use asupersync::lab::config::LabConfig;
-use asupersync::lab::fuzz::{fuzz_quick, FuzzConfig, FuzzHarness};
+use asupersync::lab::fuzz::{FuzzConfig, FuzzHarness, fuzz_quick};
 use asupersync::lab::oracle::{
     CancellationProtocolOracle, LoserDrainOracle, ObligationLeakOracle, QuiescenceOracle,
 };
 use asupersync::record::task::TaskState;
 use asupersync::record::{ObligationKind, ObligationState};
 use asupersync::types::cancel::{CancelKind, CancelReason};
-use asupersync::types::outcome::{join_outcomes, PanicPayload};
+use asupersync::types::outcome::{PanicPayload, join_outcomes};
 use asupersync::types::{Budget, ObligationId, Outcome, RegionId, Severity, TaskId, Time};
 use common::*;
 
@@ -537,7 +537,10 @@ fn wf_obl_3_abort_during_cancel_is_clean() {
 
     obl_oracle.on_region_close(root, t(250));
 
-    assert!(cancel_oracle.check().is_ok(), "WF-OBL.3: cancel protocol clean");
+    assert!(
+        cancel_oracle.check().is_ok(),
+        "WF-OBL.3: cancel protocol clean"
+    );
     assert!(
         obl_oracle.check(t(250)).is_ok(),
         "WF-OBL.3: aborted obligation must not leak"
@@ -599,7 +602,10 @@ fn wf_mask_1_strengthen_idempotent() {
         let mut copy = r.clone();
         let sev_before = copy.severity();
         let changed = copy.strengthen(r);
-        assert!(!changed, "WF-MASK.1: strengthen(x, x) must return false (no change)");
+        assert!(
+            !changed,
+            "WF-MASK.1: strengthen(x, x) must return false (no change)"
+        );
         assert_eq!(
             copy.severity(),
             sev_before,
@@ -953,7 +959,10 @@ fn wf_fuzz_3_corpus_round_trip() {
     let json = serde_json::to_string_pretty(&corpus).expect("serialize");
     let deserialized: asupersync::lab::fuzz::FuzzRegressionCorpus =
         serde_json::from_str(&json).expect("deserialize");
-    assert_eq!(corpus, deserialized, "WF-FUZZ.3: corpus round-trip must be exact");
+    assert_eq!(
+        corpus, deserialized,
+        "WF-FUZZ.3: corpus round-trip must be exact"
+    );
 }
 
 /// WF-FUZZ.4: Same seed produces identical fuzz report fingerprints.
@@ -1085,7 +1094,12 @@ fn scan_dir_for_pattern(dir: &std::path::Path, pattern: &str, violations: &mut V
                 if let Ok(contents) = std::fs::read_to_string(&path) {
                     for (i, line) in contents.lines().enumerate() {
                         if line.contains(pattern) {
-                            violations.push(format!("{}:{}: {}", path.display(), i + 1, line.trim()));
+                            violations.push(format!(
+                                "{}:{}: {}",
+                                path.display(),
+                                i + 1,
+                                line.trim()
+                            ));
                         }
                     }
                 }

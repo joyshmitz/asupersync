@@ -13,10 +13,10 @@ use std::collections::HashMap;
 
 use asupersync::combinator::timeout::effective_deadline;
 use asupersync::lab::fuzz::{FuzzConfig, FuzzHarness};
+use asupersync::types::Time;
 use asupersync::types::budget::Budget;
 use asupersync::types::cancel::{CancelKind, CancelReason};
-use asupersync::types::outcome::{join_outcomes, Outcome, PanicPayload, Severity};
-use asupersync::types::Time;
+use asupersync::types::outcome::{Outcome, PanicPayload, Severity, join_outcomes};
 
 // ─────────────────────────────────────────────────────────────────────────────
 // Fixture loading helpers
@@ -28,8 +28,7 @@ fn load_fixture(filename: &str) -> Value {
     let path = format!("{FIXTURE_DIR}/{filename}");
     let content = std::fs::read_to_string(&path)
         .unwrap_or_else(|e| panic!("failed to load fixture {path}: {e}"));
-    serde_json::from_str(&content)
-        .unwrap_or_else(|e| panic!("failed to parse fixture {path}: {e}"))
+    serde_json::from_str(&content).unwrap_or_else(|e| panic!("failed to parse fixture {path}: {e}"))
 }
 
 fn load_manifest() -> Value {
@@ -50,8 +49,13 @@ fn golden_manifest_schema_valid() {
         "manifest schema version must be v1"
     );
 
-    let fixtures = manifest["fixtures"].as_array().expect("fixtures must be array");
-    assert!(!fixtures.is_empty(), "manifest must have at least one fixture");
+    let fixtures = manifest["fixtures"]
+        .as_array()
+        .expect("fixtures must be array");
+    assert!(
+        !fixtures.is_empty(),
+        "manifest must have at least one fixture"
+    );
 
     for fixture in fixtures {
         let id = fixture["id"].as_str().expect("fixture must have id");
@@ -65,8 +69,13 @@ fn golden_manifest_schema_valid() {
             std::path::Path::new(&path).exists(),
             "fixture file must exist: {path}"
         );
-        let rule_ids = fixture["rule_ids"].as_array().expect("fixture must have rule_ids");
-        assert!(!rule_ids.is_empty(), "fixture {id} must reference at least one rule_id");
+        let rule_ids = fixture["rule_ids"]
+            .as_array()
+            .expect("fixture must have rule_ids");
+        assert!(
+            !rule_ids.is_empty(),
+            "fixture {id} must reference at least one rule_id"
+        );
     }
 
     let change_log = manifest["change_log"]
@@ -502,13 +511,17 @@ fn golden_manifest_update_policy() {
         "drift justification must be required"
     );
 
-    let reviewers = policy["reviewers"].as_array().expect("reviewers must be array");
+    let reviewers = policy["reviewers"]
+        .as_array()
+        .expect("reviewers must be array");
     assert!(
         !reviewers.is_empty(),
         "at least one reviewer group must be specified"
     );
 
-    let checklist = policy["checklist"].as_array().expect("checklist must be array");
+    let checklist = policy["checklist"]
+        .as_array()
+        .expect("checklist must be array");
     assert!(
         checklist.len() >= 3,
         "update checklist must have at least 3 items"
@@ -540,10 +553,7 @@ fn golden_manifest_change_log_integrity() {
         let affected = entry["fixtures_affected"]
             .as_array()
             .expect("change_log entry must have fixtures_affected");
-        assert!(
-            !affected.is_empty(),
-            "fixtures_affected must not be empty"
-        );
+        assert!(!affected.is_empty(), "fixtures_affected must not be empty");
     }
 }
 

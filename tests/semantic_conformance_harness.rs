@@ -53,6 +53,64 @@ fn t(nanos: u64) -> Time {
     Time::from_nanos(nanos)
 }
 
+/// Drive a task through the full cancel protocol: Running → CancelRequested → Cancelling →
+/// Finalizing → Completed(Cancelled). Reduces boilerplate in multi-task cancel scenarios.
+#[allow(clippy::too_many_arguments)]
+fn drive_cancel_protocol(
+    oracle: &mut CancellationProtocolOracle,
+    task_id: TaskId,
+    reason: &CancelReason,
+    cleanup: Budget,
+    request_t: u64,
+    ack_t: u64,
+    finalize_t: u64,
+    complete_t: u64,
+) {
+    oracle.on_cancel_request(task_id, reason.clone(), t(request_t));
+    oracle.on_transition(
+        task_id,
+        &TaskState::Running,
+        &TaskState::CancelRequested {
+            reason: reason.clone(),
+            cleanup_budget: cleanup,
+        },
+        t(request_t),
+    );
+    oracle.on_transition(
+        task_id,
+        &TaskState::CancelRequested {
+            reason: reason.clone(),
+            cleanup_budget: cleanup,
+        },
+        &TaskState::Cancelling {
+            reason: reason.clone(),
+            cleanup_budget: cleanup,
+        },
+        t(ack_t),
+    );
+    oracle.on_transition(
+        task_id,
+        &TaskState::Cancelling {
+            reason: reason.clone(),
+            cleanup_budget: cleanup,
+        },
+        &TaskState::Finalizing {
+            reason: reason.clone(),
+            cleanup_budget: cleanup,
+        },
+        t(finalize_t),
+    );
+    oracle.on_transition(
+        task_id,
+        &TaskState::Finalizing {
+            reason: reason.clone(),
+            cleanup_budget: cleanup,
+        },
+        &TaskState::Completed(Outcome::Cancelled(reason.clone())),
+        t(complete_t),
+    );
+}
+
 // ============================================================================
 // Rule-ID → Oracle Mapping
 // ============================================================================
@@ -92,26 +150,14 @@ fn oracle_to_rules() -> BTreeMap<&'static str, Vec<&'static str>> {
     );
     m.insert(
         "loser_drain",
-        vec![
-            "inv.combinator.loser_drained",
-            "law.race.never_abandon",
-        ],
+        vec!["inv.combinator.loser_drained", "law.race.never_abandon"],
     );
-    m.insert(
-        "finalizer",
-        vec!["rule.region.close_run_finalizer"],
-    );
+    m.insert("finalizer", vec!["rule.region.close_run_finalizer"]);
     m.insert(
         "region_tree",
-        vec![
-            "def.ownership.region_tree",
-            "rule.ownership.spawn",
-        ],
+        vec!["def.ownership.region_tree", "rule.ownership.spawn"],
     );
-    m.insert(
-        "ambient_authority",
-        vec!["inv.capability.no_ambient"],
-    );
+    m.insert("ambient_authority", vec!["inv.capability.no_ambient"]);
     m
 }
 
@@ -150,7 +196,7 @@ fn check_rule_verdicts(suite: &OracleSuite, now: Time) -> Vec<RuleVerdict> {
 fn assert_rules_pass(verdicts: &[RuleVerdict], scenario: &str) {
     let failures: Vec<_> = verdicts.iter().filter(|v| !v.passed).collect();
     if !failures.is_empty() {
-        eprintln!("=== Conformance FAIL: {} ===", scenario);
+        eprintln!("=== Conformance FAIL: {scenario} ===");
         for f in &failures {
             eprintln!(
                 "  FAIL: {} (oracle: {}) — {}",
@@ -239,7 +285,7 @@ fn conformance_cancel_protocol_full_cycle() {
             reason: reason.clone(),
             cleanup_budget: cleanup,
         },
-        &TaskState::Completed(Outcome::Cancelled(reason.clone())),
+        &TaskState::Completed(Outcome::Cancelled(reason)),
         t(50),
     );
 
@@ -350,13 +396,17 @@ fn conformance_obligation_lifecycle() {
     suite
         .obligation_leak
         .on_create(o1, ObligationKind::SendPermit, t1, root);
-    suite.obligation_leak.on_resolve(o1, ObligationState::Committed);
+    suite
+        .obligation_leak
+        .on_resolve(o1, ObligationState::Committed);
 
     // Obligation 2: reserve → abort (cancel path)
     suite
         .obligation_leak
         .on_create(o2, ObligationKind::SendPermit, t1, root);
-    suite.obligation_leak.on_resolve(o2, ObligationState::Aborted);
+    suite
+        .obligation_leak
+        .on_resolve(o2, ObligationState::Aborted);
 
     // Complete task and close region
     suite.quiescence.on_task_complete(t1);
@@ -404,95 +454,11 @@ fn conformance_cancel_propagates_down() {
     // Cancel propagates to child region (inv.cancel.propagates_down #6)
     oracle.on_region_cancel(child, reason.clone(), t(51));
 
-    // Child task receives propagated cancellation
-    oracle.on_cancel_request(child_task, reason.clone(), t(55));
-    oracle.on_transition(
-        child_task,
-        &TaskState::Running,
-        &TaskState::CancelRequested {
-            reason: reason.clone(),
-            cleanup_budget: cleanup,
-        },
-        t(55),
-    );
-    oracle.on_transition(
-        child_task,
-        &TaskState::CancelRequested {
-            reason: reason.clone(),
-            cleanup_budget: cleanup,
-        },
-        &TaskState::Cancelling {
-            reason: reason.clone(),
-            cleanup_budget: cleanup,
-        },
-        t(60),
-    );
-    oracle.on_transition(
-        child_task,
-        &TaskState::Cancelling {
-            reason: reason.clone(),
-            cleanup_budget: cleanup,
-        },
-        &TaskState::Finalizing {
-            reason: reason.clone(),
-            cleanup_budget: cleanup,
-        },
-        t(70),
-    );
-    oracle.on_transition(
-        child_task,
-        &TaskState::Finalizing {
-            reason: reason.clone(),
-            cleanup_budget: cleanup,
-        },
-        &TaskState::Completed(Outcome::Cancelled(reason.clone())),
-        t(80),
-    );
+    // Child task receives propagated cancellation — full cancel protocol cycle
+    drive_cancel_protocol(&mut oracle, child_task, &reason, cleanup, 55, 60, 70, 80);
 
-    // Parent task also cancels
-    oracle.on_cancel_request(parent_task, reason.clone(), t(50));
-    oracle.on_transition(
-        parent_task,
-        &TaskState::Running,
-        &TaskState::CancelRequested {
-            reason: reason.clone(),
-            cleanup_budget: cleanup,
-        },
-        t(50),
-    );
-    oracle.on_transition(
-        parent_task,
-        &TaskState::CancelRequested {
-            reason: reason.clone(),
-            cleanup_budget: cleanup,
-        },
-        &TaskState::Cancelling {
-            reason: reason.clone(),
-            cleanup_budget: cleanup,
-        },
-        t(85),
-    );
-    oracle.on_transition(
-        parent_task,
-        &TaskState::Cancelling {
-            reason: reason.clone(),
-            cleanup_budget: cleanup,
-        },
-        &TaskState::Finalizing {
-            reason: reason.clone(),
-            cleanup_budget: cleanup,
-        },
-        t(90),
-    );
-    oracle.on_transition(
-        parent_task,
-        &TaskState::Finalizing {
-            reason: reason.clone(),
-            cleanup_budget: cleanup,
-        },
-        &TaskState::Completed(Outcome::Cancelled(reason)),
-        t(100),
-    );
+    // Parent task also cancels — full cancel protocol cycle
+    drive_cancel_protocol(&mut oracle, parent_task, &reason, cleanup, 50, 85, 90, 100);
 
     let result = oracle.check();
     assert!(
@@ -567,6 +533,7 @@ fn conformance_outcome_join_semantics() {
 
 /// Runs a full integrated scenario through OracleSuite and reports per-rule verdicts.
 #[test]
+#[allow(clippy::too_many_lines)]
 fn conformance_full_suite_integrated() {
     init_test_logging();
     test_phase!("conformance_full_suite_integrated");
@@ -589,23 +556,15 @@ fn conformance_full_suite_integrated() {
     suite.quiescence.on_spawn(t2, root);
 
     // Cancel protocol for t1 (#1-4)
-    suite
-        .cancellation_protocol
-        .on_region_create(root, None);
+    suite.cancellation_protocol.on_region_create(root, None);
     suite.cancellation_protocol.on_task_create(t1, root);
     suite.cancellation_protocol.on_task_create(t2, root);
-    suite.cancellation_protocol.on_transition(
-        t1,
-        &TaskState::Created,
-        &TaskState::Running,
-        t(10),
-    );
-    suite.cancellation_protocol.on_transition(
-        t2,
-        &TaskState::Created,
-        &TaskState::Running,
-        t(10),
-    );
+    suite
+        .cancellation_protocol
+        .on_transition(t1, &TaskState::Created, &TaskState::Running, t(10));
+    suite
+        .cancellation_protocol
+        .on_transition(t2, &TaskState::Created, &TaskState::Running, t(10));
 
     // t1: cancel protocol full cycle
     suite
@@ -688,7 +647,7 @@ fn conformance_full_suite_integrated() {
         "  Rules failed: {}",
         verdicts.iter().filter(|v| !v.passed).count()
     );
-    println!("  Rule-IDs: {:?}", mapped_rules);
+    println!("  Rule-IDs: {mapped_rules:?}");
 
     assert_rules_pass(&verdicts, "full_suite_integrated");
 
@@ -739,20 +698,13 @@ fn conformance_deterministic_replay() {
     assert_eq!(report1.failed, report2.failed, "Fail count mismatch");
 
     for (e1, e2) in report1.entries.iter().zip(report2.entries.iter()) {
-        assert_eq!(
-            e1.invariant, e2.invariant,
-            "Oracle order mismatch"
-        );
+        assert_eq!(e1.invariant, e2.invariant, "Oracle order mismatch");
         assert_eq!(
             e1.passed, e2.passed,
             "Oracle {} verdict mismatch: run1={}, run2={}",
             e1.invariant, e1.passed, e2.passed
         );
-        assert_eq!(
-            e1.stats, e2.stats,
-            "Oracle {} stats mismatch",
-            e1.invariant
-        );
+        assert_eq!(e1.stats, e2.stats, "Oracle {} stats mismatch", e1.invariant);
     }
 
     test_complete!("conformance_deterministic_replay");

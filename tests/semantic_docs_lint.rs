@@ -66,10 +66,7 @@ const CANONICAL_RULE_IDS: [&str; 47] = [
 ];
 
 /// Rule IDs not expected in FOS body (type-level enforcement only).
-const FOS_EXEMPT_RULE_IDS: [&str; 2] = [
-    "inv.capability.no_ambient",
-    "def.capability.cx_scope",
-];
+const FOS_EXEMPT_RULE_IDS: [&str; 2] = ["inv.capability.no_ambient", "def.capability.cx_scope"];
 
 /// Canonical glossary terms that must appear in the FOS.
 const GLOSSARY_CORE_TERMS: [&str; 15] = [
@@ -99,8 +96,7 @@ fn load_fos() -> String {
 }
 
 fn load_glossary() -> String {
-    std::fs::read_to_string("docs/semantic_contract_glossary.md")
-        .expect("failed to load glossary")
+    std::fs::read_to_string("docs/semantic_contract_glossary.md").expect("failed to load glossary")
 }
 
 fn load_schema() -> String {
@@ -471,10 +467,7 @@ fn fos_no_orphan_rule_references() {
                         || candidate.starts_with("comb."))
                 {
                     if !canonical_set.contains(candidate) {
-                        orphans.push(format!(
-                            "  line {}: `{candidate}`",
-                            line_num + 1
-                        ));
+                        orphans.push(format!("  line {}: `{candidate}`", line_num + 1));
                     }
                 }
                 pos = abs_start + end + 1;
@@ -617,10 +610,9 @@ fn fos_internal_section_references_valid() {
         if line.starts_with('#') {
             // Extract section numbers like "1.2", "3.4", "7.8"
             for word in line.split_whitespace() {
-                if word.chars().next().is_some_and(|c| c.is_ascii_digit())
-                    && word.contains('.')
-                {
-                    let section_num = word.trim_end_matches(|c: char| !c.is_ascii_digit() && c != '.');
+                if word.chars().next().is_some_and(|c| c.is_ascii_digit()) && word.contains('.') {
+                    let section_num =
+                        word.trim_end_matches(|c: char| !c.is_ascii_digit() && c != '.');
                     if !section_num.is_empty() {
                         existing_sections.insert(section_num.to_string());
                     }
@@ -658,10 +650,7 @@ fn fos_internal_section_references_valid() {
                     .iter()
                     .any(|s| s.starts_with(&format!("{major}.")))
                 {
-                    broken.push(format!(
-                        "  line {}: §{section_ref} not found",
-                        line_num + 1
-                    ));
+                    broken.push(format!("  line {}: §{section_ref} not found", line_num + 1));
                 }
             }
             pos = abs_idx + section_end;

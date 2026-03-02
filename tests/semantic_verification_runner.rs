@@ -50,10 +50,7 @@ fn unified_runner_supports_profiles() {
 fn unified_runner_supports_ci_mode() {
     let script = load_runner();
 
-    assert!(
-        script.contains("--ci"),
-        "Runner must support --ci flag"
-    );
+    assert!(script.contains("--ci"), "Runner must support --ci flag");
     assert!(
         script.contains("CI_MODE"),
         "Runner must implement CI mode logic"
@@ -64,10 +61,7 @@ fn unified_runner_supports_ci_mode() {
 fn unified_runner_supports_json() {
     let script = load_runner();
 
-    assert!(
-        script.contains("--json"),
-        "Runner must support --json flag"
-    );
+    assert!(script.contains("--json"), "Runner must support --json flag");
     assert!(
         script.contains("verification_report.json"),
         "Runner must write JSON verification report"
@@ -87,6 +81,8 @@ fn unified_runner_includes_all_suites() {
         "semantic_golden_fixture_validation",
         "semantic_lean_regression",
         "semantic_tla_scenarios",
+        "semantic_log_schema_validation",
+        "semantic_witness_replay_e2e",
         "run_lean_regression.sh",
         "run_tla_scenarios.sh",
     ];
@@ -118,7 +114,7 @@ fn unified_runner_supports_suite_filter() {
         "Runner must support --suite filter flag"
     );
 
-    let filter_options = ["docs", "runtime", "golden", "lean", "tla"];
+    let filter_options = ["docs", "runtime", "golden", "lean", "tla", "logging"];
     for option in &filter_options {
         assert!(
             script.contains(option),
@@ -143,6 +139,18 @@ fn unified_runner_report_schema() {
         "suites_skipped",
         "overall_status",
         "results",
+        "quality_gates",
+        "semantic_coverage_logging_gate",
+        "profile_contract",
+        "runtime_budget_s",
+        "budget_status",
+        "suite_inclusion",
+        "suite_skipped",
+        "required_artifacts",
+        "required_log_outputs",
+        "global_thresholds",
+        "domain_thresholds",
+        "failures",
     ];
 
     let mut missing = Vec::new();
@@ -163,6 +171,28 @@ fn unified_runner_report_schema() {
     );
 }
 
+#[test]
+fn unified_runner_declares_profile_budgets_and_skip_logging() {
+    let script = load_runner();
+
+    assert!(
+        script.contains("PROFILE_RUNTIME_BUDGET_S"),
+        "Runner must declare runtime budget per profile"
+    );
+    assert!(
+        script.contains("Profile selected:"),
+        "Runner logs must declare selected profile"
+    );
+    assert!(
+        script.contains("Skipped components:"),
+        "Runner logs must declare skipped components"
+    );
+    assert!(
+        script.contains("coverage_gate"),
+        "Profile component matrix must include coverage_gate component"
+    );
+}
+
 // ─── Exit code semantics ─────────────────────────────────────────
 
 #[test]
@@ -177,6 +207,28 @@ fn unified_runner_distinguishes_required_optional() {
     assert!(
         script.contains("REQUIRED_FAILURES") || script.contains("required_failures"),
         "Runner must count required failures separately in CI mode"
+    );
+}
+
+#[test]
+fn unified_runner_sem_12_14_gate_present() {
+    let script = load_runner();
+
+    assert!(
+        script.contains("SEM-12.14"),
+        "Runner must reference SEM-12.14 gate ownership"
+    );
+    assert!(
+        script.contains("coverage_gate"),
+        "Runner must emit a coverage_gate result row"
+    );
+    assert!(
+        script.contains("semantic_verification_matrix.md"),
+        "Runner must consume semantic matrix coverage inputs"
+    );
+    assert!(
+        script.contains("semantic_verification_log_schema.md"),
+        "Runner must consume logging schema coverage inputs"
     );
 }
 

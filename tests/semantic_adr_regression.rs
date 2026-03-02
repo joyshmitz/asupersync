@@ -33,9 +33,7 @@ mod common;
 
 use asupersync::combinator::race::{RaceWinner, race2_outcomes};
 use asupersync::combinator::timeout::effective_deadline;
-use asupersync::lab::oracle::{
-    CancellationProtocolOracle, LoserDrainOracle, QuiescenceOracle,
-};
+use asupersync::lab::oracle::{CancellationProtocolOracle, LoserDrainOracle, QuiescenceOracle};
 use asupersync::record::task::TaskState;
 use asupersync::types::cancel::{CancelKind, CancelReason};
 use asupersync::types::outcome::{PanicPayload, join_outcomes};
@@ -57,6 +55,52 @@ fn t(nanos: u64) -> Time {
 fn init_test(test_name: &str) {
     init_test_logging();
     test_phase!(test_name);
+}
+
+/// Drive a task through the cancel protocol after CancelRequested:
+/// CancelRequested → Cancelling → Finalizing → Completed(Cancelled).
+fn drive_cancel_from_requested(
+    oracle: &mut CancellationProtocolOracle,
+    task_id: TaskId,
+    reason: &CancelReason,
+    cleanup_budget: Budget,
+    cancel_t: u64,
+    finalize_t: u64,
+    complete_t: u64,
+) {
+    oracle.on_transition(
+        task_id,
+        &TaskState::CancelRequested {
+            reason: reason.clone(),
+            cleanup_budget,
+        },
+        &TaskState::Cancelling {
+            reason: reason.clone(),
+            cleanup_budget,
+        },
+        t(cancel_t),
+    );
+    oracle.on_transition(
+        task_id,
+        &TaskState::Cancelling {
+            reason: reason.clone(),
+            cleanup_budget,
+        },
+        &TaskState::Finalizing {
+            reason: reason.clone(),
+            cleanup_budget,
+        },
+        t(finalize_t),
+    );
+    oracle.on_transition(
+        task_id,
+        &TaskState::Finalizing {
+            reason: reason.clone(),
+            cleanup_budget,
+        },
+        &TaskState::Completed(Outcome::Cancelled(reason.clone())),
+        t(complete_t),
+    );
 }
 
 // ============================================================================
@@ -89,8 +133,7 @@ fn adr_001_race_loser_always_drained() {
     let winner: Outcome<i32, &str> = Outcome::Ok(42);
     let loser: Outcome<i32, &str> = Outcome::Ok(99);
 
-    let (winner_out, which_won, loser_out) =
-        race2_outcomes(RaceWinner::First, winner, loser);
+    let (winner_out, which_won, loser_out) = race2_outcomes(RaceWinner::First, winner, loser);
 
     // ADR-001 invariant: winner is returned
     assert!(
@@ -107,7 +150,10 @@ fn adr_001_race_loser_always_drained() {
 
     // ADR-001 invariant: loser has a terminal outcome (drained, not abandoned)
     assert!(
-        loser_out.is_ok() || loser_out.is_err() || loser_out.is_cancelled() || loser_out.is_panicked(),
+        loser_out.is_ok()
+            || loser_out.is_err()
+            || loser_out.is_cancelled()
+            || loser_out.is_panicked(),
         "ADR-001 VIOLATED: race loser must have terminal outcome (drained), got {loser_out:?}. \
          Pre-harmonization ambiguity: loser could be abandoned without drain. \
          Witness: W1.3 shows cascading deadlock if losers not drained. \
@@ -210,12 +256,14 @@ fn adr_002_canonical_5_severity_mapping() {
 
     // ADR-002 invariant: canonical kinds at expected levels
     assert_eq!(
-        CancelKind::User.severity(), 0,
+        CancelKind::User.severity(),
+        0,
         "ADR-002 VIOLATED: User (canonical voluntary) must be severity 0. \
          Rule: def.cancel.severity_ordering (#8)."
     );
     assert_eq!(
-        CancelKind::Shutdown.severity(), 5,
+        CancelKind::Shutdown.severity(),
+        5,
         "ADR-002 VIOLATED: Shutdown (canonical terminal) must be severity 5. \
          Rule: def.cancel.severity_ordering (#8)."
     );
@@ -334,7 +382,10 @@ fn adr_003_cancel_propagates_parent_to_child() {
     oracle.on_transition(
         parent,
         &TaskState::Running,
-        &TaskState::CancelRequested { reason: reason.clone(), cleanup_budget },
+        &TaskState::CancelRequested {
+            reason: reason.clone(),
+            cleanup_budget,
+        },
         t(50),
     );
 
@@ -343,48 +394,16 @@ fn adr_003_cancel_propagates_parent_to_child() {
     oracle.on_transition(
         child,
         &TaskState::Running,
-        &TaskState::CancelRequested { reason: reason.clone(), cleanup_budget },
+        &TaskState::CancelRequested {
+            reason: reason.clone(),
+            cleanup_budget,
+        },
         t(51),
     );
 
     // Both complete through cancel protocol
-    oracle.on_transition(
-        child,
-        &TaskState::CancelRequested { reason: reason.clone(), cleanup_budget },
-        &TaskState::Cancelling { reason: reason.clone(), cleanup_budget },
-        t(100),
-    );
-    oracle.on_transition(
-        child,
-        &TaskState::Cancelling { reason: reason.clone(), cleanup_budget },
-        &TaskState::Finalizing { reason: reason.clone(), cleanup_budget },
-        t(110),
-    );
-    oracle.on_transition(
-        child,
-        &TaskState::Finalizing { reason: reason.clone(), cleanup_budget },
-        &TaskState::Completed(Outcome::Cancelled(reason.clone())),
-        t(120),
-    );
-
-    oracle.on_transition(
-        parent,
-        &TaskState::CancelRequested { reason: reason.clone(), cleanup_budget },
-        &TaskState::Cancelling { reason: reason.clone(), cleanup_budget },
-        t(130),
-    );
-    oracle.on_transition(
-        parent,
-        &TaskState::Cancelling { reason: reason.clone(), cleanup_budget },
-        &TaskState::Finalizing { reason: reason.clone(), cleanup_budget },
-        t(140),
-    );
-    oracle.on_transition(
-        parent,
-        &TaskState::Finalizing { reason: reason.clone(), cleanup_budget },
-        &TaskState::Completed(Outcome::Cancelled(reason)),
-        t(150),
-    );
+    drive_cancel_from_requested(&mut oracle, child, &reason, cleanup_budget, 100, 110, 120);
+    drive_cancel_from_requested(&mut oracle, parent, &reason, cleanup_budget, 130, 140, 150);
 
     let result = oracle.check();
     assert!(
@@ -507,7 +526,8 @@ fn adr_005_join_associative_severity() {
                 let rhs = join_outcomes(a.clone(), rhs_inner);
 
                 assert_eq!(
-                    lhs.severity(), rhs.severity(),
+                    lhs.severity(),
+                    rhs.severity(),
                     "ADR-005 VIOLATED: join is NOT associative on severity. \
                      join(join({a:?}, {b:?}), {c:?}).severity = {:?} != \
                      join({a:?}, join({b:?}, {c:?})).severity = {:?}. \
@@ -515,7 +535,8 @@ fn adr_005_join_associative_severity() {
                      Witness: W5.1 shows how non-associativity causes optimizer bugs. \
                      Rule: law.join.assoc (#42). \
                      Charter: SEM-INV-004.",
-                    lhs.severity(), rhs.severity()
+                    lhs.severity(),
+                    rhs.severity()
                 );
             }
         }
@@ -552,7 +573,8 @@ fn adr_005_race_commutative_severity() {
                 let (w2, _, _) = race2_outcomes(flipped, b.clone(), a.clone());
 
                 assert_eq!(
-                    w1.severity(), w2.severity(),
+                    w1.severity(),
+                    w2.severity(),
                     "ADR-005 VIOLATED: race is NOT commutative on severity. \
                      race({a:?}, {b:?}, winner={winner:?}).severity = {:?} != \
                      race({b:?}, {a:?}, winner=flipped).severity = {:?}. \
@@ -560,7 +582,8 @@ fn adr_005_race_commutative_severity() {
                      Witness: W5.2 shows commutativity depends on schedule, not argument order. \
                      Rule: law.race.comm (#43). \
                      Charter: SEM-INV-004.",
-                    w1.severity(), w2.severity()
+                    w1.severity(),
+                    w2.severity()
                 );
             }
         }
@@ -595,10 +618,15 @@ fn adr_005_timeout_min_law() {
         let nested = effective_deadline(outer, Some(inner));
 
         // Collapsed: timeout(min(outer, inner), f)
-        let min_deadline = if outer.as_nanos() <= inner.as_nanos() { outer } else { inner };
+        let min_deadline = if outer.as_nanos() <= inner.as_nanos() {
+            outer
+        } else {
+            inner
+        };
 
         assert_eq!(
-            nested.as_nanos(), min_deadline.as_nanos(),
+            nested.as_nanos(),
+            min_deadline.as_nanos(),
             "ADR-005 VIOLATED: timeout collapse does NOT follow min law. \
              effective_deadline({outer:?}, Some({inner:?})) = {nested:?} != min({outer:?}, {inner:?}) = {min_deadline:?}. \
              Pre-harmonization: nested timeout collapse was unverified. \
@@ -665,7 +693,9 @@ fn adr_006_no_unsafe_in_capability_module() {
 }
 
 fn scan_for_unsafe(dir: &std::path::Path, violations: &mut Vec<String>) {
-    let Ok(entries) = std::fs::read_dir(dir) else { return };
+    let Ok(entries) = std::fs::read_dir(dir) else {
+        return;
+    };
     for entry in entries.flatten() {
         let path = entry.path();
         if path.is_dir() {
@@ -768,7 +798,12 @@ fn adr_007_seed_equivalence() {
 fn adr_008_severity_total_order() {
     init_test("adr_008_severity_total_order");
 
-    let severities = [Severity::Ok, Severity::Err, Severity::Cancelled, Severity::Panicked];
+    let severities = [
+        Severity::Ok,
+        Severity::Err,
+        Severity::Cancelled,
+        Severity::Panicked,
+    ];
 
     // ADR-008: total order means every pair is comparable
     for (i, &a) in severities.iter().enumerate() {
@@ -783,12 +818,14 @@ fn adr_008_severity_total_order() {
                          Ratified: RT uses Ok(0) < Err(1) < Cancelled(2) < Panicked(3). \
                          Rule: def.outcome.severity_lattice (#30). \
                          Charter: SEM-DEF-001.",
-                        a.as_u8(), b.as_u8()
+                        a.as_u8(),
+                        b.as_u8()
                     );
                 }
                 std::cmp::Ordering::Equal => {
                     assert_eq!(
-                        a.as_u8(), b.as_u8(),
+                        a.as_u8(),
+                        b.as_u8(),
                         "ADR-008 VIOLATED: same severity has different values."
                     );
                 }
@@ -805,7 +842,11 @@ fn adr_008_severity_total_order() {
     // ADR-008: specific numeric values must be stable
     assert_eq!(Severity::Ok.as_u8(), 0, "ADR-008: Ok must be 0");
     assert_eq!(Severity::Err.as_u8(), 1, "ADR-008: Err must be 1");
-    assert_eq!(Severity::Cancelled.as_u8(), 2, "ADR-008: Cancelled must be 2");
+    assert_eq!(
+        Severity::Cancelled.as_u8(),
+        2,
+        "ADR-008: Cancelled must be 2"
+    );
     assert_eq!(Severity::Panicked.as_u8(), 3, "ADR-008: Panicked must be 3");
 
     test_complete!("adr_008_severity_total_order");
@@ -832,23 +873,29 @@ fn adr_008_join_is_max_severity() {
             let expected_sev = std::cmp::max(a.severity_u8(), b.severity_u8());
 
             assert_eq!(
-                result.severity_u8(), expected_sev,
+                result.severity_u8(),
+                expected_sev,
                 "ADR-008 VIOLATED: join({a:?}, {b:?}).severity = {} != max({}, {}) = {}. \
                  Pre-harmonization: TLA+ collapses all outcomes to 'Completed'. \
                  Ratified: join is max-severity (LEAN proves total order + join). \
                  Rule: def.outcome.join_semantics (#31). \
                  Charter: SEM-DEF-001.",
-                result.severity_u8(), a.severity_u8(), b.severity_u8(), expected_sev
+                result.severity_u8(),
+                a.severity_u8(),
+                b.severity_u8(),
+                expected_sev
             );
         }
 
         // ADR-008: idempotent: join(a, a).severity == a.severity
         let idem = join_outcomes(a.clone(), a.clone());
         assert_eq!(
-            idem.severity_u8(), a.severity_u8(),
+            idem.severity_u8(),
+            a.severity_u8(),
             "ADR-008 VIOLATED: join is not idempotent. join({a:?}, {a:?}).severity = {} != {}. \
              Rule: def.outcome.join_semantics (#31).",
-            idem.severity_u8(), a.severity_u8()
+            idem.severity_u8(),
+            a.severity_u8()
         );
     }
 
