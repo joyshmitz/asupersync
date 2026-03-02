@@ -1944,6 +1944,164 @@ impl IoCap for BrowserTransportIoCap {
     }
 }
 
+impl EntropyIoCap for BrowserEntropyIoCap {
+    fn authorize(&self, request: &EntropyRequest) -> Result<(), EntropyPolicyError> {
+        if !self.authority.allowed_sources.contains(&request.source) {
+            return Err(EntropyPolicyError::SourceDenied(request.source));
+        }
+        if !self
+            .authority
+            .allowed_operations
+            .contains(&request.operation)
+        {
+            return Err(EntropyPolicyError::OperationDenied(request.operation));
+        }
+        if request.operation == EntropyOperation::FillBytes
+            && request.byte_len > self.authority.max_fill_bytes
+        {
+            return Err(EntropyPolicyError::ByteLengthExceeded {
+                requested: request.byte_len,
+                limit: self.authority.max_fill_bytes,
+            });
+        }
+        Ok(())
+    }
+
+    fn deterministic_fallback_enabled(&self) -> bool {
+        self.deterministic_fallback
+    }
+}
+
+impl IoCap for BrowserEntropyIoCap {
+    fn is_real_io(&self) -> bool {
+        true
+    }
+
+    fn name(&self) -> &'static str {
+        "browser-entropy"
+    }
+
+    fn capabilities(&self) -> IoCapabilities {
+        IoCapabilities {
+            file_ops: false,
+            network_ops: false,
+            timer_integration: true,
+            deterministic: false,
+        }
+    }
+
+    fn entropy_cap(&self) -> Option<&dyn EntropyIoCap> {
+        Some(self)
+    }
+}
+
+impl TimeIoCap for BrowserTimeIoCap {
+    fn authorize(&self, request: &TimeRequest) -> Result<(), TimePolicyError> {
+        if !self.authority.allowed_sources.contains(&request.source) {
+            return Err(TimePolicyError::SourceDenied(request.source));
+        }
+        if !self
+            .authority
+            .allowed_operations
+            .contains(&request.operation)
+        {
+            return Err(TimePolicyError::OperationDenied(request.operation));
+        }
+        if self.require_monotonic && request.source != TimeSourceKind::DeterministicVirtual {
+            if request.source != TimeSourceKind::PerformanceNow {
+                return Err(TimePolicyError::SourceDenied(request.source));
+            }
+        }
+        if matches!(
+            request.operation,
+            TimeOperation::Sleep | TimeOperation::Interval
+        ) {
+            let duration = request
+                .duration_ms
+                .ok_or(TimePolicyError::MissingDuration(request.operation))?;
+            if duration < self.authority.min_duration_ms {
+                return Err(TimePolicyError::DurationBelowMinimum {
+                    requested_ms: duration,
+                    minimum_ms: self.authority.min_duration_ms,
+                });
+            }
+            if duration > self.authority.max_duration_ms {
+                return Err(TimePolicyError::DurationAboveMaximum {
+                    requested_ms: duration,
+                    maximum_ms: self.authority.max_duration_ms,
+                });
+            }
+        }
+        Ok(())
+    }
+
+    fn require_monotonic(&self) -> bool {
+        self.require_monotonic
+    }
+}
+
+impl IoCap for BrowserTimeIoCap {
+    fn is_real_io(&self) -> bool {
+        true
+    }
+
+    fn name(&self) -> &'static str {
+        "browser-time"
+    }
+
+    fn capabilities(&self) -> IoCapabilities {
+        IoCapabilities {
+            file_ops: false,
+            network_ops: false,
+            timer_integration: true,
+            deterministic: false,
+        }
+    }
+
+    fn time_cap(&self) -> Option<&dyn TimeIoCap> {
+        Some(self)
+    }
+}
+
+impl HostApiIoCap for BrowserHostApiIoCap {
+    fn authorize(&self, request: &HostApiRequest) -> Result<(), HostApiPolicyError> {
+        if !self.authority.allowed_surfaces.contains(&request.surface) {
+            return Err(HostApiPolicyError::SurfaceDenied(request.surface));
+        }
+        if request.degraded_mode && !self.authority.allow_degraded_mode {
+            return Err(HostApiPolicyError::DegradedModeDenied(request.surface));
+        }
+        Ok(())
+    }
+
+    fn require_redaction_safe_diagnostics(&self) -> bool {
+        self.require_redaction_safe_diagnostics
+    }
+}
+
+impl IoCap for BrowserHostApiIoCap {
+    fn is_real_io(&self) -> bool {
+        true
+    }
+
+    fn name(&self) -> &'static str {
+        "browser-host-api"
+    }
+
+    fn capabilities(&self) -> IoCapabilities {
+        IoCapabilities {
+            file_ops: false,
+            network_ops: false,
+            timer_integration: true,
+            deterministic: false,
+        }
+    }
+
+    fn host_api_cap(&self) -> Option<&dyn HostApiIoCap> {
+        Some(self)
+    }
+}
+
 impl StorageIoCap for BrowserStorageIoCap {
     fn authorize(&self, request: &StorageRequest) -> Result<(), StoragePolicyError> {
         if request.namespace.is_empty() {
@@ -2350,6 +2508,163 @@ mod tests {
             BrowserTransportCancellationPolicy::CloseThenAbort
         );
         assert_eq!(transport_cap.reconnect_policy(), reconnect);
+    }
+
+    fn strict_entropy_cap() -> BrowserEntropyIoCap {
+        BrowserEntropyIoCap::new(
+            EntropyAuthority::deny_all()
+                .grant_source(EntropySourceKind::WebCrypto)
+                .grant_operation(EntropyOperation::NextU64)
+                .grant_operation(EntropyOperation::FillBytes)
+                .with_max_fill_bytes(64),
+            true,
+        )
+    }
+
+    #[test]
+    fn entropy_authority_default_is_deny_all() {
+        let cap = BrowserEntropyIoCap::new(EntropyAuthority::default(), false);
+        assert_eq!(
+            cap.authorize(&EntropyRequest::next_u64(EntropySourceKind::WebCrypto)),
+            Err(EntropyPolicyError::SourceDenied(
+                EntropySourceKind::WebCrypto
+            ))
+        );
+    }
+
+    #[test]
+    fn entropy_policy_denies_oversized_fill() {
+        let cap = strict_entropy_cap();
+        assert_eq!(
+            cap.authorize(&EntropyRequest::fill_bytes(
+                EntropySourceKind::WebCrypto,
+                65
+            )),
+            Err(EntropyPolicyError::ByteLengthExceeded {
+                requested: 65,
+                limit: 64
+            })
+        );
+    }
+
+    #[test]
+    fn entropy_policy_allows_explicit_grant_and_exposes_iocap() {
+        let cap = strict_entropy_cap();
+        assert_eq!(
+            cap.authorize(&EntropyRequest::fill_bytes(
+                EntropySourceKind::WebCrypto,
+                32
+            )),
+            Ok(())
+        );
+        let io_cap: &dyn IoCap = &cap;
+        let entropy_cap = io_cap.entropy_cap().expect("entropy cap should be present");
+        assert!(entropy_cap.deterministic_fallback_enabled());
+    }
+
+    fn strict_time_cap(require_monotonic: bool) -> BrowserTimeIoCap {
+        BrowserTimeIoCap::new(
+            TimeAuthority::deny_all()
+                .grant_source(TimeSourceKind::PerformanceNow)
+                .grant_source(TimeSourceKind::DeterministicVirtual)
+                .grant_operation(TimeOperation::Now)
+                .grant_operation(TimeOperation::Sleep)
+                .grant_operation(TimeOperation::Interval)
+                .with_min_duration_ms(5)
+                .with_max_duration_ms(5_000),
+            require_monotonic,
+        )
+    }
+
+    #[test]
+    fn time_policy_denies_source_escalation_when_monotonic_required() {
+        let cap = strict_time_cap(true);
+        assert_eq!(
+            cap.authorize(&TimeRequest::now(TimeSourceKind::DateNow)),
+            Err(TimePolicyError::SourceDenied(TimeSourceKind::DateNow))
+        );
+    }
+
+    #[test]
+    fn time_policy_enforces_duration_bounds() {
+        let cap = strict_time_cap(false);
+        assert_eq!(
+            cap.authorize(&TimeRequest::sleep(TimeSourceKind::PerformanceNow, 3)),
+            Err(TimePolicyError::DurationBelowMinimum {
+                requested_ms: 3,
+                minimum_ms: 5
+            })
+        );
+        assert_eq!(
+            cap.authorize(&TimeRequest::interval(
+                TimeSourceKind::PerformanceNow,
+                8_000
+            )),
+            Err(TimePolicyError::DurationAboveMaximum {
+                requested_ms: 8_000,
+                maximum_ms: 5_000
+            })
+        );
+    }
+
+    #[test]
+    fn time_policy_allows_explicit_grant_and_exposes_iocap() {
+        let cap = strict_time_cap(true);
+        assert_eq!(
+            cap.authorize(&TimeRequest::sleep(TimeSourceKind::PerformanceNow, 100)),
+            Ok(())
+        );
+        let io_cap: &dyn IoCap = &cap;
+        let time_cap = io_cap.time_cap().expect("time cap should be present");
+        assert!(time_cap.require_monotonic());
+    }
+
+    fn strict_host_api_cap() -> BrowserHostApiIoCap {
+        BrowserHostApiIoCap::new(
+            HostApiAuthority::deny_all()
+                .grant_surface(HostApiSurface::Crypto)
+                .grant_surface(HostApiSurface::Performance),
+            true,
+        )
+    }
+
+    #[test]
+    fn host_api_authority_default_is_deny_all() {
+        let cap = BrowserHostApiIoCap::new(HostApiAuthority::default(), false);
+        assert_eq!(
+            cap.authorize(&HostApiRequest::new(HostApiSurface::Crypto)),
+            Err(HostApiPolicyError::SurfaceDenied(HostApiSurface::Crypto))
+        );
+    }
+
+    #[test]
+    fn host_api_policy_denies_degraded_mode_when_not_allowed() {
+        let cap = strict_host_api_cap();
+        assert_eq!(
+            cap.authorize(&HostApiRequest::new(HostApiSurface::Crypto).with_degraded_mode()),
+            Err(HostApiPolicyError::DegradedModeDenied(
+                HostApiSurface::Crypto
+            ))
+        );
+    }
+
+    #[test]
+    fn host_api_policy_allows_explicit_grant_and_exposes_iocap() {
+        let cap = BrowserHostApiIoCap::new(
+            HostApiAuthority::deny_all()
+                .grant_surface(HostApiSurface::Crypto)
+                .with_degraded_mode_allowed(),
+            true,
+        );
+        assert_eq!(
+            cap.authorize(&HostApiRequest::new(HostApiSurface::Crypto).with_degraded_mode()),
+            Ok(())
+        );
+        let io_cap: &dyn IoCap = &cap;
+        let host_api_cap = io_cap
+            .host_api_cap()
+            .expect("host api cap should be present");
+        assert!(host_api_cap.require_redaction_safe_diagnostics());
     }
 
     #[test]

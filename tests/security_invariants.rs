@@ -12,12 +12,12 @@ use asupersync::io::{
     BrowserTimeIoCap, BrowserTransportAuthority, BrowserTransportCancellationPolicy,
     BrowserTransportIoCap, BrowserTransportKind, BrowserTransportPolicyError,
     BrowserTransportReconnectPolicy, BrowserTransportRequest, BrowserTransportSupport,
-    EntropyAuthority, EntropyOperation, EntropyPolicyError, EntropyRequest, EntropySourceKind,
-    FetchAuthority, FetchMethod, FetchPolicyError, FetchRequest, HostApiAuthority,
-    HostApiPolicyError, HostApiRequest, HostApiSurface, StorageAuthority, StorageBackend,
-    StorageConsistencyPolicy, StorageIoCap, StorageOperation, StoragePolicyError,
-    StorageQuotaPolicy, StorageRedactionPolicy, StorageRequest, TimeAuthority, TimeOperation,
-    TimePolicyError, TimeRequest, TimeSourceKind, TransportIoCap,
+    EntropyAuthority, EntropyIoCap, EntropyOperation, EntropyPolicyError, EntropyRequest,
+    EntropySourceKind, FetchAuthority, FetchMethod, FetchPolicyError, FetchRequest,
+    HostApiAuthority, HostApiIoCap, HostApiPolicyError, HostApiRequest, HostApiSurface,
+    StorageAuthority, StorageBackend, StorageConsistencyPolicy, StorageIoCap, StorageOperation,
+    StoragePolicyError, StorageQuotaPolicy, StorageRedactionPolicy, StorageRequest, TimeAuthority,
+    TimeIoCap, TimeOperation, TimePolicyError, TimeRequest, TimeSourceKind, TransportIoCap,
 };
 use asupersync::net::websocket::{CloseReason, Frame, Opcode, WsError};
 
@@ -628,6 +628,120 @@ mod browser_host_authority_security {
         let cap = strict_host_api_cap();
         let request = HostApiRequest::new(HostApiSurface::TimeoutScheduler);
         assert_eq!(cap.authorize(&request), Ok(()));
+    }
+}
+
+// =============================================================================
+// BROWSER ENTROPY/TIME/HOST AUTHORITY INVARIANTS
+// =============================================================================
+
+mod browser_authority_capsules_security {
+    use super::*;
+
+    fn strict_entropy_cap() -> BrowserEntropyIoCap {
+        BrowserEntropyIoCap::new(
+            EntropyAuthority::deny_all()
+                .grant_source(EntropySourceKind::WebCrypto)
+                .grant_operation(EntropyOperation::NextU64)
+                .grant_operation(EntropyOperation::FillBytes)
+                .with_max_fill_bytes(128),
+            true,
+        )
+    }
+
+    fn strict_time_cap() -> BrowserTimeIoCap {
+        BrowserTimeIoCap::new(
+            TimeAuthority::deny_all()
+                .grant_source(TimeSourceKind::PerformanceNow)
+                .grant_operation(TimeOperation::Now)
+                .grant_operation(TimeOperation::Sleep)
+                .with_min_duration_ms(10)
+                .with_max_duration_ms(5_000),
+            true,
+        )
+    }
+
+    fn strict_host_cap() -> BrowserHostApiIoCap {
+        BrowserHostApiIoCap::new(
+            HostApiAuthority::deny_all()
+                .grant_surface(HostApiSurface::Crypto)
+                .grant_surface(HostApiSurface::Performance),
+            true,
+        )
+    }
+
+    #[test]
+    fn invariant_entropy_capsule_default_is_deny_all() {
+        let cap = BrowserEntropyIoCap::new(EntropyAuthority::default(), false);
+        assert_eq!(
+            cap.authorize(&EntropyRequest::next_u64(EntropySourceKind::WebCrypto)),
+            Err(EntropyPolicyError::SourceDenied(
+                EntropySourceKind::WebCrypto
+            ))
+        );
+    }
+
+    #[test]
+    fn invariant_entropy_capsule_enforces_fill_limits() {
+        let cap = strict_entropy_cap();
+        assert_eq!(
+            cap.authorize(&EntropyRequest::fill_bytes(
+                EntropySourceKind::WebCrypto,
+                129
+            )),
+            Err(EntropyPolicyError::ByteLengthExceeded {
+                requested: 129,
+                limit: 128
+            })
+        );
+    }
+
+    #[test]
+    fn invariant_time_capsule_requires_monotonic_source() {
+        let cap = strict_time_cap();
+        assert_eq!(
+            cap.authorize(&TimeRequest::now(TimeSourceKind::DateNow)),
+            Err(TimePolicyError::SourceDenied(TimeSourceKind::DateNow))
+        );
+    }
+
+    #[test]
+    fn invariant_time_capsule_enforces_duration_bounds() {
+        let cap = strict_time_cap();
+        assert_eq!(
+            cap.authorize(&TimeRequest::sleep(TimeSourceKind::PerformanceNow, 1)),
+            Err(TimePolicyError::DurationBelowMinimum {
+                requested_ms: 1,
+                minimum_ms: 10
+            })
+        );
+        assert_eq!(
+            cap.authorize(&TimeRequest::sleep(TimeSourceKind::PerformanceNow, 9_999)),
+            Err(TimePolicyError::DurationAboveMaximum {
+                requested_ms: 9_999,
+                maximum_ms: 5_000
+            })
+        );
+    }
+
+    #[test]
+    fn invariant_host_capsule_default_is_deny_all() {
+        let cap = BrowserHostApiIoCap::new(HostApiAuthority::default(), false);
+        assert_eq!(
+            cap.authorize(&HostApiRequest::new(HostApiSurface::Crypto)),
+            Err(HostApiPolicyError::SurfaceDenied(HostApiSurface::Crypto))
+        );
+    }
+
+    #[test]
+    fn invariant_host_capsule_degraded_mode_requires_explicit_grant() {
+        let cap = strict_host_cap();
+        assert_eq!(
+            cap.authorize(&HostApiRequest::new(HostApiSurface::Crypto).with_degraded_mode()),
+            Err(HostApiPolicyError::DegradedModeDenied(
+                HostApiSurface::Crypto
+            ))
+        );
     }
 }
 
