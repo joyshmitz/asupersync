@@ -703,6 +703,14 @@ Canonical incident triage flow (must be followed in order):
 3. `route_disposition`: apply class policy (`fail-fast` or `fail-safe`) and assign mitigation owner.
 4. `governance_escalation`: open/update blocker bead and record governance thread/sign-off status.
 
+Incident forensics playbook (asupersync-umelq.12.5):
+- Canonical operator guidance: `docs/replay-debugging.md` ->
+  `WASM Incident Forensics Playbook (asupersync-umelq.12.5)`.
+- Deterministic drill command:
+  `bash ./scripts/run_all_e2e.sh --suite wasm-incident-forensics`
+- Contract drift gate:
+  `python3 ./scripts/check_incident_forensics_playbook.py`
+
 Governance integration requirement:
 - Every unresolved reliability guardrail failure must be reviewed on the same cadence IDs used by the refinement reporting contract in `formal/lean/coverage/runtime_state_refinement_map.json` (`reporting_and_signoff_contract.report_cadence`).
 

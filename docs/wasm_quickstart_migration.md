@@ -50,6 +50,49 @@ Guardrails:
 Reference: `docs/integration.md` ("wasm32 Guardrails"), `src/lib.rs` compile
 error gates.
 
+## Release Channel Workflow (WASM-14 / `asupersync-umelq.15.3`)
+
+Browser onboarding and migration should flow through the release-channel
+contract before promotion beyond local/dev usage.
+
+Canonical policy:
+
+- `docs/wasm_release_channel_strategy.md`
+
+Channel model:
+
+1. `nightly` (`wasm-browser-dev`) for rapid iteration,
+2. `canary` (`wasm-browser-canary`) for pre-stable validation,
+3. `stable` (`wasm-browser-release`) only after all release gates pass.
+
+Minimum gate bundle before promotion:
+
+```bash
+python3 scripts/check_wasm_optimization_policy.py \
+  --policy .github/wasm_optimization_policy.json
+
+python3 scripts/check_wasm_dependency_policy.py \
+  --policy .github/wasm_dependency_policy.json
+
+python3 scripts/check_security_release_gate.py \
+  --policy .github/security_release_policy.json \
+  --check-deps \
+  --dep-policy .github/wasm_dependency_policy.json
+```
+
+Cargo-heavy profile checks remain `rch`-offloaded:
+
+```bash
+rch exec -- cargo check --target wasm32-unknown-unknown \
+  --no-default-features --features wasm-browser-dev
+
+rch exec -- cargo check --target wasm32-unknown-unknown \
+  --no-default-features --features wasm-browser-prod
+```
+
+If any release-blocking gate fails, treat as promotion-blocking and follow the
+demotion/rollback sequence in `docs/wasm_release_channel_strategy.md`.
+
 ## Workspace Slicing Checkpoint (WASM-02 / `asupersync-umelq.3.4`)
 
 Before onboarding framework adapters, verify workspace slicing closure for the

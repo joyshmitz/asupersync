@@ -114,6 +114,27 @@ CI evidence:
   - replay commands and artifact pointers for failed matrix/forensics rows
   - status labels: `none_required`, `action_required`, `insufficient_data`
 
+### Incident Forensics Drill Contract (asupersync-umelq.12.5)
+
+Deterministic incident drill surfaces for browser replay triage:
+
+- Suite runner:
+  `bash ./scripts/run_all_e2e.sh --suite wasm-incident-forensics`
+- Direct drill runner:
+  `TEST_SEED=4242 bash ./scripts/test_wasm_incident_forensics_e2e.sh`
+- Playbook contract check:
+  `python3 ./scripts/check_incident_forensics_playbook.py`
+
+Expected deterministic artifact root:
+- `target/e2e-results/wasm_incident_forensics`
+
+Expected per-run artifacts:
+- `summary.json` (`e2e-suite-summary-v3`)
+- `incident_summary.json` (`incident-forensics-drill-summary-v1`)
+- `incident_events.ndjson` (`incident-forensics-event-v1`)
+- `repro_bundle.json` (`incident-forensics-repro-bundle-v1`)
+- replay payloads (`replay_run1.json`, `replay_run2.json`) and failure probe diagnostics (`expected_failure.log`)
+
 Example structured log entry (start/end markers include the same context):
 
 ```text
@@ -273,6 +294,43 @@ RaptorQ one-command validation notes:
 
 If any command fails, open/refresh a bead under `[TEST-COVERAGE][Track-D]`,
 link the failing artifact, and do not mark maintenance pass as complete.
+
+## SEM-10.4 Guardrail Mismatch Fixtures
+
+Use the deterministic mismatch-fixture harness to validate that anti-drift
+guardrails fail with actionable diagnostics across projection surfaces.
+
+Fixture catalog:
+- `tests/fixtures/semantic_guardrail_mismatch/fixtures.json`
+- schema: `semantic-guardrail-mismatch-fixtures-v1`
+- required surfaces: `docs`, `runtime`, `lean`, `tla`, `e2e`
+
+Harness:
+- `scripts/test_semantic_guardrail_mismatch_fixtures.sh`
+- summary schema: `semantic-guardrail-mismatch-report-v1`
+- artifacts: `target/semantic-guardrail-fixtures/<run-id>/`
+
+Commands:
+
+```bash
+# Fast deterministic pass (non-heavy cases only)
+bash scripts/test_semantic_guardrail_mismatch_fixtures.sh --light
+
+# Full matrix (includes runner-backed heavy cases; uses rch when available)
+bash scripts/test_semantic_guardrail_mismatch_fixtures.sh
+```
+
+Expected behavior:
+- Every fixture must fail with `expected_exit != 0`.
+- Every fixture must emit required diagnostic substrings from the catalog.
+- Harness exits non-zero if any fixture misses exit/diagnostic expectations.
+
+False-positive / noise profile:
+- Exit-code checks are exact and deterministic (no fuzzy thresholds).
+- Diagnostic checks use fixed substring assertions per fixture id.
+- Heavy runner cases are isolated from light checks so local fast loops stay
+  stable and low-noise.
+- Artifact logs are per-fixture (`logs/<fixture_id>.log`) for direct replay.
 
 ## Coverage Audit Matrix (bd-2alu)
 

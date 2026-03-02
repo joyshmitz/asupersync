@@ -238,6 +238,62 @@ In CI, the D4 matrix gate enforces the privacy policy contract:
 3. Re-run with `ASUPERSYNC_SEED` and same inputs (or load `trace.async` directly).
 4. If divergence happens, emit a **divergence artifact** with the first mismatched event.
 
+## WASM Incident Forensics Playbook (asupersync-umelq.12.5)
+
+This section defines the canonical browser-incident triage workflow and the
+minimum evidence required before closure.
+
+### Operator Workflow
+
+1. `intake`: classify symptom and severity (`sev1|sev2|sev3`), assign incident
+   owner, and attach initial artifact pointer.
+2. `replay`: run deterministic replay with pinned seed and scenario.
+3. `diagnose`: compare expected/observed replay outputs and capture divergence
+   or confidence evidence.
+4. `contain`: apply mitigation (fallback, rollback, or channel hold) and
+   document the exact command path used.
+5. `closure`: verify replay is reproducible, evidence is complete, and handoff
+   notes include next actions.
+
+### Canonical Commands
+
+```bash
+# 1) Deterministic replay drill (writes summary + repro bundle artifacts)
+TEST_SEED=4242 bash ./scripts/test_wasm_incident_forensics_e2e.sh
+
+# 2) Single-suite orchestration path (for matrix + replay command routing)
+bash ./scripts/run_all_e2e.sh --suite wasm-incident-forensics
+
+# 3) Playbook/docs contract check (fails on command or artifact drift)
+python3 ./scripts/check_incident_forensics_playbook.py
+
+# 4) Direct replay command template (always offload cargo-heavy execution)
+rch exec -- cargo run --quiet --features cli --bin asupersync -- --format json --color never \
+  lab replay examples/scenarios/smoke_happy_path.yaml \
+  --seed 4242 \
+  --artifact-pointer artifacts/replay/wasm-incident-smoke-4242.json \
+  --artifact-output target/e2e-results/wasm_incident_forensics/replay_report.json \
+  --window-start 1 \
+  --window-events 10
+```
+
+### Required Evidence Bundle
+
+- `target/e2e-results/wasm_incident_forensics/artifacts_<timestamp>/summary.json`
+- `target/e2e-results/wasm_incident_forensics/artifacts_<timestamp>/incident_summary.json`
+- `target/e2e-results/wasm_incident_forensics/artifacts_<timestamp>/incident_events.ndjson`
+- `target/e2e-results/wasm_incident_forensics/artifacts_<timestamp>/repro_bundle.json`
+- replay output payload (`replay_run1.json`, `replay_run2.json`) and
+  expected-failure probe log (`expected_failure.log`)
+
+### Handoff Contract
+
+| Role | Required handoff fields |
+|------|-------------------------|
+| Incident owner | `incident_id`, `severity`, `seed`, `repro_command`, `artifact_dir` |
+| Runtime responder | mitigation action, containment status, fallback mode, ETA |
+| Verification reviewer | deterministic replay status, divergence status, closure recommendation |
+
 ### Failure Triage + Repro Pipeline (bd-1ex7)
 
 This is the standard failure triage pipeline used across unit, integration,
