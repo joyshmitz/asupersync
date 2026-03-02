@@ -38,18 +38,18 @@
       "delta_vs_sequential": [
         {
           "batch_size": 4,
-          "p95_delta_pct": -0.004431894444936878,
-          "p99_delta_pct": -0.004431894444936878
+          "p95_delta_pct": 0.7370764283947564,
+          "p99_delta_pct": 0.7370764283947564
         },
         {
           "batch_size": 8,
-          "p95_delta_pct": -0.33239208337026577,
-          "p99_delta_pct": -0.33239208337026577
+          "p95_delta_pct": 0.38770714815730895,
+          "p99_delta_pct": 0.38770714815730895
         },
         {
           "batch_size": 16,
-          "p95_delta_pct": 5.410076861712231,
-          "p99_delta_pct": 5.410076861712231
+          "p95_delta_pct": 2.3540687608211726,
+          "p99_delta_pct": 2.3540687608211726
         }
       ],
       "extra_repair_symbols": 6,
@@ -60,9 +60,9 @@
           "mode": "sequential",
           "sample_count": 20,
           "time_us": {
-            "p50": 39104.75,
-            "p95": 39486.5,
-            "p99": 39486.5
+            "p50": 40161.25,
+            "p95": 40430.0,
+            "p99": 40430.0
           },
           "wavefront_batches_total": 0,
           "wavefront_overlap_peeled_total": 0
@@ -72,9 +72,9 @@
           "mode": "wavefront",
           "sample_count": 20,
           "time_us": {
-            "p50": 39044.25,
-            "p95": 39484.75,
-            "p99": 39484.75
+            "p50": 40250.0,
+            "p95": 40728.0,
+            "p99": 40728.0
           },
           "wavefront_batches_total": 1600,
           "wavefront_overlap_peeled_total": 2240
@@ -84,9 +84,9 @@
           "mode": "wavefront",
           "sample_count": 20,
           "time_us": {
-            "p50": 39065.5,
-            "p95": 39355.25,
-            "p99": 39355.25
+            "p50": 40197.25,
+            "p95": 40586.75,
+            "p99": 40586.75
           },
           "wavefront_batches_total": 800,
           "wavefront_overlap_peeled_total": 2240
@@ -96,9 +96,9 @@
           "mode": "wavefront",
           "sample_count": 20,
           "time_us": {
-            "p50": 39342.5,
-            "p95": 41622.75,
-            "p99": 41622.75
+            "p50": 40077.75,
+            "p95": 41381.75,
+            "p99": 41381.75
           },
           "wavefront_batches_total": 400,
           "wavefront_overlap_peeled_total": 2240
@@ -116,18 +116,18 @@
       "delta_vs_sequential": [
         {
           "batch_size": 4,
-          "p95_delta_pct": -4.382144005612886,
-          "p99_delta_pct": -4.382144005612886
+          "p95_delta_pct": -0.5560660402525417,
+          "p99_delta_pct": -0.5560660402525417
         },
         {
           "batch_size": 8,
-          "p95_delta_pct": -3.6191422808197156,
-          "p99_delta_pct": -3.6191422808197156
+          "p95_delta_pct": -0.7220559030144944,
+          "p99_delta_pct": -0.7220559030144944
         },
         {
           "batch_size": 16,
-          "p95_delta_pct": -2.1007396146987456,
-          "p99_delta_pct": -2.1007396146987456
+          "p95_delta_pct": -0.5809645196668346,
+          "p99_delta_pct": -0.5809645196668346
         }
       ],
       "extra_repair_symbols": 8,
@@ -138,9 +138,9 @@
           "mode": "sequential",
           "sample_count": 16,
           "time_us": {
-            "p50": 41629.75,
-            "p95": 42758.75,
-            "p99": 42758.75
+            "p50": 41872.75,
+            "p95": 42171.25,
+            "p99": 42171.25
           },
           "wavefront_batches_total": 0,
           "wavefront_overlap_peeled_total": 0
@@ -150,9 +150,9 @@
           "mode": "wavefront",
           "sample_count": 16,
           "time_us": {
-            "p50": 40667.0,
-            "p95": 40885.0,
-            "p99": 40885.0
+            "p50": 41730.5,
+            "p95": 41936.75,
+            "p99": 41936.75
           },
           "wavefront_batches_total": 1536,
           "wavefront_overlap_peeled_total": 2304
@@ -162,9 +162,9 @@
           "mode": "wavefront",
           "sample_count": 16,
           "time_us": {
-            "p50": 40649.0,
-            "p95": 41211.25,
-            "p99": 41211.25
+            "p50": 41736.5,
+            "p95": 41866.75,
+            "p99": 41866.75
           },
           "wavefront_batches_total": 768,
           "wavefront_overlap_peeled_total": 2304
@@ -174,9 +174,9 @@
           "mode": "wavefront",
           "sample_count": 16,
           "time_us": {
-            "p50": 40652.25,
-            "p95": 41860.5,
-            "p99": 41860.5
+            "p50": 41696.75,
+            "p95": 41926.25,
+            "p99": 41926.25
           },
           "wavefront_batches_total": 384,
           "wavefront_overlap_peeled_total": 2304
@@ -194,18 +194,18 @@
       "delta_vs_sequential": [
         {
           "batch_size": 4,
-          "p95_delta_pct": 3.9762383202681004,
-          "p99_delta_pct": 3.9762383202681004
+          "p95_delta_pct": 0.32642900010478754,
+          "p99_delta_pct": 0.32642900010478754
         },
         {
           "batch_size": 8,
-          "p95_delta_pct": 0.8295092965617865,
-          "p99_delta_pct": 0.8295092965617865
+          "p95_delta_pct": -0.06191989787979919,
+          "p99_delta_pct": -0.06191989787979919
         },
         {
           "batch_size": 16,
-          "p95_delta_pct": 3.0024523773078564,
-          "p99_delta_pct": 3.0024523773078564
+          "p95_delta_pct": 2.6768448160343956,
+          "p99_delta_pct": 2.6768448160343956
         }
       ],
       "extra_repair_symbols": 6,
@@ -216,9 +216,9 @@
           "mode": "sequential",
           "sample_count": 16,
           "time_us": {
-            "p50": 76372.5,
-            "p95": 76762.25,
-            "p99": 76762.25
+            "p50": 78443.75,
+            "p95": 78730.75,
+            "p99": 78730.75
           },
           "wavefront_batches_total": 0,
           "wavefront_overlap_peeled_total": 0
@@ -228,9 +228,9 @@
           "mode": "wavefront",
           "sample_count": 16,
           "time_us": {
-            "p50": 76425.25,
-            "p95": 79814.5,
-            "p99": 79814.5
+            "p50": 78459.25,
+            "p95": 78987.75,
+            "p99": 78987.75
           },
           "wavefront_batches_total": 1280,
           "wavefront_overlap_peeled_total": 1792
@@ -240,9 +240,9 @@
           "mode": "wavefront",
           "sample_count": 16,
           "time_us": {
-            "p50": 76467.5,
-            "p95": 77399.0,
-            "p99": 77399.0
+            "p50": 78354.75,
+            "p95": 78682.0,
+            "p99": 78682.0
           },
           "wavefront_batches_total": 640,
           "wavefront_overlap_peeled_total": 1792
@@ -252,9 +252,9 @@
           "mode": "wavefront",
           "sample_count": 16,
           "time_us": {
-            "p50": 76561.75,
-            "p95": 79067.0,
-            "p99": 79067.0
+            "p50": 78292.75,
+            "p95": 80838.25,
+            "p99": 80838.25
           },
           "wavefront_batches_total": 320,
           "wavefront_overlap_peeled_total": 1792
