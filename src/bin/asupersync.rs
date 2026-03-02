@@ -35,6 +35,7 @@ use conformance::{
 use franken_decision::DecisionAuditEntry;
 use franken_evidence::{EvidenceLedger, EvidenceLedgerBuilder};
 use franken_kernel::{DecisionId, TraceId};
+use sha2::{Digest, Sha256};
 use std::collections::{BTreeMap, BTreeSet};
 use std::fmt::Write as _;
 use std::fs::{self, File};
@@ -297,6 +298,8 @@ enum DoctorCommand {
     ReportExport(DoctorReportExportArgs),
     /// Export core diagnostics reports into FrankenSuite evidence/decision artifacts
     FrankenExport(DoctorFrankenExportArgs),
+    /// Package doctor_asupersync CLI artifacts and deterministic config templates
+    PackageCli(DoctorPackageCliArgs),
 }
 
 #[derive(Args, Debug)]
@@ -412,6 +415,48 @@ struct DoctorReportExportArgs {
         default_values_t = [DoctorReportExportFormat::Markdown, DoctorReportExportFormat::Json]
     )]
     formats: Vec<DoctorReportExportFormat>,
+}
+
+#[derive(Clone, Copy, Debug, Eq, PartialEq, ValueEnum)]
+#[value(rename_all = "kebab-case")]
+enum DoctorPackageProfile {
+    Local,
+    Ci,
+}
+
+impl DoctorPackageProfile {
+    fn as_str(self) -> &'static str {
+        match self {
+            Self::Local => "local",
+            Self::Ci => "ci",
+        }
+    }
+}
+
+#[derive(Args, Debug)]
+struct DoctorPackageCliArgs {
+    /// Optional source binary path; defaults to current executable when omitted
+    #[arg(long = "source-binary")]
+    source_binary: Option<PathBuf>,
+
+    /// Output directory for packaged binary + release manifest + config templates
+    #[arg(
+        long = "out-dir",
+        default_value = "target/e2e-results/doctor_cli_package/artifacts"
+    )]
+    out_dir: PathBuf,
+
+    /// Installed binary name for packaged doctor CLI
+    #[arg(long = "binary-name", default_value = "doctor_asupersync")]
+    binary_name: String,
+
+    /// Default profile template (`local` or `ci`)
+    #[arg(long = "default-profile", value_enum, default_value_t = DoctorPackageProfile::Local)]
+    default_profile: DoctorPackageProfile,
+
+    /// Perform install/run smoke checks from packaged artifacts
+    #[arg(long = "smoke", action = ArgAction::SetTrue)]
+    smoke: bool,
 }
 
 // =========================================================================
@@ -782,6 +827,7 @@ fn run_doctor(args: DoctorArgs, output: &mut Output) -> Result<(), CliError> {
         }
         DoctorCommand::ReportExport(export_args) => doctor_report_export(&export_args, output),
         DoctorCommand::FrankenExport(export_args) => doctor_franken_export(&export_args, output),
+        DoctorCommand::PackageCli(package_args) => doctor_package_cli(&package_args, output),
     }
 }
 
@@ -1106,6 +1152,134 @@ impl Outputtable for DoctorFrankenExportOutput {
                 artifact.evidence_jsonl,
                 artifact.decision_json,
                 artifact.validation_status
+            ));
+        }
+        lines.push("Rerun commands:".to_string());
+        for command in &self.rerun_commands {
+            lines.push(format!("  {command}"));
+        }
+        lines.join("\n")
+    }
+}
+
+const DOCTOR_CLI_PACKAGE_SCHEMA_VERSION: &str = "doctor-cli-package-v1";
+const DOCTOR_CLI_PACKAGE_MANIFEST_SCHEMA_VERSION: &str = "doctor-cli-package-manifest-v1";
+const DOCTOR_CLI_PACKAGE_CONFIG_SCHEMA_VERSION: &str = "doctor-cli-package-config-v1";
+
+#[derive(Debug, serde::Serialize, PartialEq, Eq)]
+struct DoctorPackageCliOutput {
+    schema_version: String,
+    package_version: String,
+    binary_name: String,
+    source_binary: String,
+    packaged_binary: String,
+    packaged_binary_size_bytes: u64,
+    packaged_binary_sha256: String,
+    release_manifest: String,
+    default_profile: String,
+    config_templates: Vec<DoctorPackageTemplateArtifact>,
+    install_smoke: Option<DoctorPackageInstallSmokeResult>,
+    rerun_commands: Vec<String>,
+    structured_logs: Vec<DoctorPackageStructuredLog>,
+}
+
+#[derive(Debug, Clone, serde::Serialize, serde::Deserialize, PartialEq, Eq)]
+struct DoctorPackageTemplateArtifact {
+    profile: String,
+    path: String,
+    command_preview: String,
+}
+
+#[derive(Debug, Clone, serde::Serialize, PartialEq, Eq)]
+struct DoctorPackageInstallSmokeResult {
+    install_root: String,
+    installed_binary: String,
+    startup_status: String,
+    command_status: String,
+    command_output_sha256: String,
+    observed_contract_version: String,
+}
+
+#[derive(Debug, Clone, serde::Serialize, PartialEq, Eq)]
+struct DoctorPackageStructuredLog {
+    level: String,
+    event: String,
+    message: String,
+    remediation_guidance: Option<String>,
+    fields: BTreeMap<String, String>,
+}
+
+#[derive(Debug, Clone, serde::Serialize, serde::Deserialize, PartialEq, Eq)]
+struct DoctorCliPackageManifest {
+    schema_version: String,
+    package_version: String,
+    binary_name: String,
+    default_profile: String,
+    source_binary: String,
+    packaged_binary: String,
+    packaged_binary_size_bytes: u64,
+    packaged_binary_sha256: String,
+    config_templates: Vec<DoctorPackageTemplateArtifact>,
+    supported_platforms: Vec<String>,
+    compatibility_expectations: Vec<String>,
+    upgrade_path: Vec<String>,
+}
+
+#[derive(Debug, Clone, serde::Serialize, serde::Deserialize, PartialEq, Eq)]
+struct DoctorCliPackageConfigTemplate {
+    schema_version: String,
+    profile: String,
+    binary_name: String,
+    output_format: String,
+    color: String,
+    doctor_command: String,
+    workspace_root: String,
+    report_out_dir: String,
+    strict_mode: bool,
+    rch_binary: String,
+}
+
+#[derive(Debug, Clone, PartialEq, Eq)]
+struct MaterializedDoctorPackageTemplate {
+    artifact: DoctorPackageTemplateArtifact,
+    config: DoctorCliPackageConfigTemplate,
+}
+
+impl Outputtable for DoctorPackageCliOutput {
+    fn human_format(&self) -> String {
+        let mut lines = vec![
+            format!("Schema: {}", self.schema_version),
+            format!("Package version: {}", self.package_version),
+            format!("Binary: {}", self.binary_name),
+            format!("Source binary: {}", self.source_binary),
+            format!("Packaged binary: {}", self.packaged_binary),
+            format!(
+                "Packaged binary digest: {} ({} bytes)",
+                self.packaged_binary_sha256, self.packaged_binary_size_bytes
+            ),
+            format!("Release manifest: {}", self.release_manifest),
+            format!("Default profile: {}", self.default_profile),
+            format!("Config templates: {}", self.config_templates.len()),
+        ];
+        for template in &self.config_templates {
+            lines.push(format!(
+                "  - {}: {} ({})",
+                template.profile, template.path, template.command_preview
+            ));
+        }
+        if let Some(smoke) = &self.install_smoke {
+            lines.push("Install smoke:".to_string());
+            lines.push(format!("  - install root: {}", smoke.install_root));
+            lines.push(format!("  - installed binary: {}", smoke.installed_binary));
+            lines.push(format!("  - startup: {}", smoke.startup_status));
+            lines.push(format!("  - command: {}", smoke.command_status));
+            lines.push(format!(
+                "  - command output sha256: {}",
+                smoke.command_output_sha256
+            ));
+            lines.push(format!(
+                "  - observed contract version: {}",
+                smoke.observed_contract_version
             ));
         }
         lines.push("Rerun commands:".to_string());
@@ -1594,6 +1768,719 @@ fn doctor_franken_export(
         rerun_commands,
     };
     output.write(&payload).map_err(output_cli_error)
+}
+
+fn doctor_package_cli(args: &DoctorPackageCliArgs, output: &mut Output) -> Result<(), CliError> {
+    let source_binary = resolve_doctor_package_source_binary(args)?;
+    validate_packaged_binary_name(args.binary_name.as_str())?;
+
+    fs::create_dir_all(&args.out_dir).map_err(|err| {
+        CliError::new(
+            "doctor_package_error",
+            "Failed to create package output directory",
+        )
+        .detail(err.to_string())
+        .context("path", args.out_dir.display().to_string())
+        .context(
+            "remediation",
+            "Ensure the output path is writable and retry packaging.".to_string(),
+        )
+        .exit_code(ExitCode::RUNTIME_ERROR)
+    })?;
+
+    let package_dir = args.out_dir.join("package").join("bin");
+    fs::create_dir_all(&package_dir).map_err(|err| {
+        CliError::new(
+            "doctor_package_error",
+            "Failed to create package binary directory",
+        )
+        .detail(err.to_string())
+        .context("path", package_dir.display().to_string())
+        .context(
+            "remediation",
+            "Ensure the package directory path is writable.".to_string(),
+        )
+        .exit_code(ExitCode::RUNTIME_ERROR)
+    })?;
+
+    let source_bytes = fs::read(&source_binary).map_err(|err| io_error(&source_binary, &err))?;
+    if source_bytes.is_empty() {
+        return Err(
+            CliError::new("doctor_package_error", "Source binary is empty and cannot be packaged")
+                .detail(source_binary.display().to_string())
+                .context(
+                    "remediation",
+                    "Build the CLI binary first (`rch exec -- cargo build --release --features cli --bin asupersync`) and retry."
+                        .to_string(),
+                )
+                .exit_code(ExitCode::USER_ERROR),
+        );
+    }
+    let packaged_binary = package_dir.join(&args.binary_name);
+    fs::write(&packaged_binary, &source_bytes).map_err(|err| {
+        CliError::new("doctor_package_error", "Failed to write packaged binary")
+            .detail(err.to_string())
+            .context("path", packaged_binary.display().to_string())
+            .context(
+                "remediation",
+                "Check filesystem permissions and available disk space.".to_string(),
+            )
+            .exit_code(ExitCode::RUNTIME_ERROR)
+    })?;
+    let source_permissions = fs::metadata(&source_binary)
+        .map_err(|err| io_error(&source_binary, &err))?
+        .permissions();
+    fs::set_permissions(&packaged_binary, source_permissions).map_err(|err| {
+        CliError::new(
+            "doctor_package_error",
+            "Failed to preserve packaged binary permissions",
+        )
+        .detail(err.to_string())
+        .context("path", packaged_binary.display().to_string())
+        .context(
+            "remediation",
+            "Ensure executable permissions can be applied in the package directory.".to_string(),
+        )
+        .exit_code(ExitCode::RUNTIME_ERROR)
+    })?;
+
+    let config_dir = args.out_dir.join("config");
+    let materialized =
+        materialize_doctor_package_templates(&config_dir, args.binary_name.as_str())?;
+    let mut config_templates = materialized
+        .iter()
+        .map(|entry| entry.artifact.clone())
+        .collect::<Vec<_>>();
+    config_templates.sort_by(|left, right| left.profile.cmp(&right.profile));
+
+    let default_profile = args.default_profile.as_str().to_string();
+    let default_config = materialized
+        .iter()
+        .find(|entry| entry.config.profile == default_profile)
+        .map(|entry| entry.config.clone())
+        .ok_or_else(|| {
+            CliError::new(
+                "doctor_package_error",
+                "Default profile template was not materialized",
+            )
+            .detail(default_profile.clone())
+            .context(
+                "remediation",
+                "Verify template generation for local and ci profiles.".to_string(),
+            )
+            .exit_code(ExitCode::RUNTIME_ERROR)
+        })?;
+
+    let packaged_binary_sha256 = sha256_hex(&source_bytes);
+    let packaged_binary_size_bytes = source_bytes.len() as u64;
+    let release_manifest_doc = build_doctor_cli_release_manifest(
+        env!("CARGO_PKG_VERSION"),
+        args.binary_name.as_str(),
+        default_profile.as_str(),
+        source_binary.as_path(),
+        packaged_binary.as_path(),
+        packaged_binary_size_bytes,
+        packaged_binary_sha256.as_str(),
+        &config_templates,
+    );
+    let release_manifest_path = args.out_dir.join("doctor_cli_release_manifest.json");
+    let release_manifest_payload =
+        serde_json::to_vec_pretty(&release_manifest_doc).map_err(|err| {
+            CliError::new(
+                "doctor_package_error",
+                "Failed to serialize release manifest",
+            )
+            .detail(err.to_string())
+            .context("path", release_manifest_path.display().to_string())
+            .context(
+                "remediation",
+                "Inspect release manifest schema fields for serialization-unsafe data.".to_string(),
+            )
+            .exit_code(ExitCode::INTERNAL_ERROR)
+        })?;
+    fs::write(&release_manifest_path, release_manifest_payload).map_err(|err| {
+        CliError::new("doctor_package_error", "Failed to write release manifest")
+            .detail(err.to_string())
+            .context("path", release_manifest_path.display().to_string())
+            .context(
+                "remediation",
+                "Ensure manifest destination is writable and retry.".to_string(),
+            )
+            .exit_code(ExitCode::RUNTIME_ERROR)
+    })?;
+
+    let install_smoke = if args.smoke {
+        Some(run_doctor_package_install_smoke(
+            packaged_binary.as_path(),
+            args.out_dir.as_path(),
+            args.binary_name.as_str(),
+            &default_config,
+        )?)
+    } else {
+        None
+    };
+
+    let source_binary_cli = source_binary.display().to_string();
+    let mut rerun_commands = vec![
+        format!(
+            "asupersync doctor package-cli --source-binary {} --out-dir {} --binary-name {} --default-profile {}{}",
+            source_binary.display(),
+            args.out_dir.display(),
+            args.binary_name,
+            args.default_profile.as_str(),
+            if args.smoke { " --smoke" } else { "" }
+        ),
+        "rch exec -- cargo build --release --features cli --bin asupersync".to_string(),
+    ];
+    rerun_commands.sort();
+
+    let mut structured_logs = Vec::new();
+    structured_logs.push(doctor_package_log(
+        "info",
+        "package_started",
+        "doctor_asupersync packaging started",
+        None,
+        vec![
+            ("binary_name", args.binary_name.clone()),
+            ("source_binary", source_binary_cli.clone()),
+            ("out_dir", args.out_dir.display().to_string()),
+        ],
+    ));
+    for template in &config_templates {
+        structured_logs.push(doctor_package_log(
+            "info",
+            "config_template_materialized",
+            "config template written and validated",
+            None,
+            vec![
+                ("profile", template.profile.clone()),
+                ("path", template.path.clone()),
+                ("command_preview", template.command_preview.clone()),
+            ],
+        ));
+    }
+    structured_logs.push(doctor_package_log(
+        "info",
+        "release_manifest_written",
+        "release manifest captured package metadata and compatibility policy",
+        None,
+        vec![
+            ("manifest_path", release_manifest_path.display().to_string()),
+            ("packaged_binary_sha256", packaged_binary_sha256.clone()),
+        ],
+    ));
+    if let Some(smoke) = &install_smoke {
+        structured_logs.push(doctor_package_log(
+            "info",
+            "install_smoke_passed",
+            "packaged binary install/run smoke check completed",
+            Some("If this check fails, verify executable permissions and run `doctor report-contract` manually."),
+            vec![
+                ("install_root", smoke.install_root.clone()),
+                (
+                    "observed_contract_version",
+                    smoke.observed_contract_version.clone(),
+                ),
+                ("command_output_sha256", smoke.command_output_sha256.clone()),
+            ],
+        ));
+    }
+    structured_logs.push(doctor_package_log(
+        "info",
+        "package_completed",
+        "doctor_asupersync packaging completed successfully",
+        None,
+        vec![
+            ("packaged_binary", packaged_binary.display().to_string()),
+            (
+                "release_manifest",
+                release_manifest_path.display().to_string(),
+            ),
+        ],
+    ));
+
+    let payload = DoctorPackageCliOutput {
+        schema_version: DOCTOR_CLI_PACKAGE_SCHEMA_VERSION.to_string(),
+        package_version: env!("CARGO_PKG_VERSION").to_string(),
+        binary_name: args.binary_name.clone(),
+        source_binary: source_binary_cli,
+        packaged_binary: packaged_binary.display().to_string(),
+        packaged_binary_size_bytes,
+        packaged_binary_sha256,
+        release_manifest: release_manifest_path.display().to_string(),
+        default_profile,
+        config_templates,
+        install_smoke,
+        rerun_commands,
+        structured_logs,
+    };
+    output.write(&payload).map_err(output_cli_error)
+}
+
+fn resolve_doctor_package_source_binary(args: &DoctorPackageCliArgs) -> Result<PathBuf, CliError> {
+    let source_binary = if let Some(path) = &args.source_binary {
+        path.clone()
+    } else {
+        std::env::current_exe().map_err(|err| {
+            CliError::new(
+                "doctor_package_error",
+                "Failed to resolve current executable for packaging",
+            )
+            .detail(err.to_string())
+            .context(
+                "remediation",
+                "Pass an explicit --source-binary path to a built asupersync executable."
+                    .to_string(),
+            )
+            .exit_code(ExitCode::RUNTIME_ERROR)
+        })?
+    };
+    let metadata = fs::metadata(&source_binary).map_err(|err| io_error(&source_binary, &err))?;
+    if !metadata.is_file() {
+        return Err(CliError::new(
+            "invalid_argument",
+            "Source binary path does not reference a file",
+        )
+        .detail(source_binary.display().to_string())
+        .context(
+            "remediation",
+            "Provide a file path to a compiled asupersync binary.".to_string(),
+        )
+        .exit_code(ExitCode::USER_ERROR));
+    }
+    Ok(source_binary)
+}
+
+fn materialize_doctor_package_templates(
+    config_dir: &Path,
+    binary_name: &str,
+) -> Result<Vec<MaterializedDoctorPackageTemplate>, CliError> {
+    fs::create_dir_all(config_dir).map_err(|err| {
+        CliError::new(
+            "doctor_package_error",
+            "Failed to create config template directory",
+        )
+        .detail(err.to_string())
+        .context("path", config_dir.display().to_string())
+        .context(
+            "remediation",
+            "Ensure the config template path is writable and retry.".to_string(),
+        )
+        .exit_code(ExitCode::RUNTIME_ERROR)
+    })?;
+
+    let mut entries = Vec::new();
+    for profile in [DoctorPackageProfile::Local, DoctorPackageProfile::Ci] {
+        let template = doctor_package_config_template(profile, binary_name);
+        let path = config_dir.join(format!("{}.{}.json", binary_name, profile.as_str()));
+        let payload = serde_json::to_string_pretty(&template).map_err(|err| {
+            CliError::new(
+                "doctor_package_error",
+                "Failed to serialize config template",
+            )
+            .detail(err.to_string())
+            .context("profile", profile.as_str().to_string())
+            .context("path", path.display().to_string())
+            .context(
+                "remediation",
+                "Verify template defaults contain only serializable primitive values.".to_string(),
+            )
+            .exit_code(ExitCode::INTERNAL_ERROR)
+        })?;
+        fs::write(&path, payload.as_bytes()).map_err(|err| {
+            CliError::new("doctor_package_error", "Failed to write config template")
+                .detail(err.to_string())
+                .context("profile", profile.as_str().to_string())
+                .context("path", path.display().to_string())
+                .context(
+                    "remediation",
+                    "Ensure template output path is writable.".to_string(),
+                )
+                .exit_code(ExitCode::RUNTIME_ERROR)
+        })?;
+        let parsed = parse_doctor_package_config(payload.as_str()).map_err(|reason| {
+            CliError::new(
+                "invalid_config",
+                "Materialized config template failed validation",
+            )
+            .detail(reason)
+            .context("profile", profile.as_str().to_string())
+            .context("path", path.display().to_string())
+            .context(
+                "remediation",
+                "Regenerate templates and ensure schema/profile/flag defaults match contract."
+                    .to_string(),
+            )
+            .exit_code(ExitCode::RUNTIME_ERROR)
+        })?;
+        let command_preview = render_doctor_packaged_command(&parsed, binary_name);
+        entries.push(MaterializedDoctorPackageTemplate {
+            artifact: DoctorPackageTemplateArtifact {
+                profile: profile.as_str().to_string(),
+                path: path.display().to_string(),
+                command_preview,
+            },
+            config: parsed,
+        });
+    }
+    entries.sort_by(|left, right| left.artifact.profile.cmp(&right.artifact.profile));
+    Ok(entries)
+}
+
+fn doctor_package_config_template(
+    profile: DoctorPackageProfile,
+    binary_name: &str,
+) -> DoctorCliPackageConfigTemplate {
+    let (color, strict_mode) = match profile {
+        DoctorPackageProfile::Local => ("auto".to_string(), false),
+        DoctorPackageProfile::Ci => ("never".to_string(), true),
+    };
+    DoctorCliPackageConfigTemplate {
+        schema_version: DOCTOR_CLI_PACKAGE_CONFIG_SCHEMA_VERSION.to_string(),
+        profile: profile.as_str().to_string(),
+        binary_name: binary_name.to_string(),
+        output_format: "json".to_string(),
+        color,
+        doctor_command: "report-contract".to_string(),
+        workspace_root: ".".to_string(),
+        report_out_dir: "target/e2e-results/doctor_report_export/artifacts".to_string(),
+        strict_mode,
+        rch_binary: "~/.local/bin/rch".to_string(),
+    }
+}
+
+fn parse_doctor_package_config(raw: &str) -> Result<DoctorCliPackageConfigTemplate, String> {
+    let config: DoctorCliPackageConfigTemplate = serde_json::from_str(raw)
+        .map_err(|err| format!("config template JSON decode failed: {err}"))?;
+    validate_doctor_package_config(&config)?;
+    Ok(config)
+}
+
+fn validate_doctor_package_config(config: &DoctorCliPackageConfigTemplate) -> Result<(), String> {
+    if config.schema_version != DOCTOR_CLI_PACKAGE_CONFIG_SCHEMA_VERSION {
+        return Err(format!(
+            "schema_version must be {}",
+            DOCTOR_CLI_PACKAGE_CONFIG_SCHEMA_VERSION
+        ));
+    }
+    if !matches!(config.profile.as_str(), "local" | "ci") {
+        return Err("profile must be one of: local, ci".to_string());
+    }
+    if !is_valid_packaged_binary_name(config.binary_name.as_str()) {
+        return Err("binary_name must contain only ASCII letters, digits, '-' or '_'".to_string());
+    }
+    if !matches!(
+        config.output_format.as_str(),
+        "json" | "json-pretty" | "stream-json" | "tsv" | "human"
+    ) {
+        return Err(
+            "output_format must be one of: json, json-pretty, stream-json, tsv, human".to_string(),
+        );
+    }
+    if !matches!(config.color.as_str(), "auto" | "always" | "never") {
+        return Err("color must be one of: auto, always, never".to_string());
+    }
+    if config.doctor_command != "report-contract" {
+        return Err("doctor_command must be report-contract".to_string());
+    }
+    if config.workspace_root.trim().is_empty() {
+        return Err("workspace_root must be non-empty".to_string());
+    }
+    if config.report_out_dir.trim().is_empty() {
+        return Err("report_out_dir must be non-empty".to_string());
+    }
+    if config.rch_binary.trim().is_empty() {
+        return Err("rch_binary must be non-empty".to_string());
+    }
+    Ok(())
+}
+
+fn render_doctor_packaged_command(
+    config: &DoctorCliPackageConfigTemplate,
+    binary_name: &str,
+) -> String {
+    format!(
+        "{binary_name} --format {} --color {} doctor {}",
+        config.output_format, config.color, config.doctor_command
+    )
+}
+
+fn validate_packaged_binary_name(binary_name: &str) -> Result<(), CliError> {
+    if is_valid_packaged_binary_name(binary_name) {
+        return Ok(());
+    }
+    Err(
+        CliError::new("invalid_argument", "Invalid --binary-name value")
+            .detail(binary_name.to_string())
+            .context(
+                "remediation",
+                "Use only ASCII letters, digits, '-' or '_' for packaged binary names.".to_string(),
+            )
+            .exit_code(ExitCode::USER_ERROR),
+    )
+}
+
+fn is_valid_packaged_binary_name(binary_name: &str) -> bool {
+    !binary_name.is_empty()
+        && binary_name
+            .chars()
+            .all(|ch| ch.is_ascii_alphanumeric() || ch == '-' || ch == '_')
+}
+
+fn run_doctor_package_install_smoke(
+    packaged_binary: &Path,
+    out_dir: &Path,
+    binary_name: &str,
+    config: &DoctorCliPackageConfigTemplate,
+) -> Result<DoctorPackageInstallSmokeResult, CliError> {
+    let install_root = out_dir.join("install_smoke_env");
+    let install_bin_dir = install_root.join("bin");
+    fs::create_dir_all(&install_bin_dir).map_err(|err| {
+        CliError::new(
+            "doctor_package_smoke_error",
+            "Failed to create install smoke directory",
+        )
+        .detail(err.to_string())
+        .context("path", install_bin_dir.display().to_string())
+        .context(
+            "remediation",
+            "Use a fresh writable out-dir when running --smoke.".to_string(),
+        )
+        .exit_code(ExitCode::RUNTIME_ERROR)
+    })?;
+    let installed_binary = install_bin_dir.join(binary_name);
+    let packaged_bytes =
+        fs::read(packaged_binary).map_err(|err| io_error(packaged_binary, &err))?;
+    fs::write(&installed_binary, &packaged_bytes).map_err(|err| {
+        CliError::new(
+            "doctor_package_smoke_error",
+            "Failed to install packaged binary for smoke",
+        )
+        .detail(err.to_string())
+        .context("path", installed_binary.display().to_string())
+        .context(
+            "remediation",
+            "Ensure install-smoke directories are writable.".to_string(),
+        )
+        .exit_code(ExitCode::RUNTIME_ERROR)
+    })?;
+    let permissions = fs::metadata(packaged_binary)
+        .map_err(|err| io_error(packaged_binary, &err))?
+        .permissions();
+    fs::set_permissions(&installed_binary, permissions).map_err(|err| {
+        CliError::new(
+            "doctor_package_smoke_error",
+            "Failed to set install-smoke executable permissions",
+        )
+        .detail(err.to_string())
+        .context("path", installed_binary.display().to_string())
+        .context(
+            "remediation",
+            "Ensure executable permission bits are supported on this filesystem.".to_string(),
+        )
+        .exit_code(ExitCode::RUNTIME_ERROR)
+    })?;
+
+    let startup = ProcessCommand::new(&installed_binary)
+        .arg("--help")
+        .current_dir(&install_root)
+        .output()
+        .map_err(|err| {
+            CliError::new(
+                "doctor_package_smoke_error",
+                "Failed to execute packaged binary startup probe",
+            )
+            .detail(err.to_string())
+            .context("binary", installed_binary.display().to_string())
+            .context(
+                "remediation",
+                "Confirm packaged binary target architecture matches the current runtime."
+                    .to_string(),
+            )
+            .exit_code(ExitCode::RUNTIME_ERROR)
+        })?;
+    if !startup.status.success() {
+        return Err(CliError::new(
+            "doctor_package_smoke_error",
+            "Packaged binary startup probe exited non-zero",
+        )
+        .detail(format!("exit status: {}", startup.status))
+        .context(
+            "stderr",
+            String::from_utf8_lossy(&startup.stderr).trim().to_string(),
+        )
+        .context(
+            "remediation",
+            "Inspect packaged binary permissions/target and run it manually with `--help`."
+                .to_string(),
+        )
+        .exit_code(ExitCode::RUNTIME_ERROR));
+    }
+
+    let command = ProcessCommand::new(&installed_binary)
+        .arg("--format")
+        .arg(config.output_format.as_str())
+        .arg("--color")
+        .arg(config.color.as_str())
+        .arg("doctor")
+        .arg(config.doctor_command.as_str())
+        .current_dir(&install_root)
+        .output()
+        .map_err(|err| {
+            CliError::new(
+                "doctor_package_smoke_error",
+                "Failed to execute packaged binary doctor command",
+            )
+            .detail(err.to_string())
+            .context("binary", installed_binary.display().to_string())
+            .context(
+                "remediation",
+                "Verify packaged command compatibility and runtime shared-library availability."
+                    .to_string(),
+            )
+            .exit_code(ExitCode::RUNTIME_ERROR)
+        })?;
+    if !command.status.success() {
+        return Err(CliError::new(
+            "doctor_package_smoke_error",
+            "Packaged binary doctor command exited non-zero",
+        )
+        .detail(format!("exit status: {}", command.status))
+        .context(
+            "stderr",
+            String::from_utf8_lossy(&command.stderr).trim().to_string(),
+        )
+        .context(
+            "remediation",
+            "Run packaged binary manually and verify `doctor report-contract` succeeds."
+                .to_string(),
+        )
+        .exit_code(ExitCode::RUNTIME_ERROR));
+    }
+    let stdout = String::from_utf8(command.stdout).map_err(|err| {
+        CliError::new(
+            "doctor_package_smoke_error",
+            "Packaged binary produced non-UTF8 smoke output",
+        )
+        .detail(err.to_string())
+        .context(
+            "remediation",
+            "Use a UTF-8 locale and JSON output for packaged smoke validation.".to_string(),
+        )
+        .exit_code(ExitCode::RUNTIME_ERROR)
+    })?;
+    let payload: serde_json::Value = serde_json::from_str(&stdout).map_err(|err| {
+        CliError::new(
+            "doctor_package_smoke_error",
+            "Packaged binary smoke output was not valid JSON",
+        )
+        .detail(err.to_string())
+        .context("output", stdout.trim().to_string())
+        .context(
+            "remediation",
+            "Ensure packaged config uses `output_format = json`.".to_string(),
+        )
+        .exit_code(ExitCode::RUNTIME_ERROR)
+    })?;
+    let observed_contract_version = payload
+        .get("contract")
+        .and_then(|contract| contract.get("contract_version"))
+        .and_then(|value| value.as_str())
+        .unwrap_or("")
+        .to_string();
+    if observed_contract_version != "doctor-core-report-v1" {
+        return Err(CliError::new(
+            "doctor_package_smoke_error",
+            "Packaged smoke output contract version mismatch",
+        )
+        .detail(observed_contract_version)
+        .context("expected", "doctor-core-report-v1".to_string())
+        .context(
+            "remediation",
+            "Run `doctor report-contract` from source binary and compare schema versions."
+                .to_string(),
+        )
+        .exit_code(ExitCode::RUNTIME_ERROR));
+    }
+    Ok(DoctorPackageInstallSmokeResult {
+        install_root: install_root.display().to_string(),
+        installed_binary: installed_binary.display().to_string(),
+        startup_status: "ok".to_string(),
+        command_status: "ok".to_string(),
+        command_output_sha256: sha256_hex(stdout.as_bytes()),
+        observed_contract_version,
+    })
+}
+
+fn build_doctor_cli_release_manifest(
+    package_version: &str,
+    binary_name: &str,
+    default_profile: &str,
+    source_binary: &Path,
+    packaged_binary: &Path,
+    packaged_binary_size_bytes: u64,
+    packaged_binary_sha256: &str,
+    config_templates: &[DoctorPackageTemplateArtifact],
+) -> DoctorCliPackageManifest {
+    let mut template_entries = config_templates.to_vec();
+    template_entries.sort_by(|left, right| left.profile.cmp(&right.profile));
+    DoctorCliPackageManifest {
+        schema_version: DOCTOR_CLI_PACKAGE_MANIFEST_SCHEMA_VERSION.to_string(),
+        package_version: package_version.to_string(),
+        binary_name: binary_name.to_string(),
+        default_profile: default_profile.to_string(),
+        source_binary: source_binary.display().to_string(),
+        packaged_binary: packaged_binary.display().to_string(),
+        packaged_binary_size_bytes,
+        packaged_binary_sha256: packaged_binary_sha256.to_string(),
+        config_templates: template_entries,
+        supported_platforms: vec![
+            "linux-x86_64".to_string(),
+            "linux-aarch64".to_string(),
+            "macos-x86_64".to_string(),
+            "macos-aarch64".to_string(),
+        ],
+        compatibility_expectations: vec![
+            "Config schema is additive-only within doctor-cli-package-config-v1.".to_string(),
+            "Packaged smoke requires doctor report-contract to emit doctor-core-report-v1."
+                .to_string(),
+            "Operator CI flows should invoke cargo-heavy checks via rch exec.".to_string(),
+        ],
+        upgrade_path: vec![
+            "Build new asupersync binary with rch exec -- cargo build --release --features cli --bin asupersync.".to_string(),
+            "Re-run doctor package-cli and compare packaged_binary_sha256 in release manifests.".to_string(),
+            "Promote package only if install smoke and e2e determinism checks remain green.".to_string(),
+        ],
+    }
+}
+
+fn doctor_package_log(
+    level: &str,
+    event: &str,
+    message: &str,
+    remediation_guidance: Option<&str>,
+    fields: Vec<(&str, String)>,
+) -> DoctorPackageStructuredLog {
+    let mut normalized_fields = BTreeMap::new();
+    for (key, value) in fields {
+        normalized_fields.insert(key.to_string(), value);
+    }
+    DoctorPackageStructuredLog {
+        level: level.to_string(),
+        event: event.to_string(),
+        message: message.to_string(),
+        remediation_guidance: remediation_guidance.map(str::to_string),
+        fields: normalized_fields,
+    }
+}
+
+fn sha256_hex(bytes: &[u8]) -> String {
+    let digest = Sha256::digest(bytes);
+    let mut hex = String::with_capacity(digest.len() * 2);
+    for byte in digest {
+        let _ = write!(hex, "{byte:02x}");
+    }
+    hex
 }
 
 fn select_core_reports_for_export(
@@ -3613,6 +4500,119 @@ mod tests {
                 DoctorReportExportFormat::Markdown
             ]
         );
+    }
+
+    #[test]
+    fn doctor_package_cli_args_parse_flags() {
+        let cli = Cli::try_parse_from([
+            "asupersync",
+            "doctor",
+            "package-cli",
+            "--source-binary",
+            "target/release/asupersync",
+            "--out-dir",
+            "target/e2e-results/doctor_cli_package",
+            "--binary-name",
+            "doctor_asupersync",
+            "--default-profile",
+            "ci",
+            "--smoke",
+        ])
+        .expect("parse doctor package-cli args");
+
+        let Command::Doctor(DoctorArgs {
+            command: DoctorCommand::PackageCli(args),
+        }) = cli.command
+        else {
+            panic!("expected doctor package-cli command");
+        };
+        assert_eq!(
+            args.source_binary.as_deref(),
+            Some(Path::new("target/release/asupersync"))
+        );
+        assert_eq!(
+            args.out_dir,
+            PathBuf::from("target/e2e-results/doctor_cli_package")
+        );
+        assert_eq!(args.binary_name, "doctor_asupersync");
+        assert_eq!(args.default_profile, DoctorPackageProfile::Ci);
+        assert!(args.smoke);
+    }
+
+    #[test]
+    fn doctor_package_template_materialization_is_deterministic() {
+        let temp = tempfile::tempdir().expect("tempdir");
+        let first = materialize_doctor_package_templates(temp.path(), "doctor_asupersync")
+            .expect("materialize first");
+        let second = materialize_doctor_package_templates(temp.path(), "doctor_asupersync")
+            .expect("materialize second");
+
+        assert_eq!(first.len(), 2);
+        assert_eq!(second.len(), 2);
+        assert_eq!(
+            first
+                .iter()
+                .map(|entry| entry.artifact.profile.clone())
+                .collect::<Vec<_>>(),
+            vec!["ci".to_string(), "local".to_string()]
+        );
+        assert_eq!(
+            first
+                .iter()
+                .map(|entry| entry.artifact.command_preview.clone())
+                .collect::<Vec<_>>(),
+            second
+                .iter()
+                .map(|entry| entry.artifact.command_preview.clone())
+                .collect::<Vec<_>>()
+        );
+        for entry in &first {
+            let raw = fs::read_to_string(&entry.artifact.path).expect("read materialized template");
+            let parsed = parse_doctor_package_config(&raw).expect("template parse");
+            assert_eq!(
+                parsed.schema_version,
+                DOCTOR_CLI_PACKAGE_CONFIG_SCHEMA_VERSION
+            );
+            assert_eq!(parsed.profile, entry.artifact.profile);
+            assert!(entry.artifact.command_preview.contains("--format"));
+            assert!(entry.artifact.command_preview.contains("--color"));
+            assert!(
+                entry
+                    .artifact
+                    .command_preview
+                    .contains("doctor report-contract")
+            );
+        }
+    }
+
+    #[test]
+    fn render_doctor_packaged_command_includes_cli_flags() {
+        let config = doctor_package_config_template(DoctorPackageProfile::Ci, "doctor_asupersync");
+        let command = render_doctor_packaged_command(&config, "doctor_asupersync");
+        assert_eq!(
+            command,
+            "doctor_asupersync --format json --color never doctor report-contract"
+        );
+    }
+
+    #[test]
+    fn parse_doctor_package_config_rejects_invalid_profile() {
+        let mut config =
+            doctor_package_config_template(DoctorPackageProfile::Local, "doctor_asupersync");
+        config.profile = "prod".to_string();
+        let raw = serde_json::to_string(&config).expect("serialize config");
+        let err = parse_doctor_package_config(&raw).expect_err("invalid profile should fail");
+        assert!(err.contains("profile must be one of: local, ci"));
+    }
+
+    #[test]
+    fn parse_doctor_package_config_rejects_invalid_output_format() {
+        let mut config =
+            doctor_package_config_template(DoctorPackageProfile::Local, "doctor_asupersync");
+        config.output_format = "xml".to_string();
+        let raw = serde_json::to_string(&config).expect("serialize config");
+        let err = parse_doctor_package_config(&raw).expect_err("invalid format should fail");
+        assert!(err.contains("output_format must be one of"));
     }
 
     #[test]
