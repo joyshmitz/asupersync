@@ -45,7 +45,7 @@
 \*   ADR-007: Determinism/seed (#46-47) not modeled — tested via lab runtime
 \*   ADR-008: Outcome severity (#29-31) abstracted — no severity tags on tasks
 \*
-\* Assumptions / Limits:
+\* Assumption envelope (model assumptions, not safety guarantees):
 \*   - Finite task/region/obligation sets (configurable via constants)
 \*   - Mask depth bounded by MAX_MASK (default 2 for tractable checking)
 \*   - CancelReason abstracted to a single symbolic value (ADR-003)
@@ -65,6 +65,7 @@
 \*   CancelIdempotenceStructural:  Cancel only applies to Running tasks (#5)
 \*   ReplyLinearityInvariant:      Spork SINV-1 — obligations resolved on close
 \*   RegistryLeaseInvariant:       Spork SINV-3 — ledger empty on close
+\*   AssumptionEnvelopeInvariant:  Bounded model envelope for reproducible checking
 \*   CancelTerminates (TEMPORAL):  Cancel eventually reaches Completed (needs LiveSpec)
 \*
 \* Usage:
@@ -139,6 +140,19 @@ vars == <<taskState, taskRegion, taskMask, taskAlive,
           regionState, regionParent, regionCancel,
           regionChildren, regionSubs, regionLedger,
           obState, obHolder, obRegion, obAlive>>
+
+\* ---- Model Assumption Envelope (SEM-07.3) ----
+\*
+\* This invariant captures bounded-check assumptions that are part of the
+\* model-check contract and should not be misread as runtime guarantees.
+\* Non-checkable assumptions (ADR-003/004/005/007/008 abstractions) are
+\* documented in module header comments and docs/semantic_inventory_tla.md.
+AssumptionEnvelopeInvariant ==
+    /\ RootRegion \in RegionIds
+    /\ Cardinality(TaskIds) \in 1..3
+    /\ Cardinality(RegionIds) \in 1..3
+    /\ Cardinality(ObligationIds) \in 0..2
+    /\ MAX_MASK \in 1..2
 
 \* ---- State Domains (canonical: docs/semantic_contract_glossary.md) ----
 
@@ -561,15 +575,14 @@ Next ==
 \* ---- Specification ----
 
 \* Safety specification (no fairness — checking invariants only).
-\* Deadlock checking is disabled because terminal states (all closed) are expected.
+\* AssumptionEnvelopeInvariant is checked separately in Asupersync_MC.cfg.
 Spec == Init /\ [][Next]_vars
 
 \* ---- Liveness / Progress (documented, not checked in safety-only config) ----
 \*
 \* CancelTerminates: every task that enters cancel processing eventually
-\* reaches Completed. This requires weak fairness on Next, which the
-\* safety-only Spec does not include. The liveness spec (LiveSpec) is
-\* provided for documentation and future model-checking with fairness.
+\* reaches Completed. This requires fairness assumptions, which the safety-only
+\* Spec does not include. LiveSpec documents the fairness-enabled envelope.
 \*
 \* Note: Asupersync_MC.cfg uses Spec (safety-only, no fairness clauses).
 \* To model-check liveness, use LiveSpec with PROPERTY CancelTerminates.
@@ -579,7 +592,11 @@ CancelTerminates ==
                                            "CancelAcknowledged"} ~>
             (taskState[t] = "Completed" \/ ~taskAlive[t])
 
-LiveSpec == Init /\ [][Next]_vars /\ WF_vars(Next)
+LivenessFairnessAssumptions == WF_vars(Next)
+
+LiveSpec == Init /\ [][Next]_vars
+           /\ AssumptionEnvelopeInvariant
+           /\ LivenessFairnessAssumptions
 
 \* ---- Canonical Mask Properties (SEM-07.1) ----
 
@@ -714,6 +731,9 @@ SporkInv == ReplyLinearityInvariant /\ RegistryLeaseInvariant
 
 Inv == CoreInv /\ SporkInv
 
+\* Explicit alias to separate guarantees from assumptions in docs/tooling.
+SafetyGuaranteesInvariant == Inv
+
 \* ===========================================================================
 \* SEM-07.1 ALIGNMENT VERIFICATION (br-asupersync-3cddg.7.1)
 \*
@@ -759,8 +779,9 @@ Inv == CoreInv /\ SporkInv
 \* Bounded Assumptions:
 \*   - |TaskIds| = 2, |RegionIds| = 2, |ObligationIds| = 1 (MC config)
 \*   - MAX_MASK = 2 (tractable bounded checking)
+\*   - AssumptionEnvelopeInvariant enforces bounded envelope in TLC runs
 \*   - Safety-only (no fairness/liveness clauses in Spec)
-\*   - Deadlock checking disabled (terminal states expected)
+\*   - Liveness model-checking requires LiveSpec + fairness assumptions
 \*
 \* Model Check Reproduction:
 \*   scripts/run_model_check.sh --ci
