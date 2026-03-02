@@ -4,7 +4,7 @@
   "track_bead_id": "asupersync-m7o6i",
   "parent_track_bead_id": "asupersync-2cyx5",
   "external_ref": "bd-2bd8e",
-  "generated_at_utc": "2026-02-22T06:32:30Z",
+  "generated_at_utc": "2026-03-02T19:50:00Z",
   "contract": {
     "states": [
       "healthy",
@@ -436,8 +436,7 @@
       }
     ],
     "remaining_requirements": [
-      "Close asupersync-36m6p (E5) so closure_readiness dependencies all reach required_status=closed.",
-      "Attach Track-G handoff packet fields (gate_verdict_table, artifact_replay_index, residual_risk_register, go_no_go_decision) in asupersync-2cyx5."
+      "Close asupersync-36m6p (E5) so closure_readiness dependencies all reach required_status=closed."
     ],
     "track_g_handoff": {
       "bead_id": "asupersync-2cyx5",
@@ -446,7 +445,15 @@
         "artifact_replay_index",
         "residual_risk_register",
         "go_no_go_decision"
-      ]
+      ],
+      "attached_packet_fields": [
+        "gate_verdict_table",
+        "artifact_replay_index",
+        "residual_risk_register",
+        "go_no_go_decision"
+      ],
+      "attachment_status": "complete_in_h2_packet_pending_track_g_closure",
+      "evidence_ref": "artifacts/raptorq_program_closure_signoff_packet_v1.json"
     }
   }
 }
