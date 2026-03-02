@@ -309,7 +309,7 @@ validate_dual_policy_probe_contract() {
     echo ">>> [bundle] ${stage_id}: ${stage_desc}"
     start_s="$(date +%s)"
 
-    grep '"schema_version":"raptorq-track-e-dual-policy-probe-v2"' "$stage_log" >"$contract_log" || true
+    grep '"schema_version":"raptorq-track-e-dual-policy-probe-v3"' "$stage_log" >"$contract_log" || true
     if [[ ! -s "$contract_log" ]]; then
         status="fail"
         rc=1
@@ -318,7 +318,7 @@ validate_dual_policy_probe_contract() {
     elif ! jq -s -e '
         length >= 7 and
         all(.[];
-            .schema_version == "raptorq-track-e-dual-policy-probe-v2" and
+            .schema_version == "raptorq-track-e-dual-policy-probe-v3" and
             (.scenario_id | type == "string" and length > 0) and
             (.seed | type == "number" and . >= 0 and floor == .) and
             (.mode | type == "string" and length > 0) and

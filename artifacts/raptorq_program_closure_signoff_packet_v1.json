@@ -115,7 +115,7 @@
       "track_code": "G",
       "track_bead_id": "asupersync-2cyx5",
       "required_status": "closed",
-      "current_status": "in_progress",
+      "current_status": "open",
       "status_reason": "Track-G final governance aggregation is still in progress and blocks final sign-off.",
       "closure_dependency_path": "direct",
       "evidence_refs": [
@@ -128,7 +128,7 @@
       "track_code": "H",
       "track_bead_id": "asupersync-p8o9m",
       "required_status": "closed",
-      "current_status": "in_progress",
+      "current_status": "open",
       "status_reason": "Track-H finalization/sign-off remains open until upstream closure dependencies are fully satisfied.",
       "closure_dependency_path": "direct",
       "evidence_refs": [
