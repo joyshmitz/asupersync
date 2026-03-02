@@ -602,9 +602,9 @@ impl IoDriverHandle {
             let wakers = {
                 let mut driver = self.inner.lock();
                 let events = guard.take_events();
-                if let Ok(n) = poll_result {
+                if let Ok(n) = &poll_result {
                     driver.stats.polls += 1;
-                    driver.stats.events_received += n as u64;
+                    driver.stats.events_received += *n as u64;
                     let wakers = driver.restore_and_extract_wakers(events, on_event);
                     drop(driver);
                     wakers
