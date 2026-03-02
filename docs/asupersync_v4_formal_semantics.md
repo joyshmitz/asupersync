@@ -10,6 +10,20 @@ This document defines the operational semantics of Asupersync 4.0 in a style sui
 3. Translation to TLA+ for model checking
 4. Reasoning about correctness without excessive formalism
 
+### Normative Classification
+
+Sections are classified as follows (see `docs/semantic_docs_rule_mapping.md` for
+the complete section-to-rule-ID mapping):
+
+- **Normative** sections define behavior that must be consistent with the
+  canonical semantic contract (SEM-04.1). Changes require drift justification.
+- **[Explanatory]** sections provide intuition, motivation, or proof sketches.
+  They must not contradict normative content but may simplify for readability.
+- **[Implementation]** sections map semantics to runtime or tooling artifacts.
+  Changes require checking that the mapping remains accurate.
+
+Sections without a marker are **normative** by default.
+
 ---
 
 ## 1. Domains
@@ -64,7 +78,7 @@ Severity tiers (total order):
 Strengthen combines two reasons by taking the more severe kind (max on severity)
 and the tighter budget (min on deadlines/quotas). See `inv.cancel.idempotence` (#5).
 
-### 1.4 Budgets
+### 1.4 Budgets [Explanatory]
 
 Product semiring with componentwise min (except priority: max):
 
@@ -114,7 +128,7 @@ ObligationState ::= Reserved | Committed | Aborted | Leaked
 ObligationKind  ::= SendPermit | Ack | Lease | IoOp
 ```
 
-### 1.8 Trace labels, independence, and true concurrency
+### 1.8 Trace labels, independence, and true concurrency [Explanatory]
 
 Small-step semantics is written as interleavings, but Asupersync’s *spec* is intentionally stronger:
 many interleavings are observationally the same because they differ only by reordering **independent** actions.
@@ -166,7 +180,7 @@ Held(t) = { o ∈ dom(O) | O[o].holder = t ∧ O[o].state = Reserved }
 The intended rule is: reaching `Completed(_)` with `Held(t) ≠ ∅` is a semantic error (a leak).
 The operational rule `LEAK` below is the runtime witness of this linearity violation.
 
-### 1.10 (Optional extension) Distributed time as causal partial order
+### 1.10 (Optional extension) Distributed time as causal partial order [Explanatory]
 
 For distributed structured concurrency, traces should be **causally ordered**, not totally ordered.
 A standard representation is a vector clock:
@@ -179,7 +193,7 @@ e1 ∥ e2  iff  neither VC(e1) ≤ VC(e2) nor VC(e2) ≤ VC(e1)
 
 This lets remote traces remain honest: concurrent events stay unordered until causality forces an order.
 
-### 1.11 Scheduler lanes (priority model)
+### 1.11 Scheduler lanes (priority model) [Implementation]
 
 Asupersync scheduling is modeled as **three priority lanes**:
 
@@ -200,7 +214,7 @@ lane(t) =
 Timed lane ordering is Earliest-Deadline-First (EDF). When deadlines tie,
 deterministic task-id ordering breaks ties.
 
-### 1.12 Scheduler fairness bound (implementation model)
+### 1.12 Scheduler fairness bound (implementation model) [Explanatory]
 
 The implementation uses a **per-worker cancel streak counter** to bound
 starvation of timed/ready work while preserving cancel preemption.
@@ -511,7 +525,7 @@ Under fair scheduling and **sufficient cleanup budgets**, every task that enters
 Therefore, cancellation completes in a bounded number of steps assuming budgets
 cover required cleanup and finalizers are themselves terminating.
 
-#### 3.2.4 Mapping to runtime transitions
+#### 3.2.4 Mapping to runtime transitions [Implementation]
 
 The semantic states correspond directly to runtime records:
 
@@ -623,7 +637,7 @@ Preconditions:
 Masking is never “free”: it consumes a finite mask budget.
 Primitives that use masking must account for it explicitly (via budgets/policy) so cancellation has a quantitative bound.
 
-#### Game-theoretic view (spec): cancellation as an adversarial, budgeted protocol
+#### Game-theoretic view (spec): cancellation as an adversarial, budgeted protocol [Explanatory]
 
 For reasoning (and eventually mechanized proofs), it is useful to interpret cancellation as a two-player, quantitative game:
 
@@ -812,7 +826,7 @@ Then:
 
 This provides simple linear invariants and fast trace checks for “no leaks.”
 
-#### 3.4.1 Linear logic view (affine, single-use tokens)
+#### 3.4.1 Linear logic view (affine, single-use tokens) [Explanatory]
 
 We model obligations as **linear resources** in a judgmental style:
 
@@ -853,7 +867,7 @@ LEAK:
 This matches the runtime behavior: uncommitted obligations are detected and reported
 when a task completes.
 
-#### 3.4.2 Mapping to runtime state
+#### 3.4.2 Mapping to runtime state [Implementation]
 
 The linear context `Δ` is *represented concretely* by the obligation registry `O`:
 
@@ -869,7 +883,7 @@ Transitions in §3.4 correspond directly to mutations of `O`:
 
 This is the concrete embedding of linear logic into the runtime’s operational state.
 
-#### 3.4.3 Mapping to oracles and tests
+#### 3.4.3 Mapping to oracles and tests [Implementation]
 
 The lab runtime’s **ObligationLeakOracle** and trace checks implement the same rule:
 
@@ -937,7 +951,7 @@ to survive task completion.)
 This lemma underpins the lab-runtime oracle: when the oracle reports no leaks,
 region close is safe w.r.t. obligations.
 
-#### 3.4.6 No silent drop (safety theorem, sketch)
+#### 3.4.6 No silent drop (safety theorem, sketch) [Explanatory]
 
 **Theorem (No Silent Drop):** For any obligation `o`, the system records
 either `commit(o)` or `abort(o)` **before** the holder task completes,
@@ -1181,7 +1195,7 @@ After race(f1, f2) returns:
   t ∈ S.ready_lane   ⇒ lane(t) = Ready
 ```
 
-### Meta: Compositional specs (separation + rely/guarantee)
+### Meta: Compositional specs (separation + rely/guarantee) [Explanatory]
 
 The invariants above are global; in practice we want *local* reasoning that composes.
 A standard approach is:
@@ -1238,7 +1252,7 @@ O[o].state = Reserved ∧ fair
 
 These enable optimizations and test oracles:
 
-### 7.0 What `≃` means (trace quotient, not raw interleavings)
+### 7.0 What `≃` means (trace quotient, not raw interleavings) [Explanatory]
 
 When we write `p ≃ q`, we mean observational equivalence **up to**:
 
@@ -1248,7 +1262,7 @@ When we write `p ≃ q`, we mean observational equivalence **up to**:
 
 This is the “right” notion for lawful rewrites and for schedule exploration: differences that only permute independent work should not matter.
 
-### 7.1 Trace-equivalence for Plan IR (lab oracle target)
+### 7.1 Trace-equivalence for Plan IR (lab oracle target) [Explanatory]
 
 Fix a deterministic lab configuration `C` (seed suite, schedule policy, budget model, time model).
 Two closed plans `P` and `Q` are equivalent (`P ≃ Q`) iff, under the same `C`:
@@ -1264,7 +1278,7 @@ Operational oracle (what the lab checks):
 
 We do **not** require identical step-by-step schedules; only independence-respecting equivalence.
 
-### 7.2 Side-condition schema for rewrite rules
+### 7.2 Side-condition schema for rewrite rules [Implementation]
 
 Every rewrite rule must declare the side conditions it relies on in a machine-checkable form.
 This is the contract between the rule author, the analyzer, and the certificate verifier.
@@ -1340,7 +1354,7 @@ race(join(a, b), join(a, c)) ≃ join(a, race(b, c))
 // Don't run 'a' twice
 ```
 
-### 7.8 Denotational sketch (powerdomains for nondeterminism)
+### 7.8 Denotational sketch (powerdomains for nondeterminism) [Explanatory]
 
 Operational semantics is the executable truth; still, it is useful to keep a denotational picture in mind.
 Interpret a closed computation as a set of possible outcomes (nondeterminism from scheduling):
@@ -1359,7 +1373,7 @@ Adequacy (“operational steps generate exactly the denotation”) is the target
 
 ---
 
-## 8. Test Oracle Usage
+## 8. Test Oracle Usage [Implementation]
 
 The lab runtime implements these semantics exactly. Property tests verify:
 
@@ -1394,7 +1408,7 @@ spawned = completed
   TaskCompleted{t1} ∈ trace ∧ TaskCompleted{t2} ∈ trace
 ```
 
-### 8.1 Schedule exploration: optimal DPOR (one trace per equivalence class)
+### 8.1 Schedule exploration: optimal DPOR (one trace per equivalence class) [Explanatory]
 
 Because `≃` quotients by independence, the right exploration target is **one execution per Mazurkiewicz trace** (not per interleaving).
 This is exactly what *optimal DPOR* algorithms achieve.
@@ -1407,12 +1421,12 @@ At a high level:
 
 Result: exploration cost becomes proportional to the number of equivalence classes, not factorial in the number of steps.
 
-### 8.2 Static complement: abstract interpretation for obligation leaks
+### 8.2 Static complement: abstract interpretation for obligation leaks [Explanatory]
 
 Dynamic traces catch real bugs; static analysis catches *likely* bugs early.
 A sound (possibly conservative) abstract interpreter can track “may hold unresolved obligations” per scope/task and warn on scope exit.
 
-### 8.3 Proof-carrying trace certificate (spec)
+### 8.3 Proof-carrying trace certificate (spec) [Implementation]
 
 Each trace can carry a compact certificate: a machine-verifiable witness that
 the run respected invariants. The certificate must be deterministic and stable
@@ -1477,7 +1491,7 @@ capped (e.g., first `K` violations). Large traces do not inflate certificates.
 
 ---
 
-## 9. TLA+ Sketch
+## 9. TLA+ Sketch [Implementation]
 
 For model checking, translate to TLA+:
 
