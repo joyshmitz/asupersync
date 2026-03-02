@@ -189,3 +189,14 @@ cargo test --test semantic_log_schema_validation
 **Decision**: Phase 1 semantic harmonization requirements are met. The documentation alignment is complete (47/47 rule IDs, glossary, transitions, invariants) and there are zero unresolved CODE-GAPs in the runtime gap matrix.
 
 Remaining gates (G2, G3, G5, G6) are tracked for Phase 2 and have clear remediation paths. The evidence bundle assembly infrastructure (SEM-09.2) is in place to automate future evaluations.
+
+---
+
+## 7. Residual Risk Register Link (SEM-09.4)
+
+The canonical residual-risk and exception ledger for this evaluation is:
+
+- `docs/semantic_residual_risk_register.md` (`asupersync-3cddg.9.4`)
+
+That artifact tracks owner, expiry, bounded impact, and follow-up bead for each
+open verification risk and defines objective GO/NO-GO closure rules.

@@ -15,6 +15,9 @@ artifact that joins:
 The bundle is designed for SEM-09.3 gate evaluation and for reproducible
 handoff between agents.
 
+SEM-09.4 (`docs/semantic_residual_risk_register.md`) consumes this bundle to
+maintain the bounded residual-risk register and objective GO/NO-GO decisions.
+
 ## Command
 
 ```bash
