@@ -568,9 +568,9 @@ pub struct SymbolicObligationRegistry {
     /// Obligations by object ID.
     by_object: RwLock<HashMap<ObjectId, Vec<ObligationId>>>,
     /// Obligations by holder task (arena-slot indexed).
-    by_holder: RwLock<Vec<Option<Vec<ObligationId>>>>,
+    by_holder: RwLock<Vec<Option<(TaskId, Vec<ObligationId>)>>>,
     /// Obligations by region (arena-slot indexed).
-    by_region: RwLock<Vec<Option<Vec<ObligationId>>>>,
+    by_region: RwLock<Vec<Option<(RegionId, Vec<ObligationId>)>>>,
     /// Next obligation ID.
     next_id: AtomicU64,
 }
@@ -690,11 +690,12 @@ impl SymbolicObligationRegistry {
     pub fn obligations_for_region(&self, region: RegionId) -> Vec<ObligationId> {
         let slot = region.arena_index().index() as usize;
         let guard = self.by_region.read();
-        guard
-            .get(slot)
-            .and_then(Option::as_ref)
-            .cloned()
-            .unwrap_or_default()
+        if let Some(Some((stored_region, ids))) = guard.get(slot) {
+            if *stored_region == region {
+                return ids.clone();
+            }
+        }
+        Vec::new()
     }
 
     /// Returns obligation IDs for a task.
@@ -702,11 +703,12 @@ impl SymbolicObligationRegistry {
     pub fn obligations_for_task(&self, task: TaskId) -> Vec<ObligationId> {
         let slot = task.arena_index().index() as usize;
         let guard = self.by_holder.read();
-        guard
-            .get(slot)
-            .and_then(Option::as_ref)
-            .cloned()
-            .unwrap_or_default()
+        if let Some(Some((stored_task, ids))) = guard.get(slot) {
+            if *stored_task == task {
+                return ids.clone();
+            }
+        }
+        Vec::new()
     }
 
     /// Returns obligation IDs for an object.
@@ -725,7 +727,15 @@ impl SymbolicObligationRegistry {
         let slot = region.arena_index().index() as usize;
         let ids = {
             let by_region = self.by_region.read();
-            by_region.get(slot).and_then(Option::as_ref).cloned()
+            if let Some(Some((stored_region, ids))) = by_region.get(slot) {
+                if *stored_region == region {
+                    Some(ids.clone())
+                } else {
+                    None
+                }
+            } else {
+                None
+            }
         };
 
         let Some(ids) = ids else {
@@ -752,7 +762,15 @@ impl SymbolicObligationRegistry {
         let slot = region.arena_index().index() as usize;
         let ids = {
             let by_region = self.by_region.read();
-            by_region.get(slot).and_then(Option::as_ref).cloned()
+            if let Some(Some((stored_region, ids))) = by_region.get(slot) {
+                if *stored_region == region {
+                    Some(ids.clone())
+                } else {
+                    None
+                }
+            } else {
+                None
+            }
         };
 
         let Some(ids) = ids else {
@@ -815,7 +833,12 @@ impl SymbolicObligationRegistry {
             if holder_slot >= by_holder.len() {
                 by_holder.resize_with(holder_slot + 1, || None);
             }
-            by_holder[holder_slot].get_or_insert_with(Vec::new).push(id);
+            let entry = by_holder[holder_slot].get_or_insert_with(|| (holder, Vec::new()));
+            if entry.0 != holder {
+                entry.0 = holder;
+                entry.1.clear();
+            }
+            entry.1.push(id);
         }
         {
             let region_slot = region.arena_index().index() as usize;
@@ -823,7 +846,12 @@ impl SymbolicObligationRegistry {
             if region_slot >= by_region.len() {
                 by_region.resize_with(region_slot + 1, || None);
             }
-            by_region[region_slot].get_or_insert_with(Vec::new).push(id);
+            let entry = by_region[region_slot].get_or_insert_with(|| (region, Vec::new()));
+            if entry.0 != region {
+                entry.0 = region;
+                entry.1.clear();
+            }
+            entry.1.push(id);
         }
     }
 }
