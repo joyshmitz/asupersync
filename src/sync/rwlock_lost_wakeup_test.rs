@@ -40,11 +40,13 @@ pub fn main() {
     drop(w1_guard);
     
     // 4. Writer 2 calls write(). Since reader hasn't acquired yet, readers == 0, 
-    // but writer_active is false. Wait, Writer 2 poll:
+    // but the lock was PRE-GRANTED to the readers by Writer 1's release.
     let mut w2_fut = lock.write(&cx);
-    // Writer 2 poll: `can_acquire` = !writer_active && readers == 0 && (dequeued || (waiter_id.is_none() && writer_waiters == 1))
-    // Wait! Since readers == 0 and writer_active == false, Writer 2 WILL ACQUIRE the lock!
+    // Writer 2 poll: `can_acquire` evaluates to false because readers were pre-granted
+    // the lock (state.readers > 0) or state.writer_active was kept logically correct.
+    // Actually, state.readers was pre-incremented by release_writer!
+    // So Writer 2 WILL NOT ACQUIRE the lock!
     let w2_res = poll_once(&mut w2_fut);
     println!("Writer 2 result: {:?}", w2_res.is_some());
-    // If writer 2 acquires the lock, then no wakeup is lost because writer 2 didn't block!
+    assert!(!w2_res.is_some(), "Writer 2 should queue instead of stealing the lock!");
 }
