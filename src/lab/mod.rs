@@ -79,7 +79,10 @@ pub use explorer::{
     CoverageMetrics, DporCoverageMetrics, DporExplorer, ExplorationReport, ExplorerConfig,
     RunResult, ScheduleExplorer, TopologyExplorer, ViolationReport,
 };
-pub use fuzz::{FuzzConfig, FuzzFinding, FuzzHarness, FuzzReport, fuzz_quick};
+pub use fuzz::{
+    FuzzConfig, FuzzFinding, FuzzHarness, FuzzRegressionCase, FuzzRegressionCorpus, FuzzReport,
+    fuzz_quick,
+};
 pub use http::{
     RequestBuilder, RequestTrace, TestHarness, TraceEntry, VirtualClient, VirtualServer,
 };

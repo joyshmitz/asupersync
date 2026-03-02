@@ -11,7 +11,7 @@
 #[macro_use]
 mod common;
 
-use asupersync::lab::{LabConfig, LabRuntime};
+use asupersync::lab::{FuzzConfig, FuzzHarness, LabConfig, LabRuntime};
 use asupersync::runtime::yield_now;
 use asupersync::trace::{
     DiagnosticConfig, ReplayEvent, ReplayTrace, StreamingReplayer, TraceEvent, TraceReader,
@@ -1150,5 +1150,88 @@ fn deterministic_replay_parity_seed_sweep_1000() {
         mismatch_count = mismatch_count,
         determinism_ppm = determinism_ppm,
         total_wall_time_ms = total_wall_time_ms
+    );
+}
+
+#[test]
+fn schedule_permutation_fuzz_regression_corpus_artifact() {
+    init_test("schedule_permutation_fuzz_regression_corpus_artifact");
+
+    // Intentionally leave one task unscheduled per run so the harness always
+    // captures at least one minimized failing case for regression replay.
+    let config = FuzzConfig::new(0x6C6F_7265_6D71_6505, 24)
+        .worker_count(2)
+        .max_steps(10_000)
+        .minimize(true);
+    let harness = FuzzHarness::new(config.clone());
+
+    let report = harness.run(|runtime| {
+        let root = runtime.state.create_root_region(Budget::INFINITE);
+        for i in 0..3_u8 {
+            let (task_id, _) = runtime
+                .state
+                .create_task(root, Budget::INFINITE, async move {
+                    for _ in 0..i {
+                        yield_now().await;
+                    }
+                })
+                .expect("create scheduled task");
+            runtime.scheduler.lock().schedule(task_id, 0);
+        }
+        let _unscheduled = runtime
+            .state
+            .create_task(root, Budget::INFINITE, async {})
+            .expect("create unscheduled task");
+        runtime.run_until_quiescent();
+    });
+
+    assert_with_log!(
+        report.has_findings(),
+        "fuzz report has failures",
+        true,
+        report.has_findings()
+    );
+    let corpus = report.to_regression_corpus(config.base_seed);
+    assert_with_log!(
+        !corpus.cases.is_empty(),
+        "regression corpus contains failing cases",
+        true,
+        !corpus.cases.is_empty()
+    );
+    let replay_seed_is_minimal = corpus
+        .cases
+        .iter()
+        .all(|case| case.replay_seed <= case.seed);
+    assert_with_log!(
+        replay_seed_is_minimal,
+        "replay seeds are minimized or equal to source seed",
+        true,
+        replay_seed_is_minimal
+    );
+    let categories_present = corpus
+        .cases
+        .iter()
+        .all(|case| !case.violation_categories.is_empty());
+    assert_with_log!(
+        categories_present,
+        "every corpus case has stable failure categories",
+        true,
+        categories_present
+    );
+
+    let artifact = serde_json::to_value(&corpus).expect("serialize fuzz corpus");
+    write_replay_artifact_json("schedule_permutation_fuzz_corpus.json", &artifact);
+    tracing::info!(
+        schema_version = corpus.schema_version,
+        base_seed = corpus.base_seed,
+        iterations = corpus.iterations,
+        case_count = corpus.cases.len(),
+        "schedule permutation fuzz corpus generated"
+    );
+
+    test_complete!(
+        "schedule_permutation_fuzz_regression_corpus_artifact",
+        cases = corpus.cases.len(),
+        iterations = corpus.iterations
     );
 }

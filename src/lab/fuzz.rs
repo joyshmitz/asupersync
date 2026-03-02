@@ -5,6 +5,7 @@
 //! minimized to produce a minimal reproducer.
 
 use crate::lab::config::LabConfig;
+use crate::lab::replay::normalize_for_replay;
 use crate::lab::runtime::{InvariantViolation, LabRuntime};
 use std::collections::BTreeMap;
 
@@ -72,6 +73,8 @@ pub struct FuzzFinding {
     pub violations: Vec<InvariantViolation>,
     /// Certificate hash for the schedule that triggered the violation.
     pub certificate_hash: u64,
+    /// Canonical normalized trace fingerprint for this failing run.
+    pub trace_fingerprint: u64,
     /// Minimized seed (if minimization succeeded).
     pub minimized_seed: Option<u64>,
 }
@@ -87,6 +90,34 @@ pub struct FuzzReport {
     pub violation_counts: BTreeMap<String, usize>,
     /// Certificate hashes seen (for determinism verification).
     pub unique_certificates: usize,
+}
+
+/// Deterministic corpus entry for a minimized failing fuzz run.
+#[derive(Debug, Clone, PartialEq, Eq, serde::Serialize, serde::Deserialize)]
+pub struct FuzzRegressionCase {
+    /// Seed that produced the original failure.
+    pub seed: u64,
+    /// Replay seed to use for regression checks (minimized when available).
+    pub replay_seed: u64,
+    /// Scheduler certificate hash from the failing run.
+    pub certificate_hash: u64,
+    /// Canonical normalized trace fingerprint for the failing run.
+    pub trace_fingerprint: u64,
+    /// Stable violation categories observed for this case.
+    pub violation_categories: Vec<String>,
+}
+
+/// Deterministic regression corpus produced by a fuzz campaign.
+#[derive(Debug, Clone, PartialEq, Eq, serde::Serialize, serde::Deserialize)]
+pub struct FuzzRegressionCorpus {
+    /// Schema version for compatibility and migration.
+    pub schema_version: u32,
+    /// Base seed used for this fuzz campaign.
+    pub base_seed: u64,
+    /// Number of iterations executed by the campaign.
+    pub iterations: usize,
+    /// Cases sorted in deterministic replay order.
+    pub cases: Vec<FuzzRegressionCase>,
 }
 
 impl FuzzReport {
@@ -109,6 +140,44 @@ impl FuzzReport {
             .iter()
             .filter_map(|f| f.minimized_seed)
             .collect()
+    }
+
+    /// Build a deterministic minimized-failure replay corpus.
+    ///
+    /// Cases are sorted by replay seed and stable fingerprints so CI can diff
+    /// corpus snapshots reproducibly.
+    #[must_use]
+    pub fn to_regression_corpus(&self, base_seed: u64) -> FuzzRegressionCorpus {
+        let mut cases: Vec<FuzzRegressionCase> = self
+            .findings
+            .iter()
+            .map(|finding| {
+                let replay_seed = finding.minimized_seed.unwrap_or(finding.seed);
+                FuzzRegressionCase {
+                    seed: finding.seed,
+                    replay_seed,
+                    certificate_hash: finding.certificate_hash,
+                    trace_fingerprint: finding.trace_fingerprint,
+                    violation_categories: sorted_violation_categories(&finding.violations),
+                }
+            })
+            .collect();
+
+        cases.sort_by_key(|case| {
+            (
+                case.replay_seed,
+                case.seed,
+                case.trace_fingerprint,
+                case.certificate_hash,
+            )
+        });
+
+        FuzzRegressionCorpus {
+            schema_version: 1,
+            base_seed,
+            iterations: self.iterations,
+            cases,
+        }
     }
 }
 
@@ -163,6 +232,7 @@ impl FuzzHarness {
                     steps: result.steps,
                     violations: result.violations,
                     certificate_hash: result.certificate_hash,
+                    trace_fingerprint: result.trace_fingerprint,
                     minimized_seed,
                 });
             }
@@ -189,12 +259,17 @@ impl FuzzHarness {
 
         let steps = runtime.steps();
         let certificate_hash = runtime.certificate().hash();
+        let trace_events = runtime.trace().snapshot();
+        let normalized = normalize_for_replay(&trace_events);
+        let trace_fingerprint =
+            crate::trace::canonicalize::trace_fingerprint(&normalized.normalized);
         let violations = runtime.check_invariants();
 
         SingleRunResult {
             steps,
             violations,
             certificate_hash,
+            trace_fingerprint,
         }
     }
 
@@ -252,6 +327,7 @@ struct SingleRunResult {
     steps: u64,
     violations: Vec<InvariantViolation>,
     certificate_hash: u64,
+    trace_fingerprint: u64,
 }
 
 fn violation_category(v: &InvariantViolation) -> String {
@@ -262,6 +338,13 @@ fn violation_category(v: &InvariantViolation) -> String {
         InvariantViolation::QuiescenceViolation => "quiescence_violation".to_string(),
         InvariantViolation::Futurelock { .. } => "futurelock".to_string(),
     }
+}
+
+fn sorted_violation_categories(violations: &[InvariantViolation]) -> Vec<String> {
+    let mut categories: Vec<String> = violations.iter().map(violation_category).collect();
+    categories.sort_unstable();
+    categories.dedup();
+    categories
 }
 
 /// Convenience function: run a quick fuzz campaign with default settings.
@@ -338,6 +421,7 @@ mod tests {
                 steps: 10,
                 violations: vec![],
                 certificate_hash: 123,
+                trace_fingerprint: 456,
                 minimized_seed: Some(3),
             }],
             violation_counts: BTreeMap::new(),
@@ -396,6 +480,7 @@ mod tests {
             steps: 500,
             violations: vec![],
             certificate_hash: 12345,
+            trace_fingerprint: 67890,
             minimized_seed: Some(7),
         };
         let dbg = format!("{finding:?}");
@@ -404,6 +489,7 @@ mod tests {
         assert_eq!(cloned.seed, 99);
         assert_eq!(cloned.steps, 500);
         assert_eq!(cloned.certificate_hash, 12345);
+        assert_eq!(cloned.trace_fingerprint, 67890);
         assert_eq!(cloned.minimized_seed, Some(7));
     }
 
@@ -420,5 +506,58 @@ mod tests {
         assert!(!report.has_findings());
         assert!(report.finding_seeds().is_empty());
         assert!(report.minimized_seeds().is_empty());
+    }
+
+    #[test]
+    fn regression_corpus_is_sorted_and_minimized() {
+        let report = FuzzReport {
+            iterations: 3,
+            findings: vec![
+                FuzzFinding {
+                    seed: 44,
+                    steps: 100,
+                    violations: vec![
+                        InvariantViolation::QuiescenceViolation,
+                        InvariantViolation::QuiescenceViolation,
+                    ],
+                    certificate_hash: 0xB,
+                    trace_fingerprint: 0xBB,
+                    minimized_seed: Some(3),
+                },
+                FuzzFinding {
+                    seed: 13,
+                    steps: 200,
+                    violations: vec![InvariantViolation::Futurelock {
+                        task: crate::types::TaskId::new_for_test(1, 0),
+                        region: crate::types::RegionId::new_for_test(1, 0),
+                        idle_steps: 1,
+                        held: Vec::new(),
+                    }],
+                    certificate_hash: 0xA,
+                    trace_fingerprint: 0xAA,
+                    minimized_seed: None,
+                },
+            ],
+            violation_counts: BTreeMap::new(),
+            unique_certificates: 2,
+        };
+
+        let corpus = report.to_regression_corpus(1234);
+        assert_eq!(corpus.schema_version, 1);
+        assert_eq!(corpus.base_seed, 1234);
+        assert_eq!(corpus.iterations, 3);
+        assert_eq!(corpus.cases.len(), 2);
+
+        // Sorted by replay_seed then deterministic tie-breakers.
+        assert_eq!(corpus.cases[0].seed, 44);
+        assert_eq!(corpus.cases[0].replay_seed, 3);
+        assert_eq!(
+            corpus.cases[0].violation_categories,
+            vec!["quiescence_violation"]
+        );
+
+        assert_eq!(corpus.cases[1].seed, 13);
+        assert_eq!(corpus.cases[1].replay_seed, 13);
+        assert_eq!(corpus.cases[1].violation_categories, vec!["futurelock"]);
     }
 }
