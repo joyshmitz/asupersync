@@ -12,9 +12,8 @@ This document defines the H2 closure packet for:
 - Packet state: `draft_blocked`
 - Go/no-go: `no_go_pending_dependency_closure`
 - Current blockers:
-1. `asupersync-346lm`
-2. `asupersync-p8o9m`
-3. `asupersync-2cyx5`
+1. `asupersync-p8o9m`
+2. `asupersync-2cyx5`
 
 This packet is intentionally execution-ready but not final until dependency
 closure conditions are satisfied.
@@ -61,8 +60,21 @@ Current state snapshot in the artifact:
 1. Track D (`asupersync-np1co`): `closed`
 2. Track E (`asupersync-2ncba`): `in_progress` (gated via Track G)
 3. Track F (`asupersync-mg1qh`): `closed`
-4. Track G (`asupersync-2cyx5`): `in_progress`
+4. Track G (`asupersync-2cyx5`): `open`
 5. Track H (`asupersync-p8o9m`): `open`
+
+## Track-G Handoff Packet Fields
+
+The closure packet now carries explicit Track-G handoff fields:
+
+1. `gate_verdict_table`
+2. `artifact_replay_index`
+3. `residual_risk_register`
+4. `go_no_go_decision`
+
+These fields are included directly in
+`artifacts/raptorq_program_closure_signoff_packet_v1.json` so G7 closure
+readiness can consume the handoff without implicit assumptions.
 
 ## Radical Lever Coverage Requirement
 

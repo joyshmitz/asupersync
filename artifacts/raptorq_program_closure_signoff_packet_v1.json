@@ -4,12 +4,11 @@
   "track_bead_id": "asupersync-2f71w",
   "parent_track_bead_id": "asupersync-p8o9m",
   "external_ref": "bd-23cxf",
-  "generated_at_utc": "2026-02-22T18:35:00Z",
+  "generated_at_utc": "2026-03-02T19:50:00Z",
   "packet_state": {
     "status": "draft_blocked",
     "go_no_go_decision": "no_go_pending_dependency_closure",
     "blocking_dependencies": [
-      "asupersync-346lm",
       "asupersync-p8o9m",
       "asupersync-2cyx5"
     ],
@@ -89,7 +88,7 @@
       "track_code": "E",
       "track_bead_id": "asupersync-2ncba",
       "required_status": "closed",
-      "current_status": "open",
+      "current_status": "in_progress",
       "status_reason": "Track-E is still converging; H2 closure consumes this via Track-G governance closure path.",
       "closure_dependency_path": "via asupersync-2cyx5",
       "evidence_refs": [
@@ -116,7 +115,7 @@
       "track_bead_id": "asupersync-2cyx5",
       "required_status": "closed",
       "current_status": "open",
-      "status_reason": "Track-G final governance aggregation is still in progress and blocks final sign-off.",
+      "status_reason": "Track-G is open and currently unassigned after stale-owner reset; governance aggregation still blocks final sign-off.",
       "closure_dependency_path": "direct",
       "evidence_refs": [
         "artifacts/raptorq_controlled_rollout_policy_v1.json",
@@ -129,7 +128,7 @@
       "track_bead_id": "asupersync-p8o9m",
       "required_status": "closed",
       "current_status": "open",
-      "status_reason": "Track-H finalization/sign-off remains open until upstream closure dependencies are fully satisfied.",
+      "status_reason": "Track-H finalization/sign-off remains open pending Track-G closure and final H2 adjudication.",
       "closure_dependency_path": "direct",
       "evidence_refs": [
         "docs/raptorq_program_closure_signoff_packet.md",
@@ -291,6 +290,90 @@
       "status"
     ]
   },
+  "gate_verdict_table": [
+    {
+      "gate_id": "G5",
+      "bead_id": "asupersync-1gbx5",
+      "required_status": "closed",
+      "current_status": "closed",
+      "verdict": "pass",
+      "evidence_refs": [
+        "scripts/run_raptorq_e2e.sh",
+        "tests/raptorq_perf_invariants.rs::h2_closure_packet_schema_and_lever_coverage"
+      ],
+      "replay_commands": [
+        "rch exec -- cargo test --test raptorq_perf_invariants h2_closure_packet_schema_and_lever_coverage -- --nocapture"
+      ]
+    },
+    {
+      "gate_id": "G6",
+      "bead_id": "asupersync-1xbzk",
+      "required_status": "closed",
+      "current_status": "closed",
+      "verdict": "pass",
+      "evidence_refs": [
+        "docs/raptorq_unit_test_matrix.md",
+        "tests/raptorq_perf_invariants.rs::h2_closure_packet_docs_are_cross_linked"
+      ],
+      "replay_commands": [
+        "rch exec -- cargo test --test raptorq_perf_invariants h2_closure_packet_docs_are_cross_linked -- --nocapture"
+      ]
+    },
+    {
+      "gate_id": "G4",
+      "bead_id": "asupersync-23kd4",
+      "required_status": "closed",
+      "current_status": "closed",
+      "verdict": "pass",
+      "evidence_refs": [
+        "artifacts/raptorq_controlled_rollout_policy_v1.json",
+        "docs/raptorq_controlled_rollout_policy.md"
+      ],
+      "replay_commands": [
+        "rch exec -- cargo test --test ci_regression_gates -- --nocapture"
+      ]
+    },
+    {
+      "gate_id": "TRACK_G",
+      "bead_id": "asupersync-2cyx5",
+      "required_status": "closed",
+      "current_status": "open",
+      "verdict": "blocked",
+      "evidence_refs": [
+        "artifacts/raptorq_expected_loss_decision_contract_v1.json",
+        "artifacts/raptorq_program_closure_signoff_packet_v1.json#gate_verdict_table"
+      ],
+      "replay_commands": [
+        "rch exec -- cargo test --test raptorq_perf_invariants h2_closure_packet_dependency_status_alignment -- --nocapture"
+      ]
+    }
+  ],
+  "artifact_replay_index": [
+    {
+      "artifact_path": "artifacts/raptorq_program_closure_signoff_packet_v1.json",
+      "purpose": "H2 closure packet integrity and dependency/status alignment",
+      "replay_commands": [
+        "rch exec -- cargo test --test raptorq_perf_invariants h2_closure_packet_schema_and_lever_coverage -- --nocapture",
+        "rch exec -- cargo test --test raptorq_perf_invariants h2_closure_packet_dependency_status_alignment -- --nocapture",
+        "rch exec -- cargo test --test raptorq_perf_invariants h2_closure_packet_docs_are_cross_linked -- --nocapture"
+      ]
+    },
+    {
+      "artifact_path": "artifacts/raptorq_expected_loss_decision_contract_v1.json",
+      "purpose": "G7 expected-loss contract and replay bundle integrity",
+      "replay_commands": [
+        "rch exec -- cargo test --test raptorq_perf_invariants g7_expected_loss_contract_schema_and_coverage -- --nocapture",
+        "rch exec -- cargo test --test raptorq_perf_invariants g7_expected_loss_contract_docs_are_cross_linked -- --nocapture"
+      ]
+    },
+    {
+      "artifact_path": "artifacts/raptorq_replay_catalog_v1.json",
+      "purpose": "Canonical deterministic replay pointer resolution",
+      "replay_commands": [
+        "rch exec -- ./scripts/run_raptorq_e2e.sh --profile full --bundle"
+      ]
+    }
+  ],
   "signoff_checklist": [
     {
       "check_id": "h2-claim-boundary-contract",
@@ -340,9 +423,9 @@
     {
       "risk_id": "RQ-H2-R1",
       "severity": "medium",
-      "status": "open",
-      "description": "Track-H final dossier (`asupersync-346lm`) remains in progress; final sign-off narrative may drift until closed.",
-      "mitigation": "Require closed status and final evidence refresh before moving packet_state.status to ready_for_signoff.",
+      "status": "mitigated",
+      "description": "Track-H final dossier (`asupersync-346lm`) previously lagged closure, creating narrative drift risk before H1 consolidation.",
+      "mitigation": "H1 is now closed; keep H2 packet fields synchronized with live Beads statuses while Track-G and Track-H remain open.",
       "owner_bead_id": "asupersync-346lm"
     },
     {
