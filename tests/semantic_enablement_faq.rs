@@ -59,10 +59,7 @@ fn faq_covers_canonical_contract() {
         faq.contains("semantic_contract_schema.md"),
         "FAQ must reference canonical contract"
     );
-    assert!(
-        faq.contains("47"),
-        "FAQ must mention 47 canonical rules"
-    );
+    assert!(faq.contains("47"), "FAQ must mention 47 canonical rules");
 }
 
 #[test]
@@ -330,8 +327,7 @@ fn faq_has_numbered_questions() {
     let question_count = faq.matches("### Q").count();
     assert!(
         question_count >= 20,
-        "FAQ must have at least 20 questions, found {}",
-        question_count
+        "FAQ must have at least 20 questions, found {question_count}",
     );
 }
 

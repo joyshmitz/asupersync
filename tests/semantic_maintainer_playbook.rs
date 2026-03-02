@@ -242,7 +242,9 @@ fn playbook_documents_quality_gates() {
 fn playbook_documents_no_mock_policy() {
     let playbook = load_playbook();
     assert!(
-        playbook.contains("No-Mock") || playbook.contains("no-mock") || playbook.contains("No mock"),
+        playbook.contains("No-Mock")
+            || playbook.contains("no-mock")
+            || playbook.contains("No mock"),
         "Playbook must document the no-mock testing policy"
     );
 }
@@ -350,7 +352,9 @@ fn playbook_documents_semantic_change_review() {
 fn playbook_documents_governance_escalation() {
     let playbook = load_playbook();
     assert!(
-        playbook.contains("Governance") || playbook.contains("governance") || playbook.contains("escalation"),
+        playbook.contains("Governance")
+            || playbook.contains("governance")
+            || playbook.contains("escalation"),
         "Playbook must document governance escalation paths"
     );
 }
@@ -370,7 +374,9 @@ fn playbook_documents_unsafe_code_policy() {
 fn playbook_has_audit_procedure() {
     let playbook = load_playbook();
     assert!(
-        playbook.contains("Recurring Audit") || playbook.contains("Audit Procedure") || playbook.contains("audit"),
+        playbook.contains("Recurring Audit")
+            || playbook.contains("Audit Procedure")
+            || playbook.contains("audit"),
         "Playbook must include recurring audit procedure"
     );
 }
@@ -388,7 +394,9 @@ fn playbook_has_audit_checklist() {
 fn playbook_documents_drift_detection() {
     let playbook = load_playbook();
     assert!(
-        playbook.contains("Drift Detection") || playbook.contains("drift detection") || playbook.contains("drift"),
+        playbook.contains("Drift Detection")
+            || playbook.contains("drift detection")
+            || playbook.contains("drift"),
         "Playbook must document drift detection procedures"
     );
 }

@@ -47,7 +47,9 @@ fn cadence_defines_four_tiers() {
 fn cadence_tier1_covers_quality_gates() {
     let cadence = load_cadence();
     assert!(
-        cadence.contains("cargo check") && cadence.contains("cargo clippy") && cadence.contains("cargo fmt"),
+        cadence.contains("cargo check")
+            && cadence.contains("cargo clippy")
+            && cadence.contains("cargo fmt"),
         "Tier 1 must include quality gate commands"
     );
 }
@@ -235,7 +237,8 @@ fn cadence_documents_ci_integration() {
 fn cadence_references_anti_drift_checks() {
     let cadence = load_cadence();
     assert!(
-        cadence.contains("check_semantic_consistency") || cadence.contains("check_rule_traceability"),
+        cadence.contains("check_semantic_consistency")
+            || cadence.contains("check_rule_traceability"),
         "Must reference SEM-10 anti-drift CI checks"
     );
 }
