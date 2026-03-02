@@ -116,7 +116,7 @@ impl SymbolCancelToken {
                 token_id: rng.next_u64(),
                 object_id,
                 cancelled: AtomicBool::new(false),
-                cancelled_at: AtomicU64::new(0),
+                cancelled_at: AtomicU64::new(u64::MAX),
                 reason: RwLock::new(None),
                 cleanup_budget: Budget::default(),
                 children: RwLock::new(SmallVec::new()),
@@ -133,7 +133,7 @@ impl SymbolCancelToken {
                 token_id: rng.next_u64(),
                 object_id,
                 cancelled: AtomicBool::new(false),
-                cancelled_at: AtomicU64::new(0),
+                cancelled_at: AtomicU64::new(u64::MAX),
                 reason: RwLock::new(None),
                 cleanup_budget: budget,
                 children: RwLock::new(SmallVec::new()),
@@ -173,14 +173,18 @@ impl SymbolCancelToken {
     #[must_use]
     pub fn cancelled_at(&self) -> Option<Time> {
         let nanos = self.state.cancelled_at.load(Ordering::Acquire);
-        if nanos == 0 {
+        if nanos == u64::MAX {
             if self.is_cancelled() {
-                // If it's cancelled but nanos is 0, we caught it in the middle of
+                // If it's cancelled but nanos is u64::MAX, we caught it in the middle of
                 // the cancel() function. Wait for the reason lock to ensure
                 // the cancel() function has finished updating cancelled_at.
                 let _guard = self.state.reason.read();
                 let nanos_sync = self.state.cancelled_at.load(Ordering::Acquire);
-                Some(Time::from_nanos(nanos_sync))
+                if nanos_sync == u64::MAX {
+                    None // Should only happen if parsed from bytes and reason never set
+                } else {
+                    Some(Time::from_nanos(nanos_sync))
+                }
             } else {
                 None
             }
@@ -348,7 +352,7 @@ impl SymbolCancelToken {
                 token_id,
                 object_id: ObjectId::new(high, low),
                 cancelled: AtomicBool::new(cancelled),
-                cancelled_at: AtomicU64::new(0),
+                cancelled_at: AtomicU64::new(u64::MAX),
                 reason: RwLock::new(None),
                 cleanup_budget: Budget::default(),
                 children: RwLock::new(SmallVec::new()),
@@ -366,7 +370,7 @@ impl SymbolCancelToken {
                 token_id,
                 object_id,
                 cancelled: AtomicBool::new(false),
-                cancelled_at: AtomicU64::new(0),
+                cancelled_at: AtomicU64::new(u64::MAX),
                 reason: RwLock::new(None),
                 cleanup_budget: Budget::default(),
                 children: RwLock::new(SmallVec::new()),
@@ -935,7 +939,7 @@ impl CleanupCoordinator {
                 _created_at: now,
             });
 
-        set.total_bytes += symbol.len();
+        set.total_bytes = set.total_bytes.saturating_add(symbol.len());
         set.symbols.push(symbol);
     }
 
