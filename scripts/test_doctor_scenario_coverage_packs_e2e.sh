@@ -257,7 +257,12 @@ if [[ ${EXIT_CODE} -eq 0 ]]; then
         ($contract.selection_modes | index("recovery") != null) and
         ($contract.required_pack_fields | index("workflow_variant") != null) and
         ($contract.required_run_fields | index("terminal_state") != null) and
+        ($contract.required_run_fields | index("artifact_manifest") != null) and
+        ($contract.required_run_fields | index("visual_snapshot") != null) and
         ($contract.required_log_fields | index("failure_cluster") != null) and
+        ($contract.required_log_fields | index("snapshot_path") != null) and
+        ($contract.required_log_fields | index("metrics_path") != null) and
+        ($contract.required_log_fields | index("replay_metadata_path") != null) and
         ($contract.minimum_required_pack_ids | length >= 4) and
         ($contract.coverage_packs | length >= 4)
     ' "${RUN1_CONTRACT_JSON}" >/dev/null \
@@ -274,8 +279,14 @@ if [[ ${EXIT_CODE} -eq 0 ]]; then
         )) and
         ($report.runs | all(.status == "passed")) and
         ($report.runs | all((.artifact_index | map(.artifact_class) | sort) == ["structured_log","summary","transcript"])) and
+        ($report.runs | all((.artifact_manifest.records | map(.artifact_class) | sort) == ["metrics","replay_metadata","snapshot","structured_log","summary","transcript"])) and
+        ($report.runs | all(.artifact_manifest.schema_version == "doctor-visual-harness-manifest-v1")) and
+        ($report.runs | all(.visual_snapshot.stage_digest | startswith("len:"))) and
         ($report.runs | all(.structured_log_summary.failure_cluster != "")) and
         ($report.runs | all(.structured_log_summary.transcript_path | startswith("artifacts/"))) and
+        ($report.runs | all(.structured_log_summary.snapshot_path | startswith("artifacts/"))) and
+        ($report.runs | all(.structured_log_summary.metrics_path | startswith("artifacts/"))) and
+        ($report.runs | all(.structured_log_summary.replay_metadata_path | startswith("artifacts/"))) and
         ($report.failure_clusters | type == "array" and length >= 4)
     ' "${RUN1_SMOKE_JSON}" >/dev/null; then
         CHECKS_PASSED=$((CHECKS_PASSED + 1))
@@ -299,7 +310,8 @@ if [[ ${EXIT_CODE} -eq 0 ]]; then
         && grep -q "doctor_scenario_coverage_packs_contract_validates" "${UNIT_LOG}" \
         && grep -q "select_doctor_scenario_coverage_packs_filters_variants" "${UNIT_LOG}" \
         && grep -q "doctor_scenario_coverage_pack_smoke_report_is_deterministic" "${UNIT_LOG}" \
-        && grep -q "doctor_scenario_coverage_pack_smoke_report_aligns_terminal_outcomes" "${UNIT_LOG}"; then
+        && grep -q "doctor_scenario_coverage_pack_smoke_report_aligns_terminal_outcomes" "${UNIT_LOG}" \
+        && grep -q "doctor_scenario_coverage_pack_visual_harness_manifest_is_complete" "${UNIT_LOG}"; then
         CHECKS_PASSED=$((CHECKS_PASSED + 1))
     else
         echo "  ERROR: unit-test slice validation failed"

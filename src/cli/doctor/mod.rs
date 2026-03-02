@@ -1321,8 +1321,67 @@ pub struct DoctorScenarioCoverageStructuredLogSummary {
     pub failure_cluster: String,
     /// Canonical transcript artifact path.
     pub transcript_path: String,
+    /// Canonical visual snapshot artifact path.
+    pub snapshot_path: String,
+    /// Canonical metrics artifact path.
+    pub metrics_path: String,
+    /// Canonical replay-metadata artifact path.
+    pub replay_metadata_path: String,
     /// Canonical artifact-manifest path.
     pub artifact_manifest_path: String,
+}
+
+/// Deterministic visual snapshot emitted by the baseline harness runtime.
+#[derive(Debug, Clone, Serialize, Deserialize, PartialEq, Eq)]
+pub struct DoctorVisualHarnessSnapshot {
+    /// Stable snapshot identifier.
+    pub snapshot_id: String,
+    /// Viewport width used for deterministic capture.
+    pub viewport_width: u16,
+    /// Viewport height used for deterministic capture.
+    pub viewport_height: u16,
+    /// Focused panel at capture time.
+    pub focused_panel: String,
+    /// Selected node identifier at capture time.
+    pub selected_node_id: String,
+    /// Deterministic digest of stage/outcome progression.
+    pub stage_digest: String,
+    /// Deterministic visual profile token.
+    pub visual_profile: String,
+    /// Capture index within this smoke run.
+    pub capture_index: u32,
+}
+
+/// One artifact entry in the baseline visual harness manifest.
+#[derive(Debug, Clone, Serialize, Deserialize, PartialEq, Eq)]
+pub struct DoctorVisualHarnessArtifactRecord {
+    /// Stable artifact identifier.
+    pub artifact_id: String,
+    /// Artifact class (`transcript`, `snapshot`, `metrics`, etc.).
+    pub artifact_class: String,
+    /// Canonical path for this artifact.
+    pub artifact_path: String,
+    /// Deterministic checksum hint for triage joins.
+    pub checksum_hint: String,
+    /// Retention class (`hot`, `warm`) for lifecycle policy.
+    pub retention_class: String,
+    /// Related artifact identifiers in lexical order.
+    pub linked_artifacts: Vec<String>,
+}
+
+/// Deterministic artifact manifest for the baseline visual harness runtime.
+#[derive(Debug, Clone, Serialize, Deserialize, PartialEq, Eq)]
+pub struct DoctorVisualHarnessArtifactManifest {
+    /// Manifest schema version.
+    pub schema_version: String,
+    /// Deterministic run identifier.
+    pub run_id: String,
+    /// Deterministic scenario identifier.
+    pub scenario_id: String,
+    /// Root artifact directory for this run.
+    pub artifact_root: String,
+    /// Manifest records in lexical artifact-id order.
+    pub records: Vec<DoctorVisualHarnessArtifactRecord>,
 }
 
 /// One deterministic scenario-pack execution report.
@@ -1350,6 +1409,10 @@ pub struct DoctorScenarioCoveragePackRun {
     pub transcript: E2eHarnessTranscript,
     /// Deterministic artifact index.
     pub artifact_index: Vec<E2eHarnessArtifactIndexEntry>,
+    /// Deterministic visual snapshot payload.
+    pub visual_snapshot: DoctorVisualHarnessSnapshot,
+    /// Deterministic artifact manifest with retention/cross-link metadata.
+    pub artifact_manifest: DoctorVisualHarnessArtifactManifest,
     /// Structured log summary.
     pub structured_log_summary: DoctorScenarioCoverageStructuredLogSummary,
 }
@@ -2925,6 +2988,7 @@ const EVIDENCE_TIMELINE_CONTRACT_VERSION: &str = "doctor-evidence-timeline-v1";
 const DOCTOR_SCENARIO_COVERAGE_PACK_CONTRACT_VERSION: &str = "doctor-scenario-coverage-packs-v1";
 const DOCTOR_SCENARIO_COVERAGE_PACK_REPORT_VERSION: &str =
     "doctor-scenario-coverage-pack-report-v1";
+const DOCTOR_VISUAL_HARNESS_MANIFEST_VERSION: &str = "doctor-visual-harness-manifest-v1";
 const CORE_DIAGNOSTICS_REPORT_VERSION: &str = "doctor-core-report-v1";
 const ADVANCED_DIAGNOSTICS_REPORT_VERSION: &str = "doctor-advanced-report-v1";
 const VISUAL_LANGUAGE_VERSION: &str = "doctor-visual-language-v1";
@@ -9169,6 +9233,160 @@ pub fn build_e2e_harness_artifact_index(
     Ok(entries)
 }
 
+fn build_doctor_visual_harness_snapshot(
+    pack: &DoctorScenarioCoveragePackSpec,
+    transcript: &E2eHarnessTranscript,
+    stage_outcomes: &[String],
+    capture_index: u32,
+) -> Result<DoctorVisualHarnessSnapshot, String> {
+    let last_event = transcript
+        .events
+        .last()
+        .ok_or_else(|| "transcript must contain at least one event".to_string())?;
+    let visual_profile = match last_event.outcome_class.as_str() {
+        "success" => "frankentui-stable",
+        "cancelled" => "frankentui-cancel",
+        _ => "frankentui-alert",
+    };
+    let focused_panel = if last_event.outcome_class == "success" {
+        "summary_panel"
+    } else {
+        "triage_panel"
+    };
+
+    Ok(DoctorVisualHarnessSnapshot {
+        snapshot_id: format!("snapshot-{}", pack.pack_id),
+        viewport_width: DEFAULT_VISUAL_VIEWPORT_WIDTH,
+        viewport_height: DEFAULT_VISUAL_VIEWPORT_HEIGHT,
+        focused_panel: focused_panel.to_string(),
+        selected_node_id: format!("node-{:02}", last_event.sequence),
+        stage_digest: content_digest(&stage_outcomes.join("|")),
+        visual_profile: visual_profile.to_string(),
+        capture_index,
+    })
+}
+
+fn linked_artifacts(values: &[&str]) -> Vec<String> {
+    let mut linked = values
+        .iter()
+        .map(|value| (*value).to_string())
+        .collect::<Vec<_>>();
+    linked.sort();
+    linked.dedup();
+    linked
+}
+
+fn build_doctor_visual_harness_artifact_manifest(
+    transcript: &E2eHarnessTranscript,
+    artifact_index: &[E2eHarnessArtifactIndexEntry],
+    snapshot: &DoctorVisualHarnessSnapshot,
+) -> Result<DoctorVisualHarnessArtifactManifest, String> {
+    let base = format!("artifacts/{}/doctor/e2e", transcript.run_id);
+    let scenario = transcript.scenario_id.as_str();
+
+    let mut records = artifact_index
+        .iter()
+        .map(|entry| {
+            let linked = match entry.artifact_class.as_str() {
+                "structured_log" => linked_artifacts(&[
+                    &format!("{scenario}-summary"),
+                    &format!("{scenario}-transcript"),
+                    &format!("{scenario}-replay-metadata"),
+                ]),
+                "summary" => linked_artifacts(&[
+                    &format!("{scenario}-structured-log"),
+                    &format!("{scenario}-metrics"),
+                ]),
+                "transcript" => linked_artifacts(&[
+                    &format!("{scenario}-structured-log"),
+                    &format!("{scenario}-snapshot"),
+                ]),
+                _ => Vec::new(),
+            };
+
+            DoctorVisualHarnessArtifactRecord {
+                artifact_id: entry.artifact_id.clone(),
+                artifact_class: entry.artifact_class.clone(),
+                artifact_path: entry.artifact_path.clone(),
+                checksum_hint: entry.checksum_hint.clone(),
+                retention_class: if entry.artifact_class == "summary" {
+                    "warm".to_string()
+                } else {
+                    "hot".to_string()
+                },
+                linked_artifacts: linked,
+            }
+        })
+        .collect::<Vec<_>>();
+
+    records.push(DoctorVisualHarnessArtifactRecord {
+        artifact_id: format!("{scenario}-snapshot"),
+        artifact_class: "snapshot".to_string(),
+        artifact_path: format!("{base}/{scenario}-snapshot.json"),
+        checksum_hint: format!(
+            "{}-snapshot-{}",
+            snapshot.snapshot_id, snapshot.capture_index
+        ),
+        retention_class: "hot".to_string(),
+        linked_artifacts: linked_artifacts(&[
+            &format!("{scenario}-transcript"),
+            &format!("{scenario}-summary"),
+        ]),
+    });
+    records.push(DoctorVisualHarnessArtifactRecord {
+        artifact_id: format!("{scenario}-metrics"),
+        artifact_class: "metrics".to_string(),
+        artifact_path: format!("{base}/{scenario}-metrics.json"),
+        checksum_hint: format!("{}-metrics", transcript.run_id),
+        retention_class: "warm".to_string(),
+        linked_artifacts: linked_artifacts(&[
+            &format!("{scenario}-summary"),
+            &format!("{scenario}-replay-metadata"),
+        ]),
+    });
+    records.push(DoctorVisualHarnessArtifactRecord {
+        artifact_id: format!("{scenario}-replay-metadata"),
+        artifact_class: "replay_metadata".to_string(),
+        artifact_path: format!("{base}/{scenario}-replay-metadata.json"),
+        checksum_hint: format!("{}-replay", transcript.run_id),
+        retention_class: "warm".to_string(),
+        linked_artifacts: linked_artifacts(&[
+            &format!("{scenario}-structured-log"),
+            &format!("{scenario}-transcript"),
+        ]),
+    });
+
+    records.sort_by(|left, right| left.artifact_id.cmp(&right.artifact_id));
+    for record in &records {
+        if !record.artifact_path.starts_with("artifacts/") {
+            return Err(format!(
+                "artifact_path must be under artifacts/: {}",
+                record.artifact_id
+            ));
+        }
+        if !matches!(record.retention_class.as_str(), "hot" | "warm") {
+            return Err(format!(
+                "unsupported retention_class {} for {}",
+                record.retention_class, record.artifact_id
+            ));
+        }
+        if record.checksum_hint.trim().is_empty() {
+            return Err(format!(
+                "checksum_hint must be non-empty for {}",
+                record.artifact_id
+            ));
+        }
+    }
+
+    Ok(DoctorVisualHarnessArtifactManifest {
+        schema_version: DOCTOR_VISUAL_HARNESS_MANIFEST_VERSION.to_string(),
+        run_id: transcript.run_id.clone(),
+        scenario_id: transcript.scenario_id.clone(),
+        artifact_root: base,
+        records,
+    })
+}
+
 fn expected_terminal_state_for_outcome(expected_outcome: &str) -> Result<&'static str, String> {
     match expected_outcome {
         "success" => Ok("completed"),
@@ -9204,6 +9422,7 @@ pub fn doctor_scenario_coverage_packs_contract() -> DoctorScenarioCoveragePacksC
         ],
         required_run_fields: vec![
             "artifact_index".to_string(),
+            "artifact_manifest".to_string(),
             "expected_outcome".to_string(),
             "failure_cluster".to_string(),
             "pack_id".to_string(),
@@ -9214,16 +9433,20 @@ pub fn doctor_scenario_coverage_packs_contract() -> DoctorScenarioCoveragePacksC
             "structured_log_summary".to_string(),
             "terminal_state".to_string(),
             "transcript".to_string(),
+            "visual_snapshot".to_string(),
             "workflow_variant".to_string(),
         ],
         required_log_fields: vec![
             "artifact_manifest_path".to_string(),
             "correlation_id".to_string(),
             "failure_cluster".to_string(),
+            "metrics_path".to_string(),
             "outcome_class".to_string(),
             "pack_id".to_string(),
+            "replay_metadata_path".to_string(),
             "scenario_id".to_string(),
             "seed".to_string(),
+            "snapshot_path".to_string(),
             "stage_outcomes".to_string(),
             "transcript_path".to_string(),
         ],
@@ -9405,6 +9628,7 @@ pub fn validate_doctor_scenario_coverage_packs_contract(
 
     validate_lexical_string_set(&contract.required_run_fields, "required_run_fields")?;
     for required in [
+        "artifact_manifest",
         "artifact_index",
         "expected_outcome",
         "failure_cluster",
@@ -9416,6 +9640,7 @@ pub fn validate_doctor_scenario_coverage_packs_contract(
         "structured_log_summary",
         "terminal_state",
         "transcript",
+        "visual_snapshot",
         "workflow_variant",
     ] {
         if !contract
@@ -9432,10 +9657,13 @@ pub fn validate_doctor_scenario_coverage_packs_contract(
         "artifact_manifest_path",
         "correlation_id",
         "failure_cluster",
+        "metrics_path",
         "outcome_class",
         "pack_id",
+        "replay_metadata_path",
         "scenario_id",
         "seed",
+        "snapshot_path",
         "stage_outcomes",
         "transcript_path",
     ] {
@@ -9667,11 +9895,43 @@ pub fn build_doctor_scenario_coverage_pack_smoke_report(
             .iter()
             .map(|event| format!("{}:{}:{}", event.stage, event.state, event.outcome_class))
             .collect::<Vec<_>>();
-        let transcript_path = artifact_index
+        let capture_index =
+            u32::try_from(index + 1).map_err(|_| "capture_index overflow".to_string())?;
+        let visual_snapshot = build_doctor_visual_harness_snapshot(
+            pack,
+            &transcript,
+            &stage_outcomes,
+            capture_index,
+        )?;
+        let artifact_manifest = build_doctor_visual_harness_artifact_manifest(
+            &transcript,
+            &artifact_index,
+            &visual_snapshot,
+        )?;
+        let transcript_path = artifact_manifest
+            .records
             .iter()
             .find(|entry| entry.artifact_class == "transcript")
             .map(|entry| entry.artifact_path.clone())
             .ok_or_else(|| format!("missing transcript artifact for {}", pack.pack_id))?;
+        let snapshot_path = artifact_manifest
+            .records
+            .iter()
+            .find(|entry| entry.artifact_class == "snapshot")
+            .map(|entry| entry.artifact_path.clone())
+            .ok_or_else(|| format!("missing snapshot artifact for {}", pack.pack_id))?;
+        let metrics_path = artifact_manifest
+            .records
+            .iter()
+            .find(|entry| entry.artifact_class == "metrics")
+            .map(|entry| entry.artifact_path.clone())
+            .ok_or_else(|| format!("missing metrics artifact for {}", pack.pack_id))?;
+        let replay_metadata_path = artifact_manifest
+            .records
+            .iter()
+            .find(|entry| entry.artifact_class == "replay_metadata")
+            .map(|entry| entry.artifact_path.clone())
+            .ok_or_else(|| format!("missing replay_metadata artifact for {}", pack.pack_id))?;
         let artifact_manifest_path = format!(
             "artifacts/{}/doctor/e2e/{}-artifact-index.json",
             transcript.run_id, transcript.scenario_id
@@ -9692,6 +9952,8 @@ pub fn build_doctor_scenario_coverage_pack_smoke_report(
             ),
             transcript,
             artifact_index,
+            visual_snapshot,
+            artifact_manifest,
             structured_log_summary: DoctorScenarioCoverageStructuredLogSummary {
                 pack_id: pack.pack_id.clone(),
                 scenario_id: pack.scenario_id.clone(),
@@ -9701,6 +9963,9 @@ pub fn build_doctor_scenario_coverage_pack_smoke_report(
                 outcome_class: pack.expected_outcome.clone(),
                 failure_cluster: pack.failure_cluster.clone(),
                 transcript_path,
+                snapshot_path,
+                metrics_path,
+                replay_metadata_path,
                 artifact_manifest_path,
             },
         });
@@ -17479,6 +17744,91 @@ impl RuntimeState {
                     "transcript".to_string(),
                 ]
             );
+            assert!(
+                run.structured_log_summary
+                    .snapshot_path
+                    .starts_with("artifacts/"),
+                "snapshot path should remain canonical"
+            );
+            assert!(
+                run.structured_log_summary
+                    .metrics_path
+                    .starts_with("artifacts/"),
+                "metrics path should remain canonical"
+            );
+            assert!(
+                run.structured_log_summary
+                    .replay_metadata_path
+                    .starts_with("artifacts/"),
+                "replay metadata path should remain canonical"
+            );
+        }
+    }
+
+    #[test]
+    fn doctor_scenario_coverage_pack_visual_harness_manifest_is_complete() {
+        let contract = doctor_scenario_coverage_packs_contract();
+        let report =
+            build_doctor_scenario_coverage_pack_smoke_report(&contract, "all", "seed-visual")
+                .expect("report");
+        for run in &report.runs {
+            assert_eq!(
+                run.artifact_manifest.schema_version,
+                DOCTOR_VISUAL_HARNESS_MANIFEST_VERSION
+            );
+            assert_eq!(run.artifact_manifest.run_id, run.transcript.run_id);
+            assert_eq!(
+                run.artifact_manifest.scenario_id,
+                run.transcript.scenario_id
+            );
+            assert_eq!(
+                run.visual_snapshot.viewport_width,
+                DEFAULT_VISUAL_VIEWPORT_WIDTH
+            );
+            assert_eq!(
+                run.visual_snapshot.viewport_height,
+                DEFAULT_VISUAL_VIEWPORT_HEIGHT
+            );
+            assert!(
+                run.visual_snapshot.stage_digest.starts_with("len:"),
+                "stage digest should use canonical content_digest formatting"
+            );
+
+            let classes = run
+                .artifact_manifest
+                .records
+                .iter()
+                .map(|record| record.artifact_class.clone())
+                .collect::<BTreeSet<_>>();
+            assert_eq!(
+                classes,
+                BTreeSet::from([
+                    "metrics".to_string(),
+                    "replay_metadata".to_string(),
+                    "snapshot".to_string(),
+                    "structured_log".to_string(),
+                    "summary".to_string(),
+                    "transcript".to_string(),
+                ])
+            );
+
+            for record in &run.artifact_manifest.records {
+                assert!(
+                    record.artifact_path.starts_with("artifacts/"),
+                    "artifact paths must stay under artifacts/: {}",
+                    record.artifact_id
+                );
+                assert!(
+                    matches!(record.retention_class.as_str(), "hot" | "warm"),
+                    "retention class must stay canonical"
+                );
+                let mut linked = record.linked_artifacts.clone();
+                let mut sorted = linked.clone();
+                sorted.sort();
+                sorted.dedup();
+                assert_eq!(linked, sorted, "linked artifacts must be lexical+unique");
+                linked.clear();
+            }
         }
     }
 
