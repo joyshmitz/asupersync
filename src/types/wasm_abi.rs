@@ -3119,6 +3119,294 @@ pub struct ReactHookDiagnosticEvent {
     pub detail: Option<String>,
 }
 
+// ---------------------------------------------------------------------------
+// Next.js App Router Integration Architecture
+// ---------------------------------------------------------------------------
+//
+// These types define the boundary map for Next.js App Router integration.
+// The key architectural constraints:
+//
+// 1. **Client Components only**: The WASM runtime runs exclusively in client
+//    components (`'use client'`). Server Components, Server Actions, and
+//    Route Handlers CANNOT import or use the runtime directly.
+//
+// 2. **No SSR execution**: The runtime initializes after hydration. During
+//    SSR, the provider renders a placeholder (loading/skeleton). There is
+//    no server-side WASM execution.
+//
+// 3. **Edge/Node split**: Edge Runtime has no WASM support in this model.
+//    Node.js middleware/API routes interact only through serialized messages,
+//    never through direct runtime calls.
+//
+// 4. **Hydration safety**: The provider must produce identical server and
+//    client markup during hydration (empty/loading state). Runtime
+//    initialization happens in useEffect, never during render.
+//
+// 5. **Route transitions**: React Router transitions (soft navigation) do
+//    NOT destroy the runtime. Only full page navigations (hard nav) or
+//    explicit unmount trigger runtime cleanup.
+
+/// Next.js rendering environment where a component executes.
+///
+/// Determines what capabilities are available. The WASM runtime is only
+/// usable in `ClientComponent` after hydration.
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Hash, Serialize, Deserialize)]
+#[serde(rename_all = "snake_case")]
+pub enum NextjsRenderEnvironment {
+    /// Server Component — no WASM, no browser APIs, no state/effects.
+    ServerComponent,
+    /// Client Component during SSR pass — no WASM, limited browser APIs.
+    ClientSsr,
+    /// Client Component after hydration — full WASM and browser APIs.
+    ClientHydrated,
+    /// Edge Runtime — no WASM, limited Node APIs.
+    EdgeRuntime,
+    /// Node.js API route / Server Action — no WASM, full Node APIs.
+    NodeServer,
+}
+
+impl NextjsRenderEnvironment {
+    /// Returns true if this environment supports WASM runtime initialization.
+    #[must_use]
+    pub fn supports_wasm_runtime(self) -> bool {
+        self == Self::ClientHydrated
+    }
+
+    /// Returns true if browser APIs (DOM, fetch with credentials, etc.) are available.
+    #[must_use]
+    pub fn has_browser_apis(self) -> bool {
+        matches!(self, Self::ClientSsr | Self::ClientHydrated)
+    }
+
+    /// Returns true if this is a server-side environment.
+    #[must_use]
+    pub fn is_server_side(self) -> bool {
+        matches!(
+            self,
+            Self::ServerComponent | Self::EdgeRuntime | Self::NodeServer
+        )
+    }
+}
+
+/// Capability that may or may not be available in a given render environment.
+///
+/// Used to build a capability matrix for documentation and runtime validation.
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Hash, Serialize, Deserialize)]
+#[serde(rename_all = "snake_case")]
+pub enum NextjsCapability {
+    /// Initialize and run the WASM runtime.
+    WasmRuntime,
+    /// Use React hooks (useState, useEffect, etc.).
+    ReactHooks,
+    /// Access browser DOM APIs.
+    DomAccess,
+    /// Use Web Workers / shared workers.
+    WebWorkers,
+    /// Access IndexedDB / localStorage.
+    BrowserStorage,
+    /// Use the Fetch API with credentials/cookies.
+    AuthenticatedFetch,
+    /// Read/write cookies via next/headers.
+    ServerCookies,
+    /// Access the request object (headers, IP, etc.).
+    RequestContext,
+    /// Use Node.js-specific APIs (fs, crypto, etc.).
+    NodeApis,
+    /// Perform streaming SSR.
+    StreamingSsr,
+}
+
+/// Returns true if a capability is available in the given environment.
+#[must_use]
+pub fn is_capability_available(env: NextjsRenderEnvironment, cap: NextjsCapability) -> bool {
+    use NextjsCapability as C;
+    use NextjsRenderEnvironment as E;
+    matches!(
+        (env, cap),
+        (
+            E::ClientHydrated,
+            C::WasmRuntime | C::DomAccess | C::WebWorkers | C::BrowserStorage
+        ) | (
+            E::ClientSsr | E::ClientHydrated,
+            C::ReactHooks | C::AuthenticatedFetch
+        ) | (
+            E::ServerComponent | E::EdgeRuntime | E::NodeServer,
+            C::ServerCookies | C::RequestContext
+        ) | (E::NodeServer, C::NodeApis)
+            | (E::ServerComponent | E::EdgeRuntime, C::StreamingSsr)
+    )
+}
+
+/// Known anti-patterns for Next.js + WASM runtime integration.
+///
+/// Each anti-pattern describes something that developers might try but
+/// that violates architectural constraints. Used in documentation,
+/// linting rules, and diagnostic error messages.
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Hash, Serialize, Deserialize)]
+#[serde(rename_all = "snake_case")]
+pub enum NextjsAntiPattern {
+    /// Importing WASM runtime in a Server Component.
+    WasmImportInServerComponent,
+    /// Calling runtime methods during SSR render pass.
+    RuntimeCallDuringSsr,
+    /// Initializing runtime in render (not in useEffect).
+    RuntimeInitInRender,
+    /// Sharing runtime handles across route segments.
+    HandlesSharingAcrossRoutes,
+    /// Using runtime in Edge middleware.
+    RuntimeInEdgeMiddleware,
+    /// Blocking hydration on runtime initialization.
+    BlockingHydration,
+    /// Passing WASM handles through Server Actions.
+    HandlesInServerActions,
+}
+
+impl NextjsAntiPattern {
+    /// Returns a human-readable explanation of why this pattern is wrong.
+    #[must_use]
+    pub fn explanation(self) -> &'static str {
+        match self {
+            Self::WasmImportInServerComponent => {
+                "Server Components cannot import WASM modules. Use 'use client' directive."
+            }
+            Self::RuntimeCallDuringSsr => {
+                "WASM runtime is not available during SSR. Initialize in useEffect after hydration."
+            }
+            Self::RuntimeInitInRender => {
+                "Runtime initialization has side effects. Use useEffect, not the render function."
+            }
+            Self::HandlesSharingAcrossRoutes => {
+                "WASM handles are scoped to a provider instance. Each route segment needs its own provider."
+            }
+            Self::RuntimeInEdgeMiddleware => {
+                "Edge Runtime does not support WASM execution in this integration model."
+            }
+            Self::BlockingHydration => {
+                "Never block hydration on WASM init. Render a placeholder, then initialize async."
+            }
+            Self::HandlesInServerActions => {
+                "WasmHandleRef values are opaque client-side references. They cannot be serialized for server actions."
+            }
+        }
+    }
+}
+
+/// Navigation type that affects runtime lifecycle.
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Hash, Serialize, Deserialize)]
+#[serde(rename_all = "snake_case")]
+pub enum NextjsNavigationType {
+    /// Soft navigation (React Router transition). Runtime survives.
+    SoftNavigation,
+    /// Hard navigation (full page load). Runtime is destroyed.
+    HardNavigation,
+    /// Back/forward navigation. Runtime may or may not survive
+    /// depending on bfcache behavior.
+    PopState,
+}
+
+impl NextjsNavigationType {
+    /// Returns true if the runtime is expected to survive this navigation.
+    #[must_use]
+    pub fn runtime_survives(self) -> bool {
+        matches!(self, Self::SoftNavigation)
+    }
+}
+
+/// Phase of the Next.js client bootstrap sequence.
+///
+/// The provider must wait for `Hydrated` before initializing the WASM runtime.
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Hash, Serialize, Deserialize)]
+#[serde(rename_all = "snake_case")]
+pub enum NextjsBootstrapPhase {
+    /// Server-rendered HTML received, JS not yet loaded.
+    ServerRendered,
+    /// JS bundles loaded, React hydration in progress.
+    Hydrating,
+    /// Hydration complete. useEffect callbacks firing.
+    Hydrated,
+    /// WASM module loaded and runtime initialized.
+    RuntimeReady,
+    /// Runtime initialization failed.
+    RuntimeFailed,
+}
+
+/// Returns true when a bootstrap phase transition is valid.
+#[must_use]
+pub fn is_valid_bootstrap_transition(from: NextjsBootstrapPhase, to: NextjsBootstrapPhase) -> bool {
+    if from == to {
+        return true;
+    }
+    matches!(
+        (from, to),
+        (
+            NextjsBootstrapPhase::ServerRendered,
+            NextjsBootstrapPhase::Hydrating
+        ) | (
+            NextjsBootstrapPhase::Hydrating,
+            NextjsBootstrapPhase::Hydrated
+        ) | (
+            NextjsBootstrapPhase::Hydrated,
+            NextjsBootstrapPhase::RuntimeReady | NextjsBootstrapPhase::RuntimeFailed
+        )
+    )
+}
+
+/// Error for invalid bootstrap phase transitions.
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Error)]
+#[error("invalid bootstrap transition: {from:?} -> {to:?}")]
+pub struct NextjsBootstrapTransitionError {
+    /// Current phase.
+    pub from: NextjsBootstrapPhase,
+    /// Requested next phase.
+    pub to: NextjsBootstrapPhase,
+}
+
+/// Validates a bootstrap phase transition.
+pub fn validate_bootstrap_transition(
+    from: NextjsBootstrapPhase,
+    to: NextjsBootstrapPhase,
+) -> Result<(), NextjsBootstrapTransitionError> {
+    if is_valid_bootstrap_transition(from, to) {
+        Ok(())
+    } else {
+        Err(NextjsBootstrapTransitionError { from, to })
+    }
+}
+
+/// Placement of a component within the Next.js rendering tree.
+///
+/// Determines the rules that apply to the component's use of the runtime.
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+pub struct NextjsComponentPlacement {
+    /// Rendering environment for this component.
+    pub environment: NextjsRenderEnvironment,
+    /// Route segment path (e.g., "/dashboard/settings").
+    pub route_segment: String,
+    /// Whether this component is inside a `<Suspense>` boundary.
+    pub inside_suspense: bool,
+    /// Whether this component is inside an error boundary.
+    pub inside_error_boundary: bool,
+    /// Layout nesting depth (root = 0).
+    pub layout_depth: u32,
+}
+
+/// Snapshot of the Next.js integration state for diagnostics.
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+pub struct NextjsIntegrationSnapshot {
+    /// Current bootstrap phase.
+    pub bootstrap_phase: NextjsBootstrapPhase,
+    /// Active render environment.
+    pub environment: NextjsRenderEnvironment,
+    /// Current route segment.
+    pub route_segment: String,
+    /// Number of active providers in the component tree.
+    pub active_provider_count: usize,
+    /// Whether the WASM module has been loaded.
+    pub wasm_module_loaded: bool,
+    /// Navigation events observed since last snapshot.
+    pub navigation_count: u32,
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
