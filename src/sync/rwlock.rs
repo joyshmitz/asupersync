@@ -823,16 +823,15 @@ impl<T> Future for OwnedWriteFuture<'_, T> {
                 }
                 drop(state);
                 return Poll::Pending;
-            } else {
-                // Dequeued - we were pre-granted the lock!
-                self.waiter_id = None;
-                if self.counted {
-                    state.writer_waiters = state.writer_waiters.saturating_sub(1);
-                    self.counted = false;
-                }
-                drop(state);
-                return Poll::Ready(Ok(OwnedRwLockWriteGuard { lock }));
             }
+            // Dequeued - we were pre-granted the lock!
+            self.waiter_id = None;
+            if self.counted {
+                state.writer_waiters = state.writer_waiters.saturating_sub(1);
+                self.counted = false;
+            }
+            drop(state);
+            return Poll::Ready(Ok(OwnedRwLockWriteGuard { lock }));
         }
 
         let can_acquire = !state.writer_active && state.readers == 0 && state.writer_waiters == 1;
@@ -870,27 +869,34 @@ impl<T> Drop for OwnedWriteFuture<'_, T> {
         let mut state = self.lock.state.lock();
 
         if let Some(waiter_id) = self.waiter_id {
-            let removed = state
-                .writer_queue
-                .iter()
-                .position(|w| w.id == waiter_id)
-                .is_some_and(|pos| {
-                    state.writer_queue.remove(pos);
-                    true
-                });
+            if let Some(pos) = state.writer_queue.iter().position(|w| w.id == waiter_id) {
+                state.writer_queue.remove(pos);
+                state.writer_waiters = state.writer_waiters.saturating_sub(1);
+            } else {
+                // We were granted the lock but dropped before taking it!
+                state.writer_waiters = state.writer_waiters.saturating_sub(1);
+                state.writer_active = false;
 
-            state.writer_waiters = state.writer_waiters.saturating_sub(1);
-
-            if !removed && !state.writer_active && state.readers == 0 && state.writer_waiters > 0 {
-                writer_waker = RwLock::<T>::pop_writer_waiter(&mut state);
+                if state.writer_waiters > 0 {
+                    writer_waker = RwLock::<T>::pop_writer_waiter(&mut state);
+                    if writer_waker.is_some() {
+                        state.writer_active = true;
+                    }
+                } else {
+                    let wakers = RwLock::<T>::drain_reader_waiters(&mut state);
+                    state.readers += wakers.len();
+                    reader_wakers = wakers;
+                }
             }
         } else {
             state.writer_waiters = state.writer_waiters.saturating_sub(1);
+            if state.writer_waiters == 0 && !state.writer_active {
+                let wakers = RwLock::<T>::drain_reader_waiters(&mut state);
+                state.readers += wakers.len();
+                reader_wakers = wakers;
+            }
         }
 
-        if state.writer_waiters == 0 && !state.writer_active {
-            reader_wakers = RwLock::<T>::drain_reader_waiters(&mut state);
-        }
         drop(state);
 
         if let Some(waker) = writer_waker {
