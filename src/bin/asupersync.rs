@@ -1,36 +1,36 @@
 //! Asupersync CLI tools (feature-gated).
 #![allow(clippy::result_large_err)]
 
+use asupersync::Time;
 use asupersync::cli::doctor::{
+    AdvancedCollaborationEntry, AdvancedDiagnosticsFixture, AdvancedDiagnosticsReportBundle,
+    AdvancedRemediationDelta, AdvancedTroubleshootingPlaybook, AdvancedTrustTransition,
+    DoctorScenarioCoveragePackSmokeReport, DoctorScenarioCoveragePacksContract,
+    EvidenceTimelineContract, EvidenceTimelineWorkflowTranscript,
     advanced_diagnostics_report_bundle, build_doctor_scenario_coverage_pack_smoke_report,
     doctor_scenario_coverage_packs_contract, evidence_timeline_contract,
     run_evidence_timeline_keyboard_flow_smoke, validate_advanced_diagnostics_report_extension,
-    validate_advanced_diagnostics_report_extension_contract, AdvancedCollaborationEntry,
-    AdvancedDiagnosticsFixture, AdvancedDiagnosticsReportBundle, AdvancedRemediationDelta,
-    AdvancedTroubleshootingPlaybook, AdvancedTrustTransition,
-    DoctorScenarioCoveragePackSmokeReport, DoctorScenarioCoveragePacksContract,
-    EvidenceTimelineContract, EvidenceTimelineWorkflowTranscript,
+    validate_advanced_diagnostics_report_extension_contract,
 };
 use asupersync::cli::{
+    CliError, ColorChoice, CommonArgs, CoreDiagnosticsReport, CoreDiagnosticsReportBundle,
+    CoreDiagnosticsSummary, ExitCode, InvariantAnalyzerReport, LockContentionAnalyzerReport,
+    OperatorModelContract, Output, OutputFormat, Outputtable, RemediationRecipeBundle,
+    ScreenEngineContract, StructuredLoggingContract, WorkspaceScanReport,
     analyze_workspace_invariants, analyze_workspace_lock_contention,
     core_diagnostics_report_bundle, core_diagnostics_report_contract, operator_model_contract,
     parse_color_choice, parse_output_format, remediation_recipe_bundle, scan_workspace,
     screen_engine_contract, structured_logging_contract, validate_core_diagnostics_report,
-    validate_core_diagnostics_report_contract, CliError, ColorChoice, CommonArgs,
-    CoreDiagnosticsReport, CoreDiagnosticsReportBundle, CoreDiagnosticsSummary, ExitCode,
-    InvariantAnalyzerReport, LockContentionAnalyzerReport, OperatorModelContract, Output,
-    OutputFormat, Outputtable, RemediationRecipeBundle, ScreenEngineContract,
-    StructuredLoggingContract, WorkspaceScanReport,
+    validate_core_diagnostics_report_contract,
 };
 use asupersync::trace::{
-    verify_trace, CompressionMode, IssueSeverity, ReplayEvent, TraceFileError, TraceReader,
-    VerificationOptions, TRACE_FILE_VERSION, TRACE_MAGIC,
+    CompressionMode, IssueSeverity, ReplayEvent, TRACE_FILE_VERSION, TRACE_MAGIC, TraceFileError,
+    TraceReader, VerificationOptions, verify_trace,
 };
-use asupersync::Time;
 use clap::{ArgAction, Args, Parser, Subcommand, ValueEnum};
 use conformance::{
-    requirements_from_entries, scan_conformance_attributes, ScanWarning, SpecRequirement,
-    TraceabilityMatrix, TraceabilityScanError,
+    ScanWarning, SpecRequirement, TraceabilityMatrix, TraceabilityScanError,
+    requirements_from_entries, scan_conformance_attributes,
 };
 use franken_decision::DecisionAuditEntry;
 use franken_evidence::{EvidenceLedger, EvidenceLedgerBuilder};
