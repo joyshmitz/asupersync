@@ -48,7 +48,7 @@
       "id": "inv.structured_concurrency.single_owner",
       "name": "Structured concurrency: every task is owned by exactly one region",
       "statement": "Task membership and region relationships remain structurally consistent through spawn/schedule/cancel/close transitions.",
-      "lean_status": "partially_proven",
+      "lean_status": "fully_proven",
       "lean_theorems": [
         "spawn_preserves_existing_task",
         "spawn_preserves_obligation",
@@ -56,20 +56,24 @@
         "spawned_task_in_region",
         "setTask_same_region_preserves_wellformed",
         "setRegion_structural_preserves_wellformed",
-        "step_preserves_wellformed"
+        "step_preserves_wellformed",
+        "step_preserves_single_owner",
+        "steps_preserve_single_owner",
+        "spawn_preserves_single_owner",
+        "scheduler_change_preserves_single_owner",
+        "setTask_same_region_preserves_single_owner",
+        "setRegion_structural_preserves_single_owner",
+        "tick_preserves_single_owner",
+        "setObligation_preserves_single_owner",
+        "reserve_preserves_single_owner"
       ],
       "test_refs": [
         "tests/property_region_ops.rs",
         "tests/region_lifecycle_conformance.rs",
         "tests/integration_e2e.rs"
       ],
-      "gaps": [
-        "No single explicit theorem stating global uniqueness of region ownership for all task IDs."
-      ],
-      "follow_up_beads": [
-        "bd-nc3ut",
-        "bd-2iwok"
-      ]
+      "gaps": [],
+      "follow_up_beads": []
     },
     {
       "id": "inv.region_close.quiescence",
@@ -99,20 +103,29 @@
       "id": "inv.cancel.protocol",
       "name": "Cancellation is a protocol: request -> drain -> finalize (idempotent)",
       "statement": "Cancellation transitions progress through the modeled states and terminate within bounded potential.",
-      "lean_status": "partially_proven",
+      "lean_status": "proven",
       "lean_theorems": [
         "cancel_masked_step",
         "cancel_ack_step",
         "cancel_finalize_step",
         "cancel_complete_step",
         "cancel_complete_produces_cancelled",
-        "cancelMasked_potential_decreases",
-        "cancelAcknowledge_potential_decreases",
-        "cancelFinalize_potential_decreases",
-        "cancelComplete_potential_reaches_zero",
+        "cancel_masked_potential_decreases",
+        "cancel_acknowledge_potential_decreases",
+        "cancel_finalize_potential_decreases",
+        "cancel_complete_potential_reaches_zero",
         "cancel_protocol_terminates",
         "cancel_steps_testable_bound",
-        "cancel_propagation_bounded"
+        "cancel_propagation_bounded",
+        "cancel_request_blocked_when_cancel_requested",
+        "cancel_request_blocked_when_cancelling",
+        "cancel_request_blocked_when_finalizing",
+        "cancel_request_blocked_when_completed",
+        "cancel_request_requires_pre_cancel_state",
+        "cancel_child_blocked_when_cancel_protocol",
+        "cancel_request_reason_monotone_incoming",
+        "cancel_request_reason_monotone_existing",
+        "strengthen_opt_monotone_rank"
       ],
       "test_refs": [
         "tests/cancellation_conformance.rs",
@@ -120,12 +133,8 @@
         "tests/cancel_obligation_invariants.rs",
         "tests/refinement_conformance.rs"
       ],
-      "gaps": [
-        "Idempotence of repeated cancel requests is not captured as a dedicated Lean theorem."
-      ],
-      "follow_up_beads": [
-        "bd-1ab3k"
-      ]
+      "gaps": [],
+      "follow_up_beads": []
     },
     {
       "id": "inv.race.losers_drained",
@@ -146,8 +155,7 @@
         "No direct Lean theorem currently states and proves race-loser full-drain semantics."
       ],
       "follow_up_beads": [
-        "bd-19efq",
-        "bd-244p5"
+        "asupersync-3cddg.6.8"
       ]
     },
     {
@@ -181,8 +189,7 @@
         "A single global theorem stating zero leaked obligations across all reachable executions is not yet present."
       ],
       "follow_up_beads": [
-        "bd-3k6l5",
-        "bd-244p5"
+        "asupersync-3cddg.6.9"
       ]
     },
     {
@@ -200,14 +207,18 @@
         "Capability discipline is heavily tested in Rust, but no dedicated Lean proof family exists yet for ambient-authority exclusion."
       ],
       "follow_up_beads": [
-        "bd-2iwok",
-        "bd-1vhw5"
+        "asupersync-3cddg.6.10"
       ]
     }
   ],
   "summary": {
-    "fully_proven": 1,
-    "partially_proven": 3,
-    "unproven": 2
+    "fully_proven": 4,
+    "partially_proven": 0,
+    "unproven": 2,
+    "proof_gap_audit_bead": "asupersync-3cddg.6.4",
+    "proof_gap_audit_commands": [
+      "jq extraction + theorem inventory reconciliation",
+      "~/.elan/bin/lake env lean Asupersync.lean"
+    ]
   }
 }

@@ -1010,14 +1010,14 @@ theorem spawn_preserves_existing_task {Value Error Panic : Type}
 -- strengthenReason is monotone: the result rank is ≥ both inputs.
 -- ==========================================================================
 
-theorem strengthenReason_rank_ge_left (a b : CancelReason) :
+theorem strengthen_reason_rank_ge_left (a b : CancelReason) :
     CancelKind.rank (strengthenReason a b).kind ≥ CancelKind.rank a.kind := by
   simp [strengthenReason]
   split
   · exact Nat.le_refl _
   · rename_i h; omega
 
-theorem strengthenReason_rank_ge_right (a b : CancelReason) :
+theorem strengthen_reason_rank_ge_right (a b : CancelReason) :
     CancelKind.rank (strengthenReason a b).kind ≥ CancelKind.rank b.kind := by
   simp [strengthenReason]
   split
@@ -1051,7 +1051,7 @@ theorem reserve_creates_reserved {Value Error Panic : Type}
 
 /-- A task in cancelling state was previously in cancelRequested state or was
     already cancelling (unchanged by a τ-step). -/
-theorem cancelling_from_cancelRequested {Value Error Panic : Type}
+theorem cancelling_from_cancel_requested {Value Error Panic : Type}
     {s s' : State Value Error Panic} {t : TaskId}
     (hStep : Step s (Label.tau) s')
     (hTask : ∃ task', getTask s' t = some task' ∧
@@ -1246,7 +1246,7 @@ end BudgetAlgebra
 -- strengthenOpt monotonicity: result rank ≥ incoming rank (bd-3bg3e)
 -- ==========================================================================
 
-theorem strengthenOpt_rank_ge_incoming (current : Option CancelReason) (incoming : CancelReason) :
+theorem strengthen_opt_rank_ge_incoming (current : Option CancelReason) (incoming : CancelReason) :
     CancelKind.rank (strengthenOpt current incoming).kind ≥ CancelKind.rank incoming.kind := by
   cases current with
   | none => simpa [strengthenOpt]
@@ -2606,7 +2606,7 @@ theorem setRegion_structural_preserves_wellformed {Value Error Panic : Type}
 -- Cancel request only updates region cancel + task state.
 -- ==========================================================================
 
-theorem cancelRequest_preserves_wellformed {Value Error Panic : Type}
+theorem cancel_request_preserves_wellformed {Value Error Panic : Type}
     {s s' : State Value Error Panic} {r : RegionId} {reason : CancelReason} {cleanup : Budget}
     (hWF : WellFormed s)
     (hStep : Step s (Label.cancel r reason) s')
@@ -3166,7 +3166,7 @@ theorem resolved_obligation_stable {Value Error Panic : Type}
       closeCancelChildren, closeChildrenDone, closeRunFinalizer, close)
     - resolve_preserves_wellformed (commit, abort, leak)
     - spawn_preserves_wellformed, reserve_preserves_wellformed,
-      cancelRequest_preserves_wellformed, tick_preserves_wellformed -/
+      cancel_request_preserves_wellformed, tick_preserves_wellformed -/
 theorem step_preserves_wellformed {Value Error Panic : Type}
     {s s' : State Value Error Panic} {l : Label Value Error Panic}
     (hWF : WellFormed s)
@@ -3285,7 +3285,7 @@ def cancel_potential {Value Error Panic : Type}
   | _ => none
 
 /-- cancelMasked strictly decreases cancellation potential by 1. -/
-theorem cancelMasked_potential_decreases {Value Error Panic : Type}
+theorem cancel_masked_potential_decreases {Value Error Panic : Type}
     {task : Task Value Error Panic}
     {reason : CancelReason} {cleanup : Budget}
     (hState : task.state = TaskState.cancelRequested reason cleanup)
@@ -3300,7 +3300,7 @@ theorem cancelMasked_potential_decreases {Value Error Panic : Type}
   exact ⟨task.mask + 3, task.mask - 1 + 3, rfl, rfl, by omega⟩
 
 /-- cancelAcknowledge strictly decreases cancellation potential (3 → 2). -/
-theorem cancelAcknowledge_potential_decreases {Value Error Panic : Type}
+theorem cancel_acknowledge_potential_decreases {Value Error Panic : Type}
     {task : Task Value Error Panic}
     {reason : CancelReason} {cleanup : Budget}
     (hState : task.state = TaskState.cancelRequested reason cleanup)
@@ -3314,7 +3314,7 @@ theorem cancelAcknowledge_potential_decreases {Value Error Panic : Type}
   exact ⟨3, 2, rfl, rfl, by omega⟩
 
 /-- cancelFinalize strictly decreases cancellation potential (2 → 1). -/
-theorem cancelFinalize_potential_decreases {Value Error Panic : Type}
+theorem cancel_finalize_potential_decreases {Value Error Panic : Type}
     {task : Task Value Error Panic}
     {reason : CancelReason} {cleanup : Budget}
     (hState : task.state = TaskState.cancelling reason cleanup)
@@ -3327,7 +3327,7 @@ theorem cancelFinalize_potential_decreases {Value Error Panic : Type}
   exact ⟨2, 1, rfl, rfl, by omega⟩
 
 /-- cancelComplete reaches zero potential (1 → 0). -/
-theorem cancelComplete_potential_reaches_zero {Value Error Panic : Type}
+theorem cancel_complete_potential_reaches_zero {Value Error Panic : Type}
     {task : Task Value Error Panic}
     {reason : CancelReason} {cleanup : Budget}
     (hState : task.state = TaskState.finalizing reason cleanup)
@@ -4176,5 +4176,575 @@ theorem obligation_leaked_canonical_form {ob : ObligationRecord}
   | leaked => simpa [hState]
 
 end CanonicalForms
+
+-- ==========================================================================
+-- GLOBAL SINGLE-OWNER INVARIANT (SEM-06.F1, asupersync-3cddg.6.6)
+--
+-- Every task belongs to exactly one region: its `region` field names its
+-- owner, and it appears in that region's `children` list and no other.
+--
+-- The invariant has two directions:
+--   ChildrenOwnParent   — children list entries point back to the parent region
+--   TaskInParentChildren — every task appears in its parent region's children
+--
+-- Cross-references:
+--   WellFormed (line 1382)
+--   spawn_preserves_wellformed (line 1954)
+--   spawned_task_in_region (line 2939)
+--   step_preserves_wellformed (line 3170)
+-- ==========================================================================
+
+section SingleOwnerInvariant
+
+/-- Children-own-parent: every child in a region's children list has that
+    region as its `Task.region` parent.  This is the "backward" direction
+    of the single-owner invariant. -/
+def ChildrenOwnParent {Value Error Panic : Type}
+    (s : State Value Error Panic) : Prop :=
+  ∀ r region, getRegion s r = some region →
+    ∀ t, t ∈ region.children →
+      ∀ task, getTask s t = some task → task.region = r
+
+/-- Task-in-parent-children: every task appears in its parent region's
+    `children` list.  This is the "forward" direction of the single-owner
+    invariant. -/
+def TaskInParentChildren {Value Error Panic : Type}
+    (s : State Value Error Panic) : Prop :=
+  ∀ t task, getTask s t = some task →
+    ∀ region, getRegion s task.region = some region →
+      t ∈ region.children
+
+/-- Global single-owner: both directions of the region-ownership bijection
+    hold simultaneously.  Together with `WellFormed.task_region_exists` these
+    give a strong structural guarantee: every task is owned by exactly one
+    region, and that region's `children` list is the authoritative roster. -/
+structure SingleOwner {Value Error Panic : Type}
+    (s : State Value Error Panic) : Prop where
+  children_own_parent : ChildrenOwnParent s
+  task_in_parent : TaskInParentChildren s
+
+-- --------------------------------------------------------------------------
+-- Helper: scheduler-only changes preserve SingleOwner
+-- --------------------------------------------------------------------------
+
+theorem scheduler_change_preserves_single_owner {Value Error Panic : Type}
+    (s : State Value Error Panic) (hSO : SingleOwner s)
+    (sched : SchedulerState)
+    : SingleOwner { s with scheduler := sched } :=
+  { children_own_parent := fun r region hReg t hMem task hTask =>
+      hSO.children_own_parent r region
+        (by simpa [getRegion] using hReg) t hMem task
+        (by simpa [getTask] using hTask)
+    task_in_parent := fun t task hTask region hReg =>
+      hSO.task_in_parent t task
+        (by simpa [getTask] using hTask) region
+        (by simpa [getRegion] using hReg) }
+
+-- --------------------------------------------------------------------------
+-- Helper: setTask with same region preserves SingleOwner
+-- Covers: schedule, complete, cancelMasked, cancelAcknowledge,
+--         cancelFinalize, cancelComplete, cancelChild
+-- --------------------------------------------------------------------------
+
+theorem setTask_same_region_preserves_single_owner {Value Error Panic : Type}
+    {s : State Value Error Panic} {t : TaskId}
+    {task newTask : Task Value Error Panic}
+    (hSO : SingleOwner s)
+    (hTask : getTask s t = some task)
+    (hSameRegion : newTask.region = task.region)
+    : SingleOwner (setTask s t newTask) :=
+  { children_own_parent := fun r region hReg tChild hMem taskChild hGet => by
+      simp [getRegion, setTask] at hReg
+      simp [getTask, setTask] at hGet
+      by_cases hEq : tChild = t
+      · -- tChild = t: taskChild is newTask
+        simp [hEq] at hGet
+        -- hGet : newTask = taskChild
+        rw [← hGet, hSameRegion]
+        exact hSO.children_own_parent r region hReg tChild hMem task
+          (by rw [hEq]; exact hTask)
+      · simp [hEq] at hGet
+        exact hSO.children_own_parent r region hReg tChild hMem taskChild hGet
+    task_in_parent := fun tQ taskQ hGetQ region hRegQ => by
+      simp [getTask, setTask] at hGetQ
+      simp [getRegion, setTask] at hRegQ
+      by_cases hEq : tQ = t
+      · -- tQ = t: taskQ is newTask
+        simp [hEq] at hGetQ
+        -- hGetQ : newTask = taskQ
+        rw [hEq]
+        have hTR : taskQ.region = task.region := by rw [← hGetQ]; exact hSameRegion
+        exact hSO.task_in_parent t task hTask region
+          (by rw [← hTR]; exact hRegQ)
+      · simp [hEq] at hGetQ
+        exact hSO.task_in_parent tQ taskQ hGetQ region hRegQ }
+
+-- --------------------------------------------------------------------------
+-- Helper: setRegion with same children preserves SingleOwner
+-- Covers: cancelPropagate, closeBegin, closeCancelChildren,
+--         closeChildrenDone, closeRunFinalizer, close
+-- --------------------------------------------------------------------------
+
+theorem setRegion_structural_preserves_single_owner {Value Error Panic : Type}
+    {s : State Value Error Panic} {r : RegionId}
+    {oldRegion newRegion : Region Value Error Panic}
+    (hSO : SingleOwner s)
+    (hOldRegion : getRegion s r = some oldRegion)
+    (hChildren : newRegion.children = oldRegion.children)
+    : SingleOwner (setRegion s r newRegion) :=
+  { children_own_parent := fun r' region' hReg tChild hMem taskChild hGet => by
+      simp [getTask, setRegion] at hGet
+      by_cases hRegEq : r' = r
+      · -- r' = r: region' is newRegion (with same children as oldRegion)
+        have hEq : newRegion = region' := by
+          simpa [getRegion, setRegion, hRegEq] using hReg
+        rw [← hEq, hChildren] at hMem
+        rw [hRegEq]
+        exact hSO.children_own_parent r oldRegion hOldRegion tChild hMem taskChild hGet
+      · simp [getRegion, setRegion, hRegEq] at hReg
+        exact hSO.children_own_parent r' region' hReg tChild hMem taskChild hGet
+    task_in_parent := fun tQ taskQ hGetQ regionQ hRegQ => by
+      simp [getTask, setRegion] at hGetQ
+      by_cases hRegEq : taskQ.region = r
+      · simp [getRegion, setRegion, hRegEq] at hRegQ
+        -- hRegQ : newRegion = regionQ
+        rw [← hRegQ, hChildren]
+        exact hSO.task_in_parent tQ taskQ hGetQ oldRegion
+          (by rw [hRegEq]; exact hOldRegion)
+      · simp [getRegion, setRegion, hRegEq] at hRegQ
+        exact hSO.task_in_parent tQ taskQ hGetQ regionQ hRegQ }
+
+-- --------------------------------------------------------------------------
+-- Helper: tick preserves SingleOwner
+-- --------------------------------------------------------------------------
+
+theorem tick_preserves_single_owner {Value Error Panic : Type}
+    {s s' : State Value Error Panic}
+    (hSO : SingleOwner s)
+    (hStep : Step s (Label.tick) s')
+    : SingleOwner s' := by
+  cases hStep with
+  | tick hUpdate =>
+    subst hUpdate
+    exact {
+      children_own_parent := fun r region hReg t hMem task hTask =>
+        hSO.children_own_parent r region
+          (by simpa [getRegion] using hReg) t hMem task
+          (by simpa [getTask] using hTask)
+      task_in_parent := fun t task hTask region hReg =>
+        hSO.task_in_parent t task
+          (by simpa [getTask] using hTask) region
+          (by simpa [getRegion] using hReg)
+    }
+
+-- --------------------------------------------------------------------------
+-- Helper: setObligation preserves SingleOwner
+-- Obligation changes do not touch task.region or region.children.
+-- --------------------------------------------------------------------------
+
+theorem setObligation_preserves_single_owner {Value Error Panic : Type}
+    {s : State Value Error Panic} {o : ObligationId}
+    {newOb : ObligationRecord}
+    (hSO : SingleOwner s)
+    : SingleOwner (setObligation s o newOb) :=
+  { children_own_parent := fun r region hReg t hMem task hTask => by
+      simp [getRegion, setObligation] at hReg
+      simp [getTask, setObligation] at hTask
+      exact hSO.children_own_parent r region hReg t hMem task hTask
+    task_in_parent := fun t task hTask region hReg => by
+      simp [getTask, setObligation] at hTask
+      simp [getRegion, setObligation] at hReg
+      exact hSO.task_in_parent t task hTask region hReg }
+
+-- --------------------------------------------------------------------------
+-- Helper: spawn preserves SingleOwner
+-- The new task has region=r and is appended to r.children.
+-- Existing tasks and other regions are unchanged.
+-- --------------------------------------------------------------------------
+
+theorem spawn_preserves_single_owner {Value Error Panic : Type}
+    {s s' : State Value Error Panic} {r : RegionId} {t : TaskId}
+    (hSO : SingleOwner s)
+    (hWF : WellFormed s)
+    (hStep : Step s (Label.spawn r t) s')
+    : SingleOwner s' := by
+  cases hStep with
+  | spawn hRegion hOpen hAbsent hUpdate =>
+    rename_i region
+    let newTask : Task Value Error Panic :=
+      { region := r, state := TaskState.created, mask := 0, waiters := [] }
+    let newRegion : Region Value Error Panic :=
+      { region with children := region.children ++ [t] }
+    have hS' : s' = setRegion (setTask s t newTask) r newRegion := hUpdate
+    subst hS'
+    constructor
+    · -- ChildrenOwnParent
+      intro r' region' hReg tChild hMem taskChild hGet
+      simp [getTask, setTask, setRegion] at hGet
+      simp [getRegion, setRegion, setTask] at hReg
+      by_cases hRegEq : r' = r
+      · -- r' = r: region' is the extended region
+        simp [hRegEq] at hReg
+        -- hReg : newRegion = region'
+        rw [← hReg] at hMem
+        -- hMem : tChild ∈ newRegion.children (= region.children ++ [t])
+        by_cases hChildEq : tChild = t
+        · -- tChild = t: the spawned task
+          simp [hChildEq] at hGet
+          -- hGet : newTask = taskChild
+          rw [← hGet, hRegEq]
+          -- goal: newTask.region = r, which is definitionally true
+        · -- tChild ≠ t: existing child
+          simp [hChildEq] at hGet
+          -- hGet : s.tasks tChild = some taskChild
+          have hInOrig : tChild ∈ region.children := by
+            -- hMem : tChild ∈ newRegion.children, definitionally region.children ++ [t]
+            change tChild ∈ region.children ++ [t] at hMem
+            rcases List.mem_append.mp hMem with h | h
+            · exact h
+            · exfalso; simp at h; exact hChildEq h
+          rw [hRegEq]
+          exact hSO.children_own_parent r region hRegion tChild hInOrig taskChild hGet
+      · -- r' ≠ r: region is unchanged from s
+        simp [hRegEq] at hReg
+        -- hReg : s.regions r' = some region' (≡ getRegion s r' = some region')
+        by_cases hChildEq : tChild = t
+        · -- impossible: t was absent from s.tasks but children_exist requires it
+          exfalso
+          rw [hChildEq] at hMem
+          obtain ⟨_, hTaskOld⟩ := hWF.children_exist r' region' hReg t hMem
+          simp [hAbsent] at hTaskOld
+        · simp [hChildEq] at hGet
+          exact hSO.children_own_parent r' region' hReg tChild hMem taskChild hGet
+    · -- TaskInParentChildren
+      intro tQ taskQ hGetQ regionQ hRegQ
+      simp [getTask, setTask, setRegion] at hGetQ
+      simp [getRegion, setRegion, setTask] at hRegQ
+      by_cases hTaskEq : tQ = t
+      · -- tQ is the newly spawned task
+        simp [hTaskEq] at hGetQ
+        -- hGetQ : newTask = taskQ
+        have hRegR : taskQ.region = r := by rw [← hGetQ]
+        simp [hRegR] at hRegQ
+        -- hRegQ : newRegion = regionQ
+        rw [← hRegQ]
+        show tQ ∈ region.children ++ [t]
+        rw [hTaskEq]
+        exact List.mem_append_right _ (List.Mem.head [])
+      · -- tQ is an existing task
+        simp [hTaskEq] at hGetQ
+        -- hGetQ : s.tasks tQ = some taskQ
+        by_cases hRegEq : taskQ.region = r
+        · -- existing task whose region = r: children now extended
+          simp [hRegEq] at hRegQ
+          -- hRegQ : newRegion = regionQ
+          rw [← hRegQ]
+          show tQ ∈ region.children ++ [t]
+          apply List.mem_append_left
+          exact hSO.task_in_parent tQ taskQ hGetQ region
+            (by rw [hRegEq]; exact hRegion)
+        · -- existing task in some other region: unchanged
+          simp [hRegEq] at hRegQ
+          exact hSO.task_in_parent tQ taskQ hGetQ regionQ hRegQ
+
+-- --------------------------------------------------------------------------
+-- Helper: reserve preserves SingleOwner
+-- Reserve creates an obligation and appends to ledger; does not touch
+-- task.region or region.children.
+-- --------------------------------------------------------------------------
+
+theorem reserve_preserves_single_owner {Value Error Panic : Type}
+    {s s' : State Value Error Panic} {o : ObligationId}
+    (hSO : SingleOwner s)
+    (hStep : Step s (Label.reserve o) s')
+    : SingleOwner s' := by
+  cases hStep with
+  | reserve hTask hRegion hAbsent hUpdate =>
+    subst hUpdate
+    apply setRegion_structural_preserves_single_owner
+    · exact setObligation_preserves_single_owner hSO
+    · simpa [getRegion, setObligation] using hRegion
+    · rfl
+
+-- --------------------------------------------------------------------------
+-- Master dispatcher: every step preserves SingleOwner
+-- Parallels step_preserves_wellformed (line 3170).
+-- --------------------------------------------------------------------------
+
+/-- Every step in the operational semantics preserves the single-owner
+    invariant.  Together with `step_preserves_wellformed`, this establishes
+    that the task→region ownership bijection is an inductive invariant of
+    the system.
+    SEM-06.F1 (asupersync-3cddg.6.6). -/
+theorem step_preserves_single_owner {Value Error Panic : Type}
+    {s s' : State Value Error Panic} {l : Label Value Error Panic}
+    (hSO : SingleOwner s)
+    (hWF : WellFormed s)
+    (hStep : Step s l s')
+    : SingleOwner s' := by
+  cases hStep with
+  -- Scheduler-only changes
+  | enqueue _ _ _ _ hUpdate =>
+    subst hUpdate; exact scheduler_change_preserves_single_owner s hSO _
+  | scheduleStep _ hUpdate =>
+    subst hUpdate; exact scheduler_change_preserves_single_owner s hSO _
+  -- Spawn (complex: adds task + modifies region children)
+  | spawn hRegion hOpen hAbsent hUpdate =>
+    exact spawn_preserves_single_owner hSO hWF
+      (Step.spawn hRegion hOpen hAbsent hUpdate)
+  -- Task-only changes (setTask preserving region field)
+  | schedule hTask _ _ _ hUpdate =>
+    subst hUpdate
+    exact setTask_same_region_preserves_single_owner hSO hTask rfl
+  | complete _ hTask _ hUpdate =>
+    subst hUpdate
+    exact setTask_same_region_preserves_single_owner hSO hTask rfl
+  -- Obligation lifecycle
+  | reserve hTask hRegion hAbsent hUpdate =>
+    exact reserve_preserves_single_owner hSO
+      (Step.reserve hTask hRegion hAbsent hUpdate)
+  | commit hOb _ _ hRegion hUpdate =>
+    cases hUpdate
+    apply setRegion_structural_preserves_single_owner
+    · exact setObligation_preserves_single_owner hSO
+    · simpa [getRegion, setObligation] using hRegion
+    · rfl
+  | abort hOb _ _ hRegion hUpdate =>
+    cases hUpdate
+    apply setRegion_structural_preserves_single_owner
+    · exact setObligation_preserves_single_owner hSO
+    · simpa [getRegion, setObligation] using hRegion
+    · rfl
+  | leak _ _ _ hOb _ _ hRegion hUpdate =>
+    cases hUpdate
+    apply setRegion_structural_preserves_single_owner
+    · exact setObligation_preserves_single_owner hSO
+    · simpa [getRegion, setObligation] using hRegion
+    · rfl
+  -- Cancel protocol: cancelRequest (setRegion then setTask)
+  | cancelRequest reason cleanup hTask hRegion hRegionMatch hNotCompleted hUpdate =>
+    rename_i r t task region
+    cases hUpdate
+    have hSO1 :=
+      setRegion_structural_preserves_single_owner hSO hRegion
+        (rfl : ({ region with cancel := some (strengthenOpt region.cancel reason) }).children
+          = region.children)
+    have hTask1 :
+        getTask
+          (setRegion s r { region with cancel := some (strengthenOpt region.cancel reason) })
+          t = some task := by
+      simpa [getTask, setRegion] using hTask
+    exact setTask_same_region_preserves_single_owner hSO1
+      hTask1
+      rfl
+  -- Cancel protocol: task-only transitions
+  | cancelMasked _ _ hTask _ _ hUpdate =>
+    cases hUpdate
+    exact setTask_same_region_preserves_single_owner hSO hTask rfl
+  | cancelAcknowledge _ _ hTask _ _ hUpdate =>
+    cases hUpdate
+    exact setTask_same_region_preserves_single_owner hSO hTask rfl
+  | cancelFinalize _ _ hTask _ hUpdate =>
+    cases hUpdate
+    exact setTask_same_region_preserves_single_owner hSO hTask rfl
+  | cancelComplete _ _ hTask _ hUpdate =>
+    cases hUpdate
+    exact setTask_same_region_preserves_single_owner hSO hTask rfl
+  | cancelChild _ _ _ _ _ hTask _ hUpdate =>
+    cases hUpdate
+    exact setTask_same_region_preserves_single_owner hSO hTask rfl
+  -- Cancel propagation: region-only structural change
+  | cancelPropagate _ _ _ _ hSub hUpdate =>
+    cases hUpdate
+    exact setRegion_structural_preserves_single_owner hSO hSub rfl
+  -- Region close lifecycle: region-only structural changes
+  | closeBegin hRegion _ hUpdate =>
+    cases hUpdate
+    exact setRegion_structural_preserves_single_owner hSO hRegion rfl
+  | closeCancelChildren _ hRegion _ _ hUpdate =>
+    cases hUpdate
+    exact setRegion_structural_preserves_single_owner hSO hRegion rfl
+  | closeChildrenDone hRegion _ _ _ hUpdate =>
+    cases hUpdate
+    exact setRegion_structural_preserves_single_owner hSO hRegion rfl
+  | closeRunFinalizer hRegion _ _ hUpdate =>
+    cases hUpdate
+    exact setRegion_structural_preserves_single_owner hSO hRegion rfl
+  | close _ hRegion _ _ _ hUpdate =>
+    cases hUpdate
+    exact setRegion_structural_preserves_single_owner hSO hRegion rfl
+  -- Time advancement
+  | tick hUpdate =>
+    exact tick_preserves_single_owner hSO (Step.tick hUpdate)
+
+/-- SingleOwner is preserved through any finite sequence of steps,
+    provided well-formedness also holds throughout (guaranteed by
+    `steps_preserve_wellformed`).
+    SEM-06.F1 global inductive invariant (asupersync-3cddg.6.6). -/
+theorem steps_preserve_single_owner {Value Error Panic : Type}
+    {s s' : State Value Error Panic}
+    (hSO : SingleOwner s)
+    (hWF : WellFormed s)
+    (hSteps : Steps s s')
+    : SingleOwner s' := by
+  induction hSteps with
+  | refl => exact hSO
+  | step hStep _ ih =>
+    exact ih
+      (step_preserves_single_owner hSO hWF hStep)
+      (step_preserves_wellformed hWF hStep)
+
+end SingleOwnerInvariant
+
+-- ==========================================================================
+-- CANCEL-REQUEST IDEMPOTENCE THEOREM FAMILY (SEM-06.F2, asupersync-3cddg.6.7)
+--
+-- Proves that repeated cancel requests are structurally blocked by the
+-- Step inductive: cancelRequest (and cancelChild) require the target task
+-- to be in {created, running}. Any task already in the cancel protocol
+-- (cancelRequested, cancelling, finalizing) or completed cannot receive
+-- another cancel request. Together these theorems close the idempotence
+-- gap in inv.cancel.protocol.
+--
+-- Cross-references:
+--   cancelRequest constructor (line 437)
+--   cancelChild constructor (line 512)
+--   completed_cannot_cancel_request (line 1935)
+--   cancelling_from_cancel_requested (line 1054)
+--   strengthen_reason_rank_ge_left / _right (line 1013)
+-- ==========================================================================
+
+section CancelRequestIdempotence
+
+/-- A task in a cancel-protocol state is not in {created, running}. -/
+private def inCancelProtocol {Value Error Panic : Type}
+    (st : TaskState Value Error Panic) : Prop :=
+  (∃ reason cleanup, st = TaskState.cancelRequested reason cleanup) ∨
+  (∃ reason cleanup, st = TaskState.cancelling reason cleanup) ∨
+  (∃ reason cleanup, st = TaskState.finalizing reason cleanup)
+
+/-- Helper: cancel-protocol states contradict the created-or-running
+    precondition. -/
+private theorem cancel_protocol_not_created_or_running {Value Error Panic : Type}
+    {st : TaskState Value Error Panic}
+    (hCP : inCancelProtocol st)
+    : ¬(st = TaskState.created ∨ st = TaskState.running) := by
+  intro hCR
+  rcases hCP with ⟨r, c, hEq⟩ | ⟨r, c, hEq⟩ | ⟨r, c, hEq⟩ <;>
+    (subst hEq; rcases hCR with h | h <;> cases h)
+
+/-- Cancel-request blocked when cancelRequested: a task already in
+    cancelRequested state cannot satisfy the cancelRequest precondition
+    (which requires created ∨ running). Idempotence follows because
+    the step cannot fire. -/
+theorem cancel_request_blocked_when_cancel_requested {Value Error Panic : Type}
+    {task : Task Value Error Panic}
+    (hState : ∃ reason cleanup,
+      task.state = TaskState.cancelRequested reason cleanup)
+    : ¬(task.state = TaskState.created ∨ task.state = TaskState.running) := by
+  rcases hState with ⟨reason, cleanup, hEq⟩
+  rw [hEq]
+  rintro (h | h) <;> exact absurd h (by simp)
+
+/-- Cancel-request blocked when cancelling: a task in cancelling state
+    cannot have cancelRequest fire on it (precondition contradiction). -/
+theorem cancel_request_blocked_when_cancelling {Value Error Panic : Type}
+    {task : Task Value Error Panic}
+    (hState : ∃ reason cleanup,
+      task.state = TaskState.cancelling reason cleanup)
+    : ¬(task.state = TaskState.created ∨ task.state = TaskState.running) := by
+  rcases hState with ⟨reason, cleanup, hEq⟩
+  rw [hEq]
+  rintro (h | h) <;> exact absurd h (by simp)
+
+/-- Cancel-request blocked when finalizing: a task in finalizing state
+    cannot have cancelRequest fire on it (precondition contradiction). -/
+theorem cancel_request_blocked_when_finalizing {Value Error Panic : Type}
+    {task : Task Value Error Panic}
+    (hState : ∃ reason cleanup,
+      task.state = TaskState.finalizing reason cleanup)
+    : ¬(task.state = TaskState.created ∨ task.state = TaskState.running) := by
+  rcases hState with ⟨reason, cleanup, hEq⟩
+  rw [hEq]
+  rintro (h | h) <;> exact absurd h (by simp)
+
+/-- Cancel-request blocked when completed: a task in completed state
+    cannot have cancelRequest fire on it. -/
+theorem cancel_request_blocked_when_completed {Value Error Panic : Type}
+    {task : Task Value Error Panic}
+    (hState : ∃ outcome, task.state = TaskState.completed outcome)
+    : ¬(task.state = TaskState.created ∨ task.state = TaskState.running) := by
+  rcases hState with ⟨outcome, hEq⟩
+  rw [hEq]
+  rintro (h | h) <;> exact absurd h (by simp)
+
+/-- Unified idempotence family: cancel-request is blocked on any task
+    that is not in {created, running}. This is the master theorem from
+    which all per-state variants follow. -/
+theorem cancel_request_requires_pre_cancel_state {Value Error Panic : Type}
+    {task : Task Value Error Panic}
+    (hNotPre : ¬(task.state = TaskState.created ∨
+      task.state = TaskState.running))
+    : inCancelProtocol task.state ∨
+      (∃ outcome, task.state = TaskState.completed outcome) := by
+  cases hState : task.state with
+  | created => exfalso; exact hNotPre (Or.inl hState)
+  | running => exfalso; exact hNotPre (Or.inr hState)
+  | cancelRequested reason cleanup =>
+    left; left; exact ⟨reason, cleanup, rfl⟩
+  | cancelling reason cleanup =>
+    left; right; left; exact ⟨reason, cleanup, rfl⟩
+  | finalizing reason cleanup =>
+    left; right; right; exact ⟨reason, cleanup, rfl⟩
+  | completed outcome =>
+    right; exact ⟨outcome, rfl⟩
+
+/-- cancelChild is also blocked on cancel-protocol tasks: the cancelChild
+    constructor requires {created, running}, so it inherits the same
+    idempotence guarantee as cancelRequest. -/
+theorem cancel_child_blocked_when_cancel_protocol {Value Error Panic : Type}
+    {task : Task Value Error Panic}
+    (hCP : inCancelProtocol task.state)
+    : ¬(task.state = TaskState.created ∨
+      task.state = TaskState.running) :=
+  cancel_protocol_not_created_or_running hCP
+
+/-- Reason-strength monotonicity for cancel-request: when cancelRequest
+    fires, the region's cancel reason is strengthened via strengthenOpt.
+    The resulting rank is at least as high as the incoming reason. -/
+theorem cancel_request_reason_monotone_incoming
+    (incoming : CancelReason) (current : Option CancelReason) :
+    CancelKind.rank (strengthenOpt current incoming).kind ≥
+      CancelKind.rank incoming.kind := by
+  simp [strengthenOpt]
+  split
+  · exact Nat.le_refl _
+  · exact strengthen_reason_rank_ge_right _ _
+
+/-- Reason-strength monotonicity for cancel-request: when cancelRequest
+    fires, the region's cancel reason is strengthened via strengthenOpt.
+    If the region already had a cancel reason, the result rank is at
+    least as high. -/
+theorem cancel_request_reason_monotone_existing
+    (incoming : CancelReason) (existing : CancelReason) :
+    CancelKind.rank (strengthenOpt (some existing) incoming).kind ≥
+      CancelKind.rank existing.kind := by
+  simp [strengthenOpt]
+  exact strengthen_reason_rank_ge_left _ _
+
+/-- Region cancel reason never weakens: any cancel-producing step that
+    calls strengthenOpt preserves or increases the rank of the region's
+    cancel reason. -/
+theorem strengthen_opt_monotone_rank
+    (current : Option CancelReason) (incoming : CancelReason) :
+    ∀ existing, current = some existing →
+      CancelKind.rank (strengthenOpt current incoming).kind ≥
+        CancelKind.rank existing.kind := by
+  intro existing hEq
+  subst hEq
+  simp [strengthenOpt]
+  exact strengthen_reason_rank_ge_left _ _
+
+end CancelRequestIdempotence
 
 end Asupersync

@@ -11,6 +11,7 @@
     {
       "line": 319,
       "constructor": "enqueue",
+      "rule_id": "step.enqueue",
       "status": "covered",
       "mapped_theorems": [
         "enqueue_preserves_wellformed_constructor",
@@ -21,6 +22,7 @@
     {
       "line": 331,
       "constructor": "scheduleStep",
+      "rule_id": "step.scheduleStep",
       "status": "covered",
       "mapped_theorems": [
         "popNext_cancel_priority",
@@ -40,6 +42,7 @@
     {
       "line": 337,
       "constructor": "spawn",
+      "rule_id": "step.spawn",
       "status": "covered",
       "mapped_theorems": [
         "spawn_preserves_existing_task",
@@ -55,6 +58,7 @@
     {
       "line": 351,
       "constructor": "schedule",
+      "rule_id": "step.schedule",
       "status": "covered",
       "mapped_theorems": [
         "schedule_preserves_wellformed_constructor",
@@ -66,6 +70,7 @@
     {
       "line": 365,
       "constructor": "complete",
+      "rule_id": "step.complete",
       "status": "covered",
       "mapped_theorems": [
         "complete_preserves_region",
@@ -77,6 +82,7 @@
     {
       "line": 374,
       "constructor": "reserve",
+      "rule_id": "step.reserve",
       "status": "covered",
       "mapped_theorems": [
         "reserve_creates_reserved",
@@ -90,6 +96,7 @@
     {
       "line": 389,
       "constructor": "commit",
+      "rule_id": "step.commit",
       "status": "covered",
       "mapped_theorems": [
         "commit_resolves",
@@ -103,6 +110,7 @@
     {
       "line": 404,
       "constructor": "abort",
+      "rule_id": "step.abort",
       "status": "covered",
       "mapped_theorems": [
         "abort_resolves",
@@ -116,6 +124,7 @@
     {
       "line": 419,
       "constructor": "leak",
+      "rule_id": "step.leak",
       "status": "covered",
       "mapped_theorems": [
         "leak_marks_leaked",
@@ -128,53 +137,66 @@
     {
       "line": 437,
       "constructor": "cancelRequest",
+      "rule_id": "step.cancelRequest",
       "status": "covered",
       "mapped_theorems": [
         "cancel_request_preserves_obligation",
-        "cancelling_from_cancelRequested",
+        "cancelling_from_cancel_requested",
         "task_cancel_requested_canonical_form",
-        "cancelRequest_preserves_wellformed",
+        "cancel_request_preserves_wellformed",
         "cancel_step_strengthens_reason",
-        "cancel_label_preserves_region_structure"
+        "cancel_label_preserves_region_structure",
+        "cancel_request_blocked_when_cancel_requested",
+        "cancel_request_blocked_when_cancelling",
+        "cancel_request_blocked_when_finalizing",
+        "cancel_request_blocked_when_completed",
+        "cancel_request_requires_pre_cancel_state",
+        "cancel_request_reason_monotone_incoming",
+        "cancel_request_reason_monotone_existing",
+        "strengthen_opt_monotone_rank"
       ]
     },
     {
       "line": 456,
       "constructor": "cancelMasked",
+      "rule_id": "step.cancelMasked",
       "status": "covered",
       "mapped_theorems": [
         "cancel_masked_step",
-        "cancelMasked_potential_decreases"
+        "cancel_masked_potential_decreases"
       ]
     },
     {
       "line": 470,
       "constructor": "cancelAcknowledge",
+      "rule_id": "step.cancelAcknowledge",
       "status": "covered",
       "mapped_theorems": [
         "cancel_ack_step",
         "task_cancelling_canonical_form",
-        "cancelAcknowledge_potential_decreases"
+        "cancel_acknowledge_potential_decreases"
       ]
     },
     {
       "line": 480,
       "constructor": "cancelFinalize",
+      "rule_id": "step.cancelFinalize",
       "status": "covered",
       "mapped_theorems": [
         "cancel_finalize_step",
         "task_finalizing_canonical_form",
-        "cancelFinalize_potential_decreases"
+        "cancel_finalize_potential_decreases"
       ]
     },
     {
       "line": 489,
       "constructor": "cancelComplete",
+      "rule_id": "step.cancelComplete",
       "status": "covered",
       "mapped_theorems": [
         "cancel_complete_step",
         "cancel_complete_produces_cancelled",
-        "cancelComplete_potential_reaches_zero",
+        "cancel_complete_potential_reaches_zero",
         "cancel_protocol_terminates",
         "cancel_terminates_from_cancelling",
         "cancel_terminates_from_finalizing",
@@ -184,6 +206,7 @@
     {
       "line": 500,
       "constructor": "cancelPropagate",
+      "rule_id": "step.cancelPropagate",
       "status": "covered",
       "mapped_theorems": [
         "cancel_propagation_bounded",
@@ -193,18 +216,21 @@
     {
       "line": 514,
       "constructor": "cancelChild",
+      "rule_id": "step.cancelChild",
       "status": "covered",
       "mapped_theorems": [
         "cancelChild_preserves_wellformed_constructor",
         "cancel_label_preserves_region_structure",
         "cancel_propagation_bounded",
         "step_preserves_wellformed",
-        "steps_preserve_wellformed"
+        "steps_preserve_wellformed",
+        "cancel_child_blocked_when_cancel_protocol"
       ]
     },
     {
       "line": 531,
       "constructor": "closeBegin",
+      "rule_id": "step.closeBegin",
       "status": "covered",
       "mapped_theorems": [
         "close_begin_step",
@@ -214,6 +240,7 @@
     {
       "line": 540,
       "constructor": "closeCancelChildren",
+      "rule_id": "step.closeCancelChildren",
       "status": "covered",
       "mapped_theorems": [
         "close_cancel_children_step",
@@ -225,6 +252,7 @@
     {
       "line": 558,
       "constructor": "closeChildrenDone",
+      "rule_id": "step.closeChildrenDone",
       "status": "covered",
       "mapped_theorems": [
         "close_children_done_step",
@@ -235,6 +263,7 @@
     {
       "line": 569,
       "constructor": "closeRunFinalizer",
+      "rule_id": "step.closeRunFinalizer",
       "status": "covered",
       "mapped_theorems": [
         "close_run_finalizer_step"
@@ -243,6 +272,7 @@
     {
       "line": 579,
       "constructor": "close",
+      "rule_id": "step.close",
       "status": "covered",
       "mapped_theorems": [
         "close_complete_step",
@@ -256,6 +286,7 @@
     {
       "line": 591,
       "constructor": "tick",
+      "rule_id": "step.tick",
       "status": "covered",
       "mapped_theorems": [
         "tick_always_available",

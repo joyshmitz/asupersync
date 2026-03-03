@@ -10,6 +10,13 @@
     "rule_id_must_exist_in_step_constructor_catalog": true,
     "enforce_via_test": "tests/lean_theorem_rule_traceability.rs"
   },
+  "traceability_summary": {
+    "row_count": 115,
+    "distinct_theorem_count": 104,
+    "distinct_rule_id_count": 22,
+    "rule_id_catalog_parity": "22/22 matched with step_constructor_coverage",
+    "audit_bead": "asupersync-3cddg.6.5"
+  },
   "rows": [
     {
       "theorem": "abort_preserves_wellformed",
@@ -107,7 +114,7 @@
       "rule_status": "covered"
     },
     {
-      "theorem": "cancelAcknowledge_potential_decreases",
+      "theorem": "cancel_acknowledge_potential_decreases",
       "theorem_line": 3186,
       "rule_id": "step.cancelAcknowledge",
       "semantic_intent": "Supports formal obligations for step.cancelAcknowledge",
@@ -221,7 +228,7 @@
       "rule_status": "partial"
     },
     {
-      "theorem": "cancelComplete_potential_reaches_zero",
+      "theorem": "cancel_complete_potential_reaches_zero",
       "theorem_line": 3213,
       "rule_id": "step.cancelComplete",
       "semantic_intent": "Supports formal obligations for step.cancelComplete",
@@ -354,7 +361,7 @@
       "rule_status": "covered"
     },
     {
-      "theorem": "cancelFinalize_potential_decreases",
+      "theorem": "cancel_finalize_potential_decreases",
       "theorem_line": 3200,
       "rule_id": "step.cancelFinalize",
       "semantic_intent": "Supports formal obligations for step.cancelFinalize",
@@ -392,7 +399,7 @@
       "rule_status": "covered"
     },
     {
-      "theorem": "cancelMasked_potential_decreases",
+      "theorem": "cancel_masked_potential_decreases",
       "theorem_line": 3171,
       "rule_id": "step.cancelMasked",
       "semantic_intent": "Supports formal obligations for step.cancelMasked",
@@ -468,7 +475,7 @@
       "rule_status": "covered"
     },
     {
-      "theorem": "cancelRequest_preserves_wellformed",
+      "theorem": "cancel_request_preserves_wellformed",
       "theorem_line": 2373,
       "rule_id": "step.cancelRequest",
       "semantic_intent": "Supports formal obligations for step.cancelRequest",
@@ -544,7 +551,7 @@
       "rule_status": "covered"
     },
     {
-      "theorem": "cancelling_from_cancelRequested",
+      "theorem": "cancelling_from_cancel_requested",
       "theorem_line": 1055,
       "rule_id": "step.cancelRequest",
       "semantic_intent": "Supports formal obligations for step.cancelRequest",
@@ -1969,6 +1976,199 @@
       "artifacts": [
         "formal/lean/Asupersync.lean:3983",
         "formal/lean/coverage/step_constructor_coverage.json"
+      ],
+      "rule_status": "covered"
+    },
+    {
+      "theorem": "step_preserves_single_owner",
+      "theorem_line": 4479,
+      "rule_id": "step.spawn",
+      "semantic_intent": "SingleOwner invariant preserved through spawn (adds task + extends children)",
+      "assumptions": [
+        "Pre-state is wellformed",
+        "Pre-state satisfies SingleOwner"
+      ],
+      "downstream_impact": [
+        "Closes SEM-06.F1 (asupersync-3cddg.6.6)",
+        "Feeds invariant_status_inventory.json upgrade to fully_proven"
+      ],
+      "artifacts": [
+        "formal/lean/Asupersync.lean:4479",
+        "formal/lean/coverage/invariant_status_inventory.json"
+      ],
+      "rule_status": "covered"
+    },
+    {
+      "theorem": "steps_preserve_single_owner",
+      "theorem_line": 4584,
+      "rule_id": "step.spawn",
+      "semantic_intent": "SingleOwner is an inductive invariant across all finite step sequences",
+      "assumptions": [
+        "Initial state is wellformed and satisfies SingleOwner"
+      ],
+      "downstream_impact": [
+        "Closes SEM-06.F1 global inductive invariant",
+        "Provides multi-step closure guarantee"
+      ],
+      "artifacts": [
+        "formal/lean/Asupersync.lean:4584",
+        "formal/lean/coverage/invariant_status_inventory.json"
+      ],
+      "rule_status": "covered"
+    },
+    {
+      "theorem": "cancel_request_blocked_when_cancel_requested",
+      "theorem_line": 4637,
+      "rule_id": "step.cancelRequest",
+      "semantic_intent": "Idempotence: cancelRequest precondition is unsatisfiable when task already cancelRequested.",
+      "assumptions": [
+        "Task state is cancelRequested"
+      ],
+      "downstream_impact": [
+        "Closes idempotence gap in inv.cancel.protocol",
+        "Feeds constructor coverage in formal/lean/coverage/step_constructor_coverage.json"
+      ],
+      "artifacts": [
+        "formal/lean/Asupersync.lean:4637",
+        "formal/lean/coverage/invariant_status_inventory.json"
+      ],
+      "rule_status": "covered"
+    },
+    {
+      "theorem": "cancel_request_blocked_when_cancelling",
+      "theorem_line": 4648,
+      "rule_id": "step.cancelRequest",
+      "semantic_intent": "Idempotence: cancelRequest precondition is unsatisfiable when task is cancelling.",
+      "assumptions": [
+        "Task state is cancelling"
+      ],
+      "downstream_impact": [
+        "Closes idempotence gap in inv.cancel.protocol",
+        "Feeds constructor coverage in formal/lean/coverage/step_constructor_coverage.json"
+      ],
+      "artifacts": [
+        "formal/lean/Asupersync.lean:4648",
+        "formal/lean/coverage/invariant_status_inventory.json"
+      ],
+      "rule_status": "covered"
+    },
+    {
+      "theorem": "cancel_request_blocked_when_finalizing",
+      "theorem_line": 4659,
+      "rule_id": "step.cancelRequest",
+      "semantic_intent": "Idempotence: cancelRequest precondition is unsatisfiable when task is finalizing.",
+      "assumptions": [
+        "Task state is finalizing"
+      ],
+      "downstream_impact": [
+        "Closes idempotence gap in inv.cancel.protocol",
+        "Feeds constructor coverage in formal/lean/coverage/step_constructor_coverage.json"
+      ],
+      "artifacts": [
+        "formal/lean/Asupersync.lean:4659",
+        "formal/lean/coverage/invariant_status_inventory.json"
+      ],
+      "rule_status": "covered"
+    },
+    {
+      "theorem": "cancel_request_blocked_when_completed",
+      "theorem_line": 4670,
+      "rule_id": "step.cancelRequest",
+      "semantic_intent": "Idempotence: cancelRequest precondition is unsatisfiable when task is completed.",
+      "assumptions": [
+        "Task state is completed"
+      ],
+      "downstream_impact": [
+        "Closes idempotence gap in inv.cancel.protocol",
+        "Feeds constructor coverage in formal/lean/coverage/step_constructor_coverage.json"
+      ],
+      "artifacts": [
+        "formal/lean/Asupersync.lean:4670",
+        "formal/lean/coverage/invariant_status_inventory.json"
+      ],
+      "rule_status": "covered"
+    },
+    {
+      "theorem": "cancel_request_requires_pre_cancel_state",
+      "theorem_line": 4680,
+      "rule_id": "step.cancelRequest",
+      "semantic_intent": "Master idempotence: any task not in {created, running} is in cancel-protocol or completed.",
+      "assumptions": [
+        "Task state is not created and not running"
+      ],
+      "downstream_impact": [
+        "Canonical theorem for cancel_request_idempotence family",
+        "Feeds constructor coverage in formal/lean/coverage/step_constructor_coverage.json"
+      ],
+      "artifacts": [
+        "formal/lean/Asupersync.lean:4680",
+        "formal/lean/coverage/invariant_status_inventory.json"
+      ],
+      "rule_status": "covered"
+    },
+    {
+      "theorem": "cancel_child_blocked_when_cancel_protocol",
+      "theorem_line": 4702,
+      "rule_id": "step.cancelChild",
+      "semantic_intent": "Idempotence: cancelChild is blocked on tasks already in cancel-protocol states.",
+      "assumptions": [
+        "Task state is in cancel-protocol (cancelRequested, cancelling, or finalizing)"
+      ],
+      "downstream_impact": [
+        "Extends idempotence guarantee to cancelChild constructor",
+        "Feeds constructor coverage in formal/lean/coverage/step_constructor_coverage.json"
+      ],
+      "artifacts": [
+        "formal/lean/Asupersync.lean:4702",
+        "formal/lean/coverage/step_constructor_coverage.json"
+      ],
+      "rule_status": "covered"
+    },
+    {
+      "theorem": "cancel_request_reason_monotone_incoming",
+      "theorem_line": 4712,
+      "rule_id": "step.cancelRequest",
+      "semantic_intent": "Monotonicity: strengthenOpt result rank >= incoming reason rank.",
+      "assumptions": [
+        "Any CancelReason and Option CancelReason"
+      ],
+      "downstream_impact": [
+        "Supports monotone reason-strength invariant across cancel protocol"
+      ],
+      "artifacts": [
+        "formal/lean/Asupersync.lean:4712"
+      ],
+      "rule_status": "covered"
+    },
+    {
+      "theorem": "cancel_request_reason_monotone_existing",
+      "theorem_line": 4722,
+      "rule_id": "step.cancelRequest",
+      "semantic_intent": "Monotonicity: strengthenOpt result rank >= existing reason rank.",
+      "assumptions": [
+        "Existing and incoming CancelReasons"
+      ],
+      "downstream_impact": [
+        "Supports monotone reason-strength invariant across cancel protocol"
+      ],
+      "artifacts": [
+        "formal/lean/Asupersync.lean:4722"
+      ],
+      "rule_status": "covered"
+    },
+    {
+      "theorem": "strengthen_opt_monotone_rank",
+      "theorem_line": 4731,
+      "rule_id": "step.cancelRequest",
+      "semantic_intent": "Generic monotonicity: strengthenOpt never weakens existing cancel reason rank.",
+      "assumptions": [
+        "Current is some existing CancelReason"
+      ],
+      "downstream_impact": [
+        "Supports monotone reason-strength invariant across cancel protocol"
+      ],
+      "artifacts": [
+        "formal/lean/Asupersync.lean:4731"
       ],
       "rule_status": "covered"
     }

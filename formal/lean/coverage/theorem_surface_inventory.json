@@ -3,7 +3,7 @@
   "inventory_id": "lean.theorem_surface.v1",
   "generated_by": "bd-3n3b2",
   "source_file": "formal/lean/Asupersync.lean",
-  "theorem_count": 146,
+  "theorem_count": 155,
   "theorems": [
     {
       "line": 188,
@@ -155,11 +155,11 @@
     },
     {
       "line": 1014,
-      "theorem": "strengthenReason_rank_ge_left"
+      "theorem": "strengthen_reason_rank_ge_left"
     },
     {
       "line": 1021,
-      "theorem": "strengthenReason_rank_ge_right"
+      "theorem": "strengthen_reason_rank_ge_right"
     },
     {
       "line": 1032,
@@ -167,7 +167,7 @@
     },
     {
       "line": 1055,
-      "theorem": "cancelling_from_cancelRequested"
+      "theorem": "cancelling_from_cancel_requested"
     },
     {
       "line": 1215,
@@ -179,7 +179,7 @@
     },
     {
       "line": 1250,
-      "theorem": "strengthenOpt_rank_ge_incoming"
+      "theorem": "strengthen_opt_rank_ge_incoming"
     },
     {
       "line": 1265,
@@ -315,7 +315,7 @@
     },
     {
       "line": 2373,
-      "theorem": "cancelRequest_preserves_wellformed"
+      "theorem": "cancel_request_preserves_wellformed"
     },
     {
       "line": 2413,
@@ -399,19 +399,19 @@
     },
     {
       "line": 3171,
-      "theorem": "cancelMasked_potential_decreases"
+      "theorem": "cancel_masked_potential_decreases"
     },
     {
       "line": 3186,
-      "theorem": "cancelAcknowledge_potential_decreases"
+      "theorem": "cancel_acknowledge_potential_decreases"
     },
     {
       "line": 3200,
-      "theorem": "cancelFinalize_potential_decreases"
+      "theorem": "cancel_finalize_potential_decreases"
     },
     {
       "line": 3213,
-      "theorem": "cancelComplete_potential_reaches_zero"
+      "theorem": "cancel_complete_potential_reaches_zero"
     },
     {
       "line": 3229,
@@ -588,6 +588,78 @@
     {
       "line": 3983,
       "theorem": "obligation_leaked_canonical_form"
+    },
+    {
+      "line": 4230,
+      "theorem": "scheduler_change_preserves_single_owner"
+    },
+    {
+      "line": 4249,
+      "theorem": "setTask_same_region_preserves_single_owner"
+    },
+    {
+      "line": 4288,
+      "theorem": "setRegion_structural_preserves_single_owner"
+    },
+    {
+      "line": 4321,
+      "theorem": "tick_preserves_single_owner"
+    },
+    {
+      "line": 4345,
+      "theorem": "setObligation_preserves_single_owner"
+    },
+    {
+      "line": 4365,
+      "theorem": "spawn_preserves_single_owner"
+    },
+    {
+      "line": 4456,
+      "theorem": "reserve_preserves_single_owner"
+    },
+    {
+      "line": 4479,
+      "theorem": "step_preserves_single_owner"
+    },
+    {
+      "line": 4584,
+      "theorem": "steps_preserve_single_owner"
+    },
+    {
+      "line": 4637,
+      "theorem": "cancel_request_blocked_when_cancel_requested"
+    },
+    {
+      "line": 4648,
+      "theorem": "cancel_request_blocked_when_cancelling"
+    },
+    {
+      "line": 4659,
+      "theorem": "cancel_request_blocked_when_finalizing"
+    },
+    {
+      "line": 4670,
+      "theorem": "cancel_request_blocked_when_completed"
+    },
+    {
+      "line": 4680,
+      "theorem": "cancel_request_requires_pre_cancel_state"
+    },
+    {
+      "line": 4702,
+      "theorem": "cancel_child_blocked_when_cancel_protocol"
+    },
+    {
+      "line": 4712,
+      "theorem": "cancel_request_reason_monotone_incoming"
+    },
+    {
+      "line": 4722,
+      "theorem": "cancel_request_reason_monotone_existing"
+    },
+    {
+      "line": 4731,
+      "theorem": "strengthen_opt_monotone_rank"
     }
   ],
   "lemma_canonicalization": {
@@ -666,6 +738,44 @@
           {
             "theorem": "cancel_propagation_bounded",
             "role": "propagation_bound_projection"
+          }
+        ]
+      },
+      {
+        "family_id": "cancel_request_idempotence",
+        "canonical_theorem": "cancel_request_requires_pre_cancel_state",
+        "variants": [
+          {
+            "theorem": "cancel_request_blocked_when_cancel_requested",
+            "role": "per_state_idempotence"
+          },
+          {
+            "theorem": "cancel_request_blocked_when_cancelling",
+            "role": "per_state_idempotence"
+          },
+          {
+            "theorem": "cancel_request_blocked_when_finalizing",
+            "role": "per_state_idempotence"
+          },
+          {
+            "theorem": "cancel_request_blocked_when_completed",
+            "role": "per_state_idempotence"
+          },
+          {
+            "theorem": "cancel_child_blocked_when_cancel_protocol",
+            "role": "cancel_child_coverage"
+          },
+          {
+            "theorem": "cancel_request_reason_monotone_incoming",
+            "role": "reason_strength_monotonicity"
+          },
+          {
+            "theorem": "cancel_request_reason_monotone_existing",
+            "role": "reason_strength_monotonicity"
+          },
+          {
+            "theorem": "strengthen_opt_monotone_rank",
+            "role": "reason_strength_monotonicity"
           }
         ]
       },
