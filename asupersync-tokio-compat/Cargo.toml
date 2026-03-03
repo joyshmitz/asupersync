@@ -17,7 +17,7 @@ exception_review = "threaded-agent-mail"
 
 [dependencies]
 # Core Asupersync runtime (no Tokio in core paths).
-asupersync = { version = "0.2.6", path = ".." }
+asupersync = { version = "0.2.7", path = ".." }
 
 # Tokio sync primitives and I/O traits — does NOT require a running Tokio runtime.
 # Used for trait implementations and type bridging.
@@ -56,4 +56,4 @@ must_use_candidate = "allow"
 missing_panics_doc = "allow"
 
 [dev-dependencies]
-asupersync = { version = "0.2.6", path = "..", features = ["test-internals"] }
+asupersync = { version = "0.2.7", path = "..", features = ["test-internals"] }
