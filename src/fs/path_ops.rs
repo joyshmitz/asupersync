@@ -193,10 +193,7 @@ fn unique_tmp_path(parent: &Path, file_name: &std::ffi::OsStr) -> PathBuf {
     let counter = ATOMIC_WRITE_COUNTER.fetch_add(1, Ordering::Relaxed);
     let mut tmp_name = std::ffi::OsString::from(".");
     tmp_name.push(file_name);
-    tmp_name.push(format!(
-        ".asupersync-tmp-{}-{counter}",
-        std::process::id()
-    ));
+    tmp_name.push(format!(".asupersync-tmp-{}-{counter}", std::process::id()));
     parent.join(tmp_name)
 }
 
@@ -446,6 +443,60 @@ mod tests {
             crate::assert_with_log!(!exists, "renamed removed", false, exists);
         });
         crate::test_complete!("copy_rename_remove");
+    }
+
+    #[test]
+    fn hard_link_roundtrip() {
+        init_test("hard_link_roundtrip");
+        let dir = TempDir::new("hard_link").unwrap();
+        let src = dir.path().join("source.txt");
+        let link = dir.path().join("link.txt");
+
+        future::block_on(async {
+            write(&src, b"same-bytes").await.unwrap();
+            hard_link(&src, &link).await.unwrap();
+
+            let source = read(&src).await.unwrap();
+            let linked = read(&link).await.unwrap();
+            crate::assert_with_log!(
+                linked == source,
+                "linked bytes match source",
+                source,
+                linked
+            );
+        });
+        crate::test_complete!("hard_link_roundtrip");
+    }
+
+    #[test]
+    fn set_permissions_readonly_roundtrip() {
+        init_test("set_permissions_readonly_roundtrip");
+        let dir = TempDir::new("permissions").unwrap();
+        let path = dir.path().join("file.txt");
+
+        future::block_on(async {
+            write(&path, b"content").await.unwrap();
+
+            let mut perms = metadata(&path).await.unwrap().permissions();
+            perms.set_readonly(true);
+            set_permissions(&path, perms).await.unwrap();
+
+            let readonly_after_set = metadata(&path).await.unwrap().permissions().readonly();
+            crate::assert_with_log!(readonly_after_set, "readonly set", true, readonly_after_set);
+
+            let mut perms = metadata(&path).await.unwrap().permissions();
+            perms.set_readonly(false);
+            set_permissions(&path, perms).await.unwrap();
+
+            let readonly_after_clear = metadata(&path).await.unwrap().permissions().readonly();
+            crate::assert_with_log!(
+                !readonly_after_clear,
+                "readonly cleared",
+                false,
+                readonly_after_clear
+            );
+        });
+        crate::test_complete!("set_permissions_readonly_roundtrip");
     }
 
     #[test]
