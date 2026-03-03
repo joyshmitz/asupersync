@@ -722,10 +722,10 @@ mod tests {
         let runtime = crate::runtime::Builder::new().build().unwrap();
         let addrs_clone = addrs.clone();
         let config_clone = config.clone();
-        let handle = runtime.handle().spawn(async move {
-            connect(&addrs_clone, &config_clone).await
-        });
-        
+        let handle = runtime
+            .handle()
+            .spawn(async move { connect(&addrs_clone, &config_clone).await });
+
         let result = runtime.block_on(handle);
         assert!(
             result.is_ok(),

@@ -169,10 +169,7 @@ impl FromRequest for Multipart {
         {
             return Err(ExtractionError::new(
                 StatusCode::UNSUPPORTED_MEDIA_TYPE,
-                format!(
-                    "expected multipart/form-data, got: {}",
-                    content_type
-                ),
+                format!("expected multipart/form-data, got: {}", content_type),
             ));
         }
 
@@ -333,17 +330,11 @@ fn find_bytes(haystack: &[u8], needle: &[u8], start: usize) -> Option<usize> {
 fn find_blank_line(data: &[u8], pos: usize) -> Option<(usize, usize)> {
     let search = &data[pos..];
     // Try CRLFCRLF first.
-    if let Some(idx) = search
-        .windows(4)
-        .position(|w| w == b"\r\n\r\n")
-    {
+    if let Some(idx) = search.windows(4).position(|w| w == b"\r\n\r\n") {
         return Some((pos + idx, pos + idx + 4));
     }
     // Fall back to LFLF.
-    if let Some(idx) = search
-        .windows(2)
-        .position(|w| w == b"\n\n")
-    {
+    if let Some(idx) = search.windows(2).position(|w| w == b"\n\n") {
         return Some((pos + idx, pos + idx + 2));
     }
     None
@@ -384,10 +375,7 @@ fn parse_part_headers(data: &[u8]) -> HashMap<String, String> {
             continue;
         }
         if let Some((key, value)) = line.split_once(':') {
-            headers.insert(
-                key.trim().to_ascii_lowercase(),
-                value.trim().to_string(),
-            );
+            headers.insert(key.trim().to_ascii_lowercase(), value.trim().to_string());
         }
     }
     headers
@@ -488,10 +476,7 @@ mod tests {
     fn parse_disposition_filename() {
         let d = r#"form-data; name="file"; filename="photo.jpg""#;
         assert_eq!(parse_disposition_param(d, "name").unwrap(), "file");
-        assert_eq!(
-            parse_disposition_param(d, "filename").unwrap(),
-            "photo.jpg"
-        );
+        assert_eq!(parse_disposition_param(d, "filename").unwrap(), "photo.jpg");
     }
 
     #[test]
@@ -572,18 +557,9 @@ mod tests {
         let body = make_multipart_body(
             "B",
             &[
-                (
-                    "Content-Disposition: form-data; name=\"a\"",
-                    b"1",
-                ),
-                (
-                    "Content-Disposition: form-data; name=\"b\"",
-                    b"2",
-                ),
-                (
-                    "Content-Disposition: form-data; name=\"c\"",
-                    b"3",
-                ),
+                ("Content-Disposition: form-data; name=\"a\"", b"1"),
+                ("Content-Disposition: form-data; name=\"b\"", b"2"),
+                ("Content-Disposition: form-data; name=\"c\"", b"3"),
             ],
         );
         let fields = parse_multipart(&body, "B").unwrap();
@@ -629,10 +605,7 @@ mod tests {
     fn parse_empty_body_field() {
         let body = make_multipart_body(
             "E",
-            &[(
-                "Content-Disposition: form-data; name=\"empty\"",
-                b"",
-            )],
+            &[("Content-Disposition: form-data; name=\"empty\"", b"")],
         );
         let fields = parse_multipart(&body, "E").unwrap();
         assert_eq!(fields.len(), 1);
@@ -653,10 +626,7 @@ mod tests {
     fn from_request_success() {
         let body = make_multipart_body(
             "TEST",
-            &[(
-                "Content-Disposition: form-data; name=\"field\"",
-                b"value",
-            )],
+            &[("Content-Disposition: form-data; name=\"field\"", b"value")],
         );
         let mut req = Request::new("POST", "/upload");
         req.headers.insert(
@@ -673,10 +643,8 @@ mod tests {
     #[test]
     fn from_request_wrong_content_type() {
         let mut req = Request::new("POST", "/upload");
-        req.headers.insert(
-            "content-type".to_string(),
-            "application/json".to_string(),
-        );
+        req.headers
+            .insert("content-type".to_string(), "application/json".to_string());
         req.body = Bytes::from(vec![]);
 
         let err = Multipart::from_request(req).unwrap_err();
@@ -725,14 +693,8 @@ mod tests {
         let body = make_multipart_body(
             "F",
             &[
-                (
-                    "Content-Disposition: form-data; name=\"x\"",
-                    b"1",
-                ),
-                (
-                    "Content-Disposition: form-data; name=\"y\"",
-                    b"2",
-                ),
+                ("Content-Disposition: form-data; name=\"x\"", b"1"),
+                ("Content-Disposition: form-data; name=\"y\"", b"2"),
             ],
         );
         let fields = parse_multipart(&body, "F").unwrap();
@@ -748,14 +710,8 @@ mod tests {
         let body = make_multipart_body(
             "R",
             &[
-                (
-                    "Content-Disposition: form-data; name=\"tag\"",
-                    b"a",
-                ),
-                (
-                    "Content-Disposition: form-data; name=\"tag\"",
-                    b"b",
-                ),
+                ("Content-Disposition: form-data; name=\"tag\"", b"a"),
+                ("Content-Disposition: form-data; name=\"tag\"", b"b"),
             ],
         );
         let fields = parse_multipart(&body, "R").unwrap();
@@ -767,22 +723,15 @@ mod tests {
 
     #[test]
     fn multipart_is_empty() {
-        let mp = Multipart {
-            fields: Vec::new(),
-        };
+        let mp = Multipart { fields: Vec::new() };
         assert!(mp.is_empty());
         assert_eq!(mp.len(), 0);
     }
 
     #[test]
     fn multipart_into_fields() {
-        let body = make_multipart_body(
-            "I",
-            &[(
-                "Content-Disposition: form-data; name=\"k\"",
-                b"v",
-            )],
-        );
+        let body =
+            make_multipart_body("I", &[("Content-Disposition: form-data; name=\"k\"", b"v")]);
         let fields = parse_multipart(&body, "I").unwrap();
         let mp = Multipart { fields };
         let mut owned = mp.into_fields();
@@ -838,9 +787,7 @@ mod tests {
 
     #[test]
     fn multipart_debug_clone() {
-        let mp = Multipart {
-            fields: vec![],
-        };
+        let mp = Multipart { fields: vec![] };
         let dbg = format!("{mp:?}");
         assert!(dbg.contains("Multipart"));
         let _cloned = mp.clone();
