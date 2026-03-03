@@ -133,6 +133,9 @@ pub struct NativeQuicConnection {
     transport: QuicTransportMachine,
     streams: StreamTable,
     next_packet_numbers: [u64; 3],
+    migration_disabled: bool,
+    active_path_id: u64,
+    migration_events: u64,
     drain_timeout_micros: u64,
 }
 
@@ -153,6 +156,9 @@ impl NativeQuicConnection {
                 config.connection_recv_limit,
             ),
             next_packet_numbers: [0, 0, 0],
+            migration_disabled: false,
+            active_path_id: 0,
+            migration_events: 0,
             drain_timeout_micros: config.drain_timeout_micros,
         }
     }
@@ -167,6 +173,12 @@ impl NativeQuicConnection {
     #[must_use]
     pub fn can_send_1rtt(&self) -> bool {
         self.tls.can_send_1rtt() && self.transport.state() == QuicConnectionState::Established
+    }
+
+    /// Whether 0-RTT application-data packets may be sent in current state.
+    #[must_use]
+    pub fn can_send_0rtt(&self) -> bool {
+        self.tls.can_send_0rtt() && self.transport.state() == QuicConnectionState::Handshaking
     }
 
     /// Access TLS machine snapshot.
@@ -396,6 +408,68 @@ impl NativeQuicConnection {
         Ok(())
     }
 
+    /// Enable session resumption/0-RTT mode for current handshake.
+    pub fn enable_resumption_0rtt(&mut self, cx: &Cx) -> Result<(), NativeQuicConnectionError> {
+        checkpoint(cx)?;
+        self.tls.enable_resumption();
+        Ok(())
+    }
+
+    /// Disable session resumption/0-RTT mode.
+    pub fn disable_resumption_0rtt(&mut self, cx: &Cx) -> Result<(), NativeQuicConnectionError> {
+        checkpoint(cx)?;
+        self.tls.disable_resumption();
+        Ok(())
+    }
+
+    /// Set active-migration policy (typically sourced from peer transport params).
+    pub fn set_active_migration_disabled(
+        &mut self,
+        cx: &Cx,
+        disabled: bool,
+    ) -> Result<(), NativeQuicConnectionError> {
+        checkpoint(cx)?;
+        self.migration_disabled = disabled;
+        Ok(())
+    }
+
+    /// Current active path identifier.
+    #[must_use]
+    pub fn active_path_id(&self) -> u64 {
+        self.active_path_id
+    }
+
+    /// Number of successful path migrations observed.
+    #[must_use]
+    pub fn migration_events(&self) -> u64 {
+        self.migration_events
+    }
+
+    /// Request migration to a new path identifier.
+    pub fn request_path_migration(
+        &mut self,
+        cx: &Cx,
+        new_path_id: u64,
+    ) -> Result<u64, NativeQuicConnectionError> {
+        checkpoint(cx)?;
+        if self.migration_disabled {
+            return Err(NativeQuicConnectionError::InvalidState(
+                "active migration disabled by transport parameters",
+            ));
+        }
+        if self.transport.state() != QuicConnectionState::Established {
+            return Err(NativeQuicConnectionError::InvalidState(
+                "path migration requires established state",
+            ));
+        }
+        if new_path_id == self.active_path_id {
+            return Ok(self.migration_events);
+        }
+        self.active_path_id = new_path_id;
+        self.migration_events = self.migration_events.saturating_add(1);
+        Ok(self.migration_events)
+    }
+
     /// Track a sent packet and return assigned packet number.
     pub fn on_packet_sent(
         &mut self,
@@ -558,7 +632,10 @@ impl NativeQuicConnection {
                 "packet send requires non-closed connection state",
             ));
         }
-        if matches!(space, PacketNumberSpace::ApplicationData) && !self.can_send_1rtt() {
+        if matches!(space, PacketNumberSpace::ApplicationData)
+            && !self.can_send_1rtt()
+            && !self.can_send_0rtt()
+        {
             return Err(NativeQuicConnectionError::InvalidState(
                 "application-data packets require established 1-RTT state",
             ));
@@ -1025,6 +1102,88 @@ mod tests {
         conn.on_peer_key_phase(&cx, true).expect("first");
         let evt = conn.on_peer_key_phase(&cx, true).expect("second same");
         assert_eq!(evt, KeyUpdateEvent::NoChange);
+    }
+
+    #[test]
+    fn appdata_packets_allowed_with_0rtt_resumption() {
+        let cx = test_cx();
+        let mut conn = NativeQuicConnection::new(NativeQuicConnectionConfig::default());
+        conn.begin_handshake(&cx).expect("begin");
+        conn.on_handshake_keys_available(&cx)
+            .expect("handshake keys");
+        conn.enable_resumption_0rtt(&cx).expect("enable 0-rtt");
+
+        assert!(conn.can_send_0rtt());
+        let pn = conn
+            .on_packet_sent(
+                &cx,
+                PacketNumberSpace::ApplicationData,
+                1200,
+                true,
+                true,
+                10_000,
+            )
+            .expect("0-rtt appdata send");
+        assert_eq!(pn, 0);
+    }
+
+    #[test]
+    fn path_migration_requires_established_state() {
+        let cx = test_cx();
+        let mut conn = NativeQuicConnection::new(NativeQuicConnectionConfig::default());
+        conn.begin_handshake(&cx).expect("begin");
+        let err = conn
+            .request_path_migration(&cx, 7)
+            .expect_err("must fail while handshaking");
+        assert_eq!(
+            err,
+            NativeQuicConnectionError::InvalidState("path migration requires established state")
+        );
+    }
+
+    #[test]
+    fn path_migration_is_blocked_when_disabled() {
+        let cx = test_cx();
+        let mut conn = established_conn();
+        conn.set_active_migration_disabled(&cx, true)
+            .expect("set policy");
+        let err = conn
+            .request_path_migration(&cx, 9)
+            .expect_err("must fail when migration disabled");
+        assert_eq!(
+            err,
+            NativeQuicConnectionError::InvalidState(
+                "active migration disabled by transport parameters"
+            )
+        );
+    }
+
+    #[test]
+    fn path_migration_updates_active_path_and_counter() {
+        let cx = test_cx();
+        let mut conn = established_conn();
+        assert_eq!(conn.active_path_id(), 0);
+        assert_eq!(conn.migration_events(), 0);
+
+        let n = conn
+            .request_path_migration(&cx, 3)
+            .expect("first migration");
+        assert_eq!(n, 1);
+        assert_eq!(conn.active_path_id(), 3);
+        assert_eq!(conn.migration_events(), 1);
+
+        let n = conn
+            .request_path_migration(&cx, 3)
+            .expect("same path is idempotent");
+        assert_eq!(n, 1);
+        assert_eq!(conn.migration_events(), 1);
+
+        let n = conn
+            .request_path_migration(&cx, 11)
+            .expect("second migration");
+        assert_eq!(n, 2);
+        assert_eq!(conn.active_path_id(), 11);
+        assert_eq!(conn.migration_events(), 2);
     }
 
     // --- Gap 7: next_writable_stream via connection API ---

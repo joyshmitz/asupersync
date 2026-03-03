@@ -211,7 +211,7 @@ fn open_stream_after_close_returns_error() {
 
 #[test]
 fn appdata_packet_before_1rtt_and_any_packet_after_close_are_rejected() {
-    let mut rng = DetRng::new(0xE6_0002_1);
+    let mut rng = DetRng::new(0x0E60_0021);
     let mut pair = ConnectionPair::new(&mut rng);
     let cx = &pair.cx;
 

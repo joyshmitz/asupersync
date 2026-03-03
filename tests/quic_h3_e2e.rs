@@ -667,7 +667,82 @@ fn key_update_lifecycle() {
 }
 
 // ===========================================================================
-// Test 8: Out-of-order receive reassembly
+// Test 8: 0-RTT resumption and migration lifecycle guards
+// ===========================================================================
+
+#[test]
+fn zero_rtt_resumption_send_path_and_migration_guards() {
+    let mut rng = DetRng::new(0xACE0_0044);
+    let mut pair = ConnectionPair::new(&mut rng);
+    let cx = &pair.cx;
+
+    pair.client.begin_handshake(cx).expect("begin handshake");
+    pair.client
+        .on_handshake_keys_available(cx)
+        .expect("handshake keys");
+    pair.client
+        .enable_resumption_0rtt(cx)
+        .expect("enable resumption");
+
+    assert!(pair.client.can_send_0rtt());
+    let pn = pair
+        .client
+        .on_packet_sent(
+            cx,
+            PacketNumberSpace::ApplicationData,
+            1200,
+            true,
+            true,
+            pair.clock.now(),
+        )
+        .expect("0-rtt appdata send");
+    assert_eq!(pn, 0);
+
+    // Migration is not allowed pre-established.
+    let err = pair
+        .client
+        .request_path_migration(cx, 7)
+        .expect_err("migration before established should fail");
+    assert_eq!(
+        err,
+        NativeQuicConnectionError::InvalidState("path migration requires established state")
+    );
+}
+
+#[test]
+fn established_migration_updates_path_and_honors_disable_policy() {
+    let mut rng = DetRng::new(0xACE0_0045);
+    let mut pair = ConnectionPair::new(&mut rng);
+    pair.establish();
+    let cx = &pair.cx;
+
+    assert_eq!(pair.client.active_path_id(), 0);
+    assert_eq!(pair.client.migration_events(), 0);
+
+    let first = pair
+        .client
+        .request_path_migration(cx, 3)
+        .expect("first migration");
+    assert_eq!(first, 1);
+    assert_eq!(pair.client.active_path_id(), 3);
+
+    pair.client
+        .set_active_migration_disabled(cx, true)
+        .expect("disable migration");
+    let err = pair
+        .client
+        .request_path_migration(cx, 9)
+        .expect_err("migration should fail when disabled");
+    assert_eq!(
+        err,
+        NativeQuicConnectionError::InvalidState(
+            "active migration disabled by transport parameters"
+        )
+    );
+}
+
+// ===========================================================================
+// Test 9: Out-of-order receive reassembly
 // ===========================================================================
 
 #[test]
@@ -718,7 +793,7 @@ fn out_of_order_receive_reassembly() {
 }
 
 // ===========================================================================
-// Test 9: Transport parameter and packet header codec roundtrips
+// Test 10: Transport parameter and packet header codec roundtrips
 // ===========================================================================
 
 #[test]
@@ -784,7 +859,7 @@ fn transport_parameter_and_packet_header_roundtrips() {
 }
 
 // ===========================================================================
-// Test 10: Full H3 GOAWAY + drain + close lifecycle
+// Test 11: Full H3 GOAWAY + drain + close lifecycle
 // ===========================================================================
 
 #[test]

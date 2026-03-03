@@ -190,7 +190,7 @@ Counts are approximate (±10%) from automated `#[test]`/`#[cfg(test)]` scanning.
 | Tests (inline) | Source files in quic_native, quic_core, h3_native |
 | Tests (integration) | `tests/quic_h3_e2e.rs`, `tests/quic_h3_e2e_cancel.rs`, `tests/quic_h3_e2e_loss.rs`, `tests/quic_h3_e2e_h3.rs`, `tests/quic_h3_e2e_violations.rs` |
 | Test count | ~472 |
-| Notes | T4.2/T4.3 transport parity is closed across handshake lifecycle, stream transitions, loss-recovery, close semantics, and flow/congestion stress correctness (see `net/quic_native/{connection,transport}.rs` plus violation/loss E2E suites). RFC 9002 remains partially implemented beyond this closure; compatibility wrappers remain explicitly separated and disabled by default. |
+| Notes | T4.2/T4.3 transport parity is closed across handshake lifecycle, stream transitions, loss-recovery, close semantics, and flow/congestion stress correctness (see `net/quic_native/{connection,transport}.rs` plus violation/loss E2E suites). T4.4 extends this with native key-update lifecycle coverage and explicit 0-RTT/resumption + migration guard paths (`enable_resumption_0rtt`, `request_path_migration`, `set_active_migration_disabled`) exercised in `tests/quic_h3_e2e.rs`. RFC 9002 remains partially implemented beyond this closure; compatibility wrappers remain explicitly separated and disabled by default. |
 
 ### F16 — Web Framework
 

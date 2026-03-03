@@ -78,6 +78,7 @@ struct KeyEpoch {
 pub struct QuicTlsMachine {
     level: CryptoLevel,
     handshake_confirmed: bool,
+    resumption_enabled: bool,
     local: KeyEpoch,
     remote: KeyEpoch,
     pending_local_update: bool,
@@ -88,6 +89,7 @@ impl Default for QuicTlsMachine {
         Self {
             level: CryptoLevel::Initial,
             handshake_confirmed: false,
+            resumption_enabled: false,
             local: KeyEpoch::default(),
             remote: KeyEpoch::default(),
             pending_local_update: false,
@@ -112,6 +114,28 @@ impl QuicTlsMachine {
     #[must_use]
     pub fn can_send_1rtt(&self) -> bool {
         self.level == CryptoLevel::OneRtt && self.handshake_confirmed
+    }
+
+    /// Whether 0-RTT application-data packets are currently allowed.
+    #[must_use]
+    pub fn can_send_0rtt(&self) -> bool {
+        self.level >= CryptoLevel::Handshake && !self.handshake_confirmed && self.resumption_enabled
+    }
+
+    /// Whether session resumption is enabled for this handshake.
+    #[must_use]
+    pub fn resumption_enabled(&self) -> bool {
+        self.resumption_enabled
+    }
+
+    /// Enable session resumption/0-RTT mode for the current handshake.
+    pub fn enable_resumption(&mut self) {
+        self.resumption_enabled = true;
+    }
+
+    /// Disable session resumption/0-RTT mode.
+    pub fn disable_resumption(&mut self) {
+        self.resumption_enabled = false;
     }
 
     /// Current local key phase bit.
@@ -523,5 +547,27 @@ mod tests {
         assert!(dbg.contains("QuicTlsMachine"), "{dbg}");
         let cloned = m.clone();
         assert_eq!(m, cloned);
+    }
+
+    #[test]
+    fn zero_rtt_requires_resumption_and_pre_confirmation_state() {
+        let mut m = QuicTlsMachine::new();
+        m.on_handshake_keys_available().expect("handshake");
+        assert!(!m.can_send_0rtt());
+
+        m.enable_resumption();
+        assert!(m.resumption_enabled());
+        assert!(m.can_send_0rtt());
+
+        m.on_1rtt_keys_available().expect("1rtt");
+        assert!(m.can_send_0rtt());
+
+        m.on_handshake_confirmed().expect("confirmed");
+        assert!(!m.can_send_0rtt());
+        assert!(m.can_send_1rtt());
+
+        m.disable_resumption();
+        assert!(!m.resumption_enabled());
+        assert!(!m.can_send_0rtt());
     }
 }

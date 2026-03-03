@@ -460,6 +460,12 @@ fn t4_transport_invariants_are_contract_enforced() {
         connection.contains("packet send requires non-closed connection state"),
         "connection guard must reject sends after close"
     );
+    assert!(
+        connection.contains("enable_resumption_0rtt")
+            && connection.contains("request_path_migration")
+            && connection.contains("set_active_migration_disabled"),
+        "connection surface must expose 0-RTT/resumption and migration hardening APIs"
+    );
 
     assert!(
         violations.contains("appdata_packet_before_1rtt_and_any_packet_after_close_are_rejected"),
@@ -473,5 +479,11 @@ fn t4_transport_invariants_are_contract_enforced() {
     assert!(
         loss.contains("delayed_ack_report_for_older_loss_does_not_double_reduce_cwnd"),
         "loss e2e suite must cover delayed-loss reporting without double cwnd reduction"
+    );
+    assert!(
+        std::fs::read_to_string(repo_root().join("tests/quic_h3_e2e.rs"))
+            .expect("quic_h3_e2e test file should load")
+            .contains("zero_rtt_resumption_send_path_and_migration_guards"),
+        "quic_h3 e2e suite must include zero-rtt/resumption/migration coverage"
     );
 }
