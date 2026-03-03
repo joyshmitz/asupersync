@@ -1,0 +1,378 @@
+//! Response compression middleware.
+//!
+//! Provides [`CompressionMiddleware`] which negotiates content encoding
+//! with the client via `Accept-Encoding` and compresses response bodies
+//! using the best available algorithm.
+//!
+//! # Design
+//!
+//! Compression is applied as a post-processing step after the inner handler
+//! produces a response. The middleware:
+//!
+//! 1. Reads the `accept-encoding` request header.
+//! 2. Negotiates the best encoding against the configured supported set.
+//! 3. Compresses the response body if profitable (above minimum size).
+//! 4. Sets `content-encoding` and `vary` response headers.
+//!
+//! # Skip Conditions
+//!
+//! Compression is skipped when:
+//! - The response already has a `content-encoding` header.
+//! - The response body is empty or below the minimum size threshold.
+//! - The response status is 204 No Content or 304 Not Modified.
+//! - No acceptable encoding is negotiated.
+//! - The negotiated encoding is `identity`.
+
+use crate::http::compress::{ContentEncoding, make_compressor, negotiate_encoding};
+
+use super::extract::Request;
+use super::handler::Handler;
+use super::response::{Response, StatusCode};
+
+/// Policy governing response compression behavior.
+#[derive(Debug, Clone)]
+pub struct CompressionPolicy {
+    /// Encodings this server supports, in preference order.
+    ///
+    /// The negotiation algorithm uses this ordering as a tiebreaker when
+    /// client quality values are equal.
+    pub supported_encodings: Vec<ContentEncoding>,
+
+    /// Minimum response body size (in bytes) to consider for compression.
+    ///
+    /// Bodies smaller than this threshold are sent uncompressed because the
+    /// compression overhead (headers, framing) may exceed the size savings.
+    pub min_body_size: usize,
+}
+
+impl Default for CompressionPolicy {
+    fn default() -> Self {
+        Self {
+            supported_encodings: vec![
+                ContentEncoding::Gzip,
+                ContentEncoding::Deflate,
+                ContentEncoding::Identity,
+            ],
+            min_body_size: 256,
+        }
+    }
+}
+
+impl CompressionPolicy {
+    /// Create a policy that only supports gzip.
+    #[must_use]
+    pub fn gzip_only() -> Self {
+        Self {
+            supported_encodings: vec![ContentEncoding::Gzip, ContentEncoding::Identity],
+            ..Self::default()
+        }
+    }
+
+    /// Set the minimum body size for compression.
+    #[must_use]
+    pub fn with_min_body_size(mut self, size: usize) -> Self {
+        self.min_body_size = size;
+        self
+    }
+}
+
+/// Middleware that compresses response bodies based on `Accept-Encoding`.
+///
+/// Wraps an inner [`Handler`] and applies content-encoding negotiation
+/// and body compression to responses that meet the policy criteria.
+///
+/// # Example
+///
+/// ```ignore
+/// use asupersync::web::compress::{CompressionMiddleware, CompressionPolicy};
+/// use asupersync::web::handler::FnHandler;
+///
+/// let handler = FnHandler::new(|| "hello world".repeat(100));
+/// let compressed = CompressionMiddleware::new(handler, CompressionPolicy::default());
+/// ```
+pub struct CompressionMiddleware<H> {
+    inner: H,
+    policy: CompressionPolicy,
+}
+
+impl<H: Handler> CompressionMiddleware<H> {
+    /// Wrap a handler with response compression.
+    #[must_use]
+    pub fn new(inner: H, policy: CompressionPolicy) -> Self {
+        Self { inner, policy }
+    }
+}
+
+impl<H: Handler> Handler for CompressionMiddleware<H> {
+    fn call(&self, req: Request) -> Response {
+        // Extract accept-encoding before passing the request.
+        let accept_encoding = req
+            .headers
+            .get("accept-encoding")
+            .cloned()
+            .unwrap_or_default();
+
+        let mut resp = self.inner.call(req);
+
+        // Skip compression for special status codes.
+        if resp.status == StatusCode::NO_CONTENT || resp.status == StatusCode::NOT_MODIFIED {
+            return resp;
+        }
+
+        // Skip if the response already has content-encoding.
+        if resp.headers.contains_key("content-encoding") {
+            return resp;
+        }
+
+        // Skip if body is below minimum size.
+        if resp.body.len() < self.policy.min_body_size {
+            return resp;
+        }
+
+        // Negotiate encoding.
+        let Some(encoding) = negotiate_encoding(&accept_encoding, &self.policy.supported_encodings)
+        else {
+            return resp;
+        };
+
+        // Identity means no compression needed.
+        if encoding == ContentEncoding::Identity {
+            resp.headers
+                .insert("vary".to_string(), "accept-encoding".to_string());
+            return resp;
+        }
+
+        // Get a compressor for the negotiated encoding.
+        let Some(mut compressor) = make_compressor(encoding) else {
+            return resp;
+        };
+
+        // Compress the body.
+        let mut compressed = Vec::new();
+        if compressor.compress(&resp.body, &mut compressed).is_err() {
+            return resp;
+        }
+        if compressor.finish(&mut compressed).is_err() {
+            return resp;
+        }
+
+        // Only use compressed version if it's actually smaller.
+        if compressed.len() >= resp.body.len() {
+            resp.headers
+                .insert("vary".to_string(), "accept-encoding".to_string());
+            return resp;
+        }
+
+        // Apply compression.
+        resp.body = compressed.into();
+        resp.headers.insert(
+            "content-encoding".to_string(),
+            encoding.as_token().to_string(),
+        );
+        resp.headers
+            .insert("vary".to_string(), "accept-encoding".to_string());
+
+        resp
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+    use crate::web::handler::FnHandler;
+    use crate::web::response::StatusCode;
+
+    fn make_request_with_encoding(encoding: &str) -> Request {
+        Request::new("GET", "/test").with_header("accept-encoding", encoding)
+    }
+
+    fn large_body_handler() -> Response {
+        let body = "Hello, World! ".repeat(100);
+        Response::new(StatusCode::OK, body.into_bytes())
+            .header("content-type", "text/plain; charset=utf-8")
+    }
+
+    fn small_body_handler() -> &'static str {
+        "tiny"
+    }
+
+    fn no_content_handler() -> Response {
+        Response::empty(StatusCode::NO_CONTENT)
+    }
+
+    fn already_compressed_handler() -> Response {
+        Response::new(StatusCode::OK, b"already-compressed".to_vec())
+            .header("content-encoding", "gzip")
+    }
+
+    // --- Basic behavior ---
+
+    #[test]
+    fn skips_compression_for_small_body() {
+        let policy = CompressionPolicy::default();
+        let mw = CompressionMiddleware::new(FnHandler::new(small_body_handler), policy);
+        let req = make_request_with_encoding("gzip");
+        let resp = mw.call(req);
+        assert_eq!(resp.status, StatusCode::OK);
+        assert!(!resp.headers.contains_key("content-encoding"));
+    }
+
+    #[test]
+    fn skips_compression_for_no_content() {
+        let policy = CompressionPolicy::default();
+        let mw = CompressionMiddleware::new(FnHandler::new(no_content_handler), policy);
+        let req = make_request_with_encoding("gzip");
+        let resp = mw.call(req);
+        assert_eq!(resp.status, StatusCode::NO_CONTENT);
+        assert!(!resp.headers.contains_key("content-encoding"));
+    }
+
+    #[test]
+    fn skips_compression_when_already_compressed() {
+        let policy = CompressionPolicy::default();
+        let mw = CompressionMiddleware::new(FnHandler::new(already_compressed_handler), policy);
+        let req = make_request_with_encoding("gzip");
+        let resp = mw.call(req);
+        assert_eq!(
+            resp.headers.get("content-encoding").unwrap(),
+            "gzip",
+            "original content-encoding preserved"
+        );
+    }
+
+    #[test]
+    fn skips_compression_when_no_accept_encoding() {
+        let policy = CompressionPolicy::default();
+        let mw = CompressionMiddleware::new(FnHandler::new(large_body_handler), policy);
+        let req = Request::new("GET", "/test");
+        let resp = mw.call(req);
+        // With empty accept-encoding, identity is negotiated, no content-encoding set.
+        assert!(!resp.headers.contains_key("content-encoding"));
+    }
+
+    #[test]
+    fn adds_vary_header() {
+        let policy = CompressionPolicy::default();
+        let mw = CompressionMiddleware::new(FnHandler::new(large_body_handler), policy);
+        let req = make_request_with_encoding("identity");
+        let resp = mw.call(req);
+        assert_eq!(
+            resp.headers.get("vary").unwrap(),
+            "accept-encoding",
+            "vary header should always be set for compressible responses"
+        );
+    }
+
+    #[test]
+    fn identity_encoding_no_compression() {
+        let policy = CompressionPolicy::default();
+        let mw = CompressionMiddleware::new(FnHandler::new(large_body_handler), policy);
+        let req = make_request_with_encoding("identity");
+        let resp = mw.call(req);
+        assert!(!resp.headers.contains_key("content-encoding"));
+    }
+
+    // --- Feature-gated compression tests ---
+
+    #[cfg(feature = "compression")]
+    #[test]
+    fn gzip_compresses_large_body() {
+        let policy = CompressionPolicy::default().with_min_body_size(0);
+        let mw = CompressionMiddleware::new(FnHandler::new(large_body_handler), policy);
+        let req = make_request_with_encoding("gzip");
+        let resp = mw.call(req);
+        assert_eq!(resp.headers.get("content-encoding").unwrap(), "gzip");
+        assert_eq!(resp.headers.get("vary").unwrap(), "accept-encoding");
+
+        // Verify compressed body is smaller.
+        let original_size = "Hello, World! ".repeat(100).len();
+        assert!(
+            resp.body.len() < original_size,
+            "compressed body ({}) should be smaller than original ({})",
+            resp.body.len(),
+            original_size,
+        );
+    }
+
+    #[cfg(feature = "compression")]
+    #[test]
+    fn deflate_compresses_large_body() {
+        let policy = CompressionPolicy {
+            supported_encodings: vec![ContentEncoding::Deflate, ContentEncoding::Identity],
+            min_body_size: 0,
+        };
+        let mw = CompressionMiddleware::new(FnHandler::new(large_body_handler), policy);
+        let req = make_request_with_encoding("deflate");
+        let resp = mw.call(req);
+        assert_eq!(resp.headers.get("content-encoding").unwrap(), "deflate");
+    }
+
+    #[cfg(feature = "compression")]
+    #[test]
+    fn gzip_preferred_over_deflate() {
+        let policy = CompressionPolicy::default().with_min_body_size(0);
+        let mw = CompressionMiddleware::new(FnHandler::new(large_body_handler), policy);
+        let req = make_request_with_encoding("gzip, deflate");
+        let resp = mw.call(req);
+        assert_eq!(resp.headers.get("content-encoding").unwrap(), "gzip");
+    }
+
+    #[cfg(feature = "compression")]
+    #[test]
+    fn respects_client_quality_preference() {
+        let policy = CompressionPolicy::default().with_min_body_size(0);
+        let mw = CompressionMiddleware::new(FnHandler::new(large_body_handler), policy);
+        let req = make_request_with_encoding("gzip;q=0.5, deflate;q=1.0");
+        let resp = mw.call(req);
+        assert_eq!(resp.headers.get("content-encoding").unwrap(), "deflate");
+    }
+
+    #[cfg(feature = "compression")]
+    #[test]
+    fn gzip_roundtrip_body_integrity() {
+        use crate::http::compress::Decompressor;
+        use crate::http::compress::GzipDecompressor;
+
+        let policy = CompressionPolicy::default().with_min_body_size(0);
+        let mw = CompressionMiddleware::new(FnHandler::new(large_body_handler), policy);
+        let req = make_request_with_encoding("gzip");
+        let resp = mw.call(req);
+
+        // Decompress and verify body integrity.
+        let mut dec = GzipDecompressor::new(None);
+        let mut decompressed = Vec::new();
+        dec.decompress(&resp.body, &mut decompressed).unwrap();
+        let expected = "Hello, World! ".repeat(100);
+        assert_eq!(
+            String::from_utf8(decompressed).unwrap(),
+            expected,
+            "decompressed body should match original"
+        );
+    }
+
+    #[cfg(feature = "compression")]
+    #[test]
+    fn min_body_size_threshold() {
+        let policy = CompressionPolicy::default().with_min_body_size(10_000);
+        let mw = CompressionMiddleware::new(FnHandler::new(large_body_handler), policy);
+        let req = make_request_with_encoding("gzip");
+        let resp = mw.call(req);
+        // "Hello, World! ".repeat(100) = 1400 bytes, below 10K threshold.
+        assert!(!resp.headers.contains_key("content-encoding"));
+    }
+
+    #[test]
+    fn gzip_only_policy() {
+        let policy = CompressionPolicy::gzip_only();
+        assert_eq!(policy.supported_encodings.len(), 2);
+        assert_eq!(policy.supported_encodings[0], ContentEncoding::Gzip);
+        assert_eq!(policy.supported_encodings[1], ContentEncoding::Identity);
+    }
+
+    #[test]
+    fn compression_policy_default() {
+        let policy = CompressionPolicy::default();
+        assert_eq!(policy.min_body_size, 256);
+        assert_eq!(policy.supported_encodings.len(), 3);
+    }
+}

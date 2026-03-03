@@ -43,6 +43,7 @@
 //! - [`Redirect`]: HTTP redirect
 //! - Tuples of `(StatusCode, impl IntoResponse)` for custom status
 
+pub mod compress;
 pub mod debug;
 pub mod extract;
 pub mod handler;

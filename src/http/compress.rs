@@ -272,6 +272,246 @@ impl Decompressor for IdentityDecompressor {
     }
 }
 
+// ─── Gzip Compressor ────────────────────────────────────────────────────────
+
+/// Gzip compressor using the flate2 (miniz_oxide) backend.
+///
+/// Compresses data in RFC 1952 gzip format. Uses compression level 6
+/// (default) which provides a good balance of speed and ratio.
+#[cfg(feature = "compression")]
+pub struct GzipCompressor {
+    encoder: flate2::write::GzEncoder<Vec<u8>>,
+}
+
+#[cfg(feature = "compression")]
+impl GzipCompressor {
+    /// Create a new gzip compressor with the default compression level.
+    #[must_use]
+    pub fn new() -> Self {
+        Self::with_level(flate2::Compression::default())
+    }
+
+    /// Create a new gzip compressor with the specified compression level.
+    #[must_use]
+    pub fn with_level(level: flate2::Compression) -> Self {
+        Self {
+            encoder: flate2::write::GzEncoder::new(Vec::new(), level),
+        }
+    }
+}
+
+#[cfg(feature = "compression")]
+impl Default for GzipCompressor {
+    fn default() -> Self {
+        Self::new()
+    }
+}
+
+#[cfg(feature = "compression")]
+impl Compressor for GzipCompressor {
+    fn compress(&mut self, input: &[u8], output: &mut Vec<u8>) -> io::Result<()> {
+        use io::Write;
+        self.encoder.write_all(input)?;
+        // Flush to get compressed bytes so far.
+        self.encoder.flush()?;
+        let buf = self.encoder.get_mut();
+        output.extend_from_slice(buf);
+        buf.clear();
+        Ok(())
+    }
+
+    fn finish(&mut self, output: &mut Vec<u8>) -> io::Result<()> {
+        use io::Write;
+        self.encoder.flush()?;
+        // Take the inner buffer, reset encoder with a new empty vec.
+        let inner = std::mem::replace(
+            &mut self.encoder,
+            flate2::write::GzEncoder::new(Vec::new(), flate2::Compression::none()),
+        );
+        let finished = inner.finish()?;
+        output.extend_from_slice(&finished);
+        Ok(())
+    }
+
+    fn encoding(&self) -> ContentEncoding {
+        ContentEncoding::Gzip
+    }
+}
+
+/// Gzip decompressor using the flate2 (miniz_oxide) backend.
+#[cfg(feature = "compression")]
+pub struct GzipDecompressor {
+    max_size: Option<usize>,
+    total: usize,
+}
+
+#[cfg(feature = "compression")]
+impl GzipDecompressor {
+    /// Create a new gzip decompressor with an optional size limit.
+    #[must_use]
+    pub const fn new(max_size: Option<usize>) -> Self {
+        Self { max_size, total: 0 }
+    }
+}
+
+#[cfg(feature = "compression")]
+impl Decompressor for GzipDecompressor {
+    fn decompress(&mut self, input: &[u8], output: &mut Vec<u8>) -> io::Result<()> {
+        use io::Read;
+        let mut decoder = flate2::read::GzDecoder::new(input);
+        let mut buf = Vec::new();
+        decoder.read_to_end(&mut buf)?;
+        self.total += buf.len();
+        if let Some(max) = self.max_size {
+            if self.total > max {
+                return Err(io::Error::new(
+                    io::ErrorKind::InvalidData,
+                    "decompressed size exceeds limit",
+                ));
+            }
+        }
+        output.extend_from_slice(&buf);
+        Ok(())
+    }
+
+    fn finish(&mut self, _output: &mut Vec<u8>) -> io::Result<()> {
+        Ok(())
+    }
+
+    fn encoding(&self) -> ContentEncoding {
+        ContentEncoding::Gzip
+    }
+}
+
+// ─── Deflate Compressor ─────────────────────────────────────────────────────
+
+/// Deflate compressor using the flate2 (miniz_oxide) backend.
+///
+/// Compresses data in RFC 1951 raw deflate format (wrapped in zlib per
+/// HTTP deflate convention).
+#[cfg(feature = "compression")]
+pub struct DeflateCompressor {
+    encoder: flate2::write::DeflateEncoder<Vec<u8>>,
+}
+
+#[cfg(feature = "compression")]
+impl DeflateCompressor {
+    /// Create a new deflate compressor with the default compression level.
+    #[must_use]
+    pub fn new() -> Self {
+        Self::with_level(flate2::Compression::default())
+    }
+
+    /// Create a new deflate compressor with the specified compression level.
+    #[must_use]
+    pub fn with_level(level: flate2::Compression) -> Self {
+        Self {
+            encoder: flate2::write::DeflateEncoder::new(Vec::new(), level),
+        }
+    }
+}
+
+#[cfg(feature = "compression")]
+impl Default for DeflateCompressor {
+    fn default() -> Self {
+        Self::new()
+    }
+}
+
+#[cfg(feature = "compression")]
+impl Compressor for DeflateCompressor {
+    fn compress(&mut self, input: &[u8], output: &mut Vec<u8>) -> io::Result<()> {
+        use io::Write;
+        self.encoder.write_all(input)?;
+        self.encoder.flush()?;
+        let buf = self.encoder.get_mut();
+        output.extend_from_slice(buf);
+        buf.clear();
+        Ok(())
+    }
+
+    fn finish(&mut self, output: &mut Vec<u8>) -> io::Result<()> {
+        use io::Write;
+        self.encoder.flush()?;
+        let inner = std::mem::replace(
+            &mut self.encoder,
+            flate2::write::DeflateEncoder::new(Vec::new(), flate2::Compression::none()),
+        );
+        let finished = inner.finish()?;
+        output.extend_from_slice(&finished);
+        Ok(())
+    }
+
+    fn encoding(&self) -> ContentEncoding {
+        ContentEncoding::Deflate
+    }
+}
+
+/// Deflate decompressor using the flate2 (miniz_oxide) backend.
+#[cfg(feature = "compression")]
+pub struct DeflateDecompressor {
+    max_size: Option<usize>,
+    total: usize,
+}
+
+#[cfg(feature = "compression")]
+impl DeflateDecompressor {
+    /// Create a new deflate decompressor with an optional size limit.
+    #[must_use]
+    pub const fn new(max_size: Option<usize>) -> Self {
+        Self { max_size, total: 0 }
+    }
+}
+
+#[cfg(feature = "compression")]
+impl Decompressor for DeflateDecompressor {
+    fn decompress(&mut self, input: &[u8], output: &mut Vec<u8>) -> io::Result<()> {
+        use io::Read;
+        let mut decoder = flate2::read::DeflateDecoder::new(input);
+        let mut buf = Vec::new();
+        decoder.read_to_end(&mut buf)?;
+        self.total += buf.len();
+        if let Some(max) = self.max_size {
+            if self.total > max {
+                return Err(io::Error::new(
+                    io::ErrorKind::InvalidData,
+                    "decompressed size exceeds limit",
+                ));
+            }
+        }
+        output.extend_from_slice(&buf);
+        Ok(())
+    }
+
+    fn finish(&mut self, _output: &mut Vec<u8>) -> io::Result<()> {
+        Ok(())
+    }
+
+    fn encoding(&self) -> ContentEncoding {
+        ContentEncoding::Deflate
+    }
+}
+
+// ─── Compressor factory ─────────────────────────────────────────────────────
+
+/// Create a compressor for the given encoding.
+///
+/// Returns `None` for unsupported encodings (Brotli requires a separate
+/// feature flag that is not yet implemented).
+#[must_use]
+pub fn make_compressor(encoding: ContentEncoding) -> Option<Box<dyn Compressor>> {
+    match encoding {
+        ContentEncoding::Identity => Some(Box::new(IdentityCompressor)),
+        #[cfg(feature = "compression")]
+        ContentEncoding::Gzip => Some(Box::new(GzipCompressor::new())),
+        #[cfg(feature = "compression")]
+        ContentEncoding::Deflate => Some(Box::new(DeflateCompressor::new())),
+        #[cfg(not(feature = "compression"))]
+        ContentEncoding::Gzip | ContentEncoding::Deflate => None,
+        ContentEncoding::Brotli => None,
+    }
+}
+
 /// Extracts the Content-Encoding value from a list of headers.
 #[must_use]
 pub fn content_encoding_from_headers(headers: &[(String, String)]) -> Option<ContentEncoding> {
@@ -601,5 +841,189 @@ mod tests {
         let d = IdentityDecompressor::default();
         let dbg = format!("{d:?}");
         assert!(dbg.contains("IdentityDecompressor"), "{dbg}");
+    }
+
+    // ====================================================================
+    // make_compressor factory tests
+    // ====================================================================
+
+    #[test]
+    fn make_compressor_identity() {
+        let comp = make_compressor(ContentEncoding::Identity);
+        assert!(comp.is_some());
+        assert_eq!(comp.unwrap().encoding(), ContentEncoding::Identity);
+    }
+
+    #[test]
+    fn make_compressor_brotli_unsupported() {
+        let comp = make_compressor(ContentEncoding::Brotli);
+        assert!(comp.is_none());
+    }
+
+    #[cfg(feature = "compression")]
+    #[test]
+    fn make_compressor_gzip() {
+        let comp = make_compressor(ContentEncoding::Gzip);
+        assert!(comp.is_some());
+        assert_eq!(comp.unwrap().encoding(), ContentEncoding::Gzip);
+    }
+
+    #[cfg(feature = "compression")]
+    #[test]
+    fn make_compressor_deflate() {
+        let comp = make_compressor(ContentEncoding::Deflate);
+        assert!(comp.is_some());
+        assert_eq!(comp.unwrap().encoding(), ContentEncoding::Deflate);
+    }
+
+    // ====================================================================
+    // Gzip compressor/decompressor tests
+    // ====================================================================
+
+    #[cfg(feature = "compression")]
+    #[test]
+    fn gzip_compress_decompress_roundtrip() {
+        let input = b"Hello, World! This is a test of gzip compression.";
+        let mut comp = GzipCompressor::new();
+        let mut compressed = Vec::new();
+        comp.compress(input, &mut compressed).unwrap();
+        comp.finish(&mut compressed).unwrap();
+
+        // Compressed data should be non-empty and different from input.
+        assert!(!compressed.is_empty());
+
+        // Decompress and verify roundtrip.
+        let mut dec = GzipDecompressor::new(None);
+        let mut decompressed = Vec::new();
+        dec.decompress(&compressed, &mut decompressed).unwrap();
+        dec.finish(&mut decompressed).unwrap();
+        assert_eq!(&decompressed, input);
+    }
+
+    #[cfg(feature = "compression")]
+    #[test]
+    fn gzip_empty_input() {
+        let mut comp = GzipCompressor::new();
+        let mut compressed = Vec::new();
+        comp.compress(b"", &mut compressed).unwrap();
+        comp.finish(&mut compressed).unwrap();
+
+        let mut dec = GzipDecompressor::new(None);
+        let mut decompressed = Vec::new();
+        dec.decompress(&compressed, &mut decompressed).unwrap();
+        assert!(decompressed.is_empty());
+    }
+
+    #[cfg(feature = "compression")]
+    #[test]
+    fn gzip_compressor_default() {
+        let comp = GzipCompressor::default();
+        assert_eq!(comp.encoding(), ContentEncoding::Gzip);
+    }
+
+    #[cfg(feature = "compression")]
+    #[test]
+    fn gzip_decompressor_size_limit() {
+        let input = b"Hello, World! This is a test of gzip compression.";
+        let mut comp = GzipCompressor::new();
+        let mut compressed = Vec::new();
+        comp.compress(input, &mut compressed).unwrap();
+        comp.finish(&mut compressed).unwrap();
+
+        let mut dec = GzipDecompressor::new(Some(10));
+        let mut decompressed = Vec::new();
+        let result = dec.decompress(&compressed, &mut decompressed);
+        assert!(result.is_err());
+    }
+
+    // ====================================================================
+    // Deflate compressor/decompressor tests
+    // ====================================================================
+
+    #[cfg(feature = "compression")]
+    #[test]
+    fn deflate_compress_decompress_roundtrip() {
+        let input = b"Hello, World! This is a test of deflate compression.";
+        let mut comp = DeflateCompressor::new();
+        let mut compressed = Vec::new();
+        comp.compress(input, &mut compressed).unwrap();
+        comp.finish(&mut compressed).unwrap();
+
+        assert!(!compressed.is_empty());
+
+        let mut dec = DeflateDecompressor::new(None);
+        let mut decompressed = Vec::new();
+        dec.decompress(&compressed, &mut decompressed).unwrap();
+        dec.finish(&mut decompressed).unwrap();
+        assert_eq!(&decompressed, input);
+    }
+
+    #[cfg(feature = "compression")]
+    #[test]
+    fn deflate_empty_input() {
+        let mut comp = DeflateCompressor::new();
+        let mut compressed = Vec::new();
+        comp.compress(b"", &mut compressed).unwrap();
+        comp.finish(&mut compressed).unwrap();
+
+        let mut dec = DeflateDecompressor::new(None);
+        let mut decompressed = Vec::new();
+        dec.decompress(&compressed, &mut decompressed).unwrap();
+        assert!(decompressed.is_empty());
+    }
+
+    #[cfg(feature = "compression")]
+    #[test]
+    fn deflate_compressor_default() {
+        let comp = DeflateCompressor::default();
+        assert_eq!(comp.encoding(), ContentEncoding::Deflate);
+    }
+
+    #[cfg(feature = "compression")]
+    #[test]
+    fn deflate_decompressor_size_limit() {
+        let input = b"Hello, World! This is a test of deflate compression.";
+        let mut comp = DeflateCompressor::new();
+        let mut compressed = Vec::new();
+        comp.compress(input, &mut compressed).unwrap();
+        comp.finish(&mut compressed).unwrap();
+
+        let mut dec = DeflateDecompressor::new(Some(10));
+        let mut decompressed = Vec::new();
+        let result = dec.decompress(&compressed, &mut decompressed);
+        assert!(result.is_err());
+    }
+
+    #[cfg(feature = "compression")]
+    #[test]
+    fn gzip_compresses_repetitive_data() {
+        // Repetitive data should compress significantly.
+        let input: Vec<u8> = "aaaa".repeat(1000).into_bytes();
+        let mut comp = GzipCompressor::new();
+        let mut compressed = Vec::new();
+        comp.compress(&input, &mut compressed).unwrap();
+        comp.finish(&mut compressed).unwrap();
+        assert!(
+            compressed.len() < input.len() / 2,
+            "gzip should compress repetitive data: {} -> {}",
+            input.len(),
+            compressed.len()
+        );
+    }
+
+    #[cfg(feature = "compression")]
+    #[test]
+    fn deflate_compresses_repetitive_data() {
+        let input: Vec<u8> = "bbbb".repeat(1000).into_bytes();
+        let mut comp = DeflateCompressor::new();
+        let mut compressed = Vec::new();
+        comp.compress(&input, &mut compressed).unwrap();
+        comp.finish(&mut compressed).unwrap();
+        assert!(
+            compressed.len() < input.len() / 2,
+            "deflate should compress repetitive data: {} -> {}",
+            input.len(),
+            compressed.len()
+        );
     }
 }
