@@ -373,6 +373,9 @@ pub struct Json<T>(pub T);
 /// Maximum JSON body size (10 MiB).
 const MAX_JSON_BODY_SIZE: usize = 10 * 1024 * 1024;
 
+/// Maximum form body size (2 MiB).
+const MAX_FORM_BODY_SIZE: usize = 2 * 1024 * 1024;
+
 impl<T: serde::de::DeserializeOwned> FromRequest for Json<T> {
     fn from_request(req: Request) -> Result<Self, ExtractionError> {
         if req.body.len() > MAX_JSON_BODY_SIZE {
@@ -421,6 +424,17 @@ pub struct Form<T>(pub T);
 #[allow(clippy::implicit_hasher)]
 impl FromRequest for Form<HashMap<String, String>> {
     fn from_request(req: Request) -> Result<Self, ExtractionError> {
+        if req.body.len() > MAX_FORM_BODY_SIZE {
+            return Err(ExtractionError::new(
+                super::response::StatusCode::PAYLOAD_TOO_LARGE,
+                format!(
+                    "form body too large: {} bytes (limit {})",
+                    req.body.len(),
+                    MAX_FORM_BODY_SIZE
+                ),
+            ));
+        }
+
         let content_type = req.headers.get("content-type").map(String::as_str);
         if let Some(ct) = content_type {
             if !ct.contains("application/x-www-form-urlencoded") {
@@ -662,6 +676,116 @@ mod tests {
             crate::web::response::StatusCode::INTERNAL_SERVER_ERROR
         );
         assert!(err.message.contains("state not configured"));
+    }
+
+    #[test]
+    fn form_body_too_large() {
+        let oversized = vec![b'a'; MAX_FORM_BODY_SIZE + 1];
+        let req = Request::new("POST", "/form").with_body(Bytes::from(oversized));
+        let result = Form::<HashMap<String, String>>::from_request(req);
+        assert!(result.is_err());
+        let err = result.unwrap_err();
+        assert_eq!(
+            err.status,
+            crate::web::response::StatusCode::PAYLOAD_TOO_LARGE
+        );
+    }
+
+    #[test]
+    fn json_body_too_large() {
+        let oversized = vec![b'a'; MAX_JSON_BODY_SIZE + 1];
+        let req = Request::new("POST", "/data")
+            .with_header("content-type", "application/json")
+            .with_body(Bytes::from(oversized));
+        let result = Json::<serde_json::Value>::from_request(req);
+        assert!(result.is_err());
+        let err = result.unwrap_err();
+        assert_eq!(
+            err.status,
+            crate::web::response::StatusCode::PAYLOAD_TOO_LARGE
+        );
+    }
+
+    #[test]
+    fn form_wrong_content_type() {
+        let req = Request::new("POST", "/form")
+            .with_header("content-type", "text/plain")
+            .with_body(Bytes::from_static(b"user=alice"));
+        let result = Form::<HashMap<String, String>>::from_request(req);
+        assert!(result.is_err());
+        let err = result.unwrap_err();
+        assert_eq!(
+            err.status,
+            crate::web::response::StatusCode::UNSUPPORTED_MEDIA_TYPE
+        );
+    }
+
+    #[test]
+    fn form_invalid_utf8() {
+        let req = Request::new("POST", "/form").with_body(Bytes::from_static(b"\xff\xfe"));
+        let result = Form::<HashMap<String, String>>::from_request(req);
+        assert!(result.is_err());
+        let err = result.unwrap_err();
+        assert_eq!(err.status, crate::web::response::StatusCode::BAD_REQUEST);
+    }
+
+    #[test]
+    fn json_invalid_body() {
+        let req = Request::new("POST", "/data")
+            .with_header("content-type", "application/json")
+            .with_body(Bytes::from_static(b"not json"));
+        let result = Json::<serde_json::Value>::from_request(req);
+        assert!(result.is_err());
+        let err = result.unwrap_err();
+        assert_eq!(
+            err.status,
+            crate::web::response::StatusCode::UNPROCESSABLE_ENTITY
+        );
+    }
+
+    #[test]
+    fn query_empty_string() {
+        let req = Request::new("GET", "/items");
+        let Query(params) = Query::<HashMap<String, String>>::from_request_parts(&req).unwrap();
+        assert!(params.is_empty());
+    }
+
+    #[test]
+    fn query_percent_encoded_values() {
+        let req = Request::new("GET", "/search").with_query("q=hello+world&tag=%23rust");
+        let Query(params) = Query::<HashMap<String, String>>::from_request_parts(&req).unwrap();
+        assert_eq!(params.get("q").unwrap(), "hello world");
+        assert_eq!(params.get("tag").unwrap(), "#rust");
+    }
+
+    #[test]
+    fn path_multiple_params() {
+        let mut params = HashMap::new();
+        params.insert("user_id".to_string(), "42".to_string());
+        params.insert("post_id".to_string(), "7".to_string());
+        let req = Request::new("GET", "/users/42/posts/7").with_path_params(params.clone());
+
+        let Path(extracted) = Path::<HashMap<String, String>>::from_request_parts(&req).unwrap();
+        assert_eq!(extracted, params);
+    }
+
+    #[test]
+    fn raw_body_empty() {
+        let req = Request::new("POST", "/upload");
+        let RawBody(body) = RawBody::from_request(req).unwrap();
+        assert!(body.is_empty());
+    }
+
+    #[test]
+    fn extraction_error_into_response() {
+        use crate::web::response::IntoResponse;
+        let err = ExtractionError::bad_request("missing field");
+        let resp = err.into_response();
+        assert_eq!(resp.status, crate::web::response::StatusCode::BAD_REQUEST);
+        assert_eq!(
+            resp.headers.get("content-type").map(String::as_str),
+            Some("text/plain; charset=utf-8")
+        );
     }
 
     #[test]
