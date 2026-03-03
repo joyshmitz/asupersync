@@ -57,6 +57,7 @@ pub mod response;
 pub mod router;
 pub mod security;
 pub mod sse;
+/// WebSocket support for the web framework.
 pub mod websocket;
 
 pub use extract::{
