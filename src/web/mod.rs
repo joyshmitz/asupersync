@@ -49,6 +49,7 @@ pub mod compress;
 pub mod debug;
 pub mod extract;
 pub mod handler;
+pub mod health;
 pub mod middleware;
 pub mod negotiate;
 pub mod nextjs_bootstrap;
