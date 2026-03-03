@@ -60,6 +60,11 @@ fn doc_references_correct_bead_and_track() {
         "document must reference bead 2oh2u.10.5"
     );
     assert!(doc.contains("[T8.5]"), "document must reference T8.5");
+    assert!(
+        doc.contains("asupersync-2oh2u.10.7"),
+        "document must reference bead 2oh2u.10.7"
+    );
+    assert!(doc.contains("[T8.7]"), "document must reference T8.7");
 }
 
 #[test]
@@ -190,10 +195,63 @@ fn doc_defines_release_promotion_denial_conditions() {
 #[test]
 fn doc_binds_to_downstream_beads() {
     let doc = load_doc();
-    for token in ["asupersync-2oh2u.10.8", "asupersync-2oh2u.10.6"] {
+    for token in [
+        "asupersync-2oh2u.10.8",
+        "asupersync-2oh2u.10.6",
+        "asupersync-2oh2u.10.7",
+        "asupersync-2oh2u.10.9",
+    ] {
         assert!(
             doc.contains(token),
             "missing downstream binding token: {token}"
+        );
+    }
+}
+
+#[test]
+fn doc_defines_t87_perf_budget_gate_set() {
+    let doc = load_doc();
+    for token in [
+        "PB-01",
+        "PB-02",
+        "PB-03",
+        "PB-04",
+        "PB-05",
+        "PB-06",
+        "p95 latency regression",
+        "throughput regression",
+        "handshake/stream setup latency",
+        "request path latency",
+        "end-to-end operation latency",
+        "bridge overhead and scheduling cost",
+    ] {
+        assert!(
+            doc.contains(token),
+            "missing T8.7 performance budget token: {token}"
+        );
+    }
+}
+
+#[test]
+fn doc_defines_t87_perf_alarm_artifacts_and_commands() {
+    let doc = load_doc();
+    for token in [
+        "tokio_track_perf_budgets.json",
+        "tokio_track_perf_alarms.json",
+        "tokio_track_perf_regression_report.md",
+        "tokio_track_perf_repro_commands.txt",
+        "alert_id",
+        "budget_id",
+        "thread_id",
+        "first_failing_commit",
+        "rch exec -- cargo bench --bench scheduler_benchmark",
+        "rch exec -- cargo bench --bench reactor_benchmark",
+        "rch exec -- cargo bench --bench protocol_benchmark",
+        "rch exec -- cargo test --test perf_regression_gates -- --nocapture",
+    ] {
+        assert!(
+            doc.contains(token),
+            "missing T8.7 alarm/runner token: {token}"
         );
     }
 }

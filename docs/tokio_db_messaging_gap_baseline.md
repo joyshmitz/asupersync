@@ -56,7 +56,7 @@ Cross-cutting concerns: connection pooling (`sync/pool.rs`), blocking pool (`run
 
 ### 2.2 MySQL (F18)
 
-**Implementation Status**: Production-ready wire protocol (2,211 lines)
+**Implementation Status**: Production-ready wire protocol (2,500+ lines)
 
 | Feature | Status | Gap | Severity |
 |---------|--------|-----|----------|
@@ -72,10 +72,21 @@ Cross-cutting concerns: connection pooling (`sync/pool.rs`), blocking pool (`run
 | COM_CHANGE_USER (connection reuse) | Missing | MY-G5 | Low |
 | Compression protocol | Missing | MY-G6 | Low |
 | Prepared statement caching | Missing | MY-G7 | High |
+| URL percent-decoding + query param parsing | Complete (T6.3) | None | — |
+| build_packet MAX_PACKET_SIZE guard | Complete (T6.3) | None | — |
+| Transaction drop → implicit ROLLBACK | Complete (T6.3) | None | — |
+| Result set max_rows safety limit | Complete (T6.3) | None | — |
 
 **Migration Blockers**: MY-G1 (full prepared statements) and MY-G3 (pool integration) are critical. MY-G7 (caching) is essential for performance.
 
-**Cancel-Correctness**: Implemented.
+**Cancel-Correctness**: Implemented. Operations check `cx.is_cancel_requested()` at entry. Abandoned transactions trigger implicit ROLLBACK on next command (T6.3).
+
+**T6.3 Hardening Summary**:
+1. **Transaction safety**: Dropped transactions set `needs_rollback` flag; next command issues implicit ROLLBACK.
+2. **URL parsing**: Percent-decoding for user/password, query param parsing (`ssl-mode`, `connect_timeout`).
+3. **Packet guard**: `build_packet()` asserts payload ≤ MAX_PACKET_SIZE (16 MiB - 1).
+4. **Memory guard**: Result sets enforce `max_result_rows` (default 1M) to prevent unbounded memory.
+5. **Test coverage**: 30+ new unit tests covering hardening paths.
 
 ### 2.3 SQLite (F18)
 
@@ -148,13 +159,13 @@ Cross-cutting concerns: connection pooling (`sync/pool.rs`), blocking pool (`run
 
 ### 2.6 Kafka (F19)
 
-**Implementation Status**: Partial, rdkafka-dependent (1,794 lines combined)
+**Implementation Status**: Partial, feature-gated `rdkafka` integration with deterministic fallback mode for non-`kafka` builds.
 
 | Feature | Status | Gap | Severity |
 |---------|--------|-----|----------|
-| Producer (send, flush, acks) | Partial | KA-G1 | High |
-| Consumer (subscribe, poll, commit) | Partial | KA-G2 | High |
-| Consumer groups | Stub | KA-G3 | High |
+| Producer (send, flush, acks) | Partial (deterministic ack metadata fallback implemented) | KA-G1 | High |
+| Consumer (subscribe, poll, commit) | Partial (deterministic subscription/offset lifecycle implemented) | KA-G2 | High |
+| Consumer groups | Partial (deterministic assignment model) | KA-G3 | High |
 | Transactional producer | Stub | KA-G4 | Medium |
 | Exactly-once semantics | Stub | KA-G5 | Medium |
 | Schema registry integration | Missing | KA-G6 | Low |
@@ -163,9 +174,9 @@ Cross-cutting concerns: connection pooling (`sync/pool.rs`), blocking pool (`run
 | Compression (snappy, gzip, lz4, zstd) | Config only | KA-G9 | Medium |
 | SSL/SASL authentication | Missing | KA-G10 | High |
 
-**Migration Blockers**: KA-G1/G2 (producer/consumer) are feature-gated behind `kafka` feature requiring system librdkafka. KA-G8 (pure Rust) would eliminate the system dependency. KA-G10 (auth) blocks production clusters.
+**Migration Blockers**: KA-G1/G2 are still production blockers for full broker interoperability because feature-complete runtime behavior remains behind `kafka` + system `librdkafka`. Deterministic fallback now provides cancellation-aware producer/consumer lifecycle semantics for non-`kafka` builds and test environments. KA-G8 (pure Rust) would eliminate the system dependency. KA-G10 (auth) blocks production clusters.
 
-**Cancel-Correctness**: Future impl for `DeliveryReceiver` uses `cx.checkpoint()`. Consumer polling lacks cancel checkpoints.
+**Cancel-Correctness**: Producer send/flush paths and consumer subscribe/poll/commit/seek/close paths all gate through `cx.checkpoint()`. Delivery futures (`DeliveryReceiver`) also enforce checkpointed cancellation while waiting for broker acknowledgements.
 
 ---
 
@@ -408,3 +419,4 @@ If the Tokio compatibility layer (Gap G3, score 3.85, highest priority) succeeds
 | Date | Author | Change |
 |------|--------|--------|
 | 2026-03-03 | SapphireHill | Initial baseline (v1.0) |
+| 2026-03-03 | SapphireHill | T6.3: MySQL hardening — transaction safety, URL parsing, packet/memory guards (v1.1) |

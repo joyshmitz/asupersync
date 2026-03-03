@@ -517,3 +517,164 @@ fn document_has_revision_history() {
         "revision history must credit authoring agent"
     );
 }
+
+// =============================================================================
+// T6.3 MySQL Hardening Contract Tests
+// =============================================================================
+
+#[test]
+fn t63_mysql_hardening_summary_present() {
+    let doc = load_baseline_doc();
+    assert!(
+        doc.contains("T6.3 Hardening Summary"),
+        "baseline must include T6.3 hardening summary"
+    );
+}
+
+#[test]
+fn t63_mysql_transaction_safety_documented() {
+    let doc = load_baseline_doc();
+    assert!(
+        doc.contains("needs_rollback") || doc.contains("implicit ROLLBACK"),
+        "T6.3 must document transaction drop → implicit ROLLBACK behavior"
+    );
+}
+
+#[test]
+fn t63_mysql_url_parsing_hardened() {
+    let doc = load_baseline_doc();
+    assert!(
+        doc.contains("Percent-decoding") || doc.contains("percent-decoding"),
+        "T6.3 must document URL percent-decoding"
+    );
+    assert!(
+        doc.contains("query param") || doc.contains("ssl-mode"),
+        "T6.3 must document URL query parameter parsing"
+    );
+}
+
+#[test]
+fn t63_mysql_packet_guard_documented() {
+    let doc = load_baseline_doc();
+    assert!(
+        doc.contains("MAX_PACKET_SIZE") || doc.contains("packet guard"),
+        "T6.3 must document build_packet overflow guard"
+    );
+}
+
+#[test]
+fn t63_mysql_memory_guard_documented() {
+    let doc = load_baseline_doc();
+    assert!(
+        doc.contains("max_result_rows") || doc.contains("memory guard"),
+        "T6.3 must document result set max_rows safety limit"
+    );
+}
+
+#[test]
+fn t63_mysql_cancel_correctness_updated() {
+    let doc = load_baseline_doc();
+    let mysql_section = doc
+        .split("### 2.2 MySQL")
+        .nth(1)
+        .and_then(|s| s.split("### 2.3").next())
+        .unwrap_or("");
+    assert!(
+        mysql_section.contains("Cancel-Correctness"),
+        "MySQL section must include cancel-correctness assessment"
+    );
+    assert!(
+        mysql_section.contains("T6.3"),
+        "cancel-correctness must reference T6.3 hardening"
+    );
+}
+
+#[test]
+fn t63_revision_history_updated() {
+    let doc = load_baseline_doc();
+    assert!(
+        doc.contains("T6.3"),
+        "revision history must include T6.3 update"
+    );
+    assert!(
+        doc.contains("v1.1"),
+        "revision history must show version bump to v1.1"
+    );
+}
+
+#[test]
+fn t63_mysql_feature_rows_include_hardening() {
+    let doc = load_baseline_doc();
+    let mysql_section = doc
+        .split("### 2.2 MySQL")
+        .nth(1)
+        .and_then(|s| s.split("### 2.3").next())
+        .unwrap_or("");
+
+    let hardened_features = [
+        "URL percent-decoding",
+        "build_packet MAX_PACKET_SIZE",
+        "Transaction drop",
+        "Result set max_rows",
+    ];
+    for feature in &hardened_features {
+        assert!(
+            mysql_section.contains(feature),
+            "MySQL feature table must include hardened feature: {feature}"
+        );
+    }
+}
+
+// =============================================================================
+// T6.8 Kafka Parity Contract Tests
+// =============================================================================
+
+#[test]
+fn t68_kafka_section_mentions_deterministic_fallback() {
+    let doc = load_baseline_doc();
+    let kafka_section = doc
+        .split("### 2.6 Kafka")
+        .nth(1)
+        .and_then(|s| s.split("---").next())
+        .unwrap_or("");
+
+    assert!(
+        kafka_section.contains("deterministic fallback"),
+        "Kafka section must document deterministic fallback behavior for non-kafka builds"
+    );
+}
+
+#[test]
+fn t68_kafka_feature_rows_capture_producer_and_consumer_lifecycle_progress() {
+    let doc = load_baseline_doc();
+    let kafka_section = doc
+        .split("### 2.6 Kafka")
+        .nth(1)
+        .and_then(|s| s.split("---").next())
+        .unwrap_or("");
+
+    assert!(
+        kafka_section.contains("deterministic ack metadata fallback"),
+        "Kafka producer row must mention deterministic ack metadata fallback"
+    );
+    assert!(
+        kafka_section.contains("deterministic subscription/offset lifecycle"),
+        "Kafka consumer row must mention deterministic subscription/offset lifecycle"
+    );
+}
+
+#[test]
+fn t68_kafka_cancel_correctness_mentions_checkpointed_paths() {
+    let doc = load_baseline_doc();
+    let kafka_section = doc
+        .split("### 2.6 Kafka")
+        .nth(1)
+        .and_then(|s| s.split("---").next())
+        .unwrap_or("");
+
+    assert!(
+        kafka_section.contains("Producer send/flush paths")
+            && kafka_section.contains("consumer subscribe/poll/commit/seek/close"),
+        "Kafka cancel-correctness must enumerate checkpointed producer and consumer paths"
+    );
+}

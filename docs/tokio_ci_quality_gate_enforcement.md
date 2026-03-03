@@ -152,5 +152,70 @@ This bead's contract test enforces document-level correctness for the gate polic
 |---|---|
 | `asupersync-2oh2u.10.8` | capability-security audits consume gate outcomes and artifact validity guarantees |
 | `asupersync-2oh2u.10.6` | replay artifact policy aligns with `QG-04` schema/freshness constraints |
+| `asupersync-2oh2u.10.7` | track-level performance budgets and alarm policy are enforced by this gate framework |
+| `asupersync-2oh2u.10.9` | replacement-readiness aggregator consumes performance budget and alarm outputs |
 
 T8.5 is complete only when strict, deterministic quality-gate policy is explicitly documented and executable contract tests pass.
+
+---
+
+## 10. Track-Level Performance Budgets and Alarms (T8.7)
+
+Track-level regression control for `asupersync-2oh2u.10.7` (`[T8.7]`) is a mandatory
+extension of this CI quality-gate contract.
+
+### 10.1 Budget Gate Set (Normative)
+
+| Budget ID | Track Scope | Metric Class | Hard-Fail Threshold |
+|---|---|---|---|
+| `PB-01` | `T2` Async I/O + codec | p95 latency regression | `> 10%` vs accepted baseline |
+| `PB-02` | `T3` fs/process/signal | throughput regression | `> 8%` vs accepted baseline |
+| `PB-03` | `T4` QUIC/H3 | handshake/stream setup latency | `> 12%` vs accepted baseline |
+| `PB-04` | `T5` web/gRPC | request path latency + tail amplification | `> 10%` vs accepted baseline |
+| `PB-05` | `T6` db/messaging | end-to-end operation latency | `> 9%` vs accepted baseline |
+| `PB-06` | `T7` adapter boundaries | bridge overhead and scheduling cost | `> 7%` vs accepted baseline |
+
+Any `PB-*` breach fails `QG-06` release eligibility.
+
+### 10.2 Required Performance Artifacts
+
+Every T8.7 enforcement run MUST emit:
+
+- `tokio_track_perf_budgets.json`
+- `tokio_track_perf_alarms.json`
+- `tokio_track_perf_regression_report.md`
+- `tokio_track_perf_repro_commands.txt`
+
+`tokio_track_perf_budgets.json` MUST include per-track fields:
+
+- `track_id`
+- `metric_name`
+- `baseline_value`
+- `current_value`
+- `regression_percent`
+- `budget_threshold_percent`
+- `status`
+
+### 10.3 Alarm Routing Contract
+
+Each alarm entry in `tokio_track_perf_alarms.json` MUST include:
+
+- `alert_id`
+- `track_id`
+- `budget_id`
+- `severity`
+- `owner`
+- `thread_id`
+- `repro_command`
+- `first_failing_commit`
+
+Alarm routing is deterministic: identical perf manifests must produce identical alarm IDs.
+
+### 10.4 Required Runner Commands (T8.7)
+
+Performance-budget checks MUST run via `rch exec --`:
+
+- `rch exec -- cargo bench --bench scheduler_benchmark`
+- `rch exec -- cargo bench --bench reactor_benchmark`
+- `rch exec -- cargo bench --bench protocol_benchmark`
+- `rch exec -- cargo test --test perf_regression_gates -- --nocapture`
