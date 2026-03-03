@@ -617,7 +617,7 @@ mod tests {
         use crate::net::tcp::VirtualTcpStream;
         use crate::test_utils::run_test_with_cx;
 
-        run_test_with_cx(|cx| async move {
+        run_test_with_cx(|_cx| async move {
             let connector = TlsConnectorBuilder::new().build().unwrap();
             let (client_io, _server_io) = VirtualTcpStream::pair(
                 "127.0.0.1:5100".parse().unwrap(),

@@ -494,7 +494,7 @@ SrXuVI5uunTgPWuOtJOP+KM=
         use crate::test_utils::run_test_with_cx;
         use futures_lite::future::zip;
 
-        run_test_with_cx(|cx| async move {
+        run_test_with_cx(|_cx| async move {
             let chain = CertificateChain::from_pem(TEST_CERT_PEM).unwrap();
             let key = PrivateKey::from_pem(TEST_KEY_PEM).unwrap();
             let acceptor = TlsAcceptorBuilder::new(chain, key)
@@ -539,7 +539,7 @@ SrXuVI5uunTgPWuOtJOP+KM=
         use crate::test_utils::run_test_with_cx;
         use futures_lite::future::zip;
 
-        run_test_with_cx(|cx| async move {
+        run_test_with_cx(|_cx| async move {
             // Server prefers http/1.1 over h2; client prefers h2 over http/1.1.
             // Per TLS ALPN, the server selects from the intersection.
             let chain = CertificateChain::from_pem(TEST_CERT_PEM).unwrap();
@@ -582,7 +582,7 @@ SrXuVI5uunTgPWuOtJOP+KM=
         use crate::test_utils::run_test_with_cx;
         use futures_lite::future::zip;
 
-        run_test_with_cx(|cx| async move {
+        run_test_with_cx(|_cx| async move {
             // Server supports only http/1.1; client offers h2 + http/1.1.
             let chain = CertificateChain::from_pem(TEST_CERT_PEM).unwrap();
             let key = PrivateKey::from_pem(TEST_KEY_PEM).unwrap();
@@ -624,7 +624,7 @@ SrXuVI5uunTgPWuOtJOP+KM=
         use crate::test_utils::run_test_with_cx;
         use futures_lite::future::zip;
 
-        run_test_with_cx(|cx| async move {
+        run_test_with_cx(|_cx| async move {
             // Server does not advertise ALPN; client offers h2 + http/1.1.
             // This should still succeed and return no negotiated ALPN.
             let chain = CertificateChain::from_pem(TEST_CERT_PEM).unwrap();
@@ -664,7 +664,7 @@ SrXuVI5uunTgPWuOtJOP+KM=
         use crate::test_utils::run_test_with_cx;
         use futures_lite::future::zip;
 
-        run_test_with_cx(|cx| async move {
+        run_test_with_cx(|_cx| async move {
             // Client requires h2; server only offers http/1.1 -> no overlap.
             let chain = CertificateChain::from_pem(TEST_CERT_PEM).unwrap();
             let key = PrivateKey::from_pem(TEST_KEY_PEM).unwrap();
@@ -708,7 +708,7 @@ SrXuVI5uunTgPWuOtJOP+KM=
         use crate::test_utils::run_test_with_cx;
         use futures_lite::future::zip;
 
-        run_test_with_cx(|cx| async move {
+        run_test_with_cx(|_cx| async move {
             // Server requires h2; client does not offer ALPN -> no negotiation.
             let chain = CertificateChain::from_pem(TEST_CERT_PEM).unwrap();
             let key = PrivateKey::from_pem(TEST_KEY_PEM).unwrap();
@@ -750,7 +750,7 @@ SrXuVI5uunTgPWuOtJOP+KM=
         use crate::net::tcp::VirtualTcpStream;
         use crate::test_utils::run_test_with_cx;
 
-        run_test_with_cx(|cx| async move {
+        run_test_with_cx(|_cx| async move {
             let certs = Certificate::from_pem(TEST_CERT_PEM).unwrap();
             let connector = crate::tls::TlsConnectorBuilder::new()
                 .add_root_certificates(certs)
