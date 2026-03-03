@@ -143,7 +143,7 @@ impl<T> OnceCell<T> {
             match self.state.compare_exchange_weak(
                 UNINIT,
                 INITIALIZING,
-                Ordering::Release,
+                Ordering::AcqRel,
                 Ordering::Acquire,
             ) {
                 Ok(_) => {
@@ -192,7 +192,7 @@ impl<T> OnceCell<T> {
             match self.state.compare_exchange_weak(
                 UNINIT,
                 INITIALIZING,
-                Ordering::Release,
+                Ordering::AcqRel,
                 Ordering::Acquire,
             ) {
                 Ok(_) => {
@@ -257,7 +257,7 @@ impl<T> OnceCell<T> {
             match self.state.compare_exchange_weak(
                 UNINIT,
                 INITIALIZING,
-                Ordering::Release,
+                Ordering::AcqRel,
                 Ordering::Acquire,
             ) {
                 Ok(_) => {
@@ -332,7 +332,7 @@ impl<T> OnceCell<T> {
             match self.state.compare_exchange_weak(
                 UNINIT,
                 INITIALIZING,
-                Ordering::Release,
+                Ordering::AcqRel,
                 Ordering::Acquire,
             ) {
                 Ok(_) => {
