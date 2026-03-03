@@ -576,9 +576,20 @@ impl Connection {
         // desynchronizes the connection flow-control windows.
         self.recv_window -= window_delta;
 
+        // Perform connection-level WINDOW_UPDATE check immediately after decrementing,
+        // BEFORE any stream-level operations that might return early with a stream error.
+        // If we don't do this, DATA frames on closed streams will permanently leak
+        // connection window capacity, leading to connection deadlocks.
+        let low_watermark = DEFAULT_CONNECTION_WINDOW_SIZE / 2;
+        if self.recv_window < low_watermark {
+            let increment = i64::from(DEFAULT_CONNECTION_WINDOW_SIZE) - i64::from(self.recv_window);
+            let increment = u32::try_from(increment)
+                .map_err(|_| H2Error::flow_control("window increment too large"))?;
+            self.send_connection_window_update(increment)?;
+        }
+
         // Look up the stream. If the stream was closed and pruned, treat
-        // it as a stream error (RFC 7540 §5.1). The connection-level window
-        // was already decremented above so the peer's accounting stays in sync.
+        // it as a stream error (RFC 7540 §5.1).
         let stream = self.streams.get_mut(frame.stream_id).ok_or_else(|| {
             H2Error::stream(
                 frame.stream_id,
@@ -600,14 +611,6 @@ impl Connection {
                 stream_id: frame.stream_id,
                 increment,
             });
-        }
-
-        let low_watermark = DEFAULT_CONNECTION_WINDOW_SIZE / 2;
-        if self.recv_window < low_watermark {
-            let increment = i64::from(DEFAULT_CONNECTION_WINDOW_SIZE) - i64::from(self.recv_window);
-            let increment = u32::try_from(increment)
-                .map_err(|_| H2Error::flow_control("window increment too large"))?;
-            self.send_connection_window_update(increment)?;
         }
 
         Ok(Some(ReceivedFrame::Data {
@@ -963,9 +966,11 @@ impl Connection {
         self.goaway_received = true;
         self.state = ConnectionState::Closing;
 
-        // Reset streams that weren't processed
+        // Reset locally-initiated streams that weren't processed by the peer.
+        // The last_stream_id only restricts streams initiated by the receiver of the GOAWAY.
         for stream_id in self.streams.active_stream_ids() {
-            if stream_id > frame.last_stream_id {
+            let is_local = (stream_id % 2 == 1) == self.is_client;
+            if is_local && stream_id > frame.last_stream_id {
                 if let Some(stream) = self.streams.get_mut(stream_id) {
                     stream.reset(ErrorCode::RefusedStream);
                 }
