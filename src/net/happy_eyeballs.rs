@@ -719,7 +719,8 @@ mod tests {
             overall_timeout: Duration::from_secs(2),
         };
 
-        let result = futures_lite::future::block_on(connect(&addrs, &config));
+        let runtime = crate::runtime::Builder::new().build().unwrap();
+        let result = runtime.block_on(connect(&addrs, &config));
         assert!(
             result.is_ok(),
             "connect should succeed via second address with distinct port: {result:?}"

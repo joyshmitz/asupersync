@@ -392,17 +392,13 @@ impl<R: AsyncRead + Unpin> AsyncRead for BrowserReadableStream<R> {
         // taken when we are near the total-byte budget or when max_read_chunk
         // is smaller than the caller's buffer — the common case goes direct.
         if effective_max < remaining {
-            let mut tmp = vec![0u8; effective_max];
-            let mut tmp_buf = ReadBuf::new(&mut tmp);
+            let mut tmp_buf = ReadBuf::new(&mut buf.unfilled()[..effective_max]);
             let result = Pin::new(&mut this.source).poll_read(cx, &mut tmp_buf);
             match &result {
                 Poll::Ready(Ok(())) => {
-                    let filled = tmp_buf.filled();
-                    let n = filled.len() as u64;
-                    if !filled.is_empty() {
-                        buf.put_slice(filled);
-                    }
-                    this.total_read = this.total_read.saturating_add(n);
+                    let n = tmp_buf.filled().len();
+                    buf.advance(n);
+                    this.total_read = this.total_read.saturating_add(n as u64);
                     if n == 0 {
                         this.state = BrowserStreamState::Closed;
                     }

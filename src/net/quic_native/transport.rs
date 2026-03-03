@@ -326,7 +326,7 @@ impl LossRecovery {
             }
         }
         if let Some(lost_packet_sent_time) = newest_lost_packet_sent_micros {
-            self.on_loss_congestion(lost_packet_sent_time);
+            self.on_loss_congestion(lost_packet_sent_time, now_micros);
         }
         event
     }
@@ -351,14 +351,14 @@ impl LossRecovery {
         }
     }
 
-    fn on_loss_congestion(&mut self, newest_lost_packet_sent_micros: u64) {
+    fn on_loss_congestion(&mut self, newest_lost_packet_sent_micros: u64, now_micros: u64) {
         // RFC 9002 Appendix B.6: Only reduce cwnd once per recovery epoch.
         if let Some(recovery_start) = self.congestion_recovery_start_time {
             if newest_lost_packet_sent_micros <= recovery_start {
                 return;
             }
         }
-        self.congestion_recovery_start_time = Some(newest_lost_packet_sent_micros);
+        self.congestion_recovery_start_time = Some(now_micros);
         let min_cwnd = self.max_datagram_size.saturating_mul(2);
         let reduced = (self.congestion_window_bytes / 2).max(min_cwnd);
         self.ssthresh_bytes = reduced;
