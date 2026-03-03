@@ -30,6 +30,8 @@
 //! - [`Path<T>`]: URL path parameters
 //! - [`Query<T>`]: Query string parameters
 //! - [`Json<T>`]: JSON request body
+//! - [`Cookie`]: Raw `Cookie` request header
+//! - [`CookieJar`]: Parsed request cookies
 //! - [`State<T>`]: Shared application state
 //! - `HeaderMap`: All request headers
 //!
@@ -55,7 +57,10 @@ pub mod response;
 pub mod router;
 pub mod security;
 
-pub use extract::{Form, FromRequest, FromRequestParts, Json as JsonExtract, Path, Query, State};
+pub use extract::{
+    Cookie, CookieJar, Form, FromRequest, FromRequestParts, Json as JsonExtract, Path, Query,
+    State,
+};
 pub use handler::{
     AsyncCxFnHandler, AsyncCxFnHandler1, AsyncCxFnHandler2, AsyncCxFnHandler3, AsyncCxFnHandler4,
     Handler,

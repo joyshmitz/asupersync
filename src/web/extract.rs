@@ -10,6 +10,8 @@
 //! - [`Query<T>`]: Query string parameters
 //! - [`Json<T>`]: JSON request body
 //! - [`Form<T>`]: URL-encoded form body
+//! - [`Cookie`]: Raw `Cookie` request header
+//! - [`CookieJar`]: Parsed request cookies
 //! - [`State<T>`]: Shared application state
 //! - [`RawBody`]: Raw request body bytes
 
@@ -353,6 +355,99 @@ fn hex_val(b: u8) -> Option<u8> {
         b'A'..=b'F' => Some(b - b'A' + 10),
         _ => None,
     }
+}
+
+// ─── Cookie / CookieJar ─────────────────────────────────────────────────────
+
+/// Extract the raw `Cookie` request header.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct Cookie(pub String);
+
+impl FromRequestParts for Cookie {
+    fn from_request_parts(req: &Request) -> Result<Self, ExtractionError> {
+        header_value_ci(req, "cookie")
+            .map(|value| Self(value.to_string()))
+            .ok_or_else(|| ExtractionError::bad_request("missing Cookie header"))
+    }
+}
+
+/// Parsed request cookies.
+///
+/// `CookieJar` is extracted from the `Cookie` header and provides convenient
+/// accessors for cookie lookup.
+#[derive(Debug, Clone, Default, PartialEq, Eq)]
+pub struct CookieJar {
+    cookies: HashMap<String, String>,
+}
+
+impl CookieJar {
+    /// Returns the cookie value for `name`, if present.
+    #[must_use]
+    pub fn get(&self, name: &str) -> Option<&str> {
+        self.cookies.get(name).map(String::as_str)
+    }
+
+    /// Returns true when a cookie with `name` exists.
+    #[must_use]
+    pub fn contains(&self, name: &str) -> bool {
+        self.cookies.contains_key(name)
+    }
+
+    /// Returns the number of cookies in the jar.
+    #[must_use]
+    pub fn len(&self) -> usize {
+        self.cookies.len()
+    }
+
+    /// Returns true when no cookies are present.
+    #[must_use]
+    pub fn is_empty(&self) -> bool {
+        self.cookies.is_empty()
+    }
+
+    /// Iterates over cookie key/value pairs.
+    pub fn iter(&self) -> impl Iterator<Item = (&str, &str)> + '_ {
+        self.cookies
+            .iter()
+            .map(|(name, value)| (name.as_str(), value.as_str()))
+    }
+}
+
+impl FromRequestParts for CookieJar {
+    fn from_request_parts(req: &Request) -> Result<Self, ExtractionError> {
+        let cookies = header_value_ci(req, "cookie")
+            .map(parse_cookie_header)
+            .unwrap_or_default();
+        Ok(Self { cookies })
+    }
+}
+
+fn header_value_ci<'a>(req: &'a Request, header_name: &str) -> Option<&'a str> {
+    req.headers
+        .iter()
+        .find(|(name, _)| name.eq_ignore_ascii_case(header_name))
+        .map(|(_, value)| value.as_str())
+}
+
+#[allow(clippy::implicit_hasher)]
+fn parse_cookie_header(raw: &str) -> HashMap<String, String> {
+    let mut parsed = HashMap::new();
+    for segment in raw.split(';') {
+        let trimmed = segment.trim();
+        if trimmed.is_empty() {
+            continue;
+        }
+        let Some((name, value)) = trimmed.split_once('=') else {
+            continue;
+        };
+        let name = name.trim();
+        if name.is_empty() {
+            continue;
+        }
+        let value = value.trim().trim_matches('"').to_string();
+        parsed.insert(name.to_string(), value);
+    }
+    parsed
 }
 
 // ─── Json<T> ─────────────────────────────────────────────────────────────────
@@ -774,6 +869,58 @@ mod tests {
         let req = Request::new("POST", "/upload");
         let RawBody(body) = RawBody::from_request(req).unwrap();
         assert!(body.is_empty());
+    }
+
+    #[test]
+    fn cookie_extraction_raw_header() {
+        let req = Request::new("GET", "/").with_header("Cookie", "session=abc; theme=dark");
+        let Cookie(raw) = Cookie::from_request_parts(&req).unwrap();
+        assert_eq!(raw, "session=abc; theme=dark");
+    }
+
+    #[test]
+    fn cookie_extraction_missing_header_is_error() {
+        let req = Request::new("GET", "/");
+        let err = Cookie::from_request_parts(&req).unwrap_err();
+        assert_eq!(err.status, crate::web::response::StatusCode::BAD_REQUEST);
+    }
+
+    #[test]
+    fn cookie_jar_parses_cookie_pairs() {
+        let req =
+            Request::new("GET", "/").with_header("cookie", "session=abc; theme=dark; id=42");
+        let jar = CookieJar::from_request_parts(&req).unwrap();
+        assert_eq!(jar.get("session"), Some("abc"));
+        assert_eq!(jar.get("theme"), Some("dark"));
+        assert_eq!(jar.get("id"), Some("42"));
+        assert_eq!(jar.len(), 3);
+    }
+
+    #[test]
+    fn cookie_jar_last_duplicate_wins() {
+        let req = Request::new("GET", "/").with_header("cookie", "token=old; token=new");
+        let jar = CookieJar::from_request_parts(&req).unwrap();
+        assert_eq!(jar.get("token"), Some("new"));
+    }
+
+    #[test]
+    fn cookie_jar_ignores_malformed_segments() {
+        let req = Request::new("GET", "/").with_header(
+            "cookie",
+            "good=1; malformed; =missing_name; spaced = ok ; quoted=\"v\"",
+        );
+        let jar = CookieJar::from_request_parts(&req).unwrap();
+        assert_eq!(jar.get("good"), Some("1"));
+        assert_eq!(jar.get("spaced"), Some("ok"));
+        assert_eq!(jar.get("quoted"), Some("v"));
+        assert!(!jar.contains("malformed"));
+    }
+
+    #[test]
+    fn cookie_jar_missing_header_is_empty() {
+        let req = Request::new("GET", "/");
+        let jar = CookieJar::from_request_parts(&req).unwrap();
+        assert!(jar.is_empty());
     }
 
     #[test]
