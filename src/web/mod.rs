@@ -51,6 +51,7 @@ pub mod extract;
 pub mod handler;
 pub mod health;
 pub mod middleware;
+pub mod multipart;
 pub mod negotiate;
 pub mod nextjs_bootstrap;
 pub mod request_region;
