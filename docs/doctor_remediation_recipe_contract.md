@@ -215,6 +215,15 @@ Structured logs for scorecards use `doctor-logging-v1` remediation
 `verification_summary` events and include before/after metrics, unresolved findings,
 confidence shifts, recommendation rationale, and replay pointers.
 
+E2E coverage for this loop is provided by:
+
+- `scripts/test_doctor_remediation_verification_e2e.sh`
+  - runs the verification-scorecard test slice twice via `rch`
+  - asserts deterministic pass-set stability across runs
+  - enforces required trust-delta/recommendation/evidence test coverage
+  - emits `e2e-suite-summary-v3` artifacts under
+    `target/e2e-results/doctor_remediation_verification/`
+
 ## Safe Extension Strategy
 
 1. Additive only within `doctor-remediation-recipe-v1`:
