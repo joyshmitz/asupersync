@@ -22,8 +22,11 @@ RUN1_JSON="${ARTIFACT_DIR}/export_run1.json"
 RUN2_JSON="${ARTIFACT_DIR}/export_run2.json"
 RUN1_LOG="${ARTIFACT_DIR}/run1.log"
 RUN2_LOG="${ARTIFACT_DIR}/run2.log"
+REPORT_EXPORT_JSON="${ARTIFACT_DIR}/report_export_cross_system.json"
+REPORT_EXPORT_LOG="${ARTIFACT_DIR}/report_export_cross_system.log"
 EXPORT_ROOT="${ARTIFACT_DIR}/export_bundle"
 FIXTURE_ID="${FIXTURE_ID:-baseline_failure_path}"
+REPORT_EXPORT_FIXTURE_ID="${REPORT_EXPORT_FIXTURE_ID:-advanced_cross_system_mismatch_path}"
 SUITE_ID="doctor_frankensuite_export_e2e"
 E2E_SCENARIO_ID="E2E-SUITE-DOCTOR-FRANKENSUITE-EXPORT"
 
@@ -50,6 +53,7 @@ echo "  TEST_LOG_LEVEL: ${TEST_LOG_LEVEL}"
 echo "  RUST_LOG:       ${RUST_LOG}"
 echo "  TEST_SEED:      ${TEST_SEED}"
 echo "  FIXTURE_ID:     ${FIXTURE_ID}"
+echo "  REPORT_EXPORT_FIXTURE_ID: ${REPORT_EXPORT_FIXTURE_ID}"
 echo "  Artifact dir:   ${ARTIFACT_DIR}"
 echo "  Export root:    ${EXPORT_ROOT}"
 echo ""
@@ -109,18 +113,73 @@ run_export_call() {
     return 1
 }
 
-echo ">>> [1/5] Running export command (run 1) via rch..."
+run_report_export_call() {
+    local run_log="$1"
+    local run_json="$2"
+    local rc=0
+    local payload=""
+    local attempt_log=""
+
+    for ((attempt = 1; attempt <= RCH_RETRY_ATTEMPTS; attempt++)); do
+        local target_dir="/tmp/rch-doctor-integration-export-${TIMESTAMP}-attempt${attempt}"
+        local -a export_cmd=(
+            env "CARGO_TARGET_DIR=${target_dir}" \
+            cargo run --quiet --features cli --bin asupersync --
+            --format json
+            --color never
+            doctor report-export
+            --fixture-id "${REPORT_EXPORT_FIXTURE_ID}"
+            --out-dir "${EXPORT_ROOT}"
+            --format json
+        )
+
+        attempt_log="${run_log%.log}.attempt${attempt}.log"
+        if timeout "${RCH_SCAN_TIMEOUT}s" "${RCH_BIN}" exec -- "${export_cmd[@]}" >"${attempt_log}" 2>&1; then
+            rc=0
+        else
+            rc=$?
+        fi
+
+        payload="$(grep -E "\"schema_version\"[[:space:]]*:[[:space:]]*\"doctor-report-export-v1\"" "${attempt_log}" | tail -n1 || true)"
+        if [[ -n "${payload}" ]] && printf '%s\n' "${payload}" | jq -e . >/dev/null 2>&1; then
+            cp "${attempt_log}" "${run_log}"
+            printf '%s\n' "${payload}" > "${run_json}"
+            if [[ ${rc} -ne 0 ]]; then
+                echo "  WARN: report-export exited ${rc}; proceeding with captured JSON payload"
+            fi
+            return 0
+        fi
+
+        if [[ ${attempt} -lt ${RCH_RETRY_ATTEMPTS} ]]; then
+            echo "  WARN: report-export attempt ${attempt}/${RCH_RETRY_ATTEMPTS} produced no valid JSON payload (exit=${rc}); retrying"
+            sleep 1
+        fi
+    done
+
+    if [[ -n "${attempt_log}" && -f "${attempt_log}" ]]; then
+        cp "${attempt_log}" "${run_log}"
+    fi
+    echo "  ERROR: report-export failed after ${RCH_RETRY_ATTEMPTS} attempt(s) (last exit=${rc}) and produced no valid JSON payload (see ${run_log})"
+    return 1
+}
+
+echo ">>> [1/7] Running export command (run 1) via rch..."
 if ! run_export_call "export run 1" "${RUN1_LOG}" "${RUN1_JSON}" "run1"; then
     EXIT_CODE=1
 fi
 
-echo ">>> [2/5] Running export command (run 2) via rch..."
+echo ">>> [2/7] Running export command (run 2) via rch..."
 if ! run_export_call "export run 2" "${RUN2_LOG}" "${RUN2_JSON}" "run2"; then
     EXIT_CODE=1
 fi
 
+echo ">>> [3/7] Running cross-system report export via rch..."
+if ! run_report_export_call "${REPORT_EXPORT_LOG}" "${REPORT_EXPORT_JSON}"; then
+    EXIT_CODE=1
+fi
+
 if [[ ${EXIT_CODE} -eq 0 ]]; then
-    echo ">>> [3/5] Verifying deterministic top-level export payload..."
+    echo ">>> [4/7] Verifying deterministic top-level export payload..."
     if diff -u "${RUN1_JSON}" "${RUN2_JSON}" > "${ARTIFACT_DIR}/determinism.diff"; then
         CHECKS_PASSED=$((CHECKS_PASSED + 1))
         rm -f "${ARTIFACT_DIR}/determinism.diff"
@@ -129,7 +188,7 @@ if [[ ${EXIT_CODE} -eq 0 ]]; then
         CHECK_FAILURES=$((CHECK_FAILURES + 1))
     fi
 
-    echo ">>> [4/5] Validating payload contract and artifact integrity..."
+    echo ">>> [5/7] Validating payload contract and artifact integrity..."
     if jq -e \
         --arg fixture "${FIXTURE_ID}" '
         .schema_version == "doctor-frankensuite-export-v1" and
@@ -167,7 +226,29 @@ if [[ ${EXIT_CODE} -eq 0 ]]; then
         CHECK_FAILURES=$((CHECK_FAILURES + 1))
     fi
 
-    echo ">>> [5/5] Verifying cross-run export-root and link stability..."
+    echo ">>> [6/7] Validating cross-system report/franken interoperability assertions..."
+    if jq -e --arg report_fixture "${REPORT_EXPORT_FIXTURE_ID}" --argjson report "$(cat "${REPORT_EXPORT_JSON}")" '
+        .schema_version == "doctor-frankensuite-export-v1" and
+        .source_schema_version == "doctor-core-report-v1" and
+        ($report.schema_version == "doctor-report-export-v1") and
+        ($report.core_schema_version == .source_schema_version) and
+        ($report.extension_schema_version == "doctor-advanced-report-v1") and
+        ($report.exports | type == "array" and length == 1) and
+        ($report.exports[0].fixture_id == $report_fixture) and
+        ($report.exports[0].collaboration_channel_count == 3) and
+        ($report.exports[0].collaboration_channels == ["agent_mail", "beads", "frankensuite"]) and
+        ($report.exports[0].has_mismatch_diagnostics == true) and
+        ($report.exports[0].validation_status == "valid") and
+        ($report.rerun_commands | map(contains("doctor report-contract")) | any) and
+        (.rerun_commands | map(contains("doctor report-contract")) | any)
+    ' "${RUN1_JSON}" >/dev/null; then
+        CHECKS_PASSED=$((CHECKS_PASSED + 1))
+    else
+        echo "  ERROR: cross-system interoperability contract validation failed"
+        CHECK_FAILURES=$((CHECK_FAILURES + 1))
+    fi
+
+    echo ">>> [7/7] Verifying cross-run export-root and link stability..."
     if jq -e --argjson run1 "$(cat "${RUN1_JSON}")" '
         .export_root == $run1.export_root and
         .exports[0].evidence_jsonl == $run1.exports[0].evidence_jsonl and

@@ -66,17 +66,41 @@ All ID vectors are deterministic and lexically ordered.
 
 `advanced_diagnostics_report_bundle()` ships deterministic fixtures:
 
-1. `advanced_failure_path`
-2. `advanced_happy_path`
+1. `advanced_conflicting_signal_path`
+2. `advanced_cross_system_mismatch_path`
+3. `advanced_failure_path`
+4. `advanced_happy_path`
+5. `advanced_partial_success_path`
+6. `advanced_rollback_path`
 
-`run_advanced_diagnostics_report_smoke(...)` validates generation/consumption and
-emits deterministic structured-log events for integration/remediation/replay
-flows.
+Coverage intent:
+
+1. rollback and recovery planning (`advanced_rollback_path`)
+2. partial-success and mixed-outcome follow-up (`advanced_partial_success_path`)
+3. conflicting verify/replay signals (`advanced_conflicting_signal_path`)
+4. cross-system mismatch diagnostics across beads/bv, Agent Mail, and FrankenSuite (`advanced_cross_system_mismatch_path`)
+
+`run_advanced_diagnostics_report_smoke(...)` validates generation/consumption,
+enforces cross-system provenance assertions, and emits deterministic
+structured-log events for integration/remediation/replay flows.
+
+## Fixture Evolution Policy
+
+When adding fixtures to this bundle:
+
+1. keep `fixture_id` values lexically ordered
+2. preserve `doctor-advanced-report-v1` compatibility (additive only)
+3. include deterministic rerun pointers and stable scenario IDs
+4. link collaboration provenance back to beads (`bead_ref`/`thread_id`), Agent Mail (`mail-*` message refs), and FrankenSuite (`franken-*` refs) where applicable
+5. add explicit mismatch diagnostics steps for cross-system divergence scenarios
 
 ## Validation Commands
 
 ```bash
 rch exec -- env CARGO_TARGET_DIR=target/rch_chartreuse_2b4jj_5_8 cargo test -p asupersync --lib advanced_diagnostics_report -- --nocapture
+rch exec -- env CARGO_TARGET_DIR=target/rch_stormydune_2b4jj_5_9 cargo test -p asupersync --lib advanced_diagnostics_report -- --nocapture
+rch exec -- env CARGO_TARGET_DIR=target/rch_stormydune_2b4jj_5_9 cargo test -p asupersync --features cli --test doctor_remediation_unit_harness -- --nocapture
+TEST_SEED=5150 RCH_BIN=~/.local/bin/rch bash scripts/test_doctor_advanced_provenance_e2e.sh
 rch exec -- env CARGO_TARGET_DIR=target/rch_chartreuse_2b4jj_5_8 cargo check --all-targets
 rch exec -- env CARGO_TARGET_DIR=target/rch_chartreuse_2b4jj_5_8 cargo clippy --all-targets -- -D warnings
 cargo fmt --check

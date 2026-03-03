@@ -138,6 +138,21 @@ Full cross-system interoperability signoff remains gated by:
 - `asupersync-2b4jj.5.3`
 - `asupersync-2b4jj.5.5`
 
+## Cross-System Compatibility Matrix (`asupersync-2b4jj.5.5`)
+
+| Surface | Version | Mandatory compatibility assertions |
+|---|---|---|
+| Beads/BV command center | `doctor-beads-command-center-v1` | IDs and priorities remain deterministic under `br ready --json` + `bv --robot-triage`; snapshot parse failures fail closed into explicit `parse_failure` events. |
+| Agent Mail pane | `doctor-agent-mail-pane-v1` | Inbox/outbox/contact normalization keeps deterministic ordering; `ack_required` transitions are explicit and thread continuity never silently drops rows. |
+| Report export | `doctor-report-export-v1` | `core_schema_version` remains `doctor-core-report-v1`; advanced fixtures preserve cross-system provenance metadata (`collaboration_channels`, mismatch diagnostics flags). |
+| FrankenSuite export | `doctor-frankensuite-export-v1` | `source_schema_version` remains `doctor-core-report-v1`; evidence/decision export counts and artifact references remain deterministic across reruns. |
+
+CI gate expectations for this matrix:
+
+1. `TEST_SEED=5150 RCH_BIN=~/.local/bin/rch bash scripts/test_doctor_advanced_provenance_e2e.sh`
+2. `TEST_SEED=4242 RCH_BIN=~/.local/bin/rch bash scripts/test_doctor_frankensuite_export_e2e.sh`
+3. `rch exec -- cargo test -p asupersync --features cli --test doctor_advanced_provenance_contract`
+
 ## Consumer Guidance
 
 1. Fail closed on unknown `contract_version` or `schema_version`.

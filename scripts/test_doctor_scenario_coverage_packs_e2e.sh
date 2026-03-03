@@ -14,10 +14,13 @@ set -euo pipefail
 
 SCRIPT_DIR="$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)"
 PROJECT_ROOT="$(dirname "$SCRIPT_DIR")"
-OUTPUT_DIR="${PROJECT_ROOT}/target/e2e-results/doctor_scenario_coverage_packs"
+TARGET_OUTPUT_DIR="${PROJECT_ROOT}/target/e2e-results/doctor_scenario_coverage_packs"
+STAGING_ROOT="${TMPDIR:-/tmp}/asupersync-e2e-staging/doctor_scenario_coverage_packs"
 TIMESTAMP="$(date +%Y%m%d_%H%M%S)"
 RUN_STARTED_TS="$(date -u +%Y-%m-%dT%H:%M:%SZ)"
-ARTIFACT_DIR="${OUTPUT_DIR}/artifacts_${TIMESTAMP}"
+ARTIFACT_BASENAME="artifacts_${TIMESTAMP}"
+ARTIFACT_DIR="${STAGING_ROOT}/${ARTIFACT_BASENAME}"
+PUBLISHED_ARTIFACT_DIR="${TARGET_OUTPUT_DIR}/${ARTIFACT_BASENAME}"
 SUMMARY_FILE="${ARTIFACT_DIR}/summary.json"
 RUN1_CONTRACT_JSON="${ARTIFACT_DIR}/contract_run1.json"
 RUN2_CONTRACT_JSON="${ARTIFACT_DIR}/contract_run2.json"
@@ -51,7 +54,16 @@ if ! [[ "${SMOKE_SEED}" =~ ^[a-z0-9._:/-]+$ ]]; then
     exit 1
 fi
 
-mkdir -p "${OUTPUT_DIR}" "${ARTIFACT_DIR}"
+ensure_artifact_dirs() {
+    mkdir -p "${ARTIFACT_DIR}"
+}
+
+publish_artifacts() {
+    mkdir -p "${TARGET_OUTPUT_DIR}" "${PUBLISHED_ARTIFACT_DIR}" \
+        && cp -a "${ARTIFACT_DIR}/." "${PUBLISHED_ARTIFACT_DIR}/"
+}
+
+ensure_artifact_dirs
 
 echo "==================================================================="
 echo "     Asupersync Doctor Scenario Coverage Packs E2E                "
@@ -63,7 +75,8 @@ echo "  RUST_LOG:         ${RUST_LOG}"
 echo "  TEST_SEED:        ${TEST_SEED}"
 echo "  SMOKE_SEED:       ${SMOKE_SEED}"
 echo "  UNIT_FILTER:      ${UNIT_FILTER}"
-echo "  Artifact dir:     ${ARTIFACT_DIR}"
+echo "  Artifact staging: ${ARTIFACT_DIR}"
+echo "  Artifact output:  ${PUBLISHED_ARTIFACT_DIR}"
 echo ""
 
 EXIT_CODE=0
@@ -79,8 +92,14 @@ run_export_call() {
     local rc_contract=0
     local rc_smoke=0
     local attempt_log=""
+    local contract_ready=0
+
+    if jq -e . "${contract_json}" >/dev/null 2>&1; then
+        contract_ready=1
+    fi
 
     for ((attempt = 1; attempt <= RCH_RETRY_ATTEMPTS; attempt++)); do
+        ensure_artifact_dirs
         local target_dir="/tmp/rch-doctor-scenario-packs-${TIMESTAMP}-${run_label}-attempt${attempt}"
         local contract_tmp="${contract_json}.attempt${attempt}"
         local smoke_tmp="${smoke_json}.attempt${attempt}"
@@ -104,10 +123,15 @@ run_export_call() {
             --seed "${SMOKE_SEED}"
         )
 
-        if timeout "${RCH_SCAN_TIMEOUT}s" "${RCH_BIN}" exec -- "${contract_cmd[@]}" >"${contract_tmp}" 2>>"${attempt_log}"; then
+        if [[ ${contract_ready} -eq 1 ]]; then
+            cp "${contract_json}" "${contract_tmp}"
             rc_contract=0
         else
-            rc_contract=$?
+            if timeout "${RCH_SCAN_TIMEOUT}s" "${RCH_BIN}" exec -- "${contract_cmd[@]}" >"${contract_tmp}" 2>>"${attempt_log}"; then
+                rc_contract=0
+            else
+                rc_contract=$?
+            fi
         fi
 
         if timeout "${RCH_SCAN_TIMEOUT}s" "${RCH_BIN}" exec -- "${smoke_cmd[@]}" >"${smoke_tmp}" 2>>"${attempt_log}"; then
@@ -132,10 +156,15 @@ run_export_call() {
             fi
         fi
 
-        if [[ ${rc_contract} -eq 0 && ${rc_smoke} -eq 0 ]] \
-            && jq -e . "${contract_tmp}" >/dev/null 2>&1 \
-            && jq -e . "${smoke_tmp}" >/dev/null 2>&1; then
+        if [[ ${rc_contract} -eq 0 ]] \
+            && jq -e . "${contract_tmp}" >/dev/null 2>&1; then
             mv "${contract_tmp}" "${contract_json}"
+            contract_ready=1
+        fi
+
+        if [[ ${contract_ready} -eq 1 && ${rc_smoke} -eq 0 ]] \
+            && jq -e . "${contract_json}" >/dev/null 2>&1 \
+            && jq -e . "${smoke_tmp}" >/dev/null 2>&1; then
             mv "${smoke_tmp}" "${smoke_json}"
             cp "${attempt_log}" "${run_log}"
             return 0
@@ -163,6 +192,7 @@ run_unit_slice() {
     local passed_count=""
 
     for ((attempt = 1; attempt <= RCH_RETRY_ATTEMPTS; attempt++)); do
+        ensure_artifact_dirs
         local target_dir="/tmp/rch-doctor-scenario-packs-unit-${TIMESTAMP}-attempt${attempt}"
         local -a unit_cmd=(
             env "CARGO_TARGET_DIR=${target_dir}" \
@@ -337,6 +367,7 @@ fi
 
 REPRO_COMMAND="TEST_LOG_LEVEL=${TEST_LOG_LEVEL} RUST_LOG=${RUST_LOG} TEST_SEED=${TEST_SEED} SMOKE_SEED=${SMOKE_SEED} RCH_BIN=${RCH_BIN} bash ${SCRIPT_DIR}/$(basename "$0")"
 
+ensure_artifact_dirs
 cat > "${SUMMARY_FILE}" <<ENDJSON
 {
   "schema_version": "e2e-suite-summary-v3",
@@ -348,7 +379,7 @@ cat > "${SUMMARY_FILE}" <<ENDJSON
   "status": "${SUITE_STATUS}",
   "failure_class": "${FAILURE_CLASS}",
   "repro_command": "${REPRO_COMMAND}",
-  "artifact_path": "${SUMMARY_FILE}",
+  "artifact_path": "${PUBLISHED_ARTIFACT_DIR}/summary.json",
   "suite": "${SUITE_ID}",
   "timestamp": "${TIMESTAMP}",
   "test_log_level": "${TEST_LOG_LEVEL}",
@@ -356,11 +387,18 @@ cat > "${SUMMARY_FILE}" <<ENDJSON
   "tests_failed": ${TESTS_FAILED},
   "exit_code": ${EXIT_CODE},
   "pattern_failures": ${CHECK_FAILURES},
-  "log_file": "${RUN1_LOG}",
-  "artifact_dir": "${ARTIFACT_DIR}",
+  "log_file": "${PUBLISHED_ARTIFACT_DIR}/run1.log",
+  "artifact_dir": "${PUBLISHED_ARTIFACT_DIR}",
   "checks_passed": ${CHECKS_PASSED}
 }
 ENDJSON
+
+if publish_artifacts; then
+    SUMMARY_FILE="${PUBLISHED_ARTIFACT_DIR}/summary.json"
+else
+    echo "  ERROR: failed to publish artifacts to ${PUBLISHED_ARTIFACT_DIR}" >&2
+    EXIT_CODE=1
+fi
 
 echo ""
 echo "==================================================================="

@@ -229,6 +229,7 @@ fn e2e_runner_scripts_emit_required_summary_contract_fields() {
         "scripts/test_wasm_cross_framework_e2e.sh",
         "scripts/test_wasm_incident_forensics_e2e.sh",
         "scripts/test_doctor_remediation_verification_e2e.sh",
+        "scripts/test_doctor_advanced_provenance_e2e.sh",
         "scripts/run_phase6_e2e.sh",
     ];
 

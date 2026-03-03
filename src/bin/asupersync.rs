@@ -1012,6 +1012,12 @@ struct DoctorReportExportArtifact {
     evidence_count: usize,
     command_count: usize,
     remediation_outcome_count: usize,
+    collaboration_channel_count: usize,
+    collaboration_channels: Vec<String>,
+    trust_outcome_classes: Vec<String>,
+    has_mismatch_diagnostics: bool,
+    has_partial_success_mix: bool,
+    has_rollback_signal: bool,
     validation_status: String,
 }
 
@@ -1045,7 +1051,7 @@ impl Outputtable for DoctorReportExportOutput {
         ];
         for artifact in &self.exports {
             lines.push(format!(
-                "  - {} [{}] files={} findings={} evidence={} commands={} remediation={} status={}",
+                "  - {} [{}] files={} findings={} evidence={} commands={} remediation={} channels={} mismatch={} partial_success={} rollback={} status={}",
                 artifact.fixture_id,
                 artifact.report_id,
                 artifact.output_files.len(),
@@ -1053,7 +1059,19 @@ impl Outputtable for DoctorReportExportOutput {
                 artifact.evidence_count,
                 artifact.command_count,
                 artifact.remediation_outcome_count,
+                artifact.collaboration_channel_count,
+                artifact.has_mismatch_diagnostics,
+                artifact.has_partial_success_mix,
+                artifact.has_rollback_signal,
                 artifact.validation_status
+            ));
+            lines.push(format!(
+                "    channels: {}",
+                artifact.collaboration_channels.join(", ")
+            ));
+            lines.push(format!(
+                "    trust outcomes: {}",
+                artifact.trust_outcome_classes.join(", ")
             ));
             for file in &artifact.output_files {
                 lines.push(format!("    - {file}"));
@@ -1444,6 +1462,56 @@ fn export_advanced_report_fixture(
         output_files.push(path.display().to_string());
     }
     output_files.sort();
+    let mut collaboration_channels = document
+        .collaboration_trail
+        .iter()
+        .map(|entry| entry.channel.clone())
+        .collect::<Vec<_>>();
+    collaboration_channels.sort();
+    collaboration_channels.dedup();
+
+    let mut trust_outcome_classes = document
+        .trust_transitions
+        .iter()
+        .map(|transition| transition.outcome_class.clone())
+        .collect::<Vec<_>>();
+    trust_outcome_classes.sort();
+    trust_outcome_classes.dedup();
+
+    let success_count = document
+        .remediation_outcomes
+        .iter()
+        .filter(|delta| delta.delta_outcome == "success")
+        .count();
+    let non_success_count = document
+        .remediation_outcomes
+        .iter()
+        .filter(|delta| delta.delta_outcome != "success")
+        .count();
+
+    let has_mismatch_diagnostics =
+        document.trust_transitions.iter().any(|transition| {
+            transition
+                .rationale
+                .to_ascii_lowercase()
+                .contains("mismatch")
+        }) || document.troubleshooting_playbooks.iter().any(|playbook| {
+            playbook
+                .ordered_steps
+                .iter()
+                .any(|step| step.contains("mismatch"))
+        });
+    let has_rollback_signal = document
+        .remediation_outcomes
+        .iter()
+        .any(|delta| delta.next_status == "open" && delta.delta_outcome == "failed")
+        || document.trust_transitions.iter().any(|transition| {
+            transition
+                .rationale
+                .to_ascii_lowercase()
+                .contains("rollback")
+        });
+
     Ok(DoctorReportExportArtifact {
         fixture_id: document.fixture_id.clone(),
         report_id: document.report_id.clone(),
@@ -1452,6 +1520,12 @@ fn export_advanced_report_fixture(
         evidence_count: document.evidence_links.len(),
         command_count: document.command_provenance.len(),
         remediation_outcome_count: document.remediation_outcomes.len(),
+        collaboration_channel_count: collaboration_channels.len(),
+        collaboration_channels,
+        trust_outcome_classes,
+        has_mismatch_diagnostics,
+        has_partial_success_mix: success_count > 0 && non_success_count > 0,
+        has_rollback_signal,
         validation_status: "valid".to_string(),
     })
 }

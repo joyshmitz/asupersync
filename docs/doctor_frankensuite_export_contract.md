@@ -71,3 +71,22 @@ This suite verifies:
 - artifact count/path integrity
 - parseable evidence/decision artifact payloads
 - repeat-run deterministic artifact file contents
+
+## Cross-System Integration Assertions (`asupersync-2b4jj.5.5`)
+
+`scripts/test_doctor_frankensuite_export_e2e.sh` also validates the
+cross-system integration boundary with doctor report exports:
+
+1. `doctor-frankensuite-export-v1.source_schema_version` must remain
+   `doctor-core-report-v1`.
+2. `doctor-report-export-v1.core_schema_version` must equal the Franken export
+   source schema version.
+3. Cross-system mismatch fixture exports must retain collaboration channels
+   `["agent_mail", "beads", "frankensuite"]`.
+4. Mismatch diagnostics metadata must remain explicit
+   (`has_mismatch_diagnostics == true`) for the mismatch fixture.
+5. Both report-export and franken-export rerun command lists must retain
+   `doctor report-contract` replay hints.
+
+These assertions are deterministic and are intended to hard-fail CI when
+boundary contracts drift.

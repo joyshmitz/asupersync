@@ -14308,11 +14308,190 @@ pub fn advanced_diagnostics_report_fixtures() -> Vec<AdvancedDiagnosticsFixture>
 
     vec![
         AdvancedDiagnosticsFixture {
+            fixture_id: "advanced_conflicting_signal_path".to_string(),
+            description:
+                "Conflicting-signal fixture with diverging verification and replay outcomes."
+                    .to_string(),
+            core_report: failure.clone(),
+            extension: AdvancedDiagnosticsReportExtension {
+                schema_version: ADVANCED_DIAGNOSTICS_REPORT_VERSION.to_string(),
+                base_report_id: "doctor-report-failure-v1".to_string(),
+                base_report_schema_version: CORE_DIAGNOSTICS_REPORT_VERSION.to_string(),
+                remediation_deltas: vec![
+                    AdvancedRemediationDelta {
+                        delta_id: "delta-020".to_string(),
+                        finding_id: "finding-001".to_string(),
+                        previous_status: "open".to_string(),
+                        next_status: "resolved".to_string(),
+                        delta_outcome: "success".to_string(),
+                        mapped_taxonomy_class: "verification_governance".to_string(),
+                        mapped_taxonomy_dimension: "contract_compliance".to_string(),
+                        verification_evidence_refs: vec!["evidence-001".to_string()],
+                    },
+                    AdvancedRemediationDelta {
+                        delta_id: "delta-021".to_string(),
+                        finding_id: "finding-002".to_string(),
+                        previous_status: "in_progress".to_string(),
+                        next_status: "open".to_string(),
+                        delta_outcome: "failed".to_string(),
+                        mapped_taxonomy_class: "replay_determinism".to_string(),
+                        mapped_taxonomy_dimension: "determinism".to_string(),
+                        verification_evidence_refs: vec!["evidence-002".to_string()],
+                    },
+                ],
+                trust_transitions: vec![
+                    AdvancedTrustTransition {
+                        transition_id: "trust-020".to_string(),
+                        stage: "initial-remediation-pass".to_string(),
+                        previous_score: 58,
+                        next_score: 74,
+                        outcome_class: "success".to_string(),
+                        mapped_taxonomy_severity: "info".to_string(),
+                        rationale: "Primary remediation improved obligation metrics.".to_string(),
+                    },
+                    AdvancedTrustTransition {
+                        transition_id: "trust-021".to_string(),
+                        stage: "replay-cross-check".to_string(),
+                        previous_score: 74,
+                        next_score: 49,
+                        outcome_class: "failed".to_string(),
+                        mapped_taxonomy_severity: "warning".to_string(),
+                        rationale:
+                            "Replay signal conflicted with remediation progress; mismatch diagnostics required."
+                                .to_string(),
+                    },
+                ],
+                collaboration_trail: vec![
+                    AdvancedCollaborationEntry {
+                        entry_id: "collab-020".to_string(),
+                        channel: "agent_mail".to_string(),
+                        actor: "ChartreuseBrook".to_string(),
+                        action: "posted conflicting replay evidence".to_string(),
+                        thread_id: "br-2b4jj.5.9".to_string(),
+                        message_ref: "mail-advanced-020".to_string(),
+                        bead_ref: "asupersync-2b4jj.5.9".to_string(),
+                        mapped_taxonomy_narrative:
+                            "Agent Mail replay report conflicts with remediation verification."
+                                .to_string(),
+                    },
+                    AdvancedCollaborationEntry {
+                        entry_id: "collab-021".to_string(),
+                        channel: "beads".to_string(),
+                        actor: "ChartreuseBrook".to_string(),
+                        action: "ranked mismatch as high-impact in bv triage".to_string(),
+                        thread_id: "br-2b4jj.5.9".to_string(),
+                        message_ref: "bv:triage-advanced-020".to_string(),
+                        bead_ref: "asupersync-2b4jj.5.9".to_string(),
+                        mapped_taxonomy_narrative:
+                            "Beads/bv dependency pressure requires conflict resolution before closure."
+                                .to_string(),
+                    },
+                ],
+                troubleshooting_playbooks: vec![AdvancedTroubleshootingPlaybook {
+                    playbook_id: "playbook-020".to_string(),
+                    title: "Conflicting-signal reconciliation loop".to_string(),
+                    trigger_taxonomy_class: "replay_determinism".to_string(),
+                    trigger_taxonomy_severity: "warning".to_string(),
+                    ordered_steps: vec![
+                        "capture_conflicting_artifacts".to_string(),
+                        "compare_replay_and_verification".to_string(),
+                        "escalate_with_mismatch_bundle".to_string(),
+                    ],
+                    command_refs: vec!["command-001".to_string(), "command-002".to_string()],
+                    evidence_refs: vec!["evidence-001".to_string(), "evidence-002".to_string()],
+                }],
+            },
+        },
+        AdvancedDiagnosticsFixture {
+            fixture_id: "advanced_cross_system_mismatch_path".to_string(),
+            description:
+                "Cross-system mismatch fixture linking beads/bv, Agent Mail, and FrankenSuite provenance."
+                    .to_string(),
+            core_report: failure.clone(),
+            extension: AdvancedDiagnosticsReportExtension {
+                schema_version: ADVANCED_DIAGNOSTICS_REPORT_VERSION.to_string(),
+                base_report_id: "doctor-report-failure-v1".to_string(),
+                base_report_schema_version: CORE_DIAGNOSTICS_REPORT_VERSION.to_string(),
+                remediation_deltas: vec![AdvancedRemediationDelta {
+                    delta_id: "delta-040".to_string(),
+                    finding_id: "finding-001".to_string(),
+                    previous_status: "open".to_string(),
+                    next_status: "in_progress".to_string(),
+                    delta_outcome: "failed".to_string(),
+                    mapped_taxonomy_class: "integration_reliability".to_string(),
+                    mapped_taxonomy_dimension: "external_dependency".to_string(),
+                    verification_evidence_refs: vec!["evidence-001".to_string(), "evidence-002".to_string()],
+                }],
+                trust_transitions: vec![AdvancedTrustTransition {
+                    transition_id: "trust-040".to_string(),
+                    stage: "cross-system-correlation".to_string(),
+                    previous_score: 63,
+                    next_score: 41,
+                    outcome_class: "failed".to_string(),
+                    mapped_taxonomy_severity: "error".to_string(),
+                    rationale:
+                        "Cross-system mismatch between beads/bv priority state, Agent Mail thread status, and FrankenSuite evidence chain."
+                            .to_string(),
+                }],
+                collaboration_trail: vec![
+                    AdvancedCollaborationEntry {
+                        entry_id: "collab-040".to_string(),
+                        channel: "agent_mail".to_string(),
+                        actor: "ChartreuseBrook".to_string(),
+                        action: "reported unresolved remediation in threaded handoff".to_string(),
+                        thread_id: "br-2b4jj.5.9".to_string(),
+                        message_ref: "mail-advanced-040".to_string(),
+                        bead_ref: "asupersync-2b4jj.5.9".to_string(),
+                        mapped_taxonomy_narrative:
+                            "Agent Mail thread indicates unresolved state while export looked healthy."
+                                .to_string(),
+                    },
+                    AdvancedCollaborationEntry {
+                        entry_id: "collab-041".to_string(),
+                        channel: "beads".to_string(),
+                        actor: "ChartreuseBrook".to_string(),
+                        action: "captured bv ranking evidence for blocked downstream work".to_string(),
+                        thread_id: "br-2b4jj.5.9".to_string(),
+                        message_ref: "bv:triage-advanced-040".to_string(),
+                        bead_ref: "asupersync-2b4jj.5.9".to_string(),
+                        mapped_taxonomy_narrative:
+                            "Beads/bv graph marks this issue as blocking despite optimistic report status."
+                                .to_string(),
+                    },
+                    AdvancedCollaborationEntry {
+                        entry_id: "collab-042".to_string(),
+                        channel: "frankensuite".to_string(),
+                        actor: "ChartreuseBrook".to_string(),
+                        action: "linked decision/evidence mismatch packet".to_string(),
+                        thread_id: "br-2b4jj.5.9".to_string(),
+                        message_ref: "franken-evidence-040".to_string(),
+                        bead_ref: "asupersync-2b4jj.5.9".to_string(),
+                        mapped_taxonomy_narrative:
+                            "FrankenSuite decision stream disagrees with exported remediation outcome."
+                                .to_string(),
+                    },
+                ],
+                troubleshooting_playbooks: vec![AdvancedTroubleshootingPlaybook {
+                    playbook_id: "playbook-040".to_string(),
+                    title: "Cross-system mismatch triage".to_string(),
+                    trigger_taxonomy_class: "integration_reliability".to_string(),
+                    trigger_taxonomy_severity: "error".to_string(),
+                    ordered_steps: vec![
+                        "correlate_beads_bv_agent_mail".to_string(),
+                        "generate_mismatch_diagnostics_bundle".to_string(),
+                        "verify_frankensuite_evidence_chain".to_string(),
+                    ],
+                    command_refs: vec!["command-001".to_string(), "command-002".to_string()],
+                    evidence_refs: vec!["evidence-001".to_string(), "evidence-002".to_string()],
+                }],
+            },
+        },
+        AdvancedDiagnosticsFixture {
             fixture_id: "advanced_failure_path".to_string(),
             description:
                 "Failure-path extension fixture with remediation delta and collaboration trail."
                     .to_string(),
-            core_report: failure,
+            core_report: failure.clone(),
             extension: AdvancedDiagnosticsReportExtension {
                 schema_version: ADVANCED_DIAGNOSTICS_REPORT_VERSION.to_string(),
                 base_report_id: "doctor-report-failure-v1".to_string(),
@@ -14342,9 +14521,9 @@ pub fn advanced_diagnostics_report_fixtures() -> Vec<AdvancedDiagnosticsFixture>
                     channel: "agent_mail".to_string(),
                     actor: "ChartreuseBrook".to_string(),
                     action: "requested remediation follow-up".to_string(),
-                    thread_id: "br-2b4jj.5.8".to_string(),
+                    thread_id: "br-2b4jj.5.9".to_string(),
                     message_ref: "mail-advanced-001".to_string(),
-                    bead_ref: "asupersync-2b4jj.5.8".to_string(),
+                    bead_ref: "asupersync-2b4jj.5.9".to_string(),
                     mapped_taxonomy_narrative:
                         "Remediation safety remained degraded after failed verification."
                             .to_string(),
@@ -14369,7 +14548,7 @@ pub fn advanced_diagnostics_report_fixtures() -> Vec<AdvancedDiagnosticsFixture>
             description:
                 "Healthy-path extension fixture with trust improvement and closure guidance."
                     .to_string(),
-            core_report: happy,
+            core_report: happy.clone(),
             extension: AdvancedDiagnosticsReportExtension {
                 schema_version: ADVANCED_DIAGNOSTICS_REPORT_VERSION.to_string(),
                 base_report_id: "doctor-report-happy-v1".to_string(),
@@ -14400,9 +14579,9 @@ pub fn advanced_diagnostics_report_fixtures() -> Vec<AdvancedDiagnosticsFixture>
                     channel: "beads".to_string(),
                     actor: "ChartreuseBrook".to_string(),
                     action: "closed remediation bead".to_string(),
-                    thread_id: "br-2b4jj.5.8".to_string(),
-                    message_ref: "mail-advanced-010".to_string(),
-                    bead_ref: "asupersync-2b4jj.5.8".to_string(),
+                    thread_id: "br-2b4jj.5.9".to_string(),
+                    message_ref: "bv:triage-advanced-010".to_string(),
+                    bead_ref: "asupersync-2b4jj.5.9".to_string(),
                     mapped_taxonomy_narrative:
                         "Verification governance is healthy and ready for promotion.".to_string(),
                 }],
@@ -14421,7 +14600,296 @@ pub fn advanced_diagnostics_report_fixtures() -> Vec<AdvancedDiagnosticsFixture>
                 }],
             },
         },
+        AdvancedDiagnosticsFixture {
+            fixture_id: "advanced_partial_success_path".to_string(),
+            description:
+                "Partial-success fixture where one remediation clears and another remains incomplete."
+                    .to_string(),
+            core_report: failure.clone(),
+            extension: AdvancedDiagnosticsReportExtension {
+                schema_version: ADVANCED_DIAGNOSTICS_REPORT_VERSION.to_string(),
+                base_report_id: "doctor-report-failure-v1".to_string(),
+                base_report_schema_version: CORE_DIAGNOSTICS_REPORT_VERSION.to_string(),
+                remediation_deltas: vec![
+                    AdvancedRemediationDelta {
+                        delta_id: "delta-060".to_string(),
+                        finding_id: "finding-001".to_string(),
+                        previous_status: "open".to_string(),
+                        next_status: "resolved".to_string(),
+                        delta_outcome: "success".to_string(),
+                        mapped_taxonomy_class: "verification_governance".to_string(),
+                        mapped_taxonomy_dimension: "contract_compliance".to_string(),
+                        verification_evidence_refs: vec!["evidence-001".to_string()],
+                    },
+                    AdvancedRemediationDelta {
+                        delta_id: "delta-061".to_string(),
+                        finding_id: "finding-002".to_string(),
+                        previous_status: "in_progress".to_string(),
+                        next_status: "in_progress".to_string(),
+                        delta_outcome: "cancelled".to_string(),
+                        mapped_taxonomy_class: "integration_reliability".to_string(),
+                        mapped_taxonomy_dimension: "external_dependency".to_string(),
+                        verification_evidence_refs: vec!["evidence-002".to_string()],
+                    },
+                ],
+                trust_transitions: vec![AdvancedTrustTransition {
+                    transition_id: "trust-060".to_string(),
+                    stage: "post-remediation-partial-success".to_string(),
+                    previous_score: 65,
+                    next_score: 72,
+                    outcome_class: "cancelled".to_string(),
+                    mapped_taxonomy_severity: "warning".to_string(),
+                    rationale:
+                        "Primary fix succeeded but secondary verification was cancelled after dependency timeout."
+                            .to_string(),
+                }],
+                collaboration_trail: vec![
+                    AdvancedCollaborationEntry {
+                        entry_id: "collab-060".to_string(),
+                        channel: "agent_mail".to_string(),
+                        actor: "ChartreuseBrook".to_string(),
+                        action: "requested follow-up verification rerun".to_string(),
+                        thread_id: "br-2b4jj.5.9".to_string(),
+                        message_ref: "mail-advanced-060".to_string(),
+                        bead_ref: "asupersync-2b4jj.5.9".to_string(),
+                        mapped_taxonomy_narrative:
+                            "Partial-success state requires deterministic rerun before closure."
+                                .to_string(),
+                    },
+                    AdvancedCollaborationEntry {
+                        entry_id: "collab-061".to_string(),
+                        channel: "beads".to_string(),
+                        actor: "ChartreuseBrook".to_string(),
+                        action: "kept dependent work blocked pending rerun".to_string(),
+                        thread_id: "br-2b4jj.5.9".to_string(),
+                        message_ref: "bv:triage-advanced-060".to_string(),
+                        bead_ref: "asupersync-2b4jj.5.9".to_string(),
+                        mapped_taxonomy_narrative:
+                            "Beads graph retains blocker edge until cancelled verification is rerun."
+                                .to_string(),
+                    },
+                ],
+                troubleshooting_playbooks: vec![AdvancedTroubleshootingPlaybook {
+                    playbook_id: "playbook-060".to_string(),
+                    title: "Partial-success continuation checklist".to_string(),
+                    trigger_taxonomy_class: "verification_governance".to_string(),
+                    trigger_taxonomy_severity: "warning".to_string(),
+                    ordered_steps: vec![
+                        "capture_partial_success_snapshot".to_string(),
+                        "resume_cancelled_validation".to_string(),
+                        "schedule_follow_up_remediation".to_string(),
+                    ],
+                    command_refs: vec!["command-001".to_string(), "command-002".to_string()],
+                    evidence_refs: vec!["evidence-001".to_string(), "evidence-002".to_string()],
+                }],
+            },
+        },
+        AdvancedDiagnosticsFixture {
+            fixture_id: "advanced_rollback_path".to_string(),
+            description:
+                "Rollback fixture with failed apply verification and explicit recovery path."
+                    .to_string(),
+            core_report: failure,
+            extension: AdvancedDiagnosticsReportExtension {
+                schema_version: ADVANCED_DIAGNOSTICS_REPORT_VERSION.to_string(),
+                base_report_id: "doctor-report-failure-v1".to_string(),
+                base_report_schema_version: CORE_DIAGNOSTICS_REPORT_VERSION.to_string(),
+                remediation_deltas: vec![AdvancedRemediationDelta {
+                    delta_id: "delta-080".to_string(),
+                    finding_id: "finding-001".to_string(),
+                    previous_status: "open".to_string(),
+                    next_status: "open".to_string(),
+                    delta_outcome: "failed".to_string(),
+                    mapped_taxonomy_class: "remediation_safety".to_string(),
+                    mapped_taxonomy_dimension: "recovery_planning".to_string(),
+                    verification_evidence_refs: vec!["evidence-001".to_string()],
+                }],
+                trust_transitions: vec![AdvancedTrustTransition {
+                    transition_id: "trust-080".to_string(),
+                    stage: "rollback-validation".to_string(),
+                    previous_score: 61,
+                    next_score: 38,
+                    outcome_class: "failed".to_string(),
+                    mapped_taxonomy_severity: "critical".to_string(),
+                    rationale: "Rollback required after failed post-apply verification.".to_string(),
+                }],
+                collaboration_trail: vec![AdvancedCollaborationEntry {
+                    entry_id: "collab-080".to_string(),
+                    channel: "agent_mail".to_string(),
+                    actor: "ChartreuseBrook".to_string(),
+                    action: "requested immediate rollback execution".to_string(),
+                    thread_id: "br-2b4jj.5.9".to_string(),
+                    message_ref: "mail-advanced-080".to_string(),
+                    bead_ref: "asupersync-2b4jj.5.9".to_string(),
+                    mapped_taxonomy_narrative:
+                        "Remediation remained unsafe; rollback is mandatory before retry."
+                            .to_string(),
+                }],
+                troubleshooting_playbooks: vec![AdvancedTroubleshootingPlaybook {
+                    playbook_id: "playbook-080".to_string(),
+                    title: "Rollback and recovery checklist".to_string(),
+                    trigger_taxonomy_class: "remediation_safety".to_string(),
+                    trigger_taxonomy_severity: "critical".to_string(),
+                    ordered_steps: vec![
+                        "execute_rollback_plan".to_string(),
+                        "reopen_blocking_bead".to_string(),
+                        "verify_rollback_state".to_string(),
+                    ],
+                    command_refs: vec!["command-001".to_string()],
+                    evidence_refs: vec!["evidence-001".to_string()],
+                }],
+            },
+        },
     ]
+}
+
+fn validate_advanced_fixture_provenance_assertions(
+    fixture: &AdvancedDiagnosticsFixture,
+) -> Result<(), String> {
+    let mut channels = BTreeSet::new();
+    for entry in &fixture.extension.collaboration_trail {
+        channels.insert(entry.channel.as_str());
+        if !entry.bead_ref.starts_with("asupersync-") {
+            return Err(format!(
+                "fixture {} collaboration {} has non-bead_ref {}",
+                fixture.fixture_id, entry.entry_id, entry.bead_ref
+            ));
+        }
+        if !entry.thread_id.starts_with("br-") {
+            return Err(format!(
+                "fixture {} collaboration {} thread_id must be br-*",
+                fixture.fixture_id, entry.entry_id
+            ));
+        }
+        match entry.channel.as_str() {
+            "agent_mail" => {
+                if !entry.message_ref.starts_with("mail-") {
+                    return Err(format!(
+                        "fixture {} collaboration {} agent_mail message_ref must be mail-*",
+                        fixture.fixture_id, entry.entry_id
+                    ));
+                }
+            }
+            "beads" => {
+                if !entry.message_ref.starts_with("bv:") && !entry.message_ref.starts_with("beads:")
+                {
+                    return Err(format!(
+                        "fixture {} collaboration {} beads message_ref must be bv:* or beads:*",
+                        fixture.fixture_id, entry.entry_id
+                    ));
+                }
+            }
+            "frankensuite" => {
+                if !entry.message_ref.starts_with("franken-") {
+                    return Err(format!(
+                        "fixture {} collaboration {} frankensuite message_ref must be franken-*",
+                        fixture.fixture_id, entry.entry_id
+                    ));
+                }
+            }
+            _ => {}
+        }
+    }
+
+    match fixture.fixture_id.as_str() {
+        "advanced_conflicting_signal_path" => {
+            let outcomes = fixture
+                .extension
+                .trust_transitions
+                .iter()
+                .map(|transition| transition.outcome_class.as_str())
+                .collect::<BTreeSet<_>>();
+            if !outcomes.contains("failed") || !outcomes.contains("success") {
+                return Err(
+                    "advanced_conflicting_signal_path must include both success and failed trust transitions"
+                        .to_string(),
+                );
+            }
+        }
+        "advanced_cross_system_mismatch_path" => {
+            for required_channel in ["agent_mail", "beads", "frankensuite"] {
+                if !channels.contains(required_channel) {
+                    return Err(format!(
+                        "advanced_cross_system_mismatch_path missing collaboration channel {required_channel}"
+                    ));
+                }
+            }
+            if !fixture
+                .extension
+                .trust_transitions
+                .iter()
+                .any(|transition| transition.rationale.contains("mismatch"))
+            {
+                return Err(
+                    "advanced_cross_system_mismatch_path must include mismatch rationale"
+                        .to_string(),
+                );
+            }
+            if !fixture
+                .extension
+                .troubleshooting_playbooks
+                .iter()
+                .any(|playbook| {
+                    playbook
+                        .ordered_steps
+                        .iter()
+                        .any(|step| step == "generate_mismatch_diagnostics_bundle")
+                })
+            {
+                return Err(
+                    "advanced_cross_system_mismatch_path must include mismatch diagnostics playbook step"
+                        .to_string(),
+                );
+            }
+        }
+        "advanced_partial_success_path" => {
+            let success = fixture
+                .extension
+                .remediation_deltas
+                .iter()
+                .filter(|delta| delta.delta_outcome == "success")
+                .count();
+            let non_success = fixture
+                .extension
+                .remediation_deltas
+                .iter()
+                .filter(|delta| delta.delta_outcome != "success")
+                .count();
+            if success == 0 || non_success == 0 {
+                return Err(
+                    "advanced_partial_success_path must include both success and non-success deltas"
+                        .to_string(),
+                );
+            }
+        }
+        "advanced_rollback_path" => {
+            if !fixture
+                .extension
+                .remediation_deltas
+                .iter()
+                .any(|delta| delta.next_status == "open")
+            {
+                return Err(
+                    "advanced_rollback_path must keep at least one finding open post-rollback"
+                        .to_string(),
+                );
+            }
+            if !fixture
+                .extension
+                .trust_transitions
+                .iter()
+                .any(|transition| transition.rationale.to_lowercase().contains("rollback"))
+            {
+                return Err(
+                    "advanced_rollback_path must include rollback rationale in trust transitions"
+                        .to_string(),
+                );
+            }
+        }
+        _ => {}
+    }
+
+    Ok(())
 }
 
 /// Returns a serializable bundle containing core + advanced report contracts and fixtures.
@@ -14468,6 +14936,7 @@ pub fn run_advanced_diagnostics_report_smoke(
             &bundle.extension_contract,
             &bundle.core_contract,
         )?;
+        validate_advanced_fixture_provenance_assertions(fixture)?;
 
         for (flow_id, kind) in [
             ("integration", "integration_sync"),
@@ -20189,6 +20658,23 @@ impl RuntimeState {
         let second = advanced_diagnostics_report_bundle();
         assert_eq!(first, second);
 
+        let fixture_ids = first
+            .fixtures
+            .iter()
+            .map(|fixture| fixture.fixture_id.as_str())
+            .collect::<Vec<_>>();
+        assert_eq!(
+            fixture_ids,
+            vec![
+                "advanced_conflicting_signal_path",
+                "advanced_cross_system_mismatch_path",
+                "advanced_failure_path",
+                "advanced_happy_path",
+                "advanced_partial_success_path",
+                "advanced_rollback_path",
+            ]
+        );
+
         for fixture in &first.fixtures {
             validate_advanced_diagnostics_report_extension(
                 &fixture.extension,
@@ -20197,7 +20683,63 @@ impl RuntimeState {
                 &first.core_contract,
             )
             .expect("fixture extension should validate");
+            validate_advanced_fixture_provenance_assertions(fixture)
+                .expect("fixture provenance assertions should validate");
         }
+    }
+
+    #[test]
+    fn advanced_cross_system_fixture_requires_expected_channels() {
+        let bundle = advanced_diagnostics_report_bundle();
+        let fixture = bundle
+            .fixtures
+            .iter()
+            .find(|candidate| candidate.fixture_id == "advanced_cross_system_mismatch_path")
+            .expect("cross-system fixture exists");
+
+        let channels = fixture
+            .extension
+            .collaboration_trail
+            .iter()
+            .map(|entry| entry.channel.as_str())
+            .collect::<BTreeSet<_>>();
+        assert!(channels.contains("agent_mail"));
+        assert!(channels.contains("beads"));
+        assert!(channels.contains("frankensuite"));
+    }
+
+    #[test]
+    fn advanced_provenance_assertions_reject_invalid_message_ref() {
+        let bundle = advanced_diagnostics_report_bundle();
+        let mut fixture = bundle
+            .fixtures
+            .iter()
+            .find(|candidate| candidate.fixture_id == "advanced_cross_system_mismatch_path")
+            .expect("cross-system fixture exists")
+            .clone();
+        fixture.extension.collaboration_trail[0].message_ref = "invalid-message-ref".to_string();
+
+        let err = validate_advanced_fixture_provenance_assertions(&fixture)
+            .expect_err("invalid message ref must fail");
+        assert!(err.contains("mail-*"), "{err}");
+    }
+
+    #[test]
+    fn advanced_partial_success_fixture_requires_mixed_delta_outcomes() {
+        let bundle = advanced_diagnostics_report_bundle();
+        let mut fixture = bundle
+            .fixtures
+            .iter()
+            .find(|candidate| candidate.fixture_id == "advanced_partial_success_path")
+            .expect("partial-success fixture exists")
+            .clone();
+        for delta in &mut fixture.extension.remediation_deltas {
+            delta.delta_outcome = "success".to_string();
+        }
+
+        let err = validate_advanced_fixture_provenance_assertions(&fixture)
+            .expect_err("all-success deltas must fail partial-success assertion");
+        assert!(err.contains("both success and non-success"), "{err}");
     }
 
     #[test]
