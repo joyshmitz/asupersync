@@ -7,13 +7,15 @@
 
 /// DNS resolution with caching and Happy Eyeballs support.
 pub mod dns;
-/// QUIC protocol implementation via quinn.
-#[cfg(feature = "quic")]
-pub mod quic;
+/// Happy Eyeballs v2 (RFC 8305) concurrent dual-stack connection racing.
+pub mod happy_eyeballs;
 /// Native QUIC protocol core codecs and types (Tokio-free, runtime-agnostic).
 pub mod quic_core;
 /// Native QUIC transport state machines (TLS, recovery, streams).
 pub mod quic_native;
+/// Compatibility QUIC API backed by external quinn stack (not part of native T4 path).
+#[cfg(feature = "quic-compat")]
+pub mod quic;
 mod resolve;
 pub mod sys;
 /// TCP networking primitives.
@@ -25,7 +27,8 @@ pub mod unix;
 /// WebSocket protocol implementation (RFC 6455).
 pub mod websocket;
 
-#[cfg(feature = "quic")]
+pub use happy_eyeballs::{HappyEyeballsConfig, connect as happy_eyeballs_connect};
+#[cfg(feature = "quic-compat")]
 pub use quic::{
     ClientAuth as QuicClientAuth, QuicConfig, QuicConnection, QuicEndpoint, QuicError,
     RecvStream as QuicRecvStream, SendStream as QuicSendStream,

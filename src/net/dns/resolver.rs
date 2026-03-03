@@ -21,7 +21,7 @@ use super::lookup::{HappyEyeballs, LookupIp, LookupMx, LookupSrv, LookupTxt};
 use crate::cx::Cx;
 use crate::net::TcpStream;
 use crate::runtime::spawn_blocking;
-use crate::time::{TimeSource, WallClock, sleep, timeout};
+use crate::time::{TimeSource, WallClock, timeout};
 use crate::types::Time;
 
 /// DNS resolver configuration.
@@ -266,34 +266,25 @@ impl Resolver {
             .unwrap_or_else(|| DnsError::Connection("no addresses to connect to".to_string())))
     }
 
-    /// Connects using Happy Eyeballs algorithm.
+    /// Connects using Happy Eyeballs v2 (RFC 8305) with concurrent racing.
+    ///
+    /// Connection attempts are started with staggered delays and raced
+    /// concurrently. The first successful connection wins; all others are
+    /// dropped. This replaces the previous sequential stagger implementation.
     async fn connect_happy_eyeballs(&self, addrs: &[SocketAddr]) -> Result<TcpStream, DnsError> {
-        // Phase 0 simplified implementation:
-        // Try addresses with a short delay between each attempt.
-        // A full implementation would use async racing.
+        use crate::net::happy_eyeballs::{self, HappyEyeballsConfig};
 
-        let delay = self.config.happy_eyeballs_delay;
-        let mut last_error = None;
+        let config = HappyEyeballsConfig {
+            first_family_delay: self.config.happy_eyeballs_delay,
+            attempt_delay: self.config.happy_eyeballs_delay,
+            connect_timeout: self.config.timeout,
+            overall_timeout: self.config.timeout * 2
+                + self.config.happy_eyeballs_delay * addrs.len() as u32,
+        };
 
-        for (i, addr) in addrs.iter().enumerate() {
-            if i > 0 && !delay.is_zero() {
-                // Stagger attempts with deterministic sleep (lab time aware).
-                sleep(timeout_now(), delay).await;
-            }
-
-            // Try to connect with timeout
-            match self.try_connect_timeout(*addr, self.config.timeout).await {
-                Ok(stream) => return Ok(stream),
-                Err(e) => {
-                    last_error = Some(e);
-                    // Continue trying other addresses
-                }
-            }
-        }
-
-        Err(last_error.unwrap_or_else(|| {
-            DnsError::Connection(format!("all {} connection attempts failed", addrs.len()))
-        }))
+        happy_eyeballs::connect(addrs, &config)
+            .await
+            .map_err(|e| DnsError::Connection(e.to_string()))
     }
 
     /// Attempts to connect to a single address.
