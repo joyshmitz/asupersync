@@ -361,23 +361,23 @@ fn quic_http3_public_boundary_wiring_is_explicit() {
     let net_quic_test = load_net_quic_test();
 
     assert!(
-        net_mod.contains("#[cfg(feature = \"quic-compat\")]")
+        net_mod.contains("#[cfg(all(feature = \"quic-compat\", not(feature = \"quic\")))]")
             && net_mod.contains("pub mod quic;"),
         "net::quic module must be compat-gated explicitly"
     );
     assert!(
-        !net_mod.contains("#[cfg(feature = \"quic\")]\npub mod quic;"),
-        "net::quic module must not be wired directly to native quic feature"
+        net_mod.contains("#[cfg(feature = \"quic\")]\npub mod quic {"),
+        "net::quic module must expose native surface under quic feature"
     );
 
     assert!(
-        http_mod.contains("#[cfg(feature = \"http3-compat\")]")
+        http_mod.contains("#[cfg(all(feature = \"http3-compat\", not(feature = \"http3\")))]")
             && http_mod.contains("pub mod h3;"),
         "http::h3 module must be compat-gated explicitly"
     );
     assert!(
-        !http_mod.contains("#[cfg(feature = \"http3\")]\npub mod h3;"),
-        "http::h3 module must not be wired directly to native http3 feature"
+        http_mod.contains("#[cfg(feature = \"http3\")]\npub mod h3 {"),
+        "http::h3 module must expose native surface under http3 feature"
     );
 
     assert!(

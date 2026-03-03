@@ -1392,7 +1392,7 @@ where
     fn register_waiter(&self, waker: std::task::Waker) -> u64 {
         let mut state = self.state.lock();
         let id = state.next_waiter_id;
-        state.next_waiter_id += 1;
+        state.next_waiter_id = state.next_waiter_id.wrapping_add(1);
         state.waiters.push_back(PoolWaiter { id, waker });
         id
     }
