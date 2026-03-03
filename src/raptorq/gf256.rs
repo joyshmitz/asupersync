@@ -1679,8 +1679,7 @@ pub fn gf256_mul_slices2(dst_a: &mut [u8], dst_b: &mut [u8], c: Gf256) {
         // SAFETY: `dispatch()` only selects X86Avx2 when runtime feature
         // detection succeeds; pointers remain within provided slice bounds.
         unsafe {
-            gf256_mul_slice_x86_avx2_impl_tables(dst_a, low_tbl_arr, high_tbl_arr, table);
-            gf256_mul_slice_x86_avx2_impl_tables(dst_b, low_tbl_arr, high_tbl_arr, table);
+            gf256_mul_slices2_x86_avx2_impl_tables(dst_a, dst_b, low_tbl_arr, high_tbl_arr, table);
         }
         return;
     }
@@ -1690,8 +1689,13 @@ pub fn gf256_mul_slices2(dst_a: &mut [u8], dst_b: &mut [u8], c: Gf256) {
         // SAFETY: `dispatch()` only selects Aarch64Neon when runtime feature
         // detection succeeds; pointers remain within provided slice bounds.
         unsafe {
-            gf256_mul_slice_aarch64_neon_impl_tables(dst_a, low_tbl_arr, high_tbl_arr, table);
-            gf256_mul_slice_aarch64_neon_impl_tables(dst_b, low_tbl_arr, high_tbl_arr, table);
+            gf256_mul_slices2_aarch64_neon_impl_tables(
+                dst_a,
+                dst_b,
+                low_tbl_arr,
+                high_tbl_arr,
+                table,
+            );
         }
         return;
     }
@@ -1973,8 +1977,15 @@ pub fn gf256_addmul_slices2(
         // SAFETY: `dispatch()` only selects X86Avx2 when runtime feature
         // detection succeeds; both pairs are length-checked.
         unsafe {
-            gf256_addmul_slice_x86_avx2_impl_tables(dst_a, src_a, low_tbl_arr, high_tbl_arr, table);
-            gf256_addmul_slice_x86_avx2_impl_tables(dst_b, src_b, low_tbl_arr, high_tbl_arr, table);
+            gf256_addmul_slices2_x86_avx2_impl_tables(
+                dst_a,
+                src_a,
+                dst_b,
+                src_b,
+                low_tbl_arr,
+                high_tbl_arr,
+                table,
+            );
         }
         return;
     }
@@ -1984,14 +1995,9 @@ pub fn gf256_addmul_slices2(
         // SAFETY: `dispatch()` only selects Aarch64Neon when runtime feature
         // detection succeeds; both pairs are length-checked.
         unsafe {
-            gf256_addmul_slice_aarch64_neon_impl_tables(
+            gf256_addmul_slices2_aarch64_neon_impl_tables(
                 dst_a,
                 src_a,
-                low_tbl_arr,
-                high_tbl_arr,
-                table,
-            );
-            gf256_addmul_slice_aarch64_neon_impl_tables(
                 dst_b,
                 src_b,
                 low_tbl_arr,
@@ -2134,6 +2140,62 @@ unsafe fn gf256_mul_slice_x86_avx2_impl_tables(
     any(target_arch = "x86", target_arch = "x86_64")
 ))]
 #[target_feature(enable = "avx2")]
+unsafe fn gf256_mul_slices2_x86_avx2_impl_tables(
+    dst_a: &mut [u8],
+    dst_b: &mut [u8],
+    low_tbl_arr: &[u8; 16],
+    high_tbl_arr: &[u8; 16],
+    table: &[u8; 256],
+) {
+    // SAFETY: caller guarantees AVX2 support.
+    let low_tbl_128 = unsafe { _mm_loadu_si128(low_tbl_arr.as_ptr().cast::<__m128i>()) };
+    let high_tbl_128 = unsafe { _mm_loadu_si128(high_tbl_arr.as_ptr().cast::<__m128i>()) };
+    let low_tbl_256 = _mm256_broadcastsi128_si256(low_tbl_128);
+    let high_tbl_256 = _mm256_broadcastsi128_si256(high_tbl_128);
+    let nibble_mask = _mm256_set1_epi8(0x0f_i8);
+
+    let common = dst_a.len().min(dst_b.len());
+    let mut i = 0usize;
+    while i + 32 <= common {
+        let ptr_a = unsafe { dst_a.as_mut_ptr().add(i) };
+        let ptr_b = unsafe { dst_b.as_mut_ptr().add(i) };
+        // SAFETY: pointer ranges are in-bounds and unaligned loads/stores are used.
+        let input_a = unsafe { _mm256_loadu_si256(ptr_a.cast::<__m256i>()) };
+        let input_b = unsafe { _mm256_loadu_si256(ptr_b.cast::<__m256i>()) };
+        let low_nibbles_a = _mm256_and_si256(input_a, nibble_mask);
+        let high_nibbles_a = _mm256_and_si256(_mm256_srli_epi16(input_a, 4), nibble_mask);
+        let low_nibbles_b = _mm256_and_si256(input_b, nibble_mask);
+        let high_nibbles_b = _mm256_and_si256(_mm256_srli_epi16(input_b, 4), nibble_mask);
+        let result_a = _mm256_xor_si256(
+            _mm256_shuffle_epi8(low_tbl_256, low_nibbles_a),
+            _mm256_shuffle_epi8(high_tbl_256, high_nibbles_a),
+        );
+        let result_b = _mm256_xor_si256(
+            _mm256_shuffle_epi8(low_tbl_256, low_nibbles_b),
+            _mm256_shuffle_epi8(high_tbl_256, high_nibbles_b),
+        );
+        unsafe { _mm256_storeu_si256(ptr_a.cast::<__m256i>(), result_a) };
+        unsafe { _mm256_storeu_si256(ptr_b.cast::<__m256i>(), result_b) };
+        i += 32;
+    }
+
+    if i < dst_a.len() {
+        unsafe {
+            gf256_mul_slice_x86_avx2_impl_tables(&mut dst_a[i..], low_tbl_arr, high_tbl_arr, table)
+        };
+    }
+    if i < dst_b.len() {
+        unsafe {
+            gf256_mul_slice_x86_avx2_impl_tables(&mut dst_b[i..], low_tbl_arr, high_tbl_arr, table)
+        };
+    }
+}
+
+#[cfg(all(
+    feature = "simd-intrinsics",
+    any(target_arch = "x86", target_arch = "x86_64")
+))]
+#[target_feature(enable = "avx2")]
 unsafe fn gf256_addmul_slice_x86_avx2_impl(dst: &mut [u8], src: &[u8], c: Gf256) {
     let (low_tbl_arr, high_tbl_arr) = mul_nibble_tables(c);
     // SAFETY: this function requires AVX2 via `target_feature`, and delegates to
@@ -2190,6 +2252,90 @@ unsafe fn gf256_addmul_slice_x86_avx2_impl_tables(
     }
 }
 
+#[cfg(all(
+    feature = "simd-intrinsics",
+    any(target_arch = "x86", target_arch = "x86_64")
+))]
+#[target_feature(enable = "avx2")]
+unsafe fn gf256_addmul_slices2_x86_avx2_impl_tables(
+    dst_a: &mut [u8],
+    src_a: &[u8],
+    dst_b: &mut [u8],
+    src_b: &[u8],
+    low_tbl_arr: &[u8; 16],
+    high_tbl_arr: &[u8; 16],
+    table: &[u8; 256],
+) {
+    // SAFETY: caller guarantees AVX2 support and matching lengths.
+    let low_tbl_128 = unsafe { _mm_loadu_si128(low_tbl_arr.as_ptr().cast::<__m128i>()) };
+    let high_tbl_128 = unsafe { _mm_loadu_si128(high_tbl_arr.as_ptr().cast::<__m128i>()) };
+    let low_tbl_256 = _mm256_broadcastsi128_si256(low_tbl_128);
+    let high_tbl_256 = _mm256_broadcastsi128_si256(high_tbl_128);
+    let nibble_mask = _mm256_set1_epi8(0x0f_i8);
+
+    let common = src_a.len().min(src_b.len());
+    let mut i = 0usize;
+    while i + 32 <= common {
+        let src_ptr_a = unsafe { src_a.as_ptr().add(i) };
+        let dst_ptr_a = unsafe { dst_a.as_mut_ptr().add(i) };
+        let src_ptr_b = unsafe { src_b.as_ptr().add(i) };
+        let dst_ptr_b = unsafe { dst_b.as_mut_ptr().add(i) };
+        // SAFETY: pointer ranges are in-bounds and unaligned loads/stores are used.
+        let src_v_a = unsafe { _mm256_loadu_si256(src_ptr_a.cast::<__m256i>()) };
+        let src_v_b = unsafe { _mm256_loadu_si256(src_ptr_b.cast::<__m256i>()) };
+        let dst_v_a = unsafe { _mm256_loadu_si256(dst_ptr_a.cast::<__m256i>()) };
+        let dst_v_b = unsafe { _mm256_loadu_si256(dst_ptr_b.cast::<__m256i>()) };
+        let low_nibbles_a = _mm256_and_si256(src_v_a, nibble_mask);
+        let high_nibbles_a = _mm256_and_si256(_mm256_srli_epi16(src_v_a, 4), nibble_mask);
+        let low_nibbles_b = _mm256_and_si256(src_v_b, nibble_mask);
+        let high_nibbles_b = _mm256_and_si256(_mm256_srli_epi16(src_v_b, 4), nibble_mask);
+        let product_a = _mm256_xor_si256(
+            _mm256_shuffle_epi8(low_tbl_256, low_nibbles_a),
+            _mm256_shuffle_epi8(high_tbl_256, high_nibbles_a),
+        );
+        let product_b = _mm256_xor_si256(
+            _mm256_shuffle_epi8(low_tbl_256, low_nibbles_b),
+            _mm256_shuffle_epi8(high_tbl_256, high_nibbles_b),
+        );
+        unsafe {
+            _mm256_storeu_si256(
+                dst_ptr_a.cast::<__m256i>(),
+                _mm256_xor_si256(dst_v_a, product_a),
+            )
+        };
+        unsafe {
+            _mm256_storeu_si256(
+                dst_ptr_b.cast::<__m256i>(),
+                _mm256_xor_si256(dst_v_b, product_b),
+            )
+        };
+        i += 32;
+    }
+
+    if i < src_a.len() {
+        unsafe {
+            gf256_addmul_slice_x86_avx2_impl_tables(
+                &mut dst_a[i..],
+                &src_a[i..],
+                low_tbl_arr,
+                high_tbl_arr,
+                table,
+            )
+        };
+    }
+    if i < src_b.len() {
+        unsafe {
+            gf256_addmul_slice_x86_avx2_impl_tables(
+                &mut dst_b[i..],
+                &src_b[i..],
+                low_tbl_arr,
+                high_tbl_arr,
+                table,
+            )
+        };
+    }
+}
+
 #[cfg(all(feature = "simd-intrinsics", target_arch = "aarch64"))]
 unsafe fn gf256_mul_slice_aarch64_neon_impl(dst: &mut [u8], c: Gf256) {
     let (low_tbl_arr, high_tbl_arr) = mul_nibble_tables(c);
@@ -2223,6 +2369,57 @@ unsafe fn gf256_mul_slice_aarch64_neon_impl_tables(
 
     for d in &mut dst[i..] {
         *d = table[*d as usize];
+    }
+}
+
+#[cfg(all(feature = "simd-intrinsics", target_arch = "aarch64"))]
+unsafe fn gf256_mul_slices2_aarch64_neon_impl_tables(
+    dst_a: &mut [u8],
+    dst_b: &mut [u8],
+    low_tbl_arr: &[u8; 16],
+    high_tbl_arr: &[u8; 16],
+    table: &[u8; 256],
+) {
+    // SAFETY: caller guarantees NEON support.
+    let low_tbl: uint8x16_t = unsafe { vld1q_u8(low_tbl_arr.as_ptr()) };
+    let high_tbl: uint8x16_t = unsafe { vld1q_u8(high_tbl_arr.as_ptr()) };
+    let nibble_mask = vdupq_n_u8(0x0f);
+
+    let common = dst_a.len().min(dst_b.len());
+    let mut i = 0usize;
+    while i + 16 <= common {
+        let ptr_a = unsafe { dst_a.as_mut_ptr().add(i) };
+        let ptr_b = unsafe { dst_b.as_mut_ptr().add(i) };
+        let input_a = unsafe { vld1q_u8(ptr_a) };
+        let input_b = unsafe { vld1q_u8(ptr_b) };
+        let low_mul_a = vqtbl1q_u8(low_tbl, vandq_u8(input_a, nibble_mask));
+        let high_mul_a = vqtbl1q_u8(high_tbl, vandq_u8(vshrq_n_u8(input_a, 4), nibble_mask));
+        let low_mul_b = vqtbl1q_u8(low_tbl, vandq_u8(input_b, nibble_mask));
+        let high_mul_b = vqtbl1q_u8(high_tbl, vandq_u8(vshrq_n_u8(input_b, 4), nibble_mask));
+        unsafe { vst1q_u8(ptr_a, veorq_u8(low_mul_a, high_mul_a)) };
+        unsafe { vst1q_u8(ptr_b, veorq_u8(low_mul_b, high_mul_b)) };
+        i += 16;
+    }
+
+    if i < dst_a.len() {
+        unsafe {
+            gf256_mul_slice_aarch64_neon_impl_tables(
+                &mut dst_a[i..],
+                low_tbl_arr,
+                high_tbl_arr,
+                table,
+            )
+        };
+    }
+    if i < dst_b.len() {
+        unsafe {
+            gf256_mul_slice_aarch64_neon_impl_tables(
+                &mut dst_b[i..],
+                low_tbl_arr,
+                high_tbl_arr,
+                table,
+            )
+        };
     }
 }
 
@@ -2269,6 +2466,75 @@ unsafe fn gf256_addmul_slice_aarch64_neon_impl_tables(
 
     for (d, s) in dst[i..].iter_mut().zip(src[i..].iter()) {
         *d ^= table[*s as usize];
+    }
+}
+
+#[cfg(all(feature = "simd-intrinsics", target_arch = "aarch64"))]
+unsafe fn gf256_addmul_slices2_aarch64_neon_impl_tables(
+    dst_a: &mut [u8],
+    src_a: &[u8],
+    dst_b: &mut [u8],
+    src_b: &[u8],
+    low_tbl_arr: &[u8; 16],
+    high_tbl_arr: &[u8; 16],
+    table: &[u8; 256],
+) {
+    // SAFETY: caller guarantees NEON support and matching lengths.
+    let low_tbl: uint8x16_t = unsafe { vld1q_u8(low_tbl_arr.as_ptr()) };
+    let high_tbl: uint8x16_t = unsafe { vld1q_u8(high_tbl_arr.as_ptr()) };
+    let nibble_mask = vdupq_n_u8(0x0f);
+
+    let common = src_a.len().min(src_b.len());
+    let mut i = 0usize;
+    while i + 16 <= common {
+        let src_ptr_a = unsafe { src_a.as_ptr().add(i) };
+        let dst_ptr_a = unsafe { dst_a.as_mut_ptr().add(i) };
+        let src_ptr_b = unsafe { src_b.as_ptr().add(i) };
+        let dst_ptr_b = unsafe { dst_b.as_mut_ptr().add(i) };
+        let src_v_a = unsafe { vld1q_u8(src_ptr_a) };
+        let src_v_b = unsafe { vld1q_u8(src_ptr_b) };
+        let dst_v_a = unsafe { vld1q_u8(dst_ptr_a) };
+        let dst_v_b = unsafe { vld1q_u8(dst_ptr_b) };
+        let low_mul_a = vqtbl1q_u8(low_tbl, vandq_u8(src_v_a, nibble_mask));
+        let high_mul_a = vqtbl1q_u8(high_tbl, vandq_u8(vshrq_n_u8(src_v_a, 4), nibble_mask));
+        let low_mul_b = vqtbl1q_u8(low_tbl, vandq_u8(src_v_b, nibble_mask));
+        let high_mul_b = vqtbl1q_u8(high_tbl, vandq_u8(vshrq_n_u8(src_v_b, 4), nibble_mask));
+        unsafe {
+            vst1q_u8(
+                dst_ptr_a,
+                veorq_u8(dst_v_a, veorq_u8(low_mul_a, high_mul_a)),
+            )
+        };
+        unsafe {
+            vst1q_u8(
+                dst_ptr_b,
+                veorq_u8(dst_v_b, veorq_u8(low_mul_b, high_mul_b)),
+            )
+        };
+        i += 16;
+    }
+
+    if i < src_a.len() {
+        unsafe {
+            gf256_addmul_slice_aarch64_neon_impl_tables(
+                &mut dst_a[i..],
+                &src_a[i..],
+                low_tbl_arr,
+                high_tbl_arr,
+                table,
+            )
+        };
+    }
+    if i < src_b.len() {
+        unsafe {
+            gf256_addmul_slice_aarch64_neon_impl_tables(
+                &mut dst_b[i..],
+                &src_b[i..],
+                low_tbl_arr,
+                high_tbl_arr,
+                table,
+            )
+        };
     }
 }
 
@@ -2728,6 +2994,114 @@ mod tests {
 
         assert_eq!(accum_left, expected_left, "{context}");
         assert_eq!(accum_right, expected_right, "{context}");
+    }
+
+    #[cfg(all(
+        feature = "simd-intrinsics",
+        any(target_arch = "x86", target_arch = "x86_64")
+    ))]
+    #[test]
+    fn avx2_dual_mul_tables_matches_single_lane_impl_with_remainders() {
+        if !std::is_x86_feature_detected!("avx2") {
+            return;
+        }
+
+        const LEN_A: usize = 97;
+        const LEN_B: usize = 161;
+        let seed = 0u64;
+        let replay_ref = "replay:rq-u-gf256-simd-scalar-equivalence-v1";
+        let context = failure_context(
+            "RQ-U-GF256-ALGEBRA",
+            seed,
+            "avx2_dual_mul_tables_matches_single_lane_impl_with_remainders",
+            replay_ref,
+        );
+
+        let c = Gf256(113);
+        let (low_tbl_arr, high_tbl_arr) = mul_nibble_tables(c);
+        let table = mul_table_for(c);
+
+        let mut a_actual: Vec<u8> = (0..LEN_A).map(|i| (i.wrapping_mul(7)) as u8).collect();
+        let mut b_actual: Vec<u8> = (0..LEN_B).map(|i| (i.wrapping_mul(11)) as u8).collect();
+        let mut a_expected = a_actual.clone();
+        let mut b_expected = b_actual.clone();
+
+        unsafe {
+            gf256_mul_slices2_x86_avx2_impl_tables(
+                &mut a_actual,
+                &mut b_actual,
+                low_tbl_arr,
+                high_tbl_arr,
+                table,
+            );
+            gf256_mul_slice_x86_avx2_impl_tables(&mut a_expected, low_tbl_arr, high_tbl_arr, table);
+            gf256_mul_slice_x86_avx2_impl_tables(&mut b_expected, low_tbl_arr, high_tbl_arr, table);
+        }
+
+        assert_eq!(a_actual, a_expected, "{context}");
+        assert_eq!(b_actual, b_expected, "{context}");
+    }
+
+    #[cfg(all(
+        feature = "simd-intrinsics",
+        any(target_arch = "x86", target_arch = "x86_64")
+    ))]
+    #[test]
+    fn avx2_dual_addmul_tables_matches_single_lane_impl_with_remainders() {
+        if !std::is_x86_feature_detected!("avx2") {
+            return;
+        }
+
+        const LEN_A: usize = 95;
+        const LEN_B: usize = 157;
+        let seed = 0u64;
+        let replay_ref = "replay:rq-u-gf256-simd-scalar-equivalence-v1";
+        let context = failure_context(
+            "RQ-U-GF256-ALGEBRA",
+            seed,
+            "avx2_dual_addmul_tables_matches_single_lane_impl_with_remainders",
+            replay_ref,
+        );
+
+        let c = Gf256(173);
+        let (low_tbl_arr, high_tbl_arr) = mul_nibble_tables(c);
+        let table = mul_table_for(c);
+
+        let src_a: Vec<u8> = (0..LEN_A).map(|i| (i.wrapping_mul(13)) as u8).collect();
+        let src_b: Vec<u8> = (0..LEN_B).map(|i| (i.wrapping_mul(17)) as u8).collect();
+        let mut a_actual: Vec<u8> = (0..LEN_A).map(|i| (i.wrapping_mul(19)) as u8).collect();
+        let mut b_actual: Vec<u8> = (0..LEN_B).map(|i| (i.wrapping_mul(23)) as u8).collect();
+        let mut a_expected = a_actual.clone();
+        let mut b_expected = b_actual.clone();
+
+        unsafe {
+            gf256_addmul_slices2_x86_avx2_impl_tables(
+                &mut a_actual,
+                &src_a,
+                &mut b_actual,
+                &src_b,
+                low_tbl_arr,
+                high_tbl_arr,
+                table,
+            );
+            gf256_addmul_slice_x86_avx2_impl_tables(
+                &mut a_expected,
+                &src_a,
+                low_tbl_arr,
+                high_tbl_arr,
+                table,
+            );
+            gf256_addmul_slice_x86_avx2_impl_tables(
+                &mut b_expected,
+                &src_b,
+                low_tbl_arr,
+                high_tbl_arr,
+                table,
+            );
+        }
+
+        assert_eq!(a_actual, a_expected, "{context}");
+        assert_eq!(b_actual, b_expected, "{context}");
     }
 
     #[test]
