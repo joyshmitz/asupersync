@@ -2181,12 +2181,12 @@ unsafe fn gf256_mul_slices2_x86_avx2_impl_tables(
 
     if i < dst_a.len() {
         unsafe {
-            gf256_mul_slice_x86_avx2_impl_tables(&mut dst_a[i..], low_tbl_arr, high_tbl_arr, table)
+            gf256_mul_slice_x86_avx2_impl_tables(&mut dst_a[i..], low_tbl_arr, high_tbl_arr, table);
         };
     }
     if i < dst_b.len() {
         unsafe {
-            gf256_mul_slice_x86_avx2_impl_tables(&mut dst_b[i..], low_tbl_arr, high_tbl_arr, table)
+            gf256_mul_slice_x86_avx2_impl_tables(&mut dst_b[i..], low_tbl_arr, high_tbl_arr, table);
         };
     }
 }
@@ -2301,13 +2301,13 @@ unsafe fn gf256_addmul_slices2_x86_avx2_impl_tables(
             _mm256_storeu_si256(
                 dst_ptr_a.cast::<__m256i>(),
                 _mm256_xor_si256(dst_v_a, product_a),
-            )
+            );
         };
         unsafe {
             _mm256_storeu_si256(
                 dst_ptr_b.cast::<__m256i>(),
                 _mm256_xor_si256(dst_v_b, product_b),
-            )
+            );
         };
         i += 32;
     }
@@ -2320,7 +2320,7 @@ unsafe fn gf256_addmul_slices2_x86_avx2_impl_tables(
                 low_tbl_arr,
                 high_tbl_arr,
                 table,
-            )
+            );
         };
     }
     if i < src_b.len() {
@@ -2331,7 +2331,7 @@ unsafe fn gf256_addmul_slices2_x86_avx2_impl_tables(
                 low_tbl_arr,
                 high_tbl_arr,
                 table,
-            )
+            );
         };
     }
 }

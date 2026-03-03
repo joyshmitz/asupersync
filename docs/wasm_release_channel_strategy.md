@@ -174,6 +174,7 @@ Policy wiring expectations:
    - `artifacts/security_release_gate_report.json`
 3. npm release assumptions are explicit and artifactized:
    - package discovery glob: `packages/*/package.json`
+   - discovered package path list: `artifacts/npm/package_json_paths.txt`
    - assumptions artifact: `artifacts/npm/npm_release_assumptions.json`
    - publish outcome artifact: `artifacts/npm/publish_outcome.json`
    - rollback outcome artifact (when rollback mode is used): `artifacts/npm/rollback_outcome.json`
