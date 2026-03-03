@@ -391,6 +391,7 @@ impl SqliteConnection {
             Ok(Ok(conn)) => Outcome::Ok(Self {
                 inner: Arc::new(Mutex::new(SqliteConnectionInner::new(conn))),
                 pool: pool_clone,
+                needs_rollback: Arc::new(AtomicBool::new(false)),
             }),
             Ok(Err(e)) => Outcome::Err(e),
             Err(crate::channel::oneshot::RecvError::Cancelled) => {
@@ -440,6 +441,7 @@ impl SqliteConnection {
             Ok(Ok(conn)) => Outcome::Ok(Self {
                 inner: Arc::new(Mutex::new(SqliteConnectionInner::new(conn))),
                 pool: pool_clone,
+                needs_rollback: Arc::new(AtomicBool::new(false)),
             }),
             Ok(Err(e)) => Outcome::Err(e),
             Err(crate::channel::oneshot::RecvError::Cancelled) => {
@@ -477,6 +479,7 @@ impl SqliteConnection {
         }
 
         let inner = Arc::clone(&self.inner);
+        let needs_rollback = Arc::clone(&self.needs_rollback);
         let sql = sql.to_string();
         let params: Vec<SqliteValue> = params.to_vec();
 
@@ -486,6 +489,11 @@ impl SqliteConnection {
         let handle = self.pool.spawn(move || {
             let result = (|| {
                 let guard = inner.lock();
+                if needs_rollback.swap(false, Ordering::AcqRel) {
+                    if let Ok(conn) = guard.get() {
+                        let _ = conn.execute("ROLLBACK", []);
+                    }
+                }
                 let conn = guard.get()?;
 
                 let params_refs: Vec<&dyn rusqlite::ToSql> =
@@ -531,6 +539,7 @@ impl SqliteConnection {
         }
 
         let inner = Arc::clone(&self.inner);
+        let needs_rollback = Arc::clone(&self.needs_rollback);
         let sql = sql.to_string();
 
         let (tx, mut rx) = crate::channel::oneshot::channel();
@@ -539,6 +548,11 @@ impl SqliteConnection {
         let handle = self.pool.spawn(move || {
             let result = (|| {
                 let guard = inner.lock();
+                if needs_rollback.swap(false, Ordering::AcqRel) {
+                    if let Ok(conn) = guard.get() {
+                        let _ = conn.execute("ROLLBACK", []);
+                    }
+                }
                 let conn = guard.get()?;
                 let res = conn
                     .execute_batch(&sql)
@@ -584,6 +598,7 @@ impl SqliteConnection {
         }
 
         let inner = Arc::clone(&self.inner);
+        let needs_rollback = Arc::clone(&self.needs_rollback);
         let sql = sql.to_string();
         let params: Vec<SqliteValue> = params.to_vec();
 
@@ -593,6 +608,11 @@ impl SqliteConnection {
         let handle = self.pool.spawn(move || {
             let result = (|| {
                 let guard = inner.lock();
+                if needs_rollback.swap(false, Ordering::AcqRel) {
+                    if let Ok(conn) = guard.get() {
+                        let _ = conn.execute("ROLLBACK", []);
+                    }
+                }
                 let conn = guard.get()?;
 
                 let params_refs: Vec<&dyn rusqlite::ToSql> =
@@ -745,12 +765,18 @@ impl SqliteConnection {
         }
 
         let inner = Arc::clone(&self.inner);
+        let needs_rollback = Arc::clone(&self.needs_rollback);
         let (tx, mut rx) = crate::channel::oneshot::channel();
         let permit = tx.reserve(cx);
 
         let handle = self.pool.spawn(move || {
             let result = (|| {
                 let guard = inner.lock();
+                if needs_rollback.swap(false, Ordering::AcqRel) {
+                    if let Ok(conn) = guard.get() {
+                        let _ = conn.execute("ROLLBACK", []);
+                    }
+                }
                 let conn = guard.get()?;
                 conn.busy_timeout(timeout)
                     .map_err(|e| SqliteError::Sqlite(e.to_string()))?;
@@ -867,13 +893,10 @@ impl SqliteTransaction<'_> {
 impl Drop for SqliteTransaction<'_> {
     fn drop(&mut self) {
         if !self.finished {
-            // Synchronous best-effort rollback on drop.
-            // This must complete before the connection is reusable to prevent
-            // a race where a subsequent BEGIN arrives before the ROLLBACK.
-            let guard = self.conn.inner.lock();
-            if let Ok(conn) = guard.get() {
-                let _ = conn.execute("ROLLBACK", []);
-            }
+            // Asynchronously enqueue a rollback via an atomic flag so we don't
+            // block the async executor thread waiting for the connection lock.
+            // The next operation spawned on the blocking pool will process the rollback.
+            self.conn.needs_rollback.store(true, Ordering::Release);
         }
     }
 }
