@@ -53,7 +53,10 @@ pub mod response;
 pub mod router;
 
 pub use extract::{Form, FromRequest, FromRequestParts, Json as JsonExtract, Path, Query, State};
-pub use handler::Handler;
+pub use handler::{
+    AsyncCxFnHandler, AsyncCxFnHandler1, AsyncCxFnHandler2, AsyncCxFnHandler3, AsyncCxFnHandler4,
+    Handler,
+};
 pub use nextjs_bootstrap::{
     BootstrapCommand, BootstrapLogEvent, BootstrapRecoveryAction, NextjsBootstrapConfig,
     NextjsBootstrapError, NextjsBootstrapSnapshot, NextjsBootstrapState,

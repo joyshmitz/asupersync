@@ -5,11 +5,13 @@
 //! abstraction that the router uses to invoke handlers.
 
 use std::future::Future;
+use std::sync::OnceLock;
 
 use crate::Cx;
+use crate::runtime::{Runtime, RuntimeBuilder};
 
 use super::extract::{FromRequest, FromRequestParts, Request};
-use super::response::{IntoResponse, Response};
+use super::response::{IntoResponse, Response, StatusCode};
 
 /// A request handler.
 ///
@@ -167,6 +169,20 @@ where
     Ok((t1, t2, t3, t4))
 }
 
+#[inline]
+fn run_async_handler<F, Res>(future: F) -> Response
+where
+    F: Future<Output = Res>,
+    Res: IntoResponse,
+{
+    static HANDLER_RUNTIME: OnceLock<Option<Runtime>> = OnceLock::new();
+    let runtime = HANDLER_RUNTIME.get_or_init(|| RuntimeBuilder::current_thread().build().ok());
+    runtime.as_ref().map_or_else(
+        || Response::empty(StatusCode::INTERNAL_SERVER_ERROR),
+        |rt| rt.block_on(future).into_response(),
+    )
+}
+
 /// Wrapper for async handlers that receive a [`Cx`] and no extractors.
 pub struct AsyncCxFnHandler<F> {
     func: F,
@@ -187,7 +203,7 @@ where
 {
     #[inline]
     fn call(&self, _req: Request) -> Response {
-        futures_lite::future::block_on((self.func)(Cx::for_testing())).into_response()
+        run_async_handler((self.func)(Cx::for_testing()))
     }
 }
 
@@ -220,7 +236,7 @@ where
             Ok(v) => v,
             Err(resp) => return resp,
         };
-        futures_lite::future::block_on((self.func)(Cx::for_testing(), t1)).into_response()
+        run_async_handler((self.func)(Cx::for_testing(), t1))
     }
 }
 
@@ -254,7 +270,7 @@ where
             Ok(v) => v,
             Err(resp) => return resp,
         };
-        futures_lite::future::block_on((self.func)(Cx::for_testing(), t1, t2)).into_response()
+        run_async_handler((self.func)(Cx::for_testing(), t1, t2))
     }
 }
 
@@ -289,7 +305,7 @@ where
             Ok(v) => v,
             Err(resp) => return resp,
         };
-        futures_lite::future::block_on((self.func)(Cx::for_testing(), t1, t2, t3)).into_response()
+        run_async_handler((self.func)(Cx::for_testing(), t1, t2, t3))
     }
 }
 
@@ -325,8 +341,7 @@ where
             Ok(v) => v,
             Err(resp) => return resp,
         };
-        futures_lite::future::block_on((self.func)(Cx::for_testing(), t1, t2, t3, t4))
-            .into_response()
+        run_async_handler((self.func)(Cx::for_testing(), t1, t2, t3, t4))
     }
 }
 
