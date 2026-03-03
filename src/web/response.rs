@@ -19,6 +19,8 @@ impl StatusCode {
     // 1xx Informational
     /// 100 Continue
     pub const CONTINUE: Self = Self(100);
+    /// 101 Switching Protocols
+    pub const SWITCHING_PROTOCOLS: Self = Self(101);
 
     // 2xx Success
     /// 200 OK

@@ -56,6 +56,7 @@ pub mod request_region;
 pub mod response;
 pub mod router;
 pub mod security;
+pub mod websocket;
 
 pub use extract::{
     Cookie, CookieJar, Form, FromRequest, FromRequestParts, Json as JsonExtract, Path, Query, State,

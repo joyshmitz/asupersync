@@ -773,23 +773,26 @@ impl<H: Handler> RequestTraceMiddleware<H> {
     }
 
     fn resolve_trace_id(req: &Request) -> Option<String> {
-        req.extensions
-            .get("trace_id")
-            .or_else(|| req.extensions.get("request_id"))
-            .or_else(|| header_value(req, "x-request-id"))
+        if let Some(id) = req.extensions.get("trace_id") {
+            return Some(id.to_string());
+        }
+        if let Some(id) = req.extensions.get("request_id") {
+            return Some(id.to_string());
+        }
+        header_value(req, "x-request-id")
     }
 }
 
 impl<H: Handler> Handler for RequestTraceMiddleware<H> {
     fn call(&self, req: Request) -> Response {
-        let method = req.method.clone();
-        let path = req.path.clone();
+        let _method = req.method.clone();
+        let _path = req.path.clone();
         let trace_id = Self::resolve_trace_id(&req);
         let start = Instant::now();
 
         debug!(
-            method = %method,
-            path = %path,
+            method = %_method,
+            path = %_path,
             trace_id = ?trace_id,
             "http request start"
         );
@@ -812,8 +815,8 @@ impl<H: Handler> Handler for RequestTraceMiddleware<H> {
 
         if status_code >= 500 {
             warn!(
-                method = %method,
-                path = %path,
+                method = %_method,
+                path = %_path,
                 status = status_code,
                 duration_ms = duration_ms,
                 trace_id = ?trace_id,
@@ -821,8 +824,8 @@ impl<H: Handler> Handler for RequestTraceMiddleware<H> {
             );
         } else {
             debug!(
-                method = %method,
-                path = %path,
+                method = %_method,
+                path = %_path,
                 status = status_code,
                 duration_ms = duration_ms,
                 trace_id = ?trace_id,

@@ -70,7 +70,7 @@ pub const KNOWN_FINDINGS: &[AmbientFinding] = &[
     // ── Time ────────────────────────────────────────────────────────────
     AmbientFinding {
         file: "web/middleware.rs",
-        line: 80,
+        line: 268,
         category: AmbientCategory::Time,
         severity: Severity::Warning,
         description: "Instant::now() in TimeoutMiddleware::call()",
