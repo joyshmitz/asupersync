@@ -276,7 +276,7 @@ mod pg {
 }
 
 #[cfg(feature = "postgres")]
-pub use pg::{with_pg_transaction, with_pg_transaction_retry, PgSavepoint};
+pub use pg::{PgSavepoint, with_pg_transaction, with_pg_transaction_retry};
 
 // ─── SQLite helpers ──────────────────────────────────────────────────────────
 
@@ -449,9 +449,7 @@ mod sqlite {
 }
 
 #[cfg(feature = "sqlite")]
-pub use sqlite::{
-    with_sqlite_transaction, with_sqlite_transaction_immediate, SqliteSavepoint,
-};
+pub use sqlite::{SqliteSavepoint, with_sqlite_transaction, with_sqlite_transaction_immediate};
 
 // ─── MySQL helpers ───────────────────────────────────────────────────────────
 
@@ -580,7 +578,7 @@ mod mysql {
 }
 
 #[cfg(feature = "mysql")]
-pub use mysql::{with_mysql_transaction, MySqlSavepoint};
+pub use mysql::{MySqlSavepoint, with_mysql_transaction};
 
 // ─── Tests ───────────────────────────────────────────────────────────────────
 
