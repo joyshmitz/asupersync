@@ -1042,7 +1042,7 @@ impl LabRuntime {
     /// This simulates clock drift or NTP corrections. A warning is logged
     /// because large jumps may affect lease/timeout correctness.
     pub fn inject_clock_skew(&mut self, skew_nanos: u64) {
-        let old_time = self.virtual_time;
+        let _old_time = self.virtual_time;
         self.advance_time(skew_nanos);
 
         crate::tracing_compat::warn!(
@@ -1403,9 +1403,10 @@ impl LabRuntime {
     #[allow(clippy::too_many_lines)]
     fn step(&mut self) {
         self.steps += 1;
-        // Consume RNG state so schedule tie-breaking is deterministic once we
-        // start making scheduler decisions here.
         let rng_value = self.rng.next_u64();
+        if self.steps < 50 {
+            println!("rng_value = {}, worker_hint = {}", rng_value, (rng_value >> 32) as usize % self.config.worker_count.max(1));
+        }
         self.replay_recorder.record_rng_value(rng_value);
         self.check_futurelocks();
         if let Some(timer) = self.state.timer_driver_handle() {
@@ -1416,7 +1417,8 @@ impl LabRuntime {
 
         // 1. Choose a worker and pop a task (deterministic multi-worker model)
         let worker_count = self.config.worker_count.max(1);
-        let worker_hint = (rng_value as usize) % worker_count;
+        // Use higher bits of rng_value since xorshift64 has poor low-bit entropy
+        let worker_hint = ((rng_value >> 32) as usize) % worker_count;
         let now = self.now();
         let (task_id, dispatch_lane) = {
             let mut sched = self.scheduler.lock();
@@ -1491,6 +1493,9 @@ impl LabRuntime {
         let _cx_guard = crate::cx::Cx::set_current(current_cx);
 
         // 4. Poll the task
+        if self.steps < 50 {
+            println!("Executing {:?} at step {}", task_id, self.steps);
+        }
         let result = if let Some(stored) = self.state.get_stored_future(task_id) {
             stored.poll(&mut cx)
         } else {
@@ -1642,7 +1647,7 @@ impl LabRuntime {
             &mut self.replay_recorder,
             &mut self.seen_io_tokens,
         );
-        if let Err(error) = handle.turn_with(Some(Duration::ZERO), |event, interest| {
+        if let Err(_error) = handle.turn_with(Some(Duration::ZERO), |event, interest| {
             let token = event.token.0;
             let interest = interest.unwrap_or(event.ready);
             if seen.insert(token) {
@@ -2145,8 +2150,10 @@ impl LabScheduler {
     /// Schedules a task in the ready lane on its assigned worker.
     pub fn schedule(&mut self, task: TaskId, priority: u8) {
         if !self.scheduled.insert(task) {
+            println!("LabScheduler already scheduled {:?}", task);
             return;
         }
+        println!("LabScheduler scheduling {:?}", task);
 
         let worker = self.assign_worker(task);
         self.workers[worker].schedule(task, priority);
