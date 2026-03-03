@@ -18,9 +18,7 @@ mod common;
 
 use asupersync::channel::mpsc;
 use asupersync::cx::Cx;
-use asupersync::stream::{
-    ReceiverStream, SinkStream, Stream, StreamExt, forward, into_sink, iter,
-};
+use asupersync::stream::{ReceiverStream, SinkStream, Stream, StreamExt, forward, into_sink, iter};
 use common::*;
 use std::pin::Pin;
 use std::sync::Arc;
@@ -79,7 +77,12 @@ fn forward_iter_to_channel() {
     let output = ReceiverStream::new(cx, rx);
     let collected = collect_sync(output);
     let ok = collected == vec![10, 20, 30, 40, 50];
-    assert_with_log!(ok, "forward iter→channel", vec![10, 20, 30, 40, 50], collected);
+    assert_with_log!(
+        ok,
+        "forward iter→channel",
+        vec![10, 20, 30, 40, 50],
+        collected
+    );
     test_complete!("forward_iter_to_channel");
 }
 
@@ -134,9 +137,7 @@ fn forward_take_skip_chain() {
     let (tx, rx) = mpsc::channel::<i32>(16);
 
     // Pipeline: [1..10] → skip(3) → take(4) → sink
-    let pipeline = iter(vec![1, 2, 3, 4, 5, 6, 7, 8, 9, 10])
-        .skip(3)
-        .take(4);
+    let pipeline = iter(vec![1, 2, 3, 4, 5, 6, 7, 8, 9, 10]).skip(3).take(4);
 
     futures_lite::future::block_on(async {
         forward(&cx, pipeline, tx).await.unwrap();
@@ -199,8 +200,7 @@ fn forward_filter_map_combinator() {
     let (tx, rx) = mpsc::channel::<i32>(16);
 
     // filter_map: parse strings, keep only valid ints
-    let pipeline = iter(vec!["1", "two", "3", "four", "5"])
-        .filter_map(|s| s.parse::<i32>().ok());
+    let pipeline = iter(vec!["1", "two", "3", "four", "5"]).filter_map(|s| s.parse::<i32>().ok());
 
     futures_lite::future::block_on(async {
         forward(&cx, pipeline, tx).await.unwrap();
@@ -224,11 +224,10 @@ fn forward_scan_running_sum() {
     let (tx, rx) = mpsc::channel::<i32>(16);
 
     // scan: running sum [1,2,3,4,5] → [1,3,6,10,15]
-    let pipeline = iter(vec![1, 2, 3, 4, 5])
-        .scan(0i32, |acc: &mut i32, x: i32| {
-            *acc += x;
-            Some(*acc)
-        });
+    let pipeline = iter(vec![1, 2, 3, 4, 5]).scan(0i32, |acc: &mut i32, x: i32| {
+        *acc += x;
+        Some(*acc)
+    });
 
     futures_lite::future::block_on(async {
         forward(&cx, pipeline, tx).await.unwrap();
@@ -248,11 +247,10 @@ fn forward_scan_early_termination() {
     let (tx, rx) = mpsc::channel::<i32>(16);
 
     // scan that terminates when accumulator > 5
-    let pipeline = iter(vec![1, 2, 3, 4, 5])
-        .scan(0i32, |acc: &mut i32, x: i32| {
-            *acc += x;
-            if *acc > 5 { None } else { Some(*acc) }
-        });
+    let pipeline = iter(vec![1, 2, 3, 4, 5]).scan(0i32, |acc: &mut i32, x: i32| {
+        *acc += x;
+        if *acc > 5 { None } else { Some(*acc) }
+    });
 
     futures_lite::future::block_on(async {
         forward(&cx, pipeline, tx).await.unwrap();
@@ -455,14 +453,13 @@ fn sink_stream_send_all_scan_pipeline() {
     let sink = into_sink(tx);
 
     // scan: build cumulative CSV string
-    let input = iter(vec!["a", "b", "c"])
-        .scan(String::new(), |acc: &mut String, item: &str| {
-            if !acc.is_empty() {
-                acc.push(',');
-            }
-            acc.push_str(item);
-            Some(acc.clone())
-        });
+    let input = iter(vec!["a", "b", "c"]).scan(String::new(), |acc: &mut String, item: &str| {
+        if !acc.is_empty() {
+            acc.push(',');
+        }
+        acc.push_str(item);
+        Some(acc.clone())
+    });
 
     futures_lite::future::block_on(async {
         sink.send_all(&cx, input).await.unwrap();
@@ -542,7 +539,7 @@ fn receiver_stream_filter_scan_forward() {
 
     let (tx_out, rx_out) = mpsc::channel::<i32>(16);
     let pipeline = ReceiverStream::new(cx.clone(), rx_in)
-        .filter(|x| x % 2 == 0)         // 2, 4, 6, 8
+        .filter(|x| x % 2 == 0) // 2, 4, 6, 8
         .scan(0i32, |acc: &mut i32, x: i32| {
             *acc += x;
             Some(*acc)
@@ -555,7 +552,12 @@ fn receiver_stream_filter_scan_forward() {
     let output = ReceiverStream::new(cx, rx_out);
     let collected = collect_sync(output);
     let ok = collected == vec![2, 6, 12, 20];
-    assert_with_log!(ok, "receiver→filter→scan→forward", vec![2, 6, 12, 20], collected);
+    assert_with_log!(
+        ok,
+        "receiver→filter→scan→forward",
+        vec![2, 6, 12, 20],
+        collected
+    );
     test_complete!("receiver_stream_filter_scan_forward");
 }
 
@@ -591,7 +593,7 @@ fn try_fold_with_filter_map_pipeline() {
 
     // filter_map → wrap in Ok → try_fold(sum)
     let pipeline = iter(vec!["1", "two", "3", "four", "5"])
-        .filter_map(|s| s.parse::<i32>().ok())   // 1, 3, 5
+        .filter_map(|s| s.parse::<i32>().ok()) // 1, 3, 5
         .map(|x| Ok::<i32, &str>(x))
         .try_fold(0i32, |acc, x| Ok::<i32, &str>(acc + x));
 
@@ -672,11 +674,10 @@ fn three_stage_scan_filter_map_pipeline() {
 
     // Stage 1: [1..6] → scan(running sum) → channel_1
     let (tx1, rx1) = mpsc::channel::<i32>(16);
-    let stage1 = iter(vec![1, 2, 3, 4, 5])
-        .scan(0i32, |acc: &mut i32, x: i32| {
-            *acc += x;
-            Some(*acc)
-        }); // 1, 3, 6, 10, 15
+    let stage1 = iter(vec![1, 2, 3, 4, 5]).scan(0i32, |acc: &mut i32, x: i32| {
+        *acc += x;
+        Some(*acc)
+    }); // 1, 3, 6, 10, 15
 
     futures_lite::future::block_on(async {
         forward(&cx, stage1, tx1).await.unwrap();
@@ -692,8 +693,7 @@ fn three_stage_scan_filter_map_pipeline() {
 
     // Stage 3: channel_2 → map(to_string) → channel_3
     let (tx3, rx3) = mpsc::channel::<String>(16);
-    let stage3 = ReceiverStream::new(cx.clone(), rx2)
-        .map(|x| format!("sum={x}"));
+    let stage3 = ReceiverStream::new(cx.clone(), rx2).map(|x| format!("sum={x}"));
 
     futures_lite::future::block_on(async {
         forward(&cx, stage3, tx3).await.unwrap();
@@ -701,7 +701,11 @@ fn three_stage_scan_filter_map_pipeline() {
 
     let output = ReceiverStream::new(cx, rx3);
     let collected = collect_sync(output);
-    let expected = vec!["sum=6".to_string(), "sum=10".to_string(), "sum=15".to_string()];
+    let expected = vec![
+        "sum=6".to_string(),
+        "sum=10".to_string(),
+        "sum=15".to_string(),
+    ];
     let ok = collected == expected;
     assert_with_log!(ok, "three-stage pipeline", expected, collected);
     test_complete!("three_stage_scan_filter_map_pipeline");
@@ -755,11 +759,10 @@ fn scan_type_change_forward() {
     let (tx, rx) = mpsc::channel::<usize>(16);
 
     // scan that changes type: &str → usize (accumulated length)
-    let pipeline = iter(vec!["hello", "world", "!"])
-        .scan(0usize, |acc: &mut usize, item: &str| {
-            *acc += item.len();
-            Some(*acc)
-        }); // 5, 10, 11
+    let pipeline = iter(vec!["hello", "world", "!"]).scan(0usize, |acc: &mut usize, item: &str| {
+        *acc += item.len();
+        Some(*acc)
+    }); // 5, 10, 11
 
     futures_lite::future::block_on(async {
         forward(&cx, pipeline, tx).await.unwrap();
@@ -768,7 +771,12 @@ fn scan_type_change_forward() {
     let output = ReceiverStream::new(cx, rx);
     let collected = collect_sync(output);
     let ok = collected == vec![5, 10, 11];
-    assert_with_log!(ok, "scan type change→forward", vec![5usize, 10, 11], collected);
+    assert_with_log!(
+        ok,
+        "scan type change→forward",
+        vec![5usize, 10, 11],
+        collected
+    );
     test_complete!("scan_type_change_forward");
 }
 
@@ -803,9 +811,8 @@ fn forward_disconnected_receiver_returns_error() {
     // Drop the receiver before forwarding.
     drop(rx);
 
-    let result = futures_lite::future::block_on(async {
-        forward(&cx, iter(vec![1, 2, 3]), tx).await
-    });
+    let result =
+        futures_lite::future::block_on(async { forward(&cx, iter(vec![1, 2, 3]), tx).await });
 
     let ok = result.is_err();
     assert_with_log!(ok, "forward to dropped rx errors", true, ok);
