@@ -468,8 +468,8 @@ mod tests {
     }
 
     #[test]
-    fn error_format_from_accept_default_plain() {
-        assert_eq!(error_format_from_accept(""), ErrorFormat::Plain);
+    fn error_format_from_accept_default_json() {
+        assert_eq!(error_format_from_accept(""), ErrorFormat::Json);
     }
 
     // ====================================================================
