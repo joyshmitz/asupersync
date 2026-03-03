@@ -98,6 +98,39 @@ pub enum PgError {
     UnsupportedAuth(String),
 }
 
+impl PgError {
+    /// Returns the PostgreSQL error code, if this is a server error.
+    #[must_use]
+    pub fn code(&self) -> Option<&str> {
+        match self {
+            Self::Server { code, .. } => Some(code),
+            _ => None,
+        }
+    }
+
+    /// Returns `true` if this is a serialization failure (SQLSTATE `40001`).
+    ///
+    /// Serialization failures occur with `SERIALIZABLE` or `REPEATABLE READ`
+    /// isolation levels when a concurrent transaction conflicts. These are
+    /// safe to retry.
+    #[must_use]
+    pub fn is_serialization_failure(&self) -> bool {
+        self.code() == Some("40001")
+    }
+
+    /// Returns `true` if this is a deadlock detected error (SQLSTATE `40P01`).
+    #[must_use]
+    pub fn is_deadlock(&self) -> bool {
+        self.code() == Some("40P01")
+    }
+
+    /// Returns `true` if this is a unique violation error (SQLSTATE `23505`).
+    #[must_use]
+    pub fn is_unique_violation(&self) -> bool {
+        self.code() == Some("23505")
+    }
+}
+
 impl fmt::Display for PgError {
     fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
         match self {

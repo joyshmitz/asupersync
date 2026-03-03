@@ -18,6 +18,7 @@
 //! [`Cx`]: crate::cx::Cx
 
 pub mod pool;
+pub mod transaction;
 
 #[cfg(feature = "sqlite")]
 pub mod sqlite;
