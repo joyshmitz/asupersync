@@ -253,3 +253,312 @@ fn audit_covers_integer_read_write_gap() {
         "must identify missing integer read/write methods"
     );
 }
+
+// =============================================================================
+// EXTENDED COVERAGE: gap enumeration, severity distribution, module paths,
+// trait parity tables, semantic sections, asupersync extensions
+// =============================================================================
+
+fn extract_gap_summary_rows(doc: &str) -> Vec<(String, String, String)> {
+    // Parse rows from the "Gap Summary" section.
+    // Format: | ID | Description | Severity | Effort | Phase |
+    let summary = match doc.split("Gap Summary").nth(1) {
+        Some(s) => s,
+        None => return Vec::new(),
+    };
+    let mut gaps = Vec::new();
+    for line in summary.lines() {
+        let cols: Vec<&str> = line.split('|').map(str::trim).collect();
+        if cols.len() >= 6 {
+            let id = cols[1];
+            let severity = cols[3];
+            let phase = cols.get(5).unwrap_or(&"");
+            if id.starts_with("IO-G") {
+                gaps.push((id.to_string(), severity.to_string(), phase.to_string()));
+            }
+        }
+    }
+    gaps
+}
+
+#[test]
+fn gap_summary_covers_all_14_gaps() {
+    let doc = load_audit_doc();
+    let gaps = extract_gap_summary_rows(&doc);
+    assert!(
+        gaps.len() >= 14,
+        "gap summary must list >= 14 gaps, found {}",
+        gaps.len()
+    );
+}
+
+#[test]
+fn all_gap_ids_from_g1_to_g14_present() {
+    let doc = load_audit_doc();
+    let ids = extract_gap_ids(&doc);
+    for i in 1..=14 {
+        let id = format!("IO-G{i}");
+        assert!(ids.contains(&id), "missing gap ID: {id}");
+    }
+}
+
+#[test]
+fn severity_distribution_matches_documented_totals() {
+    let doc = load_audit_doc();
+    let gaps = extract_gap_summary_rows(&doc);
+
+    let high = gaps.iter().filter(|(_, s, _)| s == "High").count();
+    let medium = gaps.iter().filter(|(_, s, _)| s == "Medium").count();
+    let low = gaps.iter().filter(|(_, s, _)| s == "Low").count();
+
+    assert!(high >= 3, "expected >= 3 High gaps, found {high}");
+    assert!(medium >= 5, "expected >= 5 Medium gaps, found {medium}");
+    assert!(low >= 5, "expected >= 5 Low gaps, found {low}");
+}
+
+#[test]
+fn high_severity_gaps_are_phase_a() {
+    let doc = load_audit_doc();
+    let gaps = extract_gap_summary_rows(&doc);
+
+    for (id, severity, phase) in &gaps {
+        if severity == "High" {
+            assert!(
+                phase.contains('A'),
+                "high-severity gap {id} should be Phase A, found '{phase}'"
+            );
+        }
+    }
+}
+
+#[test]
+fn all_phases_are_valid() {
+    let doc = load_audit_doc();
+    let gaps = extract_gap_summary_rows(&doc);
+    let valid_phases = ["A", "B", "C", "D"];
+
+    for (id, _, phase) in &gaps {
+        assert!(
+            valid_phases.iter().any(|p| phase.contains(p)),
+            "gap {id} has invalid phase '{phase}', expected one of {valid_phases:?}"
+        );
+    }
+}
+
+#[test]
+fn every_gap_id_in_summary_appears_in_body() {
+    let doc = load_audit_doc();
+    let summary_gaps = extract_gap_summary_rows(&doc);
+    let body_ids = extract_gap_ids(&doc);
+
+    for (gap_id, _, _) in &summary_gaps {
+        assert!(
+            body_ids.contains(gap_id),
+            "summary gap {gap_id} must also appear in body sections"
+        );
+    }
+}
+
+#[test]
+fn core_trait_parity_table_has_all_four_traits() {
+    let doc = load_audit_doc();
+    let traits = ["AsyncRead", "AsyncWrite", "AsyncBufRead", "AsyncSeek"];
+    let trait_section = doc
+        .split("Core Trait Parity")
+        .nth(1)
+        .expect("must have core trait parity section");
+
+    for t in &traits {
+        assert!(
+            trait_section.contains(t),
+            "core trait parity must list: {t}"
+        );
+    }
+}
+
+#[test]
+fn codec_trait_parity_lists_decoder_encoder() {
+    let doc = load_audit_doc();
+    let section = doc
+        .split("tokio-util Traits")
+        .nth(1)
+        .expect("must have tokio-util traits section");
+
+    assert!(section.contains("Decoder"), "must list Decoder");
+    assert!(section.contains("Encoder"), "must list Encoder");
+}
+
+#[test]
+fn framed_transport_types_complete() {
+    let doc = load_audit_doc();
+    let framed_types = ["Framed<T, U>", "FramedRead<R, D>", "FramedWrite<W, E>", "FramedParts"];
+    for ft in &framed_types {
+        assert!(
+            doc.contains(ft),
+            "framed transport section must list: {ft}"
+        );
+    }
+}
+
+#[test]
+fn semantic_differences_has_all_five_subsections() {
+    let doc = load_audit_doc();
+    let sections = [
+        "EOF Behavior",
+        "Shutdown Semantics",
+        "Buffering Invariants",
+        "Vectored I/O",
+        "Cancel-Safety",
+    ];
+    for section in &sections {
+        assert!(
+            doc.contains(section),
+            "semantic differences must have subsection: {section}"
+        );
+    }
+}
+
+#[test]
+fn buffering_invariants_document_defaults() {
+    let doc = load_audit_doc();
+    assert!(
+        doc.contains("8192"),
+        "must document 8192-byte buffer defaults"
+    );
+}
+
+#[test]
+fn cancel_safety_table_covers_key_operations() {
+    let doc = load_audit_doc();
+    let ops = ["read_exact", "write_all", "copy", "flush", "fill_buf"];
+    let cancel_section = doc
+        .split("Cancel-Safety")
+        .nth(1)
+        .expect("must have cancel-safety section");
+
+    for op in &ops {
+        assert!(
+            cancel_section.contains(op),
+            "cancel-safety table must cover: {op}"
+        );
+    }
+}
+
+#[test]
+fn asupersync_extensions_table_is_complete() {
+    let doc = load_audit_doc();
+    let extensions = [
+        "WritePermit",
+        "IoCap",
+        "BrowserStream",
+        "BrowserStorage",
+        "CopyWithProgress",
+        "CopyBidirectional",
+    ];
+    for ext in &extensions {
+        assert!(
+            doc.contains(ext),
+            "asupersync extensions must list: {ext}"
+        );
+    }
+}
+
+#[test]
+fn module_paths_reference_real_source_locations() {
+    let doc = load_audit_doc();
+    let paths = [
+        "io/read.rs",
+        "io/write.rs",
+        "io/copy.rs",
+        "io/seek.rs",
+        "codec/decoder.rs",
+        "codec/encoder.rs",
+    ];
+    for path in &paths {
+        assert!(
+            doc.contains(path),
+            "audit must reference module path: {path}"
+        );
+    }
+}
+
+#[test]
+fn io_source_files_exist() {
+    let manifest_dir = Path::new(env!("CARGO_MANIFEST_DIR"));
+    let expected_files = [
+        "src/io/read.rs",
+        "src/io/write.rs",
+        "src/io/copy.rs",
+        "src/io/seek.rs",
+        "src/io/buf_reader.rs",
+        "src/io/buf_writer.rs",
+        "src/io/split.rs",
+        "src/codec/decoder.rs",
+        "src/codec/encoder.rs",
+        "src/codec/framed.rs",
+    ];
+    for file in &expected_files {
+        let path = manifest_dir.join(file);
+        assert!(path.exists(), "referenced source file must exist: {file}");
+    }
+}
+
+#[test]
+fn document_has_revision_history() {
+    let doc = load_audit_doc();
+    assert!(
+        doc.contains("Revision History"),
+        "audit must include revision history section"
+    );
+    assert!(
+        doc.contains("SapphireHill"),
+        "revision history must credit authoring agent"
+    );
+}
+
+#[test]
+fn split_gap_documents_migration_blocker() {
+    let doc = load_audit_doc();
+    assert!(
+        doc.contains("Migration blocker") || doc.contains("migration blocker"),
+        "IO-G9 must document that into_split is a migration blocker"
+    );
+    assert!(
+        doc.contains("RefCell"),
+        "IO-G9 must note current RefCell-based split limitation"
+    );
+}
+
+#[test]
+fn priority_ranking_has_four_phases() {
+    let doc = load_audit_doc();
+    assert!(
+        doc.contains("Phase A") && doc.contains("Critical for Migration"),
+        "must have Phase A (critical for migration)"
+    );
+    assert!(
+        doc.contains("Phase B") && doc.contains("Wire Protocols"),
+        "must have Phase B (wire protocols)"
+    );
+    assert!(
+        doc.contains("Phase C") && doc.contains("Convenience"),
+        "must have Phase C (convenience)"
+    );
+    assert!(
+        doc.contains("Phase D") && doc.contains("Polish"),
+        "must have Phase D (polish)"
+    );
+}
+
+#[test]
+fn total_gap_count_matches_documented_14() {
+    let doc = load_audit_doc();
+    assert!(
+        doc.contains("14 gaps"),
+        "document must state total of 14 gaps"
+    );
+    assert!(
+        doc.contains("3 High") && doc.contains("5 Medium") && doc.contains("6 Low"),
+        "document must state severity breakdown: 3 High, 5 Medium, 6 Low"
+    );
+}
