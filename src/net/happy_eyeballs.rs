@@ -110,16 +110,8 @@ pub fn sort_addresses(addrs: &[IpAddr]) -> Vec<IpAddr> {
 /// operates on full `SocketAddr` values so each address keeps its original port.
 #[must_use]
 fn sort_socket_addrs(addrs: &[SocketAddr]) -> Vec<SocketAddr> {
-    let v6: Vec<SocketAddr> = addrs
-        .iter()
-        .copied()
-        .filter(SocketAddr::is_ipv6)
-        .collect();
-    let v4: Vec<SocketAddr> = addrs
-        .iter()
-        .copied()
-        .filter(SocketAddr::is_ipv4)
-        .collect();
+    let v6: Vec<SocketAddr> = addrs.iter().copied().filter(SocketAddr::is_ipv6).collect();
+    let v4: Vec<SocketAddr> = addrs.iter().copied().filter(SocketAddr::is_ipv4).collect();
 
     let mut result = Vec::with_capacity(v6.len() + v4.len());
     let mut v6_iter = v6.into_iter();

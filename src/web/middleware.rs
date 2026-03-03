@@ -2170,12 +2170,16 @@ mod tests {
 
     #[test]
     fn request_trace_injects_duration_and_trace_headers() {
-        let mw = RequestTraceMiddleware::new(FnHandler::new(ok_handler), RequestTracePolicy::default());
+        let mw =
+            RequestTraceMiddleware::new(FnHandler::new(ok_handler), RequestTracePolicy::default());
         let req = make_request().with_header("x-request-id", "trace-42");
         let resp = mw.call(req);
 
         assert_eq!(resp.status, StatusCode::OK);
-        assert_eq!(resp.headers.get("x-trace-id"), Some(&"trace-42".to_string()));
+        assert_eq!(
+            resp.headers.get("x-trace-id"),
+            Some(&"trace-42".to_string())
+        );
         let duration = resp
             .headers
             .get("x-response-time-ms")
@@ -2392,7 +2396,10 @@ mod tests {
         let resp = handler.call(make_request().with_header("x-request-id", "trace-55"));
         assert_eq!(resp.status, StatusCode::OK);
         assert!(resp.headers.contains_key("x-response-time-ms"));
-        assert_eq!(resp.headers.get("x-trace-id"), Some(&"trace-55".to_string()));
+        assert_eq!(
+            resp.headers.get("x-trace-id"),
+            Some(&"trace-55".to_string())
+        );
     }
 
     #[test]
