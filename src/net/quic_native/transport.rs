@@ -259,6 +259,7 @@ impl LossRecovery {
         let loss_delay = self.loss_delay_micros();
         let time_threshold = now_micros.saturating_sub(loss_delay);
         let mut event = AckEvent::empty();
+        let mut newest_lost_packet_sent_micros: Option<u64> = None;
         // RFC 9002 B.5: Only grow cwnd for packets sent AFTER the recovery
         // epoch started. Packets sent during recovery (sent_time <=
         // congestion_recovery_start_time) must not contribute to cwnd growth.
@@ -304,6 +305,10 @@ impl LossRecovery {
             let lost = packet_threshold_lost || time_threshold_lost;
             if lost {
                 event.lost_packets += 1;
+                newest_lost_packet_sent_micros = Some(
+                    newest_lost_packet_sent_micros
+                        .map_or(pkt.time_sent_micros, |seen| seen.max(pkt.time_sent_micros)),
+                );
                 if pkt.in_flight {
                     event.lost_bytes = event.lost_bytes.saturating_add(pkt.bytes);
                     self.bytes_in_flight = self.bytes_in_flight.saturating_sub(pkt.bytes);
@@ -320,8 +325,8 @@ impl LossRecovery {
                 self.on_ack_congestion(acked_bytes_for_growth);
             }
         }
-        if event.lost_packets > 0 {
-            self.on_loss_congestion(now_micros);
+        if let Some(lost_packet_sent_time) = newest_lost_packet_sent_micros {
+            self.on_loss_congestion(lost_packet_sent_time);
         }
         event
     }
@@ -346,14 +351,14 @@ impl LossRecovery {
         }
     }
 
-    fn on_loss_congestion(&mut self, now_micros: u64) {
+    fn on_loss_congestion(&mut self, newest_lost_packet_sent_micros: u64) {
         // RFC 9002 Appendix B.6: Only reduce cwnd once per recovery epoch.
         if let Some(recovery_start) = self.congestion_recovery_start_time {
-            if now_micros <= recovery_start {
+            if newest_lost_packet_sent_micros <= recovery_start {
                 return;
             }
         }
-        self.congestion_recovery_start_time = Some(now_micros);
+        self.congestion_recovery_start_time = Some(newest_lost_packet_sent_micros);
         let min_cwnd = self.max_datagram_size.saturating_mul(2);
         let reduced = (self.congestion_window_bytes / 2).max(min_cwnd);
         self.ssthresh_bytes = reduced;
@@ -783,6 +788,31 @@ mod tests {
             t.congestion_window_bytes(),
             cwnd_after_first_loss,
             "cwnd must not be reduced twice in the same recovery epoch"
+        );
+    }
+
+    #[test]
+    fn congestion_recovery_uses_lost_packet_send_time_epoch() {
+        let mut t = QuicTransportMachine::new();
+        let initial_cwnd = t.congestion_window_bytes();
+
+        t.recovery.on_loss_congestion(20_000);
+        let cwnd_after_first_loss = t.congestion_window_bytes();
+        assert!(cwnd_after_first_loss < initial_cwnd);
+
+        // Late ACK processing can report older losses in a later wall-clock tick.
+        // Recovery gating must key off lost-packet send-time, not ACK processing time.
+        t.recovery.on_loss_congestion(19_000);
+        assert_eq!(
+            t.congestion_window_bytes(),
+            cwnd_after_first_loss,
+            "older lost packets must not trigger an additional reduction"
+        );
+
+        t.recovery.on_loss_congestion(25_000);
+        assert!(
+            t.congestion_window_bytes() < cwnd_after_first_loss,
+            "newer lost packets should trigger the next recovery reduction"
         );
     }
 

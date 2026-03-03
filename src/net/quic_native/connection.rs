@@ -407,6 +407,7 @@ impl NativeQuicConnection {
         time_sent_micros: u64,
     ) -> Result<u64, NativeQuicConnectionError> {
         checkpoint(cx)?;
+        self.ensure_packet_send_state(space)?;
         if in_flight && !self.transport.can_send(bytes) {
             return Err(NativeQuicConnectionError::CongestionLimited {
                 requested: bytes,
@@ -548,6 +549,23 @@ impl NativeQuicConnection {
         ))
     }
 
+    fn ensure_packet_send_state(
+        &self,
+        space: PacketNumberSpace,
+    ) -> Result<(), NativeQuicConnectionError> {
+        if self.transport.state() == QuicConnectionState::Closed {
+            return Err(NativeQuicConnectionError::InvalidState(
+                "packet send requires non-closed connection state",
+            ));
+        }
+        if matches!(space, PacketNumberSpace::ApplicationData) && !self.can_send_1rtt() {
+            return Err(NativeQuicConnectionError::InvalidState(
+                "application-data packets require established 1-RTT state",
+            ));
+        }
+        Ok(())
+    }
+
     fn next_packet_number(&mut self, space: PacketNumberSpace) -> u64 {
         let idx = match space {
             PacketNumberSpace::Initial => 0,
@@ -664,6 +682,45 @@ mod tests {
         assert_eq!(pn0, 0);
         assert_eq!(pn1, 1);
         assert_eq!(pn2, 0);
+    }
+
+    #[test]
+    fn application_data_packets_require_established_1rtt() {
+        let cx = test_cx();
+        let mut conn = NativeQuicConnection::new(NativeQuicConnectionConfig::default());
+        conn.begin_handshake(&cx).expect("begin");
+        let err = conn
+            .on_packet_sent(
+                &cx,
+                PacketNumberSpace::ApplicationData,
+                1200,
+                true,
+                true,
+                10_000,
+            )
+            .expect_err("appdata before 1-rtt must fail");
+        assert_eq!(
+            err,
+            NativeQuicConnectionError::InvalidState(
+                "application-data packets require established 1-RTT state"
+            )
+        );
+    }
+
+    #[test]
+    fn packet_send_is_rejected_after_close() {
+        let cx = test_cx();
+        let mut conn = established_conn();
+        conn.close_immediately(&cx, 0x77).expect("close");
+        let err = conn
+            .on_packet_sent(&cx, PacketNumberSpace::Initial, 1200, true, true, 10_000)
+            .expect_err("send after close must fail");
+        assert_eq!(
+            err,
+            NativeQuicConnectionError::InvalidState(
+                "packet send requires non-closed connection state"
+            )
+        );
     }
 
     #[test]

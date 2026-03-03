@@ -10,7 +10,7 @@ use asupersync::net::quic_core::{
     ConnectionId, PacketHeader, QuicCoreError, TransportParameters, encode_varint,
 };
 use asupersync::net::quic_native::{
-    NativeQuicConnection, NativeQuicConnectionConfig, NativeQuicConnectionError,
+    NativeQuicConnection, NativeQuicConnectionConfig, NativeQuicConnectionError, PacketNumberSpace,
     QuicConnectionState, QuicStreamError, StreamId, StreamRole,
 };
 use asupersync::util::DetRng;
@@ -206,7 +206,54 @@ fn open_stream_after_close_returns_error() {
 }
 
 // ===========================================================================
-// Test 3: Invalid connection state transitions -- begin_handshake on
+// Test 3: Packet-space/state legality on send path
+// ===========================================================================
+
+#[test]
+fn appdata_packet_before_1rtt_and_any_packet_after_close_are_rejected() {
+    let mut rng = DetRng::new(0xE6_0002_1);
+    let mut pair = ConnectionPair::new(&mut rng);
+    let cx = &pair.cx;
+
+    pair.client.begin_handshake(cx).expect("begin handshake");
+    let err = pair
+        .client
+        .on_packet_sent(
+            cx,
+            PacketNumberSpace::ApplicationData,
+            1200,
+            true,
+            true,
+            pair.clock.now(),
+        )
+        .expect_err("appdata before 1-rtt must fail");
+    assert_eq!(
+        err,
+        NativeQuicConnectionError::InvalidState(
+            "application-data packets require established 1-RTT state"
+        )
+    );
+
+    pair.client.close_immediately(cx, 0x2).expect("close");
+    let err = pair
+        .client
+        .on_packet_sent(
+            cx,
+            PacketNumberSpace::Initial,
+            1200,
+            true,
+            true,
+            pair.clock.now(),
+        )
+        .expect_err("packet send after close must fail");
+    assert_eq!(
+        err,
+        NativeQuicConnectionError::InvalidState("packet send requires non-closed connection state")
+    );
+}
+
+// ===========================================================================
+// Test 4: Invalid connection state transitions -- begin_handshake on
 //         already-established connection
 // ===========================================================================
 
