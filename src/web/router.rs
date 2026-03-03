@@ -16,7 +16,7 @@ use std::collections::HashMap;
 
 use smallvec::SmallVec;
 
-use super::extract::Request;
+use super::extract::{Extensions, Request};
 use super::handler::Handler;
 use super::response::{IntoResponse, Response, StatusCode};
 
@@ -260,6 +260,7 @@ pub struct Router {
     routes: Vec<(RoutePattern, MethodRouter)>,
     nested: Vec<(String, Self)>,
     fallback: Option<Box<dyn Handler>>,
+    extensions: Extensions,
 }
 
 impl Router {
@@ -270,6 +271,7 @@ impl Router {
             routes: Vec::new(),
             nested: Vec::new(),
             fallback: None,
+            extensions: Extensions::new(),
         }
     }
 
@@ -295,12 +297,26 @@ impl Router {
         self
     }
 
+    /// Attach clonable shared typed state for request extraction.
+    ///
+    /// Handlers can retrieve this state with [`super::extract::State<T>`].
+    #[must_use]
+    pub fn with_state<T>(mut self, state: T) -> Self
+    where
+        T: Clone + Send + Sync + 'static,
+    {
+        self.extensions.insert_typed(state);
+        self
+    }
+
     /// Handle an incoming request.
     ///
     /// Routes are checked in registration order. Nested routers are checked
     /// after top-level routes.
     #[must_use]
     pub fn handle(&self, mut req: Request) -> Response {
+        req.extensions.extend_from(&self.extensions);
+
         // Check top-level routes.
         for (pattern, method_router) in &self.routes {
             if let Some(params) = pattern.matches(&req.path) {
@@ -429,6 +445,47 @@ mod tests {
 
         let resp = router.handle(Request::new("GET", "/users/42"));
         assert_eq!(resp.status, StatusCode::OK);
+    }
+
+    #[test]
+    fn route_with_typed_state() {
+        use crate::web::extract::State;
+        use crate::web::handler::FnHandler1;
+
+        #[derive(Clone)]
+        struct AppState {
+            greeting: &'static str,
+        }
+
+        fn greet(State(state): State<AppState>) -> String {
+            state.greeting.to_string()
+        }
+
+        let router = Router::new()
+            .route("/", get(FnHandler1::<_, State<AppState>>::new(greet)))
+            .with_state(AppState { greeting: "hello" });
+
+        let resp = router.handle(Request::new("GET", "/"));
+        assert_eq!(resp.status, StatusCode::OK);
+        assert_eq!(resp.body.as_ref(), b"hello");
+    }
+
+    #[test]
+    fn route_with_typed_state_missing_returns_500() {
+        use crate::web::extract::State;
+        use crate::web::handler::FnHandler1;
+
+        #[derive(Clone)]
+        struct AppState;
+
+        fn handler(State(_state): State<AppState>) -> &'static str {
+            "ok"
+        }
+
+        let router = Router::new().route("/", get(FnHandler1::<_, State<AppState>>::new(handler)));
+
+        let resp = router.handle(Request::new("GET", "/"));
+        assert_eq!(resp.status, StatusCode::INTERNAL_SERVER_ERROR);
     }
 
     #[test]

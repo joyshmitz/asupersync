@@ -13,8 +13,10 @@
 //! - [`State<T>`]: Shared application state
 //! - [`RawBody`]: Raw request body bytes
 
+use std::any::{Any, TypeId};
 use std::collections::HashMap;
 use std::fmt;
+use std::sync::Arc;
 
 use crate::bytes::Bytes;
 
@@ -88,11 +90,19 @@ impl Request {
 /// Type-erased extension map for middleware-injected data.
 ///
 /// Allows middleware to inject arbitrary typed state into requests.
-#[derive(Debug, Clone, Default)]
+#[derive(Clone, Default)]
 pub struct Extensions {
-    // Simplified: use a HashMap<TypeId, Box<dyn Any>> in production.
-    // For Phase 0, we use a string-keyed map.
-    data: HashMap<String, String>,
+    string_data: HashMap<String, String>,
+    typed_data: HashMap<TypeId, Arc<dyn Any + Send + Sync>>,
+}
+
+impl fmt::Debug for Extensions {
+    fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
+        f.debug_struct("Extensions")
+            .field("string_keys", &self.string_data.keys().collect::<Vec<_>>())
+            .field("typed_count", &self.typed_data.len())
+            .finish()
+    }
 }
 
 impl Extensions {
@@ -104,13 +114,52 @@ impl Extensions {
 
     /// Insert a value by key.
     pub fn insert(&mut self, key: impl Into<String>, value: impl Into<String>) {
-        self.data.insert(key.into(), value.into());
+        self.string_data.insert(key.into(), value.into());
     }
 
     /// Get a value by key.
     #[must_use]
     pub fn get(&self, key: &str) -> Option<&str> {
-        self.data.get(key).map(String::as_str)
+        self.string_data.get(key).map(String::as_str)
+    }
+
+    /// Insert a typed value.
+    pub fn insert_typed<T>(&mut self, value: T)
+    where
+        T: Send + Sync + 'static,
+    {
+        self.typed_data.insert(TypeId::of::<T>(), Arc::new(value));
+    }
+
+    /// Get a typed value.
+    #[must_use]
+    pub fn get_typed<T>(&self) -> Option<&T>
+    where
+        T: Send + Sync + 'static,
+    {
+        self.typed_data
+            .get(&TypeId::of::<T>())
+            .and_then(|value| value.as_ref().downcast_ref::<T>())
+    }
+
+    /// Get a cloned typed value.
+    #[must_use]
+    pub fn get_typed_cloned<T>(&self) -> Option<T>
+    where
+        T: Clone + Send + Sync + 'static,
+    {
+        self.get_typed::<T>().cloned()
+    }
+
+    /// Merge data from another extension map.
+    pub(crate) fn extend_from(&mut self, other: &Self) {
+        self.string_data.extend(other.string_data.clone());
+        self.typed_data.extend(
+            other
+                .typed_data
+                .iter()
+                .map(|(type_id, value)| (*type_id, Arc::clone(value))),
+        );
     }
 }
 
@@ -412,17 +461,18 @@ impl FromRequest for Form<HashMap<String, String>> {
 #[derive(Debug, Clone)]
 pub struct State<T>(pub T);
 
-// State extraction requires the router to inject state into extensions.
-// Phase 0: State<String> extraction from extensions for demonstration.
-impl FromRequestParts for State<String> {
+impl<T> FromRequestParts for State<T>
+where
+    T: Clone + Send + Sync + 'static,
+{
     fn from_request_parts(req: &Request) -> Result<Self, ExtractionError> {
         req.extensions
-            .get("state")
-            .map(|s| Self(s.to_string()))
+            .get_typed_cloned::<T>()
+            .map(Self)
             .ok_or_else(|| {
                 ExtractionError::new(
                     super::response::StatusCode::INTERNAL_SERVER_ERROR,
-                    "state not configured",
+                    format!("state not configured for {}", std::any::type_name::<T>()),
                 )
             })
     }
@@ -577,5 +627,63 @@ mod tests {
 
         let e2 = e;
         assert_eq!(e2.message, "missing field");
+    }
+
+    #[test]
+    fn typed_state_extraction() {
+        #[derive(Clone, Debug, PartialEq, Eq)]
+        struct AppState {
+            name: String,
+        }
+
+        let mut req = Request::new("GET", "/");
+        req.extensions.insert_typed(AppState {
+            name: "alpha".to_string(),
+        });
+
+        let State(state) = State::<AppState>::from_request_parts(&req).unwrap();
+        assert_eq!(
+            state,
+            AppState {
+                name: "alpha".to_string()
+            }
+        );
+    }
+
+    #[test]
+    fn typed_state_missing_returns_error() {
+        #[derive(Clone, Debug)]
+        struct AppState;
+
+        let req = Request::new("GET", "/");
+        let err = State::<AppState>::from_request_parts(&req).unwrap_err();
+        assert_eq!(
+            err.status,
+            crate::web::response::StatusCode::INTERNAL_SERVER_ERROR
+        );
+        assert!(err.message.contains("state not configured"));
+    }
+
+    #[test]
+    fn extensions_extend_preserves_string_and_typed_values() {
+        #[derive(Clone, Debug, PartialEq, Eq)]
+        struct AppState {
+            id: u32,
+        }
+
+        let mut base = Extensions::new();
+        base.insert("trace_id", "abc");
+        base.insert_typed(AppState { id: 7 });
+
+        let mut req_extensions = Extensions::new();
+        req_extensions.insert("request_id", "r-1");
+        req_extensions.extend_from(&base);
+
+        assert_eq!(req_extensions.get("trace_id"), Some("abc"));
+        assert_eq!(req_extensions.get("request_id"), Some("r-1"));
+        assert_eq!(
+            req_extensions.get_typed_cloned::<AppState>(),
+            Some(AppState { id: 7 })
+        );
     }
 }
