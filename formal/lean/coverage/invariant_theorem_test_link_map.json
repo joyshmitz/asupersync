@@ -247,28 +247,28 @@
           ]
         },
         {
-          "theorem": "cancelMasked_potential_decreases",
+          "theorem": "cancel_masked_potential_decreases",
           "theorem_line": 3171,
           "rule_ids": [
             "step.cancelMasked"
           ]
         },
         {
-          "theorem": "cancelAcknowledge_potential_decreases",
+          "theorem": "cancel_acknowledge_potential_decreases",
           "theorem_line": 3186,
           "rule_ids": [
             "step.cancelAcknowledge"
           ]
         },
         {
-          "theorem": "cancelFinalize_potential_decreases",
+          "theorem": "cancel_finalize_potential_decreases",
           "theorem_line": 3200,
           "rule_ids": [
             "step.cancelFinalize"
           ]
         },
         {
-          "theorem": "cancelComplete_potential_reaches_zero",
+          "theorem": "cancel_complete_potential_reaches_zero",
           "theorem_line": 3213,
           "rule_ids": [
             "step.cancelComplete"

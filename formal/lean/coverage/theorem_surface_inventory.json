@@ -816,6 +816,32 @@
             "role": "protocol_step_projection"
           }
         ]
+      },
+      {
+        "family_id": "race_loser_drain",
+        "canonical_theorem": "race_loser_drain_completeness",
+        "variants": [
+          {
+            "theorem": "closed_region_children_all_completed",
+            "role": "foundational_child_completion"
+          },
+          {
+            "theorem": "closed_region_child_completed",
+            "role": "per_child_specialization"
+          },
+          {
+            "theorem": "loser_drained_from_quiescence",
+            "role": "quiescence_to_drain_projection"
+          },
+          {
+            "theorem": "close_gate_requires_drain",
+            "role": "quiescence_decomposition"
+          },
+          {
+            "theorem": "cancelled_child_progress",
+            "role": "liveness_guarantee"
+          }
+        ]
       }
     ],
     "layering_rules": [

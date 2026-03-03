@@ -11,8 +11,8 @@
     "enforce_via_test": "tests/lean_theorem_rule_traceability.rs"
   },
   "traceability_summary": {
-    "row_count": 115,
-    "distinct_theorem_count": 104,
+    "row_count": 121,
+    "distinct_theorem_count": 110,
     "distinct_rule_id_count": 22,
     "rule_id_catalog_parity": "22/22 matched with step_constructor_coverage",
     "audit_bead": "asupersync-3cddg.6.5"
@@ -2169,6 +2169,121 @@
       ],
       "artifacts": [
         "formal/lean/Asupersync.lean:4731"
+      ],
+      "rule_status": "covered"
+    },
+    {
+      "theorem": "closed_region_children_all_completed",
+      "theorem_line": 4781,
+      "rule_id": "step.close",
+      "semantic_intent": "Race-loser drain: if a region is closed, all children in its task list are completed.",
+      "assumptions": [
+        "Region state is RegionState.closed",
+        "Pre-state is wellformed"
+      ],
+      "downstream_impact": [
+        "Foundational for race_loser_drain_completeness",
+        "Feeds constructor coverage in formal/lean/coverage/step_constructor_coverage.json"
+      ],
+      "artifacts": [
+        "formal/lean/Asupersync.lean:4781",
+        "formal/lean/coverage/invariant_status_inventory.json"
+      ],
+      "rule_status": "covered"
+    },
+    {
+      "theorem": "closed_region_child_completed",
+      "theorem_line": 4793,
+      "rule_id": "step.close",
+      "semantic_intent": "Race-loser drain: per-child specialization — any specific child of a closed region is completed.",
+      "assumptions": [
+        "Region state is RegionState.closed",
+        "Task is a member of the region's children list",
+        "Pre-state is wellformed"
+      ],
+      "downstream_impact": [
+        "Per-child version of closed_region_children_all_completed",
+        "Feeds constructor coverage in formal/lean/coverage/step_constructor_coverage.json"
+      ],
+      "artifacts": [
+        "formal/lean/Asupersync.lean:4793",
+        "formal/lean/coverage/invariant_status_inventory.json"
+      ],
+      "rule_status": "covered"
+    },
+    {
+      "theorem": "loser_drained_from_quiescence",
+      "theorem_line": 4807,
+      "rule_id": "step.close",
+      "semantic_intent": "Race-loser drain: Quiescent region implies LoserDrained for any two race participants.",
+      "assumptions": [
+        "Region is Quiescent",
+        "Both race participants are members of the region's children list"
+      ],
+      "downstream_impact": [
+        "Core projection from Quiescent to LoserDrained",
+        "Feeds race_loser_drain_completeness"
+      ],
+      "artifacts": [
+        "formal/lean/Asupersync.lean:4807",
+        "formal/lean/coverage/invariant_status_inventory.json"
+      ],
+      "rule_status": "covered"
+    },
+    {
+      "theorem": "close_gate_requires_drain",
+      "theorem_line": 4843,
+      "rule_id": "step.close",
+      "semantic_intent": "Race-loser drain: decomposes Quiescent into allTasksCompleted + allRegionsClosed + empty obligations/finalizers.",
+      "assumptions": [
+        "Region is Quiescent"
+      ],
+      "downstream_impact": [
+        "Quiescence decomposition for race-loser analysis",
+        "Feeds constructor coverage in formal/lean/coverage/step_constructor_coverage.json"
+      ],
+      "artifacts": [
+        "formal/lean/Asupersync.lean:4843",
+        "formal/lean/coverage/invariant_status_inventory.json"
+      ],
+      "rule_status": "covered"
+    },
+    {
+      "theorem": "race_loser_drain_completeness",
+      "theorem_line": 4857,
+      "rule_id": "step.close",
+      "semantic_intent": "Central SEM-06.F3 theorem: after a close step sequence, race losers are fully drained (both participants completed).",
+      "assumptions": [
+        "Steps sequence from initial to final state",
+        "Region transitions from open to closed",
+        "Both race participants are children of the region"
+      ],
+      "downstream_impact": [
+        "Canonical theorem for race_loser_drain family",
+        "Closes inv.race.losers_drained invariant gap"
+      ],
+      "artifacts": [
+        "formal/lean/Asupersync.lean:4857",
+        "formal/lean/coverage/invariant_status_inventory.json"
+      ],
+      "rule_status": "covered"
+    },
+    {
+      "theorem": "cancelled_child_progress",
+      "theorem_line": 4873,
+      "rule_id": "step.closeCancelChildren",
+      "semantic_intent": "Liveness: a cancelled child's cancel potential strictly decreases, ensuring drain progress.",
+      "assumptions": [
+        "Task state is in cancel protocol (cancelRequested, cancelling, or finalizing)",
+        "Cancel potential is positive"
+      ],
+      "downstream_impact": [
+        "Liveness guarantee for child drain during close protocol",
+        "Feeds constructor coverage in formal/lean/coverage/step_constructor_coverage.json"
+      ],
+      "artifacts": [
+        "formal/lean/Asupersync.lean:4873",
+        "formal/lean/coverage/invariant_status_inventory.json"
       ],
       "rule_status": "covered"
     }

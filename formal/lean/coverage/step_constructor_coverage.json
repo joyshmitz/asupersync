@@ -246,7 +246,8 @@
         "close_cancel_children_step",
         "region_draining_canonical_form",
         "close_children_exist_completed",
-        "cancel_label_preserves_region_structure"
+        "cancel_label_preserves_region_structure",
+        "cancelled_child_progress"
       ]
     },
     {
@@ -257,7 +258,9 @@
       "mapped_theorems": [
         "close_children_done_step",
         "region_finalizing_canonical_form",
-        "close_subregions_exist_closed"
+        "close_subregions_exist_closed",
+        "closed_region_children_all_completed",
+        "closed_region_child_completed"
       ]
     },
     {
@@ -280,7 +283,12 @@
         "close_implies_ledger_empty",
         "close_implies_finalizers_empty",
         "close_quiescence_decomposition",
-        "close_produces_closed_region"
+        "close_produces_closed_region",
+        "closed_region_children_all_completed",
+        "closed_region_child_completed",
+        "loser_drained_from_quiescence",
+        "close_gate_requires_drain",
+        "race_loser_drain_completeness"
       ]
     },
     {
