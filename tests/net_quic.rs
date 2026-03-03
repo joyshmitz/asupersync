@@ -14,7 +14,7 @@
 //! - QUIC-CANCEL-002: Cancel during read cleans up stream
 //! - QUIC-CANCEL-003: Connection close cleans up all streams
 
-#![cfg(feature = "quic")]
+#![cfg(feature = "quic-compat")]
 
 #[macro_use]
 mod common;

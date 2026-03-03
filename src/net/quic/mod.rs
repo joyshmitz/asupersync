@@ -35,11 +35,11 @@
 //!
 //! # Feature Flag
 //!
-//! This module requires the `quic` feature to be enabled:
+//! This compatibility wrapper requires the `quic-compat` feature to be enabled:
 //!
 //! ```toml
 //! [dependencies]
-//! asupersync = { version = "0.1", features = ["quic"] }
+//! asupersync = { version = "0.1", features = ["quic-compat"] }
 //! ```
 
 mod config;

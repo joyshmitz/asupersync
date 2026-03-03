@@ -64,6 +64,18 @@
 #![cfg_attr(test, allow(clippy::large_stack_frames))]
 #![cfg_attr(feature = "simd-intrinsics", feature(portable_simd))]
 
+#[cfg(feature = "quic-compat")]
+compile_error!(
+    "feature `quic-compat` is reserved for legacy quinn-backed adapters and is disabled \
+     in this Tokio-free core build."
+);
+
+#[cfg(feature = "http3-compat")]
+compile_error!(
+    "feature `http3-compat` is reserved for legacy h3/h3-quinn adapters and is disabled \
+     in this Tokio-free core build."
+);
+
 #[cfg(all(
     target_arch = "wasm32",
     not(any(

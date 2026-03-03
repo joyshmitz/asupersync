@@ -1,7 +1,7 @@
 //! HTTP/3 client support over QUIC.
 //!
 //! This module wraps the `h3` and `h3-quinn` crates with Asupersync `Cx`
-//! cancellation semantics. It is gated behind the `http3` feature.
+//! cancellation semantics. It is gated behind the `http3-compat` feature.
 //!
 //! # Driver Model
 //!
