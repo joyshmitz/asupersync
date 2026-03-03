@@ -90,7 +90,8 @@
         "reserve_holder_exists",
         "reserve_adds_to_ledger",
         "reserve_preserves_wellformed",
-        "lease_reserve_in_ledger"
+        "lease_reserve_in_ledger",
+        "ledger_implies_reserved"
       ]
     },
     {
@@ -104,7 +105,8 @@
         "commit_removes_from_ledger",
         "commit_preserves_wellformed",
         "commit_resolves_obligation",
-        "committed_obligation_stable"
+        "committed_obligation_stable",
+        "non_reserved_excluded_from_ledger"
       ]
     },
     {
@@ -131,7 +133,10 @@
         "obligation_leaked_canonical_form",
         "leak_removes_from_ledger",
         "leak_preserves_wellformed",
-        "leaked_obligation_stable"
+        "leaked_obligation_stable",
+        "leaked_not_in_ledger",
+        "leak_requires_completed_holder",
+        "no_leak_from_proper_lifecycle"
       ]
     },
     {
@@ -288,7 +293,9 @@
         "closed_region_child_completed",
         "loser_drained_from_quiescence",
         "close_gate_requires_drain",
-        "race_loser_drain_completeness"
+        "race_loser_drain_completeness",
+        "execution_obligation_lifecycle_completeness",
+        "leaked_tracked_and_non_blocking"
       ]
     },
     {

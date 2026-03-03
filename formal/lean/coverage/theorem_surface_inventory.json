@@ -3,7 +3,7 @@
   "inventory_id": "lean.theorem_surface.v1",
   "generated_by": "bd-3n3b2",
   "source_file": "formal/lean/Asupersync.lean",
-  "theorem_count": 155,
+  "theorem_count": 162,
   "theorems": [
     {
       "line": 188,
@@ -684,6 +684,34 @@
     {
       "line": 4873,
       "theorem": "cancelled_child_progress"
+    },
+    {
+      "line": 4912,
+      "theorem": "ledger_implies_reserved"
+    },
+    {
+      "line": 4930,
+      "theorem": "non_reserved_excluded_from_ledger"
+    },
+    {
+      "line": 4945,
+      "theorem": "leaked_not_in_ledger"
+    },
+    {
+      "line": 4960,
+      "theorem": "leak_requires_completed_holder"
+    },
+    {
+      "line": 4980,
+      "theorem": "no_leak_from_proper_lifecycle"
+    },
+    {
+      "line": 5000,
+      "theorem": "execution_obligation_lifecycle_completeness"
+    },
+    {
+      "line": 5021,
+      "theorem": "leaked_tracked_and_non_blocking"
     }
   ],
   "lemma_canonicalization": {
@@ -814,6 +842,36 @@
           {
             "theorem": "close_complete_step",
             "role": "protocol_step_projection"
+          }
+        ]
+      },
+      {
+        "family_id": "obligation_no_leak",
+        "canonical_theorem": "execution_obligation_lifecycle_completeness",
+        "variants": [
+          {
+            "theorem": "ledger_implies_reserved",
+            "role": "wf_projection"
+          },
+          {
+            "theorem": "non_reserved_excluded_from_ledger",
+            "role": "contrapositive_exclusion"
+          },
+          {
+            "theorem": "leaked_not_in_ledger",
+            "role": "leaked_exclusion_specialization"
+          },
+          {
+            "theorem": "leak_requires_completed_holder",
+            "role": "precondition_characterization"
+          },
+          {
+            "theorem": "no_leak_from_proper_lifecycle",
+            "role": "conditional_prevention"
+          },
+          {
+            "theorem": "leaked_tracked_and_non_blocking",
+            "role": "tracking_and_stability"
           }
         ]
       },

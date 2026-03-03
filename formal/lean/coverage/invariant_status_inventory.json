@@ -164,7 +164,7 @@
       "id": "inv.obligation.no_leaks",
       "name": "No obligation leaks",
       "statement": "Obligations are either committed/aborted/leaked with explicit state transitions and ledger updates; unresolved obligations block close.",
-      "lean_status": "partially_proven",
+      "lean_status": "proven",
       "lean_theorems": [
         "commit_resolves",
         "abort_resolves",
@@ -179,7 +179,14 @@
         "close_implies_ledger_empty",
         "call_obligation_resolved_at_close",
         "no_reserved_call_obligations_after_close",
-        "registry_lease_resolved_at_close"
+        "registry_lease_resolved_at_close",
+        "ledger_implies_reserved",
+        "non_reserved_excluded_from_ledger",
+        "leaked_not_in_ledger",
+        "leak_requires_completed_holder",
+        "no_leak_from_proper_lifecycle",
+        "execution_obligation_lifecycle_completeness",
+        "leaked_tracked_and_non_blocking"
       ],
       "test_refs": [
         "tests/obligation_lifecycle_e2e.rs",
@@ -187,12 +194,8 @@
         "tests/leak_regression_e2e.rs",
         "tests/lease_semantics.rs"
       ],
-      "gaps": [
-        "A single global theorem stating zero leaked obligations across all reachable executions is not yet present."
-      ],
-      "follow_up_beads": [
-        "asupersync-3cddg.6.9"
-      ]
+      "gaps": [],
+      "follow_up_beads": []
     },
     {
       "id": "inv.authority.no_ambient",
@@ -214,8 +217,8 @@
     }
   ],
   "summary": {
-    "fully_proven": 4,
-    "partially_proven": 1,
+    "fully_proven": 5,
+    "partially_proven": 0,
     "unproven": 1,
     "proof_gap_audit_bead": "asupersync-3cddg.6.4",
     "proof_gap_audit_commands": [

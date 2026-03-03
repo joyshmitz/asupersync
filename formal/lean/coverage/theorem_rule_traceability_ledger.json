@@ -11,8 +11,8 @@
     "enforce_via_test": "tests/lean_theorem_rule_traceability.rs"
   },
   "traceability_summary": {
-    "row_count": 121,
-    "distinct_theorem_count": 110,
+    "row_count": 128,
+    "distinct_theorem_count": 117,
     "distinct_rule_id_count": 22,
     "rule_id_catalog_parity": "22/22 matched with step_constructor_coverage",
     "audit_bead": "asupersync-3cddg.6.5"
@@ -2283,6 +2283,138 @@
       ],
       "artifacts": [
         "formal/lean/Asupersync.lean:4873",
+        "formal/lean/coverage/invariant_status_inventory.json"
+      ],
+      "rule_status": "covered"
+    },
+    {
+      "theorem": "ledger_implies_reserved",
+      "theorem_line": 4912,
+      "rule_id": "step.reserve",
+      "semantic_intent": "No-leak: WF projection — obligation in ledger must be in reserved state.",
+      "assumptions": [
+        "Pre-state is wellformed",
+        "Obligation is in region's ledger"
+      ],
+      "downstream_impact": [
+        "Building block for non_reserved_excluded_from_ledger and leaked_not_in_ledger",
+        "Canonical theorem for obligation_no_leak family"
+      ],
+      "artifacts": [
+        "formal/lean/Asupersync.lean:4912",
+        "formal/lean/coverage/invariant_status_inventory.json"
+      ],
+      "rule_status": "covered"
+    },
+    {
+      "theorem": "non_reserved_excluded_from_ledger",
+      "theorem_line": 4930,
+      "rule_id": "step.commit",
+      "semantic_intent": "No-leak: contrapositive — non-reserved obligations excluded from all ledgers.",
+      "assumptions": [
+        "Pre-state is wellformed",
+        "Obligation state is not reserved"
+      ],
+      "downstream_impact": [
+        "Proves committed/aborted/leaked obligations cannot hide in ledger",
+        "Feeds leaked_not_in_ledger"
+      ],
+      "artifacts": [
+        "formal/lean/Asupersync.lean:4930",
+        "formal/lean/coverage/invariant_status_inventory.json"
+      ],
+      "rule_status": "covered"
+    },
+    {
+      "theorem": "leaked_not_in_ledger",
+      "theorem_line": 4945,
+      "rule_id": "step.leak",
+      "semantic_intent": "No-leak: leaked obligations cannot appear in any region's ledger.",
+      "assumptions": [
+        "Pre-state is wellformed",
+        "Obligation state is leaked"
+      ],
+      "downstream_impact": [
+        "Core no-hiding guarantee: leaked obligations never block close",
+        "Feeds leaked_tracked_and_non_blocking"
+      ],
+      "artifacts": [
+        "formal/lean/Asupersync.lean:4945",
+        "formal/lean/coverage/invariant_status_inventory.json"
+      ],
+      "rule_status": "covered"
+    },
+    {
+      "theorem": "leak_requires_completed_holder",
+      "theorem_line": 4960,
+      "rule_id": "step.leak",
+      "semantic_intent": "No-leak: characterizes leak precondition — requires completed task holding reserved obligation.",
+      "assumptions": [
+        "A leak step fires"
+      ],
+      "downstream_impact": [
+        "Precondition characterization for bounded assumption reasoning",
+        "Feeds no_leak_from_proper_lifecycle"
+      ],
+      "artifacts": [
+        "formal/lean/Asupersync.lean:4960",
+        "formal/lean/coverage/invariant_status_inventory.json"
+      ],
+      "rule_status": "covered"
+    },
+    {
+      "theorem": "no_leak_from_proper_lifecycle",
+      "theorem_line": 4980,
+      "rule_id": "step.leak",
+      "semantic_intent": "No-leak: conditional — proper task lifecycle discipline prevents leak step from firing.",
+      "assumptions": [
+        "No completed task holds reserved obligations"
+      ],
+      "downstream_impact": [
+        "Formalizes bounded assumption: zero leaked obligations under discipline",
+        "Closes gap for conditional no-leak execution guarantee"
+      ],
+      "artifacts": [
+        "formal/lean/Asupersync.lean:4980",
+        "formal/lean/coverage/invariant_status_inventory.json"
+      ],
+      "rule_status": "covered"
+    },
+    {
+      "theorem": "execution_obligation_lifecycle_completeness",
+      "theorem_line": 5000,
+      "rule_id": "step.close",
+      "semantic_intent": "No-leak global: well-formed execution ending in close preserves WF, empties ledger, tracks all obligations.",
+      "assumptions": [
+        "Initial state is wellformed",
+        "Steps sequence to pre-close state",
+        "Close step fires"
+      ],
+      "downstream_impact": [
+        "Central global no-obligation-leak execution theorem",
+        "Canonical theorem for obligation_no_leak family"
+      ],
+      "artifacts": [
+        "formal/lean/Asupersync.lean:5000",
+        "formal/lean/coverage/invariant_status_inventory.json"
+      ],
+      "rule_status": "covered"
+    },
+    {
+      "theorem": "leaked_tracked_and_non_blocking",
+      "theorem_line": 5021,
+      "rule_id": "step.close",
+      "semantic_intent": "No-leak: leaked obligations are permanently tracked, never block close, and remain stable.",
+      "assumptions": [
+        "Well-formed execution ending in close",
+        "Obligation exists and is in leaked state"
+      ],
+      "downstream_impact": [
+        "Proves leaked obligations are accounted damage — tracked, non-blocking, stable",
+        "Closes the obligation lifecycle soundness argument"
+      ],
+      "artifacts": [
+        "formal/lean/Asupersync.lean:5021",
         "formal/lean/coverage/invariant_status_inventory.json"
       ],
       "rule_status": "covered"
