@@ -42,7 +42,7 @@ fn bead_ids() -> BTreeSet<String> {
     BEADS_JSONL
         .lines()
         .filter_map(|line| serde_json::from_str::<Value>(line).ok())
-        .flat_map(|entry| {
+        .flat_map(|entry: serde_json::Value| {
             let mut ids = Vec::new();
             if let Some(id) = entry.get("id").and_then(Value::as_str) {
                 ids.push(id.to_string());
@@ -63,7 +63,7 @@ fn theorem_lines(theorem_inventory: &Value) -> BTreeMap<String, u64> {
         .and_then(Value::as_array)
         .expect("theorems must be an array")
         .iter()
-        .map(|entry| {
+        .map(|entry: &serde_json::Value| {
             (
                 entry
                     .get("theorem")
@@ -107,7 +107,7 @@ fn invariant_expectations(invariant_inventory: &Value) -> BTreeMap<String, Invar
         .and_then(Value::as_array)
         .expect("invariants must be an array")
         .iter()
-        .map(|entry| {
+        .map(|entry: &serde_json::Value| {
             let id = entry
                 .get("id")
                 .and_then(Value::as_str)
@@ -239,7 +239,7 @@ fn assert_witnesses(
         .expect("theorem_witnesses must be an array");
     let witness_names = witness_rows
         .iter()
-        .map(|entry| {
+        .map(|entry: &serde_json::Value| {
             entry
                 .get("theorem")
                 .and_then(Value::as_str)
@@ -274,7 +274,7 @@ fn assert_witnesses(
             .and_then(Value::as_array)
             .expect("rule_ids must be an array")
             .iter()
-            .map(|entry| {
+            .map(|entry: &serde_json::Value| {
                 entry
                     .as_str()
                     .expect("rule_ids entries must be strings")
@@ -311,7 +311,7 @@ fn assert_checks(invariant_id: &str, row: &Value, expectations: &InvariantExpect
         .and_then(Value::as_array)
         .expect("executable_checks must be an array")
         .iter()
-        .map(|entry| {
+        .map(|entry: &serde_json::Value| {
             entry
                 .as_str()
                 .expect("executable_checks entries must be strings")
@@ -417,7 +417,7 @@ fn assert_status_and_assumption_metadata(
         assumption_envelope
             .get("assumption_id")
             .and_then(Value::as_str)
-            .is_some_and(|id| !id.trim().is_empty()),
+            .is_some_and(|id: &str| !id.trim().is_empty()),
         "{invariant_id} assumption_envelope.assumption_id must be non-empty"
     );
     let assumptions = assumption_envelope
@@ -479,7 +479,7 @@ fn summary_counts(rows: &[Value]) -> SummaryCounts {
     let invariants_total = rows.len();
     let invariants_with_theorem_witnesses = rows
         .iter()
-        .filter(|row| {
+        .filter(|row: &&serde_json::Value| {
             row.get("theorem_witnesses")
                 .and_then(Value::as_array)
                 .is_some_and(|witnesses| !witnesses.is_empty())
@@ -487,7 +487,7 @@ fn summary_counts(rows: &[Value]) -> SummaryCounts {
         .count();
     let invariants_with_executable_checks = rows
         .iter()
-        .filter(|row| {
+        .filter(|row: &&serde_json::Value| {
             row.get("executable_checks")
                 .and_then(Value::as_array)
                 .is_some_and(|checks| !checks.is_empty())
@@ -495,7 +495,7 @@ fn summary_counts(rows: &[Value]) -> SummaryCounts {
         .count();
     let invariants_with_explicit_gaps = rows
         .iter()
-        .filter(|row| {
+        .filter(|row: &&serde_json::Value| {
             row.get("explicit_gaps")
                 .and_then(Value::as_array)
                 .is_some_and(|gaps| !gaps.is_empty())
@@ -503,7 +503,7 @@ fn summary_counts(rows: &[Value]) -> SummaryCounts {
         .count();
     let invariants_meeting_theorem_and_check_requirement = rows
         .iter()
-        .filter(|row| {
+        .filter(|row: &&serde_json::Value| {
             row.get("theorem_witnesses")
                 .and_then(Value::as_array)
                 .is_some_and(|witnesses| !witnesses.is_empty())
@@ -515,7 +515,7 @@ fn summary_counts(rows: &[Value]) -> SummaryCounts {
         .count();
     let gap_entries_total = rows
         .iter()
-        .map(|row| {
+        .map(|row: &serde_json::Value| {
             row.get("explicit_gaps")
                 .and_then(Value::as_array)
                 .expect("explicit_gaps must be array")
@@ -671,7 +671,9 @@ fn link_map_summary_counts_match_rows() {
 
 fn invariant_row<'a>(rows: &'a [Value], invariant_id: &str) -> &'a Value {
     rows.iter()
-        .find(|row| row.get("invariant_id").and_then(Value::as_str) == Some(invariant_id))
+        .find(|row: &&serde_json::Value| {
+            row.get("invariant_id").and_then(Value::as_str) == Some(invariant_id)
+        })
         .unwrap_or_else(|| panic!("missing {invariant_id} row"))
 }
 
@@ -680,7 +682,7 @@ fn theorem_witness_names(row: &Value) -> BTreeSet<String> {
         .and_then(Value::as_array)
         .expect("theorem_witnesses must be an array")
         .iter()
-        .map(|entry| {
+        .map(|entry: &serde_json::Value| {
             entry
                 .get("theorem")
                 .and_then(Value::as_str)
@@ -703,7 +705,7 @@ fn assert_liveness_contract(
         assumption_envelope
             .get("assumption_id")
             .and_then(Value::as_str)
-            .is_some_and(|id| !id.trim().is_empty()),
+            .is_some_and(|id: &str| !id.trim().is_empty()),
         "{invariant_id} assumption_envelope.assumption_id must be non-empty"
     );
     let assumptions = assumption_envelope
@@ -740,7 +742,7 @@ fn assert_liveness_contract(
         .and_then(Value::as_array)
         .expect("composition_contract.consumed_by must be an array")
         .iter()
-        .map(|entry| {
+        .map(|entry: &serde_json::Value| {
             entry
                 .as_str()
                 .expect("consumed_by entries must be strings")
@@ -786,7 +788,7 @@ fn assert_cancel_liveness_row(cancel_row: &Value) {
         .expect("cancel explicit_gaps must be an array");
     let cancel_idempotence_gap = cancel_gaps
         .iter()
-        .find(|gap| {
+        .find(|gap: &&serde_json::Value| {
             gap.get("gap_id").and_then(Value::as_str)
                 == Some("inv.cancel.protocol.gap.idempotence-theorem-missing")
         })
@@ -853,7 +855,7 @@ fn assert_loser_drain_liveness_row(losers_row: &Value) {
         .expect("loser-drain explicit_gaps must be an array");
     let direct_gap = loser_gaps
         .iter()
-        .find(|gap| {
+        .find(|gap: &&serde_json::Value| {
             gap.get("gap_id").and_then(Value::as_str)
                 == Some("inv.race.losers_drained.gap.direct-lean-theorem-missing")
         })
@@ -863,7 +865,7 @@ fn assert_loser_drain_liveness_row(losers_row: &Value) {
         .and_then(Value::as_array)
         .expect("loser-drain gap dependency_blockers must be an array")
         .iter()
-        .map(|entry| {
+        .map(|entry: &serde_json::Value| {
             entry
                 .as_str()
                 .expect("dependency_blockers entries must be strings")
@@ -925,7 +927,7 @@ fn assert_obligation_terminal_outcomes_row(obligation_row: &Value) {
         .expect("obligation explicit_gaps must be an array");
     let global_zero_gap = obligation_gaps
         .iter()
-        .find(|gap| {
+        .find(|gap: &&serde_json::Value| {
             gap.get("gap_id").and_then(Value::as_str)
                 == Some("inv.obligation.no_leaks.gap.global-zero-leak-theorem-missing")
         })
@@ -936,7 +938,7 @@ fn assert_obligation_terminal_outcomes_row(obligation_row: &Value) {
         .and_then(Value::as_array)
         .expect("obligation gap dependency_blockers must be an array")
         .iter()
-        .map(|entry| {
+        .map(|entry: &serde_json::Value| {
             entry
                 .as_str()
                 .expect("dependency_blockers entries must be strings")
@@ -1057,7 +1059,7 @@ fn assert_class_row<'a>(
     assert!(
         row.get("policy_rationale")
             .and_then(Value::as_str)
-            .is_some_and(|text| !text.trim().is_empty()),
+            .is_some_and(|text: &str| !text.trim().is_empty()),
         "{class} must define non-empty policy_rationale"
     );
     failure_policy
@@ -1131,7 +1133,7 @@ fn assert_incident_triage_flow(contract: &Value) {
         assert!(
             step.get("description")
                 .and_then(Value::as_str)
-                .is_some_and(|value| !value.trim().is_empty()),
+                .is_some_and(|value: &str| !value.trim().is_empty()),
             "incident_triage_flow.{step_id}.description must be non-empty"
         );
         let required_outputs = step
@@ -1174,11 +1176,11 @@ fn reliability_hardening_contract_covers_assumption_classes_and_governance_flow(
 
     let required_classes = contract
         .get("classification_policy")
-        .and_then(|policy| policy.get("required_assumption_classes"))
+        .and_then(|policy: &serde_json::Value| policy.get("required_assumption_classes"))
         .and_then(Value::as_array)
         .expect("classification_policy.required_assumption_classes must be an array")
         .iter()
-        .map(|entry| {
+        .map(|entry: &serde_json::Value| {
             entry
                 .as_str()
                 .expect("required_assumption_classes entries must be strings")
@@ -1196,11 +1198,11 @@ fn reliability_hardening_contract_covers_assumption_classes_and_governance_flow(
 
     let severity_levels = contract
         .get("classification_policy")
-        .and_then(|policy| policy.get("incident_severity_levels"))
+        .and_then(|policy: &serde_json::Value| policy.get("incident_severity_levels"))
         .and_then(Value::as_array)
         .expect("classification_policy.incident_severity_levels must be an array")
         .iter()
-        .map(|entry| {
+        .map(|entry: &serde_json::Value| {
             entry
                 .as_str()
                 .expect("incident_severity_levels entries must be strings")
@@ -1210,11 +1212,11 @@ fn reliability_hardening_contract_covers_assumption_classes_and_governance_flow(
 
     let cadence_ids = runtime_map
         .get("reporting_and_signoff_contract")
-        .and_then(|contract| contract.get("report_cadence"))
+        .and_then(|contract: &serde_json::Value| contract.get("report_cadence"))
         .and_then(Value::as_array)
         .expect("reporting_and_signoff_contract.report_cadence must be an array")
         .iter()
-        .map(|entry| {
+        .map(|entry: &serde_json::Value| {
             entry
                 .get("cadence_id")
                 .and_then(Value::as_str)
@@ -1225,7 +1227,7 @@ fn reliability_hardening_contract_covers_assumption_classes_and_governance_flow(
 
     let invariant_ids = link_rows(&link_map)
         .iter()
-        .map(|row| {
+        .map(|row: &serde_json::Value| {
             row.get("invariant_id")
                 .and_then(Value::as_str)
                 .expect("invariant_id must be string")
@@ -1260,7 +1262,7 @@ fn assert_cross_entity_invariant_links(contract: &Value, link_map: &Value) {
         .and_then(Value::as_array)
         .expect("invariant_ids must be an array")
         .iter()
-        .map(|entry| {
+        .map(|entry: &serde_json::Value| {
             entry
                 .as_str()
                 .expect("invariant_ids entries must be strings")
@@ -1277,7 +1279,7 @@ fn assert_cross_entity_invariant_links(contract: &Value, link_map: &Value) {
 
     let known_invariants = link_rows(link_map)
         .iter()
-        .map(|row| {
+        .map(|row: &serde_json::Value| {
             row.get("invariant_id")
                 .and_then(Value::as_str)
                 .expect("invariant_id must be string")
@@ -1310,7 +1312,7 @@ fn assert_cross_entity_assumption_catalog(contract: &Value) -> BTreeSet<String> 
             assumption
                 .get("statement")
                 .and_then(Value::as_str)
-                .is_some_and(|value| !value.trim().is_empty()),
+                .is_some_and(|value: &str| !value.trim().is_empty()),
             "assumption_catalog.{assumption_id}.statement must be non-empty"
         );
     }
@@ -1351,7 +1353,7 @@ fn assert_cross_entity_theorem_chain(
             segment
                 .get("guarantee")
                 .and_then(Value::as_str)
-                .is_some_and(|value| !value.trim().is_empty()),
+                .is_some_and(|value: &str| !value.trim().is_empty()),
             "theorem_chain.{segment_id}.guarantee must be non-empty"
         );
         let theorems = segment
@@ -1444,11 +1446,11 @@ fn assert_cross_entity_theorem_chain(
 fn cross_entity_harness_field_map(runtime_map: &Value) -> BTreeMap<String, BTreeSet<String>> {
     runtime_map
         .get("conformance_harness_contract")
-        .and_then(|contract| contract.get("harnesses"))
+        .and_then(|contract: &serde_json::Value| contract.get("harnesses"))
         .and_then(Value::as_array)
         .expect("runtime map harnesses must be an array")
         .iter()
-        .map(|harness| {
+        .map(|harness: &serde_json::Value| {
             let harness_id = harness
                 .get("harness_id")
                 .and_then(Value::as_str)
@@ -1527,7 +1529,7 @@ fn assert_cross_entity_end_to_end_guarantees(
             guarantee
                 .get("statement")
                 .and_then(Value::as_str)
-                .is_some_and(|value| !value.trim().is_empty()),
+                .is_some_and(|value: &str| !value.trim().is_empty()),
             "end_to_end_guarantees.{guarantee_id}.statement must be non-empty"
         );
         let theorem_deps = guarantee
