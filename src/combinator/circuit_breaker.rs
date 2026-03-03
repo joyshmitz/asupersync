@@ -55,8 +55,8 @@ use crate::types::Time;
 // Policy Configuration
 // =========================================================================
 
-/// Maximum allowed value for `half_open_max_probes` (24 bits).
-pub const MAX_HALF_OPEN_PROBES: u32 = 0x00FF_FFFF;
+/// Maximum allowed value for `half_open_max_probes` (16 bits).
+pub const MAX_HALF_OPEN_PROBES: u32 = 0xFFFF;
 /// Minimum allowed value for `half_open_max_probes`.
 pub const MIN_HALF_OPEN_PROBES: u32 = 1;
 
@@ -207,6 +207,8 @@ pub enum State {
 
     /// Testing recovery with limited probes.
     HalfOpen {
+        /// Epoch counter to prevent stale probe poisoning.
+        epoch: u32,
         /// Number of probes currently active.
         probes_active: u32,
         /// Number of successful probes.
@@ -228,9 +230,14 @@ impl State {
             Self::Closed { failures } => u64::from(failures) << 8,
             Self::Open { since_millis } => 1 | (since_millis << 8),
             Self::HalfOpen {
+                epoch,
                 probes_active,
                 successes,
-            } => 2 | ((u64::from(probes_active) & 0xFF_FFFF) << 8) | (u64::from(successes) << 32),
+            } => {
+                2 | ((u64::from(epoch) & 0xFF_FFFF) << 8)
+                    | ((u64::from(probes_active) & 0xFFFF) << 32)
+                    | ((u64::from(successes) & 0xFFFF) << 48)
+            }
         }
     }
 
@@ -242,8 +249,9 @@ impl State {
                 since_millis: bits >> 8,
             },
             2 => Self::HalfOpen {
-                probes_active: ((bits >> 8) & 0xFF_FFFF) as u32,
-                successes: (bits >> 32) as u32,
+                epoch: ((bits >> 8) & 0xFF_FFFF) as u32,
+                probes_active: ((bits >> 32) & 0xFFFF) as u32,
+                successes: ((bits >> 48) & 0xFFFF) as u32,
             },
             _ => Self::Closed {
                 failures: (bits >> 8) as u32,
@@ -473,7 +481,9 @@ impl CircuitBreaker {
                     let elapsed = Duration::from_millis(now_millis.saturating_sub(since_millis));
                     if elapsed >= self.policy.open_duration {
                         // Transition to half-open
+                        let epoch = (self.times_opened.load(Ordering::Relaxed) & 0xFF_FFFF) as u32;
                         let new_state = State::HalfOpen {
+                            epoch,
                             probes_active: 1,
                             successes: 0,
                         };
@@ -489,7 +499,6 @@ impl CircuitBreaker {
                                 if let Some(ref cb) = self.policy.on_state_change {
                                     cb(state, new_state, &callback_metrics);
                                 }
-                                let epoch = self.times_opened.load(Ordering::Relaxed);
                                 return Ok(Permit::Probe { epoch });
                             }
                             Err(actual) => {
@@ -509,12 +518,14 @@ impl CircuitBreaker {
                 }
 
                 State::HalfOpen {
+                    epoch,
                     probes_active,
                     successes,
                 } => {
                     if probes_active < self.policy.half_open_max_probes {
                         // Try to acquire probe slot
                         let new_state = State::HalfOpen {
+                            epoch,
                             probes_active: probes_active + 1,
                             successes,
                         };
@@ -525,7 +536,6 @@ impl CircuitBreaker {
                             Ordering::Acquire,
                         ) {
                             Ok(_) => {
-                                let epoch = self.times_opened.load(Ordering::Relaxed);
                                 return Ok(Permit::Probe { epoch });
                             }
                             Err(actual) => {
@@ -585,64 +595,64 @@ impl CircuitBreaker {
                 }
                 None
             }
-            Permit::Probe { epoch } => {
-                if epoch == self.times_opened.load(Ordering::Relaxed) {
-                    let mut event = None;
-                    let mut current_bits = self.state_bits.load(Ordering::Acquire);
-                    loop {
-                        let state = State::from_bits(current_bits);
-                        match state {
-                            State::HalfOpen {
-                                probes_active,
-                                successes,
-                            } => {
-                                let new_successes = successes + 1;
-                                if new_successes >= self.policy.success_threshold {
-                                    // Transition to Closed
-                                    let new_state = State::Closed { failures: 0 };
-                                    match self.state_bits.compare_exchange_weak(
-                                        current_bits,
-                                        new_state.to_bits(),
-                                        Ordering::Release,
-                                        Ordering::Acquire,
-                                    ) {
-                                        Ok(_) => {
-                                            self.current_failure_streak.store(0, Ordering::Relaxed);
-                                            self.times_closed.fetch_add(1, Ordering::Relaxed);
-                                            let mut m = self.metrics.write();
-                                            m.current_state = new_state;
-                                            if self.policy.on_state_change.is_some() {
-                                                self.populate_metrics_snapshot(&mut m);
-                                                event = Some((state, new_state, m.clone()));
-                                            }
-                                            break;
+            Permit::Probe {
+                epoch: permit_epoch,
+            } => {
+                let mut event = None;
+                let mut current_bits = self.state_bits.load(Ordering::Acquire);
+                loop {
+                    let state = State::from_bits(current_bits);
+                    match state {
+                        State::HalfOpen {
+                            epoch,
+                            probes_active,
+                            successes,
+                        } if epoch == permit_epoch => {
+                            let new_successes = successes + 1;
+                            if new_successes >= self.policy.success_threshold {
+                                // Transition to Closed
+                                let new_state = State::Closed { failures: 0 };
+                                match self.state_bits.compare_exchange_weak(
+                                    current_bits,
+                                    new_state.to_bits(),
+                                    Ordering::Release,
+                                    Ordering::Acquire,
+                                ) {
+                                    Ok(_) => {
+                                        self.current_failure_streak.store(0, Ordering::Relaxed);
+                                        self.times_closed.fetch_add(1, Ordering::Relaxed);
+                                        let mut m = self.metrics.write();
+                                        m.current_state = new_state;
+                                        if self.policy.on_state_change.is_some() {
+                                            self.populate_metrics_snapshot(&mut m);
+                                            event = Some((state, new_state, m.clone()));
                                         }
-                                        Err(actual) => current_bits = actual,
+                                        break;
                                     }
-                                } else {
-                                    // Increment successes, decrement probes
-                                    let new_state = State::HalfOpen {
-                                        probes_active: probes_active.saturating_sub(1),
-                                        successes: new_successes,
-                                    };
-                                    match self.state_bits.compare_exchange_weak(
-                                        current_bits,
-                                        new_state.to_bits(),
-                                        Ordering::Release,
-                                        Ordering::Acquire,
-                                    ) {
-                                        Ok(_) => break,
-                                        Err(actual) => current_bits = actual,
-                                    }
+                                    Err(actual) => current_bits = actual,
+                                }
+                            } else {
+                                // Increment successes, decrement probes
+                                let new_state = State::HalfOpen {
+                                    epoch,
+                                    probes_active: probes_active.saturating_sub(1),
+                                    successes: new_successes,
+                                };
+                                match self.state_bits.compare_exchange_weak(
+                                    current_bits,
+                                    new_state.to_bits(),
+                                    Ordering::Release,
+                                    Ordering::Acquire,
+                                ) {
+                                    Ok(_) => break,
+                                    Err(actual) => current_bits = actual,
                                 }
                             }
-                            _ => break,
                         }
+                        _ => break,
                     }
-                    event
-                } else {
-                    None
                 }
+                event
             }
         };
 
@@ -745,19 +755,21 @@ impl CircuitBreaker {
             self.total_ignored_errors.fetch_add(1, Ordering::Relaxed);
 
             // Still need to release probe if applicable
-            if let Permit::Probe { epoch } = permit {
-                if epoch != self.times_opened.load(Ordering::Relaxed) {
-                    return;
-                }
+            if let Permit::Probe {
+                epoch: permit_epoch,
+            } = permit
+            {
                 let mut current_bits = self.state_bits.load(Ordering::Acquire);
                 loop {
                     let state = State::from_bits(current_bits);
                     match state {
                         State::HalfOpen {
+                            epoch,
                             probes_active,
                             successes,
-                        } => {
+                        } if epoch == permit_epoch => {
                             let new_state = State::HalfOpen {
+                                epoch,
                                 probes_active: probes_active.saturating_sub(1),
                                 successes,
                             };
@@ -848,41 +860,41 @@ impl CircuitBreaker {
                     }
                 }
             }
-            Permit::Probe { epoch } => {
-                if epoch == self.times_opened.load(Ordering::Relaxed) {
-                    let mut current_bits = self.state_bits.load(Ordering::Acquire);
-                    loop {
-                        let state = State::from_bits(current_bits);
-                        match state {
-                            State::HalfOpen { .. } => {
-                                // Probe failed -> Reopen
-                                let new_state = State::Open {
-                                    since_millis: now_millis,
-                                };
-                                match self.state_bits.compare_exchange_weak(
-                                    current_bits,
-                                    new_state.to_bits(),
-                                    Ordering::Release,
-                                    Ordering::Acquire,
-                                ) {
-                                    Ok(_) => {
-                                        self.times_opened.fetch_add(1, Ordering::Relaxed);
-                                        let mut m = self.metrics.write();
-                                        m.current_state = new_state;
-                                        if let Some(ref w) = self.sliding_window {
-                                            w.write().reset();
-                                        }
-                                        if self.policy.on_state_change.is_some() {
-                                            self.populate_metrics_snapshot(&mut m);
-                                            event = Some((state, new_state, m.clone()));
-                                        }
-                                        break;
+            Permit::Probe {
+                epoch: permit_epoch,
+            } => {
+                let mut current_bits = self.state_bits.load(Ordering::Acquire);
+                loop {
+                    let state = State::from_bits(current_bits);
+                    match state {
+                        State::HalfOpen { epoch, .. } if epoch == permit_epoch => {
+                            // Probe failed -> Reopen
+                            let new_state = State::Open {
+                                since_millis: now_millis,
+                            };
+                            match self.state_bits.compare_exchange_weak(
+                                current_bits,
+                                new_state.to_bits(),
+                                Ordering::Release,
+                                Ordering::Acquire,
+                            ) {
+                                Ok(_) => {
+                                    self.times_opened.fetch_add(1, Ordering::Relaxed);
+                                    let mut m = self.metrics.write();
+                                    m.current_state = new_state;
+                                    if let Some(ref w) = self.sliding_window {
+                                        w.write().reset();
                                     }
-                                    Err(actual) => current_bits = actual,
+                                    if self.policy.on_state_change.is_some() {
+                                        self.populate_metrics_snapshot(&mut m);
+                                        event = Some((state, new_state, m.clone()));
+                                    }
+                                    break;
                                 }
+                                Err(actual) => current_bits = actual,
                             }
-                            _ => break,
                         }
+                        _ => break,
                     }
                 }
             }
@@ -1021,7 +1033,7 @@ pub enum Permit {
     /// Probe call in half-open state.
     Probe {
         /// Epoch counter (times_opened) to prevent stale probe poisoning.
-        epoch: u64,
+        epoch: u32,
     },
 }
 
@@ -1149,6 +1161,7 @@ mod tests {
     #[test]
     fn state_bits_roundtrip_half_open() {
         let state = State::HalfOpen {
+            epoch: 123,
             probes_active: 3,
             successes: 7,
         };
@@ -1275,7 +1288,8 @@ mod tests {
             cb.metrics().current_state,
             State::HalfOpen {
                 probes_active: 1,
-                successes: 0
+                successes: 0,
+                ..
             }
         ));
     }
@@ -1768,25 +1782,28 @@ mod tests {
 
     #[test]
     fn halfopen_bit_packing_large_probes_active() {
-        // Regression: probes_active > 16M (24-bit max) would corrupt successes
+        // Regression: probes_active > 64K (16-bit max) would corrupt successes
         // field due to bit overlap in to_bits(). Now probes_active is masked to
-        // 24 bits in encoding, matching the decode mask.
+        // 16 bits in encoding, matching the decode mask.
         let state = State::HalfOpen {
-            probes_active: 0x00FF_FFFF, // max 24-bit value
+            epoch: 5,
+            probes_active: 0xFFFF, // max 16-bit value
             successes: 42,
         };
         let roundtripped = State::from_bits(state.to_bits());
         assert_eq!(
             roundtripped,
             State::HalfOpen {
-                probes_active: 0x00FF_FFFF,
+                epoch: 5,
+                probes_active: 0xFFFF,
                 successes: 42,
             }
         );
 
-        // Value exceeding 24 bits gets truncated (saturated by mask)
+        // Value exceeding 16 bits gets truncated (saturated by mask)
         let overflow = State::HalfOpen {
-            probes_active: 0x01FF_FFFF, // 25 bits - bit 24 set
+            epoch: 5,
+            probes_active: 0x1FFFF, // 17 bits - bit 16 set
             successes: 7,
         };
         let rt = State::from_bits(overflow.to_bits());
@@ -1794,7 +1811,8 @@ mod tests {
         assert_eq!(
             rt,
             State::HalfOpen {
-                probes_active: 0x00FF_FFFF,
+                epoch: 5,
+                probes_active: 0xFFFF,
                 successes: 7,
             }
         );
@@ -1803,18 +1821,21 @@ mod tests {
     #[test]
     fn halfopen_bit_packing_successes_isolated() {
         // Verify successes field is completely independent of probes_active
-        for probes in [0u32, 1, 255, 0x00FF_FFFF] {
-            for succ in [0u32, 1, 100, u32::MAX] {
+        for probes in [0u32, 1, 255, 0xFFFF] {
+            for succ in [0u32, 1, 100, 0xFFFF] {
                 let state = State::HalfOpen {
+                    epoch: 77,
                     probes_active: probes,
                     successes: succ,
                 };
                 let rt = State::from_bits(state.to_bits());
                 match rt {
                     State::HalfOpen {
+                        epoch: e,
                         probes_active: p,
                         successes: s,
                     } => {
+                        assert_eq!(e, 77, "epoch mismatch");
                         assert_eq!(p, probes, "probes_active mismatch for ({probes}, {succ})");
                         assert_eq!(s, succ, "successes mismatch for ({probes}, {succ})");
                     }
