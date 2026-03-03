@@ -169,7 +169,7 @@ impl FromRequest for Multipart {
         {
             return Err(ExtractionError::new(
                 StatusCode::UNSUPPORTED_MEDIA_TYPE,
-                format!("expected multipart/form-data, got: {}", content_type),
+                format!("expected multipart/form-data, got: {content_type}"),
             ));
         }
 
@@ -179,7 +179,7 @@ impl FromRequest for Multipart {
 
         let fields = parse_multipart(&req.body, &boundary)?;
 
-        Ok(Multipart { fields })
+        Ok(Self { fields })
     }
 }
 
@@ -192,14 +192,14 @@ fn extract_boundary(content_type: &str) -> Option<String> {
     let idx = lower.find("boundary=")?;
     let after = &content_type[idx + "boundary=".len()..];
 
-    if after.starts_with('"') {
+    if let Some(stripped) = after.strip_prefix('"') {
         // Quoted boundary
-        let end = after[1..].find('"')?;
-        Some(after[1..1 + end].to_string())
+        let end = stripped.find('"')?;
+        Some(stripped[..end].to_string())
     } else {
         // Unquoted — take until whitespace or semicolon
         let end = after
-            .find(|c: char| c == ';' || c == ' ' || c == '\t' || c == '\r' || c == '\n')
+            .find([';', ' ', '\t', '\r', '\n'])
             .unwrap_or(after.len());
         let b = after[..end].trim();
         if b.is_empty() {
@@ -365,9 +365,8 @@ fn strip_trailing_crlf(data: &[u8], end: usize) -> usize {
 /// Parse part headers from raw bytes. Keys are lowercased.
 fn parse_part_headers(data: &[u8]) -> HashMap<String, String> {
     let mut headers = HashMap::new();
-    let text = match std::str::from_utf8(data) {
-        Ok(t) => t,
-        Err(_) => return headers,
+    let Ok(text) = std::str::from_utf8(data) else {
+        return headers;
     };
     for line in text.split('\n') {
         let line = line.trim_end_matches('\r');
@@ -392,33 +391,34 @@ fn parse_disposition_param(disposition: &str, param: &str) -> Option<String> {
     let idx = lower.find(&search)?;
     let after = &disposition[idx + search.len()..];
 
-    if after.starts_with('"') {
-        // Quoted value — handle escaped quotes.
-        let mut result = String::new();
-        let mut chars = after[1..].chars();
-        loop {
-            match chars.next() {
-                Some('"') | None => break,
-                Some('\\') => {
-                    if let Some(c) = chars.next() {
-                        result.push(c);
-                    }
-                }
-                Some(c) => result.push(c),
+    after.strip_prefix('"').map_or_else(
+        || {
+            let end = after.find([';', ' ', '\t']).unwrap_or(after.len());
+            let val = after[..end].trim();
+            if val.is_empty() {
+                None
+            } else {
+                Some(val.to_string())
             }
-        }
-        Some(result)
-    } else {
-        let end = after
-            .find(|c: char| c == ';' || c == ' ' || c == '\t')
-            .unwrap_or(after.len());
-        let val = after[..end].trim();
-        if val.is_empty() {
-            None
-        } else {
-            Some(val.to_string())
-        }
-    }
+        },
+        |stripped| {
+            // Quoted value — handle escaped quotes.
+            let mut result = String::new();
+            let mut chars = stripped.chars();
+            loop {
+                match chars.next() {
+                    Some('"') | None => break,
+                    Some('\\') => {
+                        if let Some(c) = chars.next() {
+                            result.push(c);
+                        }
+                    }
+                    Some(c) => result.push(c),
+                }
+            }
+            Some(result)
+        },
+    )
 }
 
 // ─── Tests ──────────────────────────────────────────────────────────────────

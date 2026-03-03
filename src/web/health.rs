@@ -29,9 +29,10 @@
 
 use std::collections::BTreeMap;
 use std::fmt;
+use std::fmt::Write as _;
 use std::sync::{Arc, Mutex};
 
-use super::handler::{FnHandler, Handler};
+use super::handler::FnHandler;
 use super::response::{IntoResponse, Response, StatusCode};
 
 // ─── HealthStatus ────────────────────────────────────────────────────────────
@@ -137,9 +138,7 @@ impl HealthResponse {
 
 impl IntoResponse for HealthResponse {
     fn into_response(self) -> Response {
-        let status_code = if self.status.is_healthy() {
-            StatusCode::OK
-        } else if self.status.is_operational() {
+        let status_code = if self.status.is_operational() {
             StatusCode::OK
         } else {
             StatusCode::SERVICE_UNAVAILABLE
@@ -160,7 +159,7 @@ fn json_escape_into(buf: &mut String, s: &str) {
             '\r' => buf.push_str("\\r"),
             '\t' => buf.push_str("\\t"),
             c if c < '\x20' => {
-                buf.push_str(&format!("\\u{:04x}", c as u32));
+                let _ = write!(buf, "\\u{:04x}", c as u32);
             }
             c => buf.push(c),
         }
@@ -193,11 +192,14 @@ struct HealthCheckInner {
 
 impl fmt::Debug for HealthCheck {
     fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
-        let checks = self.inner.checks.lock().unwrap();
-        let names: Vec<&str> = checks.iter().map(|(n, _)| n.as_str()).collect();
+        let names: Vec<String> = {
+            let checks = self.inner.checks.lock().unwrap();
+            checks.iter().map(|(name, _)| name.clone()).collect()
+        };
+        let ready = *self.inner.ready.lock().unwrap();
         f.debug_struct("HealthCheck")
             .field("checks", &names)
-            .field("ready", &*self.inner.ready.lock().unwrap())
+            .field("ready", &ready)
             .finish()
     }
 }
@@ -246,23 +248,29 @@ impl HealthCheck {
     /// Run all health checks and return the aggregated response.
     #[must_use]
     pub fn run_checks(&self) -> HealthResponse {
-        let checks = self.inner.checks.lock().unwrap();
-        let mut results = BTreeMap::new();
-        let mut overall = HealthStatus::Healthy;
+        let (overall, results) = {
+            let checks = self.inner.checks.lock().unwrap();
+            let mut results = BTreeMap::new();
+            let mut overall = HealthStatus::Healthy;
 
-        for (name, check_fn) in checks.iter() {
-            let status = check_fn();
-            match (&overall, &status) {
-                (HealthStatus::Healthy, HealthStatus::Degraded(_)) => {
-                    overall = HealthStatus::Degraded("one or more checks degraded".to_string());
+            for (name, check_fn) in checks.iter() {
+                let status = check_fn();
+                match (&overall, &status) {
+                    (HealthStatus::Healthy, HealthStatus::Degraded(_)) => {
+                        overall = HealthStatus::Degraded("one or more checks degraded".to_string());
+                    }
+                    (_, HealthStatus::Unhealthy(_)) => {
+                        overall =
+                            HealthStatus::Unhealthy("one or more checks unhealthy".to_string());
+                    }
+                    _ => {}
                 }
-                (_, HealthStatus::Unhealthy(_)) => {
-                    overall = HealthStatus::Unhealthy("one or more checks unhealthy".to_string());
-                }
-                _ => {}
+                results.insert(name.clone(), status);
             }
-            results.insert(name.clone(), status);
-        }
+            drop(checks);
+
+            (overall, results)
+        };
 
         HealthResponse {
             status: overall,
@@ -338,6 +346,7 @@ impl Default for HealthCheck {
 
 #[cfg(test)]
 mod tests {
+    use super::super::handler::Handler;
     use super::*;
 
     // ================================================================
