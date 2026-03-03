@@ -522,6 +522,11 @@ impl<T> Drop for WriteFuture<'_, '_, T> {
             if let Some(pos) = state.writer_queue.iter().position(|w| w.id == waiter_id) {
                 state.writer_queue.remove(pos);
                 state.writer_waiters = state.writer_waiters.saturating_sub(1);
+                if state.writer_waiters == 0 && !state.writer_active {
+                    let wakers = RwLock::<T>::drain_reader_waiters(&mut state);
+                    state.readers += wakers.len();
+                    reader_wakers = wakers;
+                }
             } else {
                 // We were granted the lock but dropped before taking it!
                 state.writer_waiters = state.writer_waiters.saturating_sub(1);
@@ -871,6 +876,11 @@ impl<T> Drop for OwnedWriteFuture<'_, T> {
             if let Some(pos) = state.writer_queue.iter().position(|w| w.id == waiter_id) {
                 state.writer_queue.remove(pos);
                 state.writer_waiters = state.writer_waiters.saturating_sub(1);
+                if state.writer_waiters == 0 && !state.writer_active {
+                    let wakers = RwLock::<T>::drain_reader_waiters(&mut state);
+                    state.readers += wakers.len();
+                    reader_wakers = wakers;
+                }
             } else {
                 // We were granted the lock but dropped before taking it!
                 state.writer_waiters = state.writer_waiters.saturating_sub(1);
@@ -1668,5 +1678,54 @@ mod tests {
         let lock = RwLock::new(42_i32);
         let dbg = format!("{lock:?}");
         assert!(dbg.contains("RwLock"));
+    }
+
+    struct CountWaker(StdArc<std::sync::atomic::AtomicUsize>);
+    impl std::task::Wake for CountWaker {
+        fn wake(self: StdArc<Self>) {
+            self.0.fetch_add(1, std::sync::atomic::Ordering::SeqCst);
+        }
+    }
+
+    #[test]
+    fn test_drop_queued_writer_wakes_readers_when_readers_active() {
+        init_test("test_drop_queued_writer_wakes_readers_when_readers_active");
+        let cx = test_cx();
+        let lock = RwLock::new(0_u32);
+
+        let wake_state = StdArc::new(std::sync::atomic::AtomicUsize::new(0));
+        let waker = Waker::from(StdArc::new(CountWaker(wake_state.clone())));
+        let mut task_cx = Context::from_waker(&waker);
+
+        // 1. Hold a read lock.
+        let mut fut_read1 = lock.read(&cx);
+        let Poll::Ready(Ok(_guard1)) = std::pin::Pin::new(&mut fut_read1).poll(&mut task_cx) else {
+            panic!("Expected Ready")
+        };
+
+        // 2. Queue a writer.
+        let mut fut_write = lock.write(&cx);
+        let pending_write = std::pin::Pin::new(&mut fut_write).poll(&mut task_cx);
+        assert!(pending_write.is_pending());
+
+        // 3. Queue a second reader. It blocks because of the writer.
+        let mut fut_read2 = lock.read(&cx);
+        let pending_read = std::pin::Pin::new(&mut fut_read2).poll(&mut task_cx);
+        assert!(pending_read.is_pending());
+
+        wake_state.store(0, AtomicOrdering::SeqCst);
+
+        // 4. Drop the writer. This should wake the second reader because writer_waiters becomes 0,
+        // and even though there is an active reader, multiple readers can run concurrently.
+        drop(fut_write);
+
+        let wake_count = wake_state.load(AtomicOrdering::SeqCst);
+        crate::assert_with_log!(
+            wake_count > 0,
+            "reader woken after writer drop",
+            true,
+            wake_count > 0
+        );
+        crate::test_complete!("test_drop_queued_writer_wakes_readers_when_readers_active");
     }
 }
