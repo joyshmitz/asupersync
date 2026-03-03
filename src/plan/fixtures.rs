@@ -805,7 +805,7 @@ fn execute_plan_in_lab_core(
         let is_empty = {
             let mut sched = runtime.scheduler.lock();
             for tid in &task_ids {
-                sched.schedule(*tid, 255);
+                sched.schedule(*tid, crate::types::Budget::INFINITE.priority);
             }
             sched.is_empty()
         };

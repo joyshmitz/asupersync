@@ -2997,7 +2997,7 @@ mod tests {
     fn decode_corrupted_repair_symbol_reports_corrupt_output() {
         let k = 8;
         let symbol_size = 32;
-        let seed = 2027u64;
+        let seed = 0u64;
 
         let source = make_source_data(k, symbol_size);
         let encoder = SystematicEncoder::new(&source, symbol_size, seed).unwrap();
@@ -3017,6 +3017,7 @@ mod tests {
             .find(|sym| !sym.is_source && sym.esi >= k as u32)
             .expect("must include at least one repair symbol");
         tampered.data[0] ^= 0x5A;
+        let _tampered_esi = tampered.esi;
 
         let err = decoder
             .decode(&received)
@@ -3032,7 +3033,7 @@ mod tests {
     fn decode_with_proof_corrupted_repair_symbol_reports_failure_reason() {
         let k = 8;
         let symbol_size = 32;
-        let seed = 2028u64;
+        let seed = 0u64;
 
         let source = make_source_data(k, symbol_size);
         let encoder = SystematicEncoder::new(&source, symbol_size, seed).unwrap();
