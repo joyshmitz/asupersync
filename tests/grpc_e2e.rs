@@ -17,7 +17,8 @@ use asupersync::codec::{Decoder, Encoder};
 use asupersync::grpc::{
     CallContext, Channel, ChannelConfig, Code, GrpcClient, GrpcCodec, GrpcError, GrpcMessage,
     HealthCheckRequest, HealthService, Interceptor, InterceptorLayer, Metadata, MetadataValue,
-    MethodDescriptor, Request, Response, Server, ServingStatus, Status, auth_bearer_interceptor,
+    MethodDescriptor, ReflectionDescribeServiceRequest, ReflectionListServicesRequest,
+    ReflectionService, Request, Response, Server, ServingStatus, Status, auth_bearer_interceptor,
     auth_validator, fn_interceptor, logging_interceptor, metadata_propagator, rate_limiter,
     timeout_interceptor, trace_interceptor,
 };
@@ -881,4 +882,74 @@ fn e2e_grpc_interceptor_layer_composition() {
     assert_with_log!(full.len() == 6, "six interceptors", 6, full.len());
 
     test_complete!("e2e_grpc_interceptor_layer_composition");
+}
+
+// ============================================================================
+// Section 15: Reflection Service
+// ============================================================================
+
+#[test]
+fn e2e_grpc_reflection_registry_roundtrip() {
+    init_test("e2e_grpc_reflection_registry_roundtrip");
+
+    test_section!("setup_reflection");
+    let reflection = ReflectionService::new();
+    let health = HealthService::new();
+    reflection.register_handler(&health);
+
+    test_section!("list_services");
+    let list = futures_lite::future::block_on(
+        reflection.list_services_async(&Request::new(ReflectionListServicesRequest)),
+    )
+    .expect("list services should succeed");
+    tracing::info!(services = ?list.get_ref().services, "reflection list");
+    assert_with_log!(
+        list.get_ref()
+            .services
+            .contains(&"grpc.health.v1.Health".to_string()),
+        "health service listed",
+        true,
+        list.get_ref()
+            .services
+            .contains(&"grpc.health.v1.Health".to_string())
+    );
+
+    test_section!("describe_service");
+    let describe =
+        futures_lite::future::block_on(reflection.describe_service_async(&Request::new(
+            ReflectionDescribeServiceRequest::new("grpc.health.v1.Health"),
+        )))
+        .expect("describe should succeed");
+    let methods = &describe.get_ref().service.methods;
+    assert_with_log!(methods.len() == 2, "health method count", 2, methods.len());
+    assert_with_log!(
+        methods.iter().any(|m| m.name == "Check"),
+        "has Check",
+        true,
+        methods.iter().any(|m| m.name == "Check")
+    );
+    assert_with_log!(
+        methods.iter().any(|m| m.name == "Watch"),
+        "has Watch",
+        true,
+        methods.iter().any(|m| m.name == "Watch")
+    );
+
+    test_section!("server_builder_integration");
+    let server = Server::builder()
+        .add_service(health)
+        .enable_reflection()
+        .build();
+    assert_with_log!(
+        server
+            .get_service("grpc.reflection.v1alpha.ServerReflection")
+            .is_some(),
+        "reflection registered in server",
+        true,
+        server
+            .get_service("grpc.reflection.v1alpha.ServerReflection")
+            .is_some()
+    );
+
+    test_complete!("e2e_grpc_reflection_registry_roundtrip");
 }

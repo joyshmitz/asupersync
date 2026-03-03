@@ -52,6 +52,10 @@ use asupersync::grpc::{
     // Service types
     MethodDescriptor,
     NamedService,
+    ReflectedMethod,
+    ReflectionDescribeServiceRequest,
+    ReflectionListServicesRequest,
+    ReflectionService,
     Request,
     Response,
     // Server types
@@ -1400,6 +1404,105 @@ fn grpc_verify_045_metadata_propagator() {
     }
 
     test_complete!("grpc_verify_045_metadata_propagator");
+}
+
+/// GRPC-VERIFY-046: Reflection service traits and descriptor shape
+///
+/// Reflection service advertises canonical service name and entrypoint method.
+#[test]
+fn grpc_verify_046_reflection_service_traits() {
+    init_test("grpc_verify_046_reflection_service_traits");
+
+    assert_eq!(
+        ReflectionService::NAME,
+        "grpc.reflection.v1alpha.ServerReflection"
+    );
+    let reflection = ReflectionService::new();
+    let desc = reflection.descriptor();
+    assert_eq!(desc.name, "ServerReflection");
+    assert_eq!(desc.package, "grpc.reflection.v1alpha");
+    assert_eq!(desc.methods.len(), 1);
+    assert_eq!(desc.methods[0].name, "ServerReflectionInfo");
+    assert!(desc.methods[0].client_streaming);
+    assert!(desc.methods[0].server_streaming);
+
+    test_complete!("grpc_verify_046_reflection_service_traits");
+}
+
+/// GRPC-VERIFY-047: Reflection register/list/describe
+///
+/// Reflection registry should enumerate services and report method metadata.
+#[test]
+fn grpc_verify_047_reflection_registry_core_flow() {
+    init_test("grpc_verify_047_reflection_registry_core_flow");
+
+    static METHODS: &[MethodDescriptor] = &[
+        MethodDescriptor::unary("Ping", "/pkg.Echo/Ping"),
+        MethodDescriptor::server_streaming("Watch", "/pkg.Echo/Watch"),
+    ];
+    static DESC: ServiceDescriptor = ServiceDescriptor::new("Echo", "pkg", METHODS);
+
+    let reflection = ReflectionService::new();
+    reflection.register_descriptor(&DESC);
+
+    let services = reflection.list_services();
+    assert_eq!(services, vec!["pkg.Echo".to_string()]);
+
+    let service = reflection
+        .describe_service("pkg.Echo")
+        .expect("registered service should be describable");
+    assert_eq!(service.name, "pkg.Echo");
+    assert_eq!(service.methods.len(), 2);
+    assert_eq!(
+        service.methods[0],
+        ReflectedMethod {
+            name: "Ping".to_string(),
+            path: "/pkg.Echo/Ping".to_string(),
+            client_streaming: false,
+            server_streaming: false,
+        }
+    );
+    assert_eq!(service.methods[1].name, "Watch");
+    assert!(service.methods[1].server_streaming);
+
+    let missing = reflection.describe_service("pkg.Missing");
+    assert!(missing.is_err());
+    assert_eq!(
+        missing.expect_err("missing expected").code(),
+        Code::NotFound
+    );
+
+    test_complete!("grpc_verify_047_reflection_registry_core_flow");
+}
+
+/// GRPC-VERIFY-048: Reflection async helper endpoints
+///
+/// Async list/describe helpers should return deterministic responses.
+#[test]
+fn grpc_verify_048_reflection_async_helpers() {
+    init_test("grpc_verify_048_reflection_async_helpers");
+
+    static METHODS: &[MethodDescriptor] = &[MethodDescriptor::unary("Get", "/pkg.Api/Get")];
+    static DESC: ServiceDescriptor = ServiceDescriptor::new("Api", "pkg", METHODS);
+
+    let reflection = ReflectionService::new();
+    reflection.register_descriptor(&DESC);
+
+    let list = futures_lite::future::block_on(
+        reflection.list_services_async(&Request::new(ReflectionListServicesRequest)),
+    )
+    .expect("list should succeed");
+    assert_eq!(list.get_ref().services, vec!["pkg.Api".to_string()]);
+
+    let describe = futures_lite::future::block_on(reflection.describe_service_async(
+        &Request::new(ReflectionDescribeServiceRequest::new("pkg.Api")),
+    ))
+    .expect("describe should succeed");
+    assert_eq!(describe.get_ref().service.name, "pkg.Api");
+    assert_eq!(describe.get_ref().service.methods.len(), 1);
+    assert_eq!(describe.get_ref().service.methods[0].path, "/pkg.Api/Get");
+
+    test_complete!("grpc_verify_048_reflection_async_helpers");
 }
 
 // =============================================================================

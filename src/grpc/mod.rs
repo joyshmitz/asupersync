@@ -42,6 +42,7 @@ pub mod client;
 pub mod codec;
 pub mod health;
 pub mod interceptor;
+pub mod reflection;
 pub mod server;
 pub mod service;
 pub mod status;
@@ -59,6 +60,11 @@ pub use interceptor::{
     LoggingInterceptor, MetadataPropagator, RateLimitInterceptor, TimeoutInterceptor,
     TracingInterceptor, auth_bearer_interceptor, auth_validator, fn_interceptor,
     logging_interceptor, metadata_propagator, rate_limiter, timeout_interceptor, trace_interceptor,
+};
+pub use reflection::{
+    ReflectedMethod, ReflectedService, ReflectionDescribeServiceRequest,
+    ReflectionDescribeServiceResponse, ReflectionListServicesRequest,
+    ReflectionListServicesResponse, ReflectionService,
 };
 pub use server::{
     CallContext, CallContextWithCx, Interceptor, Server, ServerBuilder, ServerConfig,

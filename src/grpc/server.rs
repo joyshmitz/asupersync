@@ -10,6 +10,7 @@ use std::sync::Arc;
 use crate::bytes::Bytes;
 use crate::cx::{Cx, cap};
 
+use super::reflection::ReflectionService;
 use super::service::{NamedService, ServiceHandler};
 use super::status::{GrpcError, Status};
 use super::streaming::{Metadata, Request, Response};
@@ -53,6 +54,8 @@ pub struct ServerBuilder {
     config: ServerConfig,
     /// Registered services.
     services: BTreeMap<String, Arc<dyn ServiceHandler>>,
+    /// Optional reflection registry.
+    reflection: Option<ReflectionService>,
 }
 
 impl std::fmt::Debug for ServerBuilder {
@@ -60,6 +63,7 @@ impl std::fmt::Debug for ServerBuilder {
         f.debug_struct("ServerBuilder")
             .field("config", &self.config)
             .field("services", &format!("[{} services]", self.services.len()))
+            .field("reflection_enabled", &self.reflection.is_some())
             .finish()
     }
 }
@@ -71,6 +75,7 @@ impl ServerBuilder {
         Self {
             config: ServerConfig::default(),
             services: BTreeMap::new(),
+            reflection: None,
         }
     }
 
@@ -129,7 +134,35 @@ impl ServerBuilder {
     where
         S: NamedService + ServiceHandler + 'static,
     {
-        self.services.insert(S::NAME.to_string(), Arc::new(service));
+        let service_name = S::NAME.to_string();
+        let service: Arc<dyn ServiceHandler> = Arc::new(service);
+        if let Some(reflection) = self.reflection.as_ref()
+            && service_name != ReflectionService::NAME
+        {
+            reflection.register_handler(service.as_ref());
+        }
+        self.services.insert(service_name, service);
+        self
+    }
+
+    /// Enable the built-in reflection service.
+    ///
+    /// The reflection registry captures descriptors for all currently
+    /// registered services and continues to track additional services added to
+    /// this builder after reflection is enabled.
+    #[must_use]
+    pub fn enable_reflection(mut self) -> Self {
+        let reflection = self.reflection.take().unwrap_or_default();
+        for service in self.services.values() {
+            if service.descriptor().full_name() != ReflectionService::NAME {
+                reflection.register_handler(service.as_ref());
+            }
+        }
+        self.services.insert(
+            ReflectionService::NAME.to_string(),
+            Arc::new(reflection.clone()),
+        );
+        self.reflection = Some(reflection);
         self
     }
 
@@ -480,6 +513,39 @@ mod tests {
         let has_service = server.get_service("test.TestService").is_some();
         crate::assert_with_log!(has_service, "service exists", true, has_service);
         crate::test_complete!("test_server_builder");
+    }
+
+    #[test]
+    fn test_server_builder_enable_reflection() {
+        init_test("test_server_builder_enable_reflection");
+        let server = Server::builder()
+            .add_service(TestService)
+            .enable_reflection()
+            .build();
+
+        let has_reflection = server.get_service(ReflectionService::NAME).is_some();
+        crate::assert_with_log!(has_reflection, "reflection exists", true, has_reflection);
+        let names = server.service_names();
+        let has_test = names.contains(&"test.TestService");
+        crate::assert_with_log!(has_test, "test service retained", true, has_test);
+        let has_refl = names.contains(&ReflectionService::NAME);
+        crate::assert_with_log!(has_refl, "reflection service listed", true, has_refl);
+        crate::test_complete!("test_server_builder_enable_reflection");
+    }
+
+    #[test]
+    fn test_server_builder_reflection_tracks_late_registration() {
+        init_test("test_server_builder_reflection_tracks_late_registration");
+        let server = Server::builder()
+            .enable_reflection()
+            .add_service(TestService)
+            .build();
+
+        let has_reflection = server.get_service(ReflectionService::NAME).is_some();
+        crate::assert_with_log!(has_reflection, "reflection exists", true, has_reflection);
+        let has_service = server.get_service("test.TestService").is_some();
+        crate::assert_with_log!(has_service, "late service exists", true, has_service);
+        crate::test_complete!("test_server_builder_reflection_tracks_late_registration");
     }
 
     #[test]
