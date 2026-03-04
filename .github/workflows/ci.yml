@@ -174,6 +174,41 @@ jobs:
             artifacts/security_release_gate_events.ndjson
           retention-days: 30
 
+      - name: WASM bundler compatibility certification
+        run: |
+          set -euo pipefail
+          mkdir -p artifacts
+          cargo test -p asupersync --test wasm_bundler_compatibility -- --nocapture | tee artifacts/wasm_bundler_compatibility_test.log
+          python3 - <<'PY'
+          import json
+          from pathlib import Path
+
+          summary = {
+              "schema_version": "wasm-bundler-compatibility-certification-v1",
+              "workflow": ".github/workflows/ci.yml",
+              "step_name": "WASM bundler compatibility certification",
+              "test_target": "wasm_bundler_compatibility",
+              "matrix_doc": "docs/wasm_bundler_compatibility_matrix.md",
+              "log_artifact": "artifacts/wasm_bundler_compatibility_test.log",
+              "repro_command": "rch exec -- cargo test -p asupersync --test wasm_bundler_compatibility -- --nocapture",
+              "required_bundlers": ["Vite", "Webpack", "Turbopack", "esbuild"],
+              "required_browsers": ["Chrome", "Firefox", "Safari", "Edge"],
+          }
+          Path("artifacts/wasm_bundler_compatibility_summary.json").write_text(
+              json.dumps(summary, indent=2) + "\n", encoding="utf-8"
+          )
+          PY
+
+      - name: Upload WASM bundler compatibility certification artifacts
+        if: always()
+        uses: actions/upload-artifact@v4
+        with:
+          name: wasm-bundler-compatibility-certification
+          path: |
+            artifacts/wasm_bundler_compatibility_summary.json
+            artifacts/wasm_bundler_compatibility_test.log
+          retention-days: 30
+
       - name: Clippy lints
         run: cargo clippy --all-targets --all-features -- -D warnings
 

@@ -24,6 +24,10 @@ fn load_release_channels() -> String {
         .expect("failed to load release channel strategy")
 }
 
+fn load_ci_workflow() -> String {
+    std::fs::read_to_string(".github/workflows/ci.yml").expect("failed to load CI workflow")
+}
+
 // ─── Document infrastructure ─────────────────────────────────────────
 
 #[test]
@@ -514,6 +518,38 @@ fn matrix_documents_test_command() {
         doc.contains("cargo test --test wasm_bundler_compatibility"),
         "Matrix must reference its own test suite"
     );
+}
+
+#[test]
+fn matrix_documents_ci_certification_artifacts_and_repro_command() {
+    let doc = load_matrix();
+    for expected in [
+        "artifacts/wasm_bundler_compatibility_summary.json",
+        "artifacts/wasm_bundler_compatibility_test.log",
+        "rch exec -- cargo test -p asupersync --test wasm_bundler_compatibility -- --nocapture",
+    ] {
+        assert!(
+            doc.contains(expected),
+            "Matrix must document CI certification evidence token: {expected}"
+        );
+    }
+}
+
+#[test]
+fn ci_workflow_runs_bundler_compatibility_certification_gate() {
+    let workflow = load_ci_workflow();
+    for expected in [
+        "WASM bundler compatibility certification",
+        "cargo test -p asupersync --test wasm_bundler_compatibility -- --nocapture",
+        "artifacts/wasm_bundler_compatibility_summary.json",
+        "artifacts/wasm_bundler_compatibility_test.log",
+        "wasm-bundler-compatibility-certification",
+    ] {
+        assert!(
+            workflow.contains(expected),
+            "CI workflow missing bundler compatibility certification token: {expected}"
+        );
+    }
 }
 
 // ─── Cross-reference consistency with topology ───────────────────────

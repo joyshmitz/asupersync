@@ -314,6 +314,19 @@ The compatibility matrix is validated by `tests/wasm_bundler_compatibility.rs` w
 4. Bundler configuration requirements are specified for all Tier 1 targets.
 5. Known constraints are documented for each bundler.
 
+The CI `check` job includes a dedicated certification step:
+
+- `WASM bundler compatibility certification`
+- Captured evidence artifacts:
+  - `artifacts/wasm_bundler_compatibility_summary.json`
+  - `artifacts/wasm_bundler_compatibility_test.log`
+
+Local deterministic reproduction command:
+
+```bash
+rch exec -- cargo test -p asupersync --test wasm_bundler_compatibility -- --nocapture
+```
+
 Full CI gate:
 
 ```bash
