@@ -173,8 +173,16 @@ validate_artifact_lifecycle_inputs() {
         echo "ARTIFACT_RETENTION_DAYS_LOCAL must be numeric" >&2
         return 1
     fi
+    if [[ "$ARTIFACT_RETENTION_DAYS_LOCAL" -le 0 ]]; then
+        echo "ARTIFACT_RETENTION_DAYS_LOCAL must be greater than 0" >&2
+        return 1
+    fi
     if [[ ! "$ARTIFACT_RETENTION_DAYS_CI" =~ ^[0-9]+$ ]]; then
         echo "ARTIFACT_RETENTION_DAYS_CI must be numeric" >&2
+        return 1
+    fi
+    if [[ "$ARTIFACT_RETENTION_DAYS_CI" -le 0 ]]; then
+        echo "ARTIFACT_RETENTION_DAYS_CI must be greater than 0" >&2
         return 1
     fi
     if [[ ! "$LOG_QUALITY_MIN_SCORE" =~ ^[0-9]+$ ]]; then
