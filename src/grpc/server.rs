@@ -10,6 +10,7 @@ use std::sync::Arc;
 use crate::bytes::Bytes;
 use crate::cx::{Cx, cap};
 
+use super::client::CompressionEncoding;
 use super::reflection::ReflectionService;
 use super::service::{NamedService, ServiceHandler};
 use super::status::{GrpcError, Status};
@@ -32,6 +33,10 @@ pub struct ServerConfig {
     pub keepalive_interval_ms: Option<u64>,
     /// Keep-alive timeout.
     pub keepalive_timeout_ms: Option<u64>,
+    /// Compression used for outbound response messages.
+    pub send_compression: Option<CompressionEncoding>,
+    /// Compression encodings accepted by this server.
+    pub accept_compression: Vec<CompressionEncoding>,
 }
 
 impl Default for ServerConfig {
@@ -44,6 +49,8 @@ impl Default for ServerConfig {
             max_concurrent_streams: 100,
             keepalive_interval_ms: None,
             keepalive_timeout_ms: None,
+            send_compression: None,
+            accept_compression: vec![CompressionEncoding::Identity],
         }
     }
 }
@@ -125,6 +132,31 @@ impl ServerBuilder {
     #[must_use]
     pub fn keepalive_timeout(mut self, ms: u64) -> Self {
         self.config.keepalive_timeout_ms = Some(ms);
+        self
+    }
+
+    /// Set the outbound compression encoding for responses.
+    #[must_use]
+    pub fn send_compression(mut self, encoding: CompressionEncoding) -> Self {
+        self.config.send_compression = Some(encoding);
+        self
+    }
+
+    /// Add one accepted compression encoding.
+    #[must_use]
+    pub fn accept_compression(mut self, encoding: CompressionEncoding) -> Self {
+        self.config.accept_compression.push(encoding);
+        self
+    }
+
+    /// Replace accepted compression encodings.
+    #[must_use]
+    pub fn accept_compressions(
+        mut self,
+        encodings: impl IntoIterator<Item = CompressionEncoding>,
+    ) -> Self {
+        self.config.accept_compression.clear();
+        self.config.accept_compression.extend(encodings);
         self
     }
 

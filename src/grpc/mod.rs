@@ -53,7 +53,11 @@ pub use client::{
     Channel, ChannelBuilder, ChannelConfig, ClientInterceptor, CompressionEncoding, GrpcClient,
     MetadataInterceptor, ResponseStream,
 };
-pub use codec::{Codec, FramedCodec, GrpcCodec, GrpcMessage, IdentityCodec};
+pub use codec::{
+    Codec, FrameCompressor, FrameDecompressor, FramedCodec, GrpcCodec, GrpcMessage, IdentityCodec,
+};
+#[cfg(feature = "compression")]
+pub use codec::{gzip_frame_compress, gzip_frame_decompress};
 pub use health::{
     HealthCheckRequest, HealthCheckResponse, HealthReporter, HealthService, HealthServiceBuilder,
     ServingStatus,

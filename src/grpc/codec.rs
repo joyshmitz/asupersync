@@ -184,6 +184,54 @@ fn identity_frame_decompress(input: &[u8], max_size: usize) -> Result<Bytes, Grp
     Ok(Bytes::copy_from_slice(input))
 }
 
+/// Gzip frame compressor using flate2.
+///
+/// Compresses the input bytes with gzip encoding at the default compression level.
+#[cfg(feature = "compression")]
+pub fn gzip_frame_compress(input: &[u8]) -> Result<Bytes, GrpcError> {
+    use flate2::Compression;
+    use flate2::write::GzEncoder;
+    use std::io::Write;
+
+    let mut encoder = GzEncoder::new(Vec::new(), Compression::default());
+    encoder
+        .write_all(input)
+        .map_err(|e| GrpcError::compression(e.to_string()))?;
+    let compressed = encoder
+        .finish()
+        .map_err(|e| GrpcError::compression(e.to_string()))?;
+    Ok(Bytes::from(compressed))
+}
+
+/// Gzip frame decompressor using flate2.
+///
+/// Decompresses gzip-encoded bytes, enforcing `max_size` to guard against
+/// decompression bombs.
+#[cfg(feature = "compression")]
+pub fn gzip_frame_decompress(input: &[u8], max_size: usize) -> Result<Bytes, GrpcError> {
+    use flate2::read::GzDecoder;
+    use std::io::Read;
+
+    let mut decoder = GzDecoder::new(input);
+    let mut output = Vec::new();
+    let mut buf = [0u8; 8192];
+    let mut total = 0;
+    loop {
+        let n = decoder
+            .read(&mut buf)
+            .map_err(|e| GrpcError::compression(e.to_string()))?;
+        if n == 0 {
+            break;
+        }
+        total += n;
+        if total > max_size {
+            return Err(GrpcError::MessageTooLarge);
+        }
+        output.extend_from_slice(&buf[..n]);
+    }
+    Ok(Bytes::from(output))
+}
+
 /// A codec that wraps another codec with gRPC framing.
 pub struct FramedCodec<C> {
     /// The inner codec for message serialization.
@@ -255,6 +303,16 @@ impl<C: Codec> FramedCodec<C> {
         self.compressor = Some(compressor);
         self.decompressor = Some(decompressor);
         self
+    }
+
+    /// Configure gzip frame compression/decompression.
+    ///
+    /// Requires the `compression` feature flag. Uses flate2 for gzip encoding
+    /// with decompression-bomb protection via `max_message_size`.
+    #[cfg(feature = "compression")]
+    #[must_use]
+    pub fn with_gzip_frame_codec(self) -> Self {
+        self.with_frame_codec(gzip_frame_compress, gzip_frame_decompress)
     }
 
     /// Configure identity frame hooks.
@@ -602,6 +660,98 @@ mod tests {
             .expect("frame must decode");
         crate::assert_with_log!(decoded == original, "decoded", original, decoded);
         crate::test_complete!("test_framed_codec_identity_frame_codec_roundtrip");
+    }
+
+    #[test]
+    #[cfg(feature = "compression")]
+    fn test_gzip_frame_compress_decompress_roundtrip() {
+        init_test("test_gzip_frame_compress_decompress_roundtrip");
+        let original = b"hello gzip compression roundtrip test";
+        let compressed = gzip_frame_compress(original).expect("compress must succeed");
+
+        // Compressed output should differ from input (gzip header + payload).
+        crate::assert_with_log!(
+            compressed.as_ref() != original.as_slice(),
+            "compressed differs from original",
+            true,
+            compressed.as_ref() != original.as_slice()
+        );
+
+        let decompressed =
+            gzip_frame_decompress(&compressed, 1024).expect("decompress must succeed");
+        crate::assert_with_log!(
+            decompressed.as_ref() == original.as_slice(),
+            "decompressed matches original",
+            original.as_slice(),
+            decompressed.as_ref()
+        );
+        crate::test_complete!("test_gzip_frame_compress_decompress_roundtrip");
+    }
+
+    #[test]
+    #[cfg(feature = "compression")]
+    fn test_gzip_frame_decompress_bomb_protection() {
+        init_test("test_gzip_frame_decompress_bomb_protection");
+        // Compress a large payload, then try to decompress with a tiny limit.
+        let large = vec![0u8; 4096];
+        let compressed = gzip_frame_compress(&large).expect("compress must succeed");
+
+        let result = gzip_frame_decompress(&compressed, 100);
+        let ok = matches!(result, Err(GrpcError::MessageTooLarge));
+        crate::assert_with_log!(ok, "decompression bomb rejected", true, ok);
+        crate::test_complete!("test_gzip_frame_decompress_bomb_protection");
+    }
+
+    #[test]
+    #[cfg(feature = "compression")]
+    fn test_gzip_frame_empty_input() {
+        init_test("test_gzip_frame_empty_input");
+        let compressed = gzip_frame_compress(b"").expect("compress empty must succeed");
+        let decompressed =
+            gzip_frame_decompress(&compressed, 1024).expect("decompress empty must succeed");
+        let empty = decompressed.is_empty();
+        crate::assert_with_log!(empty, "empty roundtrip", true, empty);
+        crate::test_complete!("test_gzip_frame_empty_input");
+    }
+
+    #[test]
+    #[cfg(feature = "compression")]
+    fn test_framed_codec_gzip_roundtrip() {
+        init_test("test_framed_codec_gzip_roundtrip");
+        let mut codec = FramedCodec::new(IdentityCodec).with_gzip_frame_codec();
+        let mut buf = BytesMut::new();
+        let original = Bytes::from_static(b"gzip framed codec roundtrip");
+
+        codec
+            .encode_message(&original, &mut buf)
+            .expect("encode must succeed");
+
+        // Compressed flag should be set.
+        crate::assert_with_log!(
+            buf.first().copied() == Some(1),
+            "compressed flag set",
+            Some(1u8),
+            buf.first().copied()
+        );
+
+        let decoded = codec
+            .decode_message(&mut buf)
+            .expect("decode must succeed")
+            .expect("frame must decode");
+        crate::assert_with_log!(decoded == original, "decoded matches original", original, decoded);
+        crate::test_complete!("test_framed_codec_gzip_roundtrip");
+    }
+
+    #[test]
+    #[cfg(feature = "compression")]
+    fn test_gzip_frame_decompress_invalid_input() {
+        init_test("test_gzip_frame_decompress_invalid_input");
+        // Invalid gzip data should produce a compression error, not panic.
+        let garbage = b"this is not gzip data";
+        let result = gzip_frame_decompress(garbage, 4096);
+        let ok = matches!(result, Err(GrpcError::Compression(_)));
+        crate::assert_with_log!(ok, "invalid gzip rejected", true, ok);
+        crate::test_complete!("test_gzip_frame_decompress_invalid_input");
     }
 
     #[test]

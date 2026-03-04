@@ -33,6 +33,46 @@ impl CompressionEncoding {
             Self::Gzip => "gzip",
         }
     }
+
+    /// Parse a compression encoding from the `grpc-encoding` header value.
+    #[must_use]
+    pub fn from_header_value(value: &str) -> Option<Self> {
+        match value {
+            "identity" => Some(Self::Identity),
+            "gzip" => Some(Self::Gzip),
+            _ => None,
+        }
+    }
+
+    /// Return the frame compressor for this encoding, if any.
+    ///
+    /// Returns `None` for `Identity` (no compression needed).
+    /// Requires the `compression` feature for `Gzip`.
+    #[must_use]
+    pub fn frame_compressor(self) -> Option<super::codec::FrameCompressor> {
+        match self {
+            Self::Identity => None,
+            #[cfg(feature = "compression")]
+            Self::Gzip => Some(super::codec::gzip_frame_compress),
+            #[cfg(not(feature = "compression"))]
+            Self::Gzip => None,
+        }
+    }
+
+    /// Return the frame decompressor for this encoding, if any.
+    ///
+    /// Returns `None` for `Identity` (no decompression needed).
+    /// Requires the `compression` feature for `Gzip`.
+    #[must_use]
+    pub fn frame_decompressor(self) -> Option<super::codec::FrameDecompressor> {
+        match self {
+            Self::Identity => None,
+            #[cfg(feature = "compression")]
+            Self::Gzip => Some(super::codec::gzip_frame_decompress),
+            #[cfg(not(feature = "compression"))]
+            Self::Gzip => None,
+        }
+    }
 }
 
 /// gRPC channel configuration.
@@ -549,7 +589,7 @@ fn encode_grpc_timeout(timeout: Duration) -> String {
     let timeout_nanos = timeout.as_nanos().max(1);
 
     for &(unit_nanos, suffix) in &GRPC_TIMEOUT_UNITS {
-        if timeout_nanos % unit_nanos == 0 {
+        if timeout_nanos.is_multiple_of(unit_nanos) {
             let value = timeout_nanos / unit_nanos;
             if value <= MAX_GRPC_TIMEOUT_VALUE {
                 return format!("{value}{suffix}");
