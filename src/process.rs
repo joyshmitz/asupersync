@@ -696,6 +696,11 @@ impl Child {
     ///
     /// Returns an error if waiting or reading fails.
     pub fn wait_with_output(mut self) -> Result<Output, ProcessError> {
+        #[cfg(windows)]
+        {
+            return self.wait_with_output_windows();
+        }
+
         // Take the handles before waiting
         let mut stdout_handle = self.stdout.take();
         let mut stderr_handle = self.stderr.take();
@@ -770,6 +775,15 @@ impl Child {
     /// Uses cooperative yielding instead of thread sleeps while waiting for
     /// process exit and pipe drain progress.
     pub async fn wait_with_output_async(mut self) -> Result<Output, ProcessError> {
+        #[cfg(windows)]
+        {
+            return crate::runtime::spawn_blocking_io(move || {
+                self.wait_with_output_windows().map_err(io::Error::from)
+            })
+            .await
+            .map_err(ProcessError::Io);
+        }
+
         // Take the handles before waiting
         let mut stdout_handle = self.stdout.take();
         let mut stderr_handle = self.stderr.take();
@@ -913,6 +927,50 @@ impl Child {
     /// Alias for `kill()` for API compatibility.
     pub fn start_kill(&mut self) -> Result<(), ProcessError> {
         self.kill()
+    }
+
+    #[cfg(windows)]
+    fn wait_with_output_windows(mut self) -> Result<Output, ProcessError> {
+        // Take the handles before waiting to avoid writer-side deadlocks.
+        let stdout_handle = self.stdout.take().map(|handle| handle.inner);
+        let stderr_handle = self.stderr.take().map(|handle| handle.inner);
+        drop(self.stdin.take());
+
+        let stdout_thread = stdout_handle.map(|mut stream| {
+            std::thread::spawn(move || -> io::Result<Vec<u8>> {
+                let mut buf = Vec::new();
+                stream.read_to_end(&mut buf)?;
+                Ok(buf)
+            })
+        });
+        let stderr_thread = stderr_handle.map(|mut stream| {
+            std::thread::spawn(move || -> io::Result<Vec<u8>> {
+                let mut buf = Vec::new();
+                stream.read_to_end(&mut buf)?;
+                Ok(buf)
+            })
+        });
+
+        let status = self.wait()?;
+
+        let stdout = match stdout_thread {
+            Some(handle) => handle
+                .join()
+                .map_err(|_| io::Error::other("stdout reader thread panicked"))??,
+            None => Vec::new(),
+        };
+        let stderr = match stderr_thread {
+            Some(handle) => handle
+                .join()
+                .map_err(|_| io::Error::other("stderr reader thread panicked"))??,
+            None => Vec::new(),
+        };
+
+        Ok(Output {
+            status,
+            stdout,
+            stderr,
+        })
     }
 }
 

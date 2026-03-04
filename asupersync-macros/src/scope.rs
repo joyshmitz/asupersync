@@ -252,8 +252,10 @@ fn return_span(stmts: &[Stmt]) -> Option<proc_macro2::Span> {
             // Do not traverse into nested async blocks
         }
 
-        fn visit_item_fn(&mut self, _node: &'ast syn::ItemFn) {
-            // Do not traverse into nested functions
+        fn visit_item(&mut self, _node: &'ast syn::Item) {
+            // Do not traverse into any nested items (functions, impls, modules, etc.)
+            // as returns inside them are perfectly valid and do not return
+            // from the scope body.
         }
     }
 
