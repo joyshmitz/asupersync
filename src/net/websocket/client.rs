@@ -430,9 +430,8 @@ where
                 )));
             }
 
-            // Send any pending pongs
-            let pending_pongs = std::mem::take(&mut self.pending_pongs);
-            for payload in pending_pongs {
+            // Send any pending pongs (cancel-safe)
+            while let Some(payload) = self.pending_pongs.pop() {
                 let pong = Frame::pong(payload);
                 self.send_frame(pong).await?;
             }
@@ -565,12 +564,21 @@ where
 
     /// Internal: send a single frame.
     async fn send_frame(&mut self, frame: Frame) -> Result<(), WsError> {
-        self.write_buf.clear();
+        use std::future::poll_fn;
+        use crate::bytes::Buf;
+
         self.codec.encode(frame, &mut self.write_buf)?;
 
-        // Copy data to avoid borrow issues
-        let data = self.write_buf.to_vec();
-        write_all_io(&mut self.io, &data).await?;
+        while !self.write_buf.is_empty() {
+            let n = poll_fn(|cx| Pin::new(&mut self.io).poll_write(cx, self.write_buf.chunk())).await?;
+            if n == 0 {
+                return Err(WsError::Io(io::Error::new(
+                    io::ErrorKind::WriteZero,
+                    "write returned 0",
+                )));
+            }
+            self.write_buf.advance(n);
+        }
 
         Ok(())
     }
@@ -592,24 +600,6 @@ where
 
         Ok(n)
     }
-}
-
-/// Write all bytes to an I/O stream.
-async fn write_all_io<IO: AsyncWrite + Unpin>(io: &mut IO, buf: &[u8]) -> Result<(), WsError> {
-    use std::future::poll_fn;
-
-    let mut written = 0;
-    while written < buf.len() {
-        let n = poll_fn(|cx| Pin::new(&mut *io).poll_write(cx, &buf[written..])).await?;
-        if n == 0 {
-            return Err(WsError::Io(io::Error::new(
-                io::ErrorKind::WriteZero,
-                "write returned 0",
-            )));
-        }
-        written += n;
-    }
-    Ok(())
 }
 
 /// Read some bytes from an I/O stream.

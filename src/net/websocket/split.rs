@@ -231,8 +231,8 @@ where
             // Send any pending pongs (under lock)
             {
                 let shared = &mut *self.shared.lock();
-                shared.write_buf.clear();
-                for payload in shared.pending_pongs.drain(..) {
+                // cancel-safe: do not clear write_buf, pop pongs instead of draining
+                while let Some(payload) = shared.pending_pongs.pop() {
                     let pong = Frame::pong(payload);
                     let (codec, write_buf) = (&mut shared.codec, &mut shared.write_buf);
                     codec.encode(pong, write_buf)?;
@@ -371,53 +371,49 @@ where
 
     /// Internal: send a single frame (for control messages like pong/close).
     async fn send_frame_internal(&self, frame: Frame) -> Result<(), WsError> {
-        let data = {
-            let shared = &mut *self.shared.lock();
-            shared.write_buf.clear();
+        {
+            let mut shared = self.shared.lock();
             let (codec, write_buf) = (&mut shared.codec, &mut shared.write_buf);
             codec.encode(frame, write_buf)?;
-            shared.write_buf.to_vec()
-        };
-
-        self.write_all(&data).await
+        }
+        self.flush_write_buf().await
     }
 
     /// Internal: flush the write buffer.
     async fn flush_write_buf(&self) -> Result<(), WsError> {
-        let data = {
-            let mut shared = self.shared.lock();
-            if shared.write_buf.is_empty() {
-                return Ok(());
-            }
-            let data = shared.write_buf.to_vec();
-            shared.write_buf.clear();
-            data
-        };
-
-        self.write_all(&data).await
-    }
-
-    /// Internal: write all bytes.
-    async fn write_all(&self, buf: &[u8]) -> Result<(), WsError> {
         use std::future::poll_fn;
+        use crate::bytes::Buf;
 
         let _permit = acquire_write_permit(&self.shared).await;
-        let mut written = 0;
-        while written < buf.len() {
+
+        while {
+            let shared = self.shared.lock();
+            !shared.write_buf.is_empty()
+        } {
             let n = poll_fn(|poll_cx| {
                 let mut shared = self.shared.lock();
-                Pin::new(&mut shared.io).poll_write(poll_cx, &buf[written..])
+                if shared.write_buf.is_empty() {
+                    return Poll::Ready(Ok(0));
+                }
+                let chunk = shared.write_buf.chunk();
+                Pin::new(&mut shared.io).poll_write(poll_cx, chunk)
             })
             .await?;
 
             if n == 0 {
-                return Err(WsError::Io(io::Error::new(
-                    io::ErrorKind::WriteZero,
-                    "write returned 0",
-                )));
+                let shared = self.shared.lock();
+                if !shared.write_buf.is_empty() {
+                    return Err(WsError::Io(io::Error::new(
+                        io::ErrorKind::WriteZero,
+                        "write returned 0",
+                    )));
+                }
+                break;
             }
-            written += n;
+            let mut shared = self.shared.lock();
+            shared.write_buf.advance(n);
         }
+
         Ok(())
     }
 
@@ -536,35 +532,12 @@ where
 
     /// Internal: send a single frame.
     async fn send_frame(&self, frame: Frame) -> Result<(), WsError> {
-        use std::future::poll_fn;
-
-        let data = {
-            let shared = &mut *self.shared.lock();
-            shared.write_buf.clear();
+        {
+            let mut shared = self.shared.lock();
             let (codec, write_buf) = (&mut shared.codec, &mut shared.write_buf);
             codec.encode(frame, write_buf)?;
-            shared.write_buf.to_vec()
-        };
-
-        let _permit = acquire_write_permit(&self.shared).await;
-        let mut written = 0;
-        while written < data.len() {
-            let n = poll_fn(|poll_cx| {
-                let mut shared = self.shared.lock();
-                Pin::new(&mut shared.io).poll_write(poll_cx, &data[written..])
-            })
-            .await?;
-
-            if n == 0 {
-                return Err(WsError::Io(io::Error::new(
-                    io::ErrorKind::WriteZero,
-                    "write returned 0",
-                )));
-            }
-            written += n;
         }
-
-        Ok(())
+        self.flush_write_buf().await
     }
 }
 
