@@ -1345,10 +1345,17 @@ async fn run_gen_server_loop<S: GenServer>(
 ) -> S {
     use crate::tracing_compat::debug;
 
-    cell.state.store(ActorState::Running);
+    // Only transition to Running if stop() wasn't called before the server started.
+    // stop() sets Stopping before scheduling; we must honour that signal so the
+    // poll_fn guard in the message loop can detect the pre-stop and break.
+    if cell.state.load() != ActorState::Stopping {
+        cell.state.store(ActorState::Running);
+    }
 
     // Phase 1: Initialization
-    if cx.is_cancel_requested() {
+    // Skip init when either the Cx is cancelled or the server was pre-stopped
+    // (stop() sets Stopping before scheduling, but does not cancel the Cx).
+    if cx.is_cancel_requested() || cell.state.load() == ActorState::Stopping {
         cx.trace("gen_server::init_skipped_cancelled");
     } else {
         cx.trace("gen_server::init");

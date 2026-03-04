@@ -162,7 +162,7 @@ fn runner_registers_required_categories() {
     let content = std::fs::read_to_string(RUNNER_SCRIPT).unwrap();
     for category in REQUIRED_SUITE_CATEGORIES {
         assert!(
-            content.contains(&format!("\"{}\"", category)),
+            content.contains(&format!("\"{category}\"")),
             "Runner must use category: {category}"
         );
     }
@@ -172,10 +172,7 @@ fn runner_registers_required_categories() {
 fn doc_lists_all_required_suites() {
     let content = std::fs::read_to_string(DOC_SPEC).unwrap();
     for suite in REQUIRED_SUITES {
-        assert!(
-            content.contains(suite),
-            "Doc must list suite: {suite}"
-        );
+        assert!(content.contains(suite), "Doc must list suite: {suite}");
     }
 }
 

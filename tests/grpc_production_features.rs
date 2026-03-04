@@ -259,7 +259,11 @@ fn call_context_remaining_before_deadline() {
 
 #[test]
 fn call_context_remaining_after_deadline() {
-    let ctx = CallContext::with_deadline(Instant::now() - Duration::from_millis(1));
+    let ctx = CallContext::with_deadline(
+        Instant::now()
+            .checked_sub(Duration::from_millis(1))
+            .unwrap(),
+    );
     assert!(ctx.remaining().is_none());
 }
 
@@ -271,7 +275,11 @@ fn call_context_remaining_no_deadline() {
 
 #[test]
 fn call_context_is_expired_with_past_deadline() {
-    let ctx = CallContext::with_deadline(Instant::now() - Duration::from_millis(1));
+    let ctx = CallContext::with_deadline(
+        Instant::now()
+            .checked_sub(Duration::from_millis(1))
+            .unwrap(),
+    );
     assert!(ctx.is_expired());
 }
 
@@ -535,7 +543,7 @@ fn timeout_interceptor_adds_header() {
         asupersync::grpc::streaming::MetadataValue::Ascii(s) => {
             assert_eq!(s, "5000m");
         }
-        _ => panic!("expected ASCII value"),
+        asupersync::grpc::streaming::MetadataValue::Binary(_) => panic!("expected ASCII value"),
     }
 }
 
@@ -552,7 +560,7 @@ fn timeout_interceptor_preserves_existing_header() {
         asupersync::grpc::streaming::MetadataValue::Ascii(s) => {
             assert_eq!(s, "1000m");
         }
-        _ => panic!("expected ASCII value"),
+        asupersync::grpc::streaming::MetadataValue::Binary(_) => panic!("expected ASCII value"),
     }
 }
 
@@ -567,7 +575,7 @@ fn bearer_auth_interceptor_adds_token() {
         asupersync::grpc::streaming::MetadataValue::Ascii(s) => {
             assert_eq!(s, "Bearer my-token");
         }
-        _ => panic!("expected ASCII value"),
+        asupersync::grpc::streaming::MetadataValue::Binary(_) => panic!("expected ASCII value"),
     }
 }
 

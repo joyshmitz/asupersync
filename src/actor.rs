@@ -671,7 +671,12 @@ pub const DEFAULT_MAILBOX_CAPACITY: usize = 64;
 async fn run_actor_loop<A: Actor>(mut actor: A, cx: Cx, cell: &mut ActorCell<A::Message>) -> A {
     use crate::tracing_compat::debug;
 
-    cell.state.store(ActorState::Running);
+    // Only transition to Running if stop() wasn't called before the actor started.
+    // stop() sets Stopping before scheduling; we must honour that signal so the
+    // poll_fn guard in the message loop can detect the pre-stop and break.
+    if cell.state.load() != ActorState::Stopping {
+        cell.state.store(ActorState::Running);
+    }
 
     // Phase 1: Initialization
     cx.trace("actor::on_start");
