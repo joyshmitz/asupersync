@@ -956,4 +956,32 @@ mod tests {
             Some(AppState { id: 7 })
         );
     }
+
+    #[test]
+    fn extensions_hold_multiple_typed_values_and_override_same_type() {
+        #[derive(Clone, Debug, PartialEq, Eq)]
+        struct AppState {
+            id: u32,
+        }
+
+        #[derive(Clone, Debug, PartialEq, Eq)]
+        struct FeatureFlags {
+            experimental: bool,
+        }
+
+        let mut extensions = Extensions::new();
+        extensions.insert_typed(AppState { id: 1 });
+        extensions.insert_typed(FeatureFlags { experimental: true });
+        // Same TypeId should be replaced by the most recent insert.
+        extensions.insert_typed(AppState { id: 2 });
+
+        assert_eq!(
+            extensions.get_typed_cloned::<AppState>(),
+            Some(AppState { id: 2 })
+        );
+        assert_eq!(
+            extensions.get_typed_cloned::<FeatureFlags>(),
+            Some(FeatureFlags { experimental: true })
+        );
+    }
 }

@@ -110,10 +110,29 @@ impl SignalKind {
         }
     }
 
-    /// Returns the signal number on Unix platforms.
+    /// Returns the signal number on Windows platforms.
     ///
-    /// Returns `None` on non-Unix platforms.
-    #[cfg(not(unix))]
+    /// Supported mappings:
+    /// - `Interrupt` -> `SIGINT`
+    /// - `Terminate` -> `SIGTERM`
+    /// - `Quit` -> `SIGBREAK`
+    ///
+    /// Other signal kinds are unsupported and return `None`.
+    #[cfg(windows)]
+    #[must_use]
+    pub const fn as_raw_value(&self) -> Option<i32> {
+        match self {
+            Self::Interrupt => Some(libc::SIGINT),
+            Self::Terminate => Some(libc::SIGTERM),
+            Self::Quit => Some(libc::SIGBREAK),
+            _ => None,
+        }
+    }
+
+    /// Returns the signal number on other non-Unix platforms.
+    ///
+    /// Returns `None` when no mapping exists.
+    #[cfg(not(any(unix, windows)))]
     #[must_use]
     pub const fn as_raw_value(&self) -> Option<i32> {
         None
@@ -261,6 +280,36 @@ mod tests {
         let alarm = SignalKind::Alarm.as_raw_value();
         crate::assert_with_log!(alarm == libc::SIGALRM, "alarm", libc::SIGALRM, alarm);
         crate::test_complete!("signal_kind_raw_values");
+    }
+
+    #[cfg(windows)]
+    #[test]
+    fn signal_kind_raw_values_windows_subset() {
+        init_test("signal_kind_raw_values_windows_subset");
+        let interrupt = SignalKind::Interrupt.as_raw_value();
+        crate::assert_with_log!(
+            interrupt == Some(libc::SIGINT),
+            "interrupt",
+            Some(libc::SIGINT),
+            interrupt
+        );
+        let terminate = SignalKind::Terminate.as_raw_value();
+        crate::assert_with_log!(
+            terminate == Some(libc::SIGTERM),
+            "terminate",
+            Some(libc::SIGTERM),
+            terminate
+        );
+        let quit = SignalKind::Quit.as_raw_value();
+        crate::assert_with_log!(
+            quit == Some(libc::SIGBREAK),
+            "quit",
+            Some(libc::SIGBREAK),
+            quit
+        );
+        let user1 = SignalKind::User1.as_raw_value();
+        crate::assert_with_log!(user1.is_none(), "user1 unsupported", true, user1.is_none());
+        crate::test_complete!("signal_kind_raw_values_windows_subset");
     }
 
     // =========================================================================
