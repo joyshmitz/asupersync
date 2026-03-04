@@ -452,7 +452,6 @@ fn utm_09_path_with_null_byte_returns_error() {
 fn utm_10_concurrent_fs_process_shutdown() {
     let dir = temp_dir("utm10");
     let path = dir.join("concurrent.txt");
-    let path_clone = path.clone();
 
     futures_lite::future::block_on(async {
         let controller = ShutdownController::new();
@@ -462,7 +461,7 @@ fn utm_10_concurrent_fs_process_shutdown() {
         let outcome = with_graceful_shutdown(
             std::pin::pin!(async move {
                 // FS operation
-                std::fs::write(&path_clone, b"cross-domain test").expect("write");
+                std::fs::write(&path, b"cross-domain test").expect("write");
 
                 // Process operation
                 let output = Command::new("echo")
@@ -472,7 +471,7 @@ fn utm_10_concurrent_fs_process_shutdown() {
                     .expect("echo");
 
                 (
-                    std::fs::read_to_string(&path_clone).expect("readback"),
+                    std::fs::read_to_string(&path).expect("readback"),
                     output.status.success(),
                 )
             }),
