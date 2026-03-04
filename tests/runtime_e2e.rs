@@ -465,7 +465,9 @@ fn e2e_race_loser_cancellation_drain() {
             yield_now().await;
         })
         .expect("winner task");
-    runtime.scheduler.lock().schedule(winner_task, 0);
+    // Schedule winner on worker 1 to avoid LIFO starvation from loser
+    // re-enqueues on worker 0's queue.
+    runtime.scheduler.lock().schedule(winner_task, 1);
 
     let loser_task_a = spawn_cancellable_loop(&mut runtime, loser_region_a, 4096, None);
     let loser_task_b = spawn_cancellable_loop(&mut runtime, loser_region_b, 4096, None);
