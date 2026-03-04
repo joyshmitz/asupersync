@@ -34,4 +34,4 @@ pub use stream::{
     BodyKind, ChunkedEncoder, IncomingBody, IncomingBodyWriter, OutgoingBody, OutgoingBodySender,
     RequestHead, ResponseHead, StreamingRequest, StreamingResponse,
 };
-pub use types::{Method, Request, RequestBuilder, Response, ResponseBuilder, Version};
+pub use types::{Method, Request, RequestBuilder, Response, ResponseBuilder, StatusCode, Version};

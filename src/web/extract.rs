@@ -265,7 +265,8 @@ where
             return Err(ExtractionError::bad_request("no path parameters found"));
         }
 
-        if let Some(first) = req.path_params.values().next()
+        if req.path_params.len() == 1
+            && let Some(first) = req.path_params.values().next()
             && let Some(value) = deserialize_single_value::<T>(first)
         {
             return Ok(Self(value));
@@ -300,7 +301,8 @@ where
         let qs = req.query.as_deref().unwrap_or("");
         let parsed = parse_urlencoded(qs);
 
-        if let Some(first) = parsed.values().next()
+        if parsed.len() == 1
+            && let Some(first) = parsed.values().next()
             && let Some(value) = deserialize_single_value::<T>(first)
         {
             return Ok(Self(value));
@@ -1132,6 +1134,61 @@ mod tests {
         assert_eq!(
             extensions.get_typed_cloned::<FeatureFlags>(),
             Some(FeatureFlags { experimental: true })
+        );
+    }
+
+    // ── Scalar-guard regression tests ────────────────────────────────────
+
+    #[test]
+    fn path_scalar_with_multiple_params_falls_through_to_struct() {
+        // Before the len()==1 guard, Path<u32> with 2+ params would
+        // nondeterministically pick whichever value HashMap yielded first.
+        #[derive(Debug, serde::Deserialize, PartialEq)]
+        struct PostRef {
+            user_id: u32,
+            post_id: u32,
+        }
+
+        let mut params = HashMap::new();
+        params.insert("user_id".to_string(), "42".to_string());
+        params.insert("post_id".to_string(), "7".to_string());
+        let req = Request::new("GET", "/users/42/posts/7").with_path_params(params);
+
+        // Scalar extraction must NOT succeed — falls through to struct deser.
+        assert!(Path::<u32>::from_request_parts(&req).is_err());
+
+        // Struct extraction succeeds deterministically.
+        let Path(post_ref) = Path::<PostRef>::from_request_parts(&req).unwrap();
+        assert_eq!(
+            post_ref,
+            PostRef {
+                user_id: 42,
+                post_id: 7
+            }
+        );
+    }
+
+    #[test]
+    fn query_scalar_with_multiple_params_falls_through_to_struct() {
+        #[derive(Debug, serde::Deserialize, PartialEq)]
+        struct Pagination {
+            page: u32,
+            per_page: u32,
+        }
+
+        let req = Request::new("GET", "/items").with_query("page=3&per_page=25");
+
+        // Scalar extraction must NOT succeed with 2 query params.
+        assert!(Query::<u32>::from_request_parts(&req).is_err());
+
+        // Struct extraction works correctly.
+        let Query(pg) = Query::<Pagination>::from_request_parts(&req).unwrap();
+        assert_eq!(
+            pg,
+            Pagination {
+                page: 3,
+                per_page: 25
+            }
         );
     }
 }
