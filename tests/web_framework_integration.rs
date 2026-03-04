@@ -127,18 +127,14 @@ fn integration_router_method_dispatch_all_verbs() {
     common::init_test_logging();
     test_phase!("Router Method Dispatch — All Verbs");
 
-    let router = Router::new()
-        .route("/res", get(FnHandler::new(|| -> &'static str { "GET" })))
-        .route("/res", post(FnHandler::new(|| -> &'static str { "POST" })))
-        .route("/res", put(FnHandler::new(|| -> &'static str { "PUT" })))
-        .route(
-            "/res",
-            delete(FnHandler::new(|| -> &'static str { "DELETE" })),
-        )
-        .route(
-            "/res",
-            patch(FnHandler::new(|| -> &'static str { "PATCH" })),
-        );
+    let router = Router::new().route(
+        "/res",
+        get(FnHandler::new(|| -> &'static str { "GET" }))
+            .post(FnHandler::new(|| -> &'static str { "POST" }))
+            .put(FnHandler::new(|| -> &'static str { "PUT" }))
+            .delete(FnHandler::new(|| -> &'static str { "DELETE" }))
+            .patch(FnHandler::new(|| -> &'static str { "PATCH" })),
+    );
 
     for (method, expected) in [
         ("GET", "GET"),
@@ -156,7 +152,7 @@ fn integration_router_method_dispatch_all_verbs() {
         );
     }
 
-    // HEAD on a GET route should return 405 (no implicit HEAD)
+    // HEAD on a route with no HEAD handler should return 405
     let resp = router.handle(Request::new("HEAD", "/res"));
     assert_eq!(resp.status, StatusCode::METHOD_NOT_ALLOWED);
 
@@ -975,9 +971,9 @@ fn integration_middleware_rate_limit() {
     let handler = FnHandler::new(|| -> &'static str { "ok" });
     let policy = RateLimitPolicy {
         name: "test".into(),
-        rate: 2,
+        rate: 0,
         period: Duration::from_secs(60),
-        burst: 0,
+        burst: 2,
         ..Default::default()
     };
     let rl = RateLimitMiddleware::new(handler, policy);
