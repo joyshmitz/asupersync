@@ -2,7 +2,12 @@
 
 **Bead**: `asupersync-2oh2u.11.2` ([T9.2])
 **Program**: `asupersync-2oh2u` ([TOKIO-REPLACE])
+**Author**: SapphireHill (claude-code / opus-4.6)
 **Date**: 2026-03-04
+**Dependencies**: `asupersync-2oh2u.10.13`, `asupersync-2oh2u.2.10`, `asupersync-2oh2u.11.1`,
+  `asupersync-2oh2u.7.11`, `asupersync-2oh2u.6.13`, `asupersync-2oh2u.5.12`,
+  `asupersync-2oh2u.4.11`, `asupersync-2oh2u.3.10`, `asupersync-2oh2u.7.9`,
+  `asupersync-2oh2u.6.11`, `asupersync-2oh2u.5.10`
 **Purpose**: Provide end-to-end migration cookbooks for each capability domain,
 with concrete before/after examples, anti-patterns, failure-mode guidance, and
 structured-log expectations.
@@ -80,7 +85,30 @@ stream.write_all(b"hello").await?;
 - AP-T2-02: Ignoring codec frame boundaries in streaming protocols
 - AP-T2-03: Unbounded read buffers without backpressure
 
-### 3.5 Log Expectations
+### 3.5 Failure Modes
+
+| Failure | Symptom | Mitigation |
+|---------|---------|------------|
+| FM-T2-01 | Half-open TCP after migration | Enable keepalive; use read timeout |
+| FM-T2-02 | Codec state corruption on cancel | Use cancel-safe codec wrapper |
+| FM-T2-03 | Zero-copy path regresses to copy | Profile with tracing; check vectored I/O support |
+
+### 3.6 Edge Cases
+
+- Partial reads returning 0 bytes (EOF vs WouldBlock)
+- Codec decode returning `None` on incomplete frame without error
+- Write returning `Ok(0)` when kernel buffer is full
+- Simultaneous read+write cancellation on duplex streams
+
+### 3.7 Rollback Decision Points
+
+| Checkpoint | Rollback Criterion | Action |
+|-----------|-------------------|--------|
+| After R2-01/02 migration | Latency p99 > 2x baseline | Revert to tokio traits |
+| After R2-03 codec migration | Frame corruption rate > 0 | Revert codec, file bug |
+| After R2-05 TcpStream swap | Connection failure rate > 1% | Revert to tokio::net |
+
+### 3.8 Log Expectations
 
 All I/O e2e tests must emit logs with: schema_version, scenario_id, correlation_id,
 phase, outcome, detail, replay_pointer. See golden corpus `t2_io_e2e_success.json`.
