@@ -336,8 +336,8 @@ fn postgresql_has_partial_error_methods() {
     assert_eq!(pg["is_unique_violation"].as_str().unwrap(), "implemented");
     assert_eq!(
         pg["is_transient"].as_str().unwrap(),
-        "not_implemented",
-        "is_transient is a gap"
+        "implemented",
+        "is_transient now implemented"
     );
 }
 
@@ -354,16 +354,16 @@ fn mysql_error_methods_document_gaps() {
         .find(|c| c["id"] == "C-ERR-04")
         .expect("C-ERR-04");
     let mysql = &err04["backend_status"]["mysql"];
-    // MySQL currently has NO classification methods
-    let not_impl_count = mysql
+    // MySQL now has all classification methods implemented
+    let impl_count = mysql
         .as_object()
         .unwrap()
         .values()
-        .filter(|v| v.as_str().unwrap() == "not_implemented")
+        .filter(|v| v.as_str().unwrap() == "implemented")
         .count();
     assert!(
-        not_impl_count >= 5,
-        "MySQL should have many not_implemented methods, found {not_impl_count}"
+        impl_count >= 6,
+        "MySQL should have most methods implemented, found {impl_count}"
     );
 }
 

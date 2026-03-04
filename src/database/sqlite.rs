@@ -99,6 +99,104 @@ pub enum SqliteError {
     LockPoisoned,
 }
 
+impl SqliteError {
+    /// Returns `true` if this is a database-busy error (`SQLITE_BUSY`).
+    ///
+    /// The error string from rusqlite contains "database is locked" for busy.
+    #[must_use]
+    pub fn is_busy(&self) -> bool {
+        match self {
+            Self::Sqlite(msg) => msg.contains("database is locked") || msg.contains("SQLITE_BUSY"),
+            _ => false,
+        }
+    }
+
+    /// Returns `true` if this is a database-locked error (`SQLITE_LOCKED`).
+    #[must_use]
+    pub fn is_locked(&self) -> bool {
+        match self {
+            Self::Sqlite(msg) => {
+                msg.contains("database table is locked") || msg.contains("SQLITE_LOCKED")
+            }
+            _ => false,
+        }
+    }
+
+    /// Returns `true` if this is a constraint violation (`SQLITE_CONSTRAINT`).
+    #[must_use]
+    pub fn is_constraint_violation(&self) -> bool {
+        match self {
+            Self::Sqlite(msg) => {
+                msg.contains("SQLITE_CONSTRAINT")
+                    || msg.contains("UNIQUE constraint failed")
+                    || msg.contains("NOT NULL constraint failed")
+                    || msg.contains("FOREIGN KEY constraint failed")
+                    || msg.contains("CHECK constraint failed")
+            }
+            _ => false,
+        }
+    }
+
+    /// Returns `true` if this is a unique constraint violation.
+    #[must_use]
+    pub fn is_unique_violation(&self) -> bool {
+        match self {
+            Self::Sqlite(msg) => msg.contains("UNIQUE constraint failed"),
+            _ => false,
+        }
+    }
+
+    /// Returns `true` if this is a connection-level error.
+    #[must_use]
+    pub fn is_connection_error(&self) -> bool {
+        matches!(
+            self,
+            Self::Io(_) | Self::ConnectionClosed | Self::LockPoisoned
+        )
+    }
+
+    /// Returns `true` if this error is transient and may succeed on retry.
+    ///
+    /// Transient SQLite errors: SQLITE_BUSY, SQLITE_LOCKED, and I/O errors.
+    #[must_use]
+    pub fn is_transient(&self) -> bool {
+        if matches!(self, Self::Io(_) | Self::ConnectionClosed) {
+            return true;
+        }
+        self.is_busy() || self.is_locked()
+    }
+
+    /// Returns `true` if this error is safe to retry automatically.
+    #[must_use]
+    pub fn is_retryable(&self) -> bool {
+        self.is_transient()
+    }
+
+    /// Returns a synthetic error code string for cross-backend parity.
+    #[must_use]
+    pub fn error_code(&self) -> Option<&str> {
+        match self {
+            Self::Sqlite(msg) => {
+                if msg.contains("SQLITE_BUSY") || msg.contains("database is locked") {
+                    Some("SQLITE_BUSY")
+                } else if msg.contains("SQLITE_LOCKED") || msg.contains("database table is locked")
+                {
+                    Some("SQLITE_LOCKED")
+                } else if msg.contains("SQLITE_CONSTRAINT") || msg.contains("constraint failed") {
+                    Some("SQLITE_CONSTRAINT")
+                } else if msg.contains("SQLITE_ERROR") {
+                    Some("SQLITE_ERROR")
+                } else {
+                    None
+                }
+            }
+            Self::Io(_) => Some("SQLITE_IOERR"),
+            Self::ConnectionClosed => Some("SQLITE_MISUSE"),
+            _ => None,
+        }
+    }
+}
+
 impl fmt::Display for SqliteError {
     fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
         match self {

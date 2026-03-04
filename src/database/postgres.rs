@@ -129,6 +129,60 @@ impl PgError {
     pub fn is_unique_violation(&self) -> bool {
         self.code() == Some("23505")
     }
+
+    /// Returns `true` if this is any constraint violation (SQLSTATE class `23`).
+    #[must_use]
+    pub fn is_constraint_violation(&self) -> bool {
+        self.code().is_some_and(|c| c.len() >= 2 && &c[..2] == "23")
+    }
+
+    /// Returns `true` if this is a connection-level error.
+    ///
+    /// Includes I/O errors, connection closed, TLS failures, and
+    /// SQLSTATE class `08` (connection exception).
+    #[must_use]
+    pub fn is_connection_error(&self) -> bool {
+        matches!(
+            self,
+            Self::Io(_) | Self::ConnectionClosed | Self::TlsRequired
+        ) || self.code().is_some_and(|c| c.len() >= 2 && &c[..2] == "08")
+    }
+
+    /// Returns `true` if this error is transient and may succeed on retry.
+    ///
+    /// Transient errors include serialization failures, deadlocks,
+    /// connection exceptions (class `08`), and insufficient resources (class `53`).
+    #[must_use]
+    pub fn is_transient(&self) -> bool {
+        if matches!(self, Self::Io(_) | Self::ConnectionClosed) {
+            return true;
+        }
+        self.code().is_some_and(|c| {
+            c.len() >= 2
+                && matches!(
+                    &c[..2],
+                    "40" // transaction rollback (serialization, deadlock)
+                    | "08" // connection exception
+                    | "53" // insufficient resources
+                )
+        })
+    }
+
+    /// Returns `true` if this error is safe to retry automatically.
+    ///
+    /// Currently equivalent to [`is_transient`](Self::is_transient), but may
+    /// diverge if policy-level retry exclusions are added.
+    #[must_use]
+    pub fn is_retryable(&self) -> bool {
+        self.is_transient()
+    }
+
+    /// Returns the SQLSTATE error code if this is a server error, or a
+    /// synthetic code for non-server errors.
+    #[must_use]
+    pub fn error_code(&self) -> Option<&str> {
+        self.code()
+    }
 }
 
 impl fmt::Display for PgError {

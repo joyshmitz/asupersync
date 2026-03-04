@@ -130,31 +130,31 @@
             "is_serialization_failure": "implemented",
             "is_deadlock": "implemented",
             "is_unique_violation": "implemented",
-            "is_transient": "not_implemented",
-            "is_connection_error": "not_implemented",
-            "is_retryable": "not_implemented",
+            "is_transient": "implemented",
+            "is_connection_error": "implemented",
+            "is_retryable": "implemented",
             "error_code": "implemented"
           },
           "mysql": {
-            "is_serialization_failure": "not_implemented",
-            "is_deadlock": "not_implemented",
-            "is_unique_violation": "not_implemented",
-            "is_transient": "not_implemented",
-            "is_connection_error": "not_implemented",
-            "is_retryable": "not_implemented",
-            "error_code": "partial"
+            "is_serialization_failure": "implemented",
+            "is_deadlock": "implemented",
+            "is_unique_violation": "implemented",
+            "is_transient": "implemented",
+            "is_connection_error": "implemented",
+            "is_retryable": "implemented",
+            "error_code": "implemented"
           },
           "sqlite": {
             "is_serialization_failure": "not_applicable",
             "is_deadlock": "not_applicable",
-            "is_unique_violation": "not_implemented",
-            "is_transient": "not_implemented",
-            "is_connection_error": "not_implemented",
-            "is_retryable": "not_implemented",
-            "error_code": "not_implemented"
+            "is_unique_violation": "implemented",
+            "is_transient": "implemented",
+            "is_connection_error": "implemented",
+            "is_retryable": "implemented",
+            "error_code": "implemented"
           }
         },
-        "status": "partial"
+        "status": "implemented"
       },
       {
         "id": "C-ERR-05",
@@ -334,7 +334,7 @@
     "total_contracts": 19,
     "domains": {
       "retry": {"count": 5, "implemented": 2, "partial": 1, "defined": 1, "not_implemented": 1},
-      "error_classification": {"count": 3, "implemented": 0, "partial": 1, "defined": 0, "not_implemented": 2},
+      "error_classification": {"count": 3, "implemented": 1, "partial": 0, "defined": 0, "not_implemented": 2},
       "idempotency": {"count": 3, "implemented": 0, "partial": 1, "defined": 1, "not_implemented": 1},
       "delivery": {"count": 3, "implemented": 0, "partial": 0, "defined": 3, "not_implemented": 0},
       "failure_propagation": {"count": 3, "implemented": 0, "partial": 0, "defined": 3, "not_implemented": 0},
@@ -343,8 +343,8 @@
     "systems": ["postgresql", "mysql", "sqlite", "kafka", "jetstream", "nats_core", "redis_pubsub"],
     "blocking_gaps": [
       {"id": "RTY-G1", "severity": "high", "description": "MySQL/SQLite transaction retry not implemented"},
-      {"id": "ERR-G1", "severity": "high", "description": "MySQL/SQLite error classification methods missing"},
-      {"id": "ERR-G2", "severity": "medium", "description": "PostgreSQL missing is_transient/is_connection_error"},
+      {"id": "ERR-G1", "severity": "closed", "description": "MySQL/SQLite error classification methods — IMPLEMENTED"},
+      {"id": "ERR-G2", "severity": "closed", "description": "PostgreSQL is_transient/is_connection_error — IMPLEMENTED"},
       {"id": "ERR-G3", "severity": "medium", "description": "Messaging error classification methods missing"},
       {"id": "RTY-G2", "severity": "medium", "description": "Connection pool retry not implemented"},
       {"id": "IMP-G1", "severity": "low", "description": "Request-level idempotency keys not implemented"}

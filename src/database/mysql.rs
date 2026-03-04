@@ -86,6 +86,94 @@ pub enum MySqlError {
     UnsupportedAuthPlugin(String),
 }
 
+impl MySqlError {
+    /// Returns the MySQL server error code, if this is a server error.
+    #[must_use]
+    pub fn server_code(&self) -> Option<u16> {
+        match self {
+            Self::Server { code, .. } => Some(*code),
+            _ => None,
+        }
+    }
+
+    /// Returns the SQL state string, if this is a server error.
+    #[must_use]
+    pub fn sql_state(&self) -> Option<&str> {
+        match self {
+            Self::Server { sql_state, .. } => Some(sql_state),
+            _ => None,
+        }
+    }
+
+    /// Returns the error code as a string (for cross-backend parity).
+    #[must_use]
+    pub fn error_code(&self) -> Option<String> {
+        self.server_code().map(|c| c.to_string())
+    }
+
+    /// Returns `true` if this is a serialization failure.
+    ///
+    /// MySQL error 1213 (ER_LOCK_DEADLOCK) maps to this category.
+    #[must_use]
+    pub fn is_serialization_failure(&self) -> bool {
+        self.server_code() == Some(1213)
+    }
+
+    /// Returns `true` if this is a deadlock detected error.
+    ///
+    /// MySQL error 1205 (ER_LOCK_WAIT_TIMEOUT) and 1213 (ER_LOCK_DEADLOCK).
+    #[must_use]
+    pub fn is_deadlock(&self) -> bool {
+        matches!(self.server_code(), Some(1205 | 1213))
+    }
+
+    /// Returns `true` if this is a unique constraint violation.
+    ///
+    /// MySQL error 1062 (ER_DUP_ENTRY).
+    #[must_use]
+    pub fn is_unique_violation(&self) -> bool {
+        self.server_code() == Some(1062)
+    }
+
+    /// Returns `true` if this is any constraint violation.
+    ///
+    /// MySQL errors: 1062 (duplicate), 1451/1452 (foreign key).
+    #[must_use]
+    pub fn is_constraint_violation(&self) -> bool {
+        matches!(self.server_code(), Some(1062 | 1451 | 1452))
+    }
+
+    /// Returns `true` if this is a connection-level error.
+    ///
+    /// Includes I/O errors, connection closed, and MySQL errors
+    /// 2006 (server gone) and 2013 (lost connection during query).
+    #[must_use]
+    pub fn is_connection_error(&self) -> bool {
+        matches!(
+            self,
+            Self::Io(_) | Self::ConnectionClosed | Self::TlsRequired
+        ) || matches!(self.server_code(), Some(2006 | 2013))
+    }
+
+    /// Returns `true` if this error is transient and may succeed on retry.
+    ///
+    /// Transient errors: deadlock (1213), lock wait timeout (1205),
+    /// server gone (2006), lost connection (2013), and I/O errors.
+    #[must_use]
+    pub fn is_transient(&self) -> bool {
+        if matches!(self, Self::Io(_) | Self::ConnectionClosed) {
+            return true;
+        }
+        matches!(self.server_code(), Some(1205 | 1213 | 2006 | 2013))
+    }
+
+    /// Returns `true` if this error is safe to retry automatically.
+    #[must_use]
+    pub fn is_retryable(&self) -> bool {
+        self.is_transient()
+    }
+}
+
 impl fmt::Display for MySqlError {
     fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
         match self {
