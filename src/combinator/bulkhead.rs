@@ -571,19 +571,8 @@ impl Bulkhead {
         F: FnOnce() -> Result<T, E>,
         E: fmt::Display,
     {
-        let permit = self.try_acquire(weight).ok_or(BulkheadError::Full)?;
-
-        // Use catch_unwind to ensure permit is released even if op panics.
-        let result = std::panic::catch_unwind(std::panic::AssertUnwindSafe(op));
-
-        // Permit is automatically released when dropped here or on unwind.
-        // We explicitly drop it here to be clear that the protected section ends.
-        drop(permit);
-
-        match result {
-            Ok(inner_result) => inner_result.map_err(BulkheadError::Inner),
-            Err(panic_payload) => std::panic::resume_unwind(panic_payload),
-        }
+        let _permit = self.try_acquire(weight).ok_or(BulkheadError::Full)?;
+        op().map_err(BulkheadError::Inner)
     }
 
     /// Manually reset the bulkhead to full capacity.

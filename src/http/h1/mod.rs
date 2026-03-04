@@ -23,7 +23,9 @@ pub mod types;
 
 pub use client::{ClientIncomingBody, ClientStreamingResponse, Http1Client, Http1ClientCodec};
 pub use codec::{Http1Codec, HttpError};
-pub use http_client::{ClientError, HttpClient, HttpClientConfig, ParsedUrl, RedirectPolicy};
+pub use http_client::{
+    ClientError, HttpClient, HttpClientBuilder, HttpClientConfig, ParsedUrl, RedirectPolicy,
+};
 #[cfg(not(target_arch = "wasm32"))]
 pub use listener::{Http1Listener, Http1ListenerConfig};
 #[cfg(not(target_arch = "wasm32"))]

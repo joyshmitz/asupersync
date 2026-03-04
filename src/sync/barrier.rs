@@ -484,7 +484,7 @@ mod tests {
             let waker = Waker::noop();
             let mut poll_cx = Context::from_waker(waker);
             let mut fut = barrier.wait(&cx);
-            let pinned = unsafe { Pin::new_unchecked(&mut fut) };
+            let pinned = Pin::new(&mut fut);
             let status = pinned.poll(&mut poll_cx);
             let pending = status.is_pending();
             crate::assert_with_log!(pending, "party 2 pending", true, pending);
@@ -537,14 +537,14 @@ mod tests {
 
         // Poll once to arrive and register as a waiter.
         let mut fut = barrier.wait(&cx);
-        let pinned = unsafe { Pin::new_unchecked(&mut fut) };
+        let pinned = Pin::new(&mut fut);
         let status = pinned.poll(&mut poll_cx);
         let pending = status.is_pending();
         crate::assert_with_log!(pending, "arrived and waiting", true, pending);
 
         // Now cancel.
         cx.set_cancel_requested(true);
-        let pinned = unsafe { Pin::new_unchecked(&mut fut) };
+        let pinned = Pin::new(&mut fut);
         let status = pinned.poll(&mut poll_cx);
         let cancelled = matches!(status, Poll::Ready(Err(BarrierWaitError::Cancelled)));
         crate::assert_with_log!(cancelled, "cancelled after arrival", true, cancelled);
@@ -596,7 +596,7 @@ mod tests {
             let waker = Waker::noop();
             let mut poll_cx = Context::from_waker(waker);
             let mut fut = barrier.wait(&cx);
-            let pinned = unsafe { Pin::new_unchecked(&mut fut) };
+            let pinned = Pin::new(&mut fut);
             let _ = pinned.poll(&mut poll_cx); // arrives -> Pending
             // drop here
         }

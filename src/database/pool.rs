@@ -27,6 +27,8 @@
 //! let conn = pool.get()?;
 //! ```
 
+use crate::combinator::{RetryPolicy, calculate_delay};
+
 use std::collections::VecDeque;
 use std::fmt;
 use std::sync::atomic::{AtomicU64, Ordering};
@@ -384,6 +386,63 @@ impl<M: ConnectionManager> DbPool<M> {
             }
         } else {
             Err(DbPoolError::Full)
+        }
+    }
+
+    /// Acquire a connection with retry and exponential backoff.
+    ///
+    /// On transient failures (`Connect` error or `Full` pool), retries
+    /// with exponential backoff per the given policy. Total time is
+    /// bounded by `connection_timeout` from the pool config.
+    ///
+    /// # Contract: C-RTY-03
+    ///
+    /// 1. First attempt: immediate.
+    /// 2. On connection failure: retry with `initial_delay`.
+    /// 3. Total attempts bounded by `max_attempts`.
+    /// 4. Total time bounded by `connection_timeout`.
+    /// 5. No resource leak on any failure path.
+    pub fn get_with_retry(
+        &self,
+        policy: &RetryPolicy,
+    ) -> Result<PooledConnection<'_, M>, DbPoolError<M::Error>> {
+        let deadline = Instant::now() + self.config.connection_timeout;
+        let mut attempt = 0u32;
+
+        loop {
+            attempt += 1;
+
+            match self.get() {
+                Ok(conn) => return Ok(conn),
+                Err(DbPoolError::Closed) => return Err(DbPoolError::Closed),
+                Err(e) => {
+                    // Connect and Full are retryable; others are not.
+                    if !matches!(e, DbPoolError::Connect(_) | DbPoolError::Full) {
+                        return Err(e);
+                    }
+
+                    if attempt >= policy.max_attempts {
+                        return Err(e);
+                    }
+
+                    // Check if deadline already passed.
+                    let remaining = deadline.saturating_duration_since(Instant::now());
+                    if remaining.is_zero() {
+                        self.stats.total_timeouts.fetch_add(1, Ordering::Relaxed);
+                        return Err(DbPoolError::Timeout);
+                    }
+
+                    // Calculate backoff delay (no jitter in synchronous context).
+                    let delay = calculate_delay(policy, attempt, None);
+                    std::thread::sleep(delay.min(remaining));
+
+                    // Re-check deadline after sleep.
+                    if Instant::now() >= deadline {
+                        self.stats.total_timeouts.fetch_add(1, Ordering::Relaxed);
+                        return Err(DbPoolError::Timeout);
+                    }
+                }
+            }
         }
     }
 

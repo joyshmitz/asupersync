@@ -365,6 +365,99 @@ impl Default for RedirectPolicy {
     }
 }
 
+/// Builder for [`HttpClient`].
+///
+/// This provides a reqwest-style fluent API for configuring the high-level
+/// HTTP client and its underlying connection pool defaults.
+#[derive(Debug, Clone, Default)]
+pub struct HttpClientBuilder {
+    config: HttpClientConfig,
+}
+
+impl HttpClientBuilder {
+    /// Creates a builder with default configuration.
+    #[must_use]
+    pub fn new() -> Self {
+        Self::default()
+    }
+
+    /// Replaces the full pool configuration.
+    #[must_use]
+    pub fn pool_config(mut self, pool_config: PoolConfig) -> Self {
+        self.config.pool_config = pool_config;
+        self
+    }
+
+    /// Sets max pooled connections per host.
+    #[must_use]
+    pub fn max_connections_per_host(mut self, max: usize) -> Self {
+        self.config.pool_config.max_connections_per_host = max;
+        self
+    }
+
+    /// Sets max pooled connections across all hosts.
+    #[must_use]
+    pub fn max_total_connections(mut self, max: usize) -> Self {
+        self.config.pool_config.max_total_connections = max;
+        self
+    }
+
+    /// Sets idle timeout for pooled connections.
+    #[must_use]
+    pub fn idle_timeout(mut self, timeout: std::time::Duration) -> Self {
+        self.config.pool_config.idle_timeout = timeout;
+        self
+    }
+
+    /// Sets cleanup interval for idle pooled connections.
+    #[must_use]
+    pub fn cleanup_interval(mut self, interval: std::time::Duration) -> Self {
+        self.config.pool_config.cleanup_interval = interval;
+        self
+    }
+
+    /// Sets redirect behavior.
+    #[must_use]
+    pub fn redirect_policy(mut self, policy: RedirectPolicy) -> Self {
+        self.config.redirect_policy = policy;
+        self
+    }
+
+    /// Follows up to `max` redirects.
+    #[must_use]
+    pub fn max_redirects(mut self, max: u32) -> Self {
+        self.config.redirect_policy = RedirectPolicy::Limited(max);
+        self
+    }
+
+    /// Disables automatic redirect following.
+    #[must_use]
+    pub fn no_redirects(mut self) -> Self {
+        self.config.redirect_policy = RedirectPolicy::None;
+        self
+    }
+
+    /// Sets default `User-Agent`.
+    #[must_use]
+    pub fn user_agent(mut self, user_agent: impl Into<String>) -> Self {
+        self.config.user_agent = Some(user_agent.into());
+        self
+    }
+
+    /// Removes default `User-Agent`.
+    #[must_use]
+    pub fn no_user_agent(mut self) -> Self {
+        self.config.user_agent = None;
+        self
+    }
+
+    /// Builds the [`HttpClient`].
+    #[must_use]
+    pub fn build(self) -> HttpClient {
+        HttpClient::with_config(self.config)
+    }
+}
+
 /// Configuration for the HTTP client.
 #[derive(Debug, Clone)]
 pub struct HttpClientConfig {
@@ -406,6 +499,12 @@ pub struct HttpClient {
 }
 
 impl HttpClient {
+    /// Create a new [`HttpClientBuilder`].
+    #[must_use]
+    pub fn builder() -> HttpClientBuilder {
+        HttpClientBuilder::new()
+    }
+
     /// Create a new client with default configuration.
     #[must_use]
     pub fn new() -> Self {
@@ -1223,6 +1322,89 @@ mod tests {
             RedirectPolicy::Limited(10)
         ));
         assert_eq!(config.user_agent, Some("asupersync/0.1".into()));
+    }
+
+    #[test]
+    fn builder_default_matches_client_defaults() {
+        let client = HttpClient::builder().build();
+        assert_eq!(client.config.pool_config.max_connections_per_host, 6);
+        assert_eq!(client.config.pool_config.max_total_connections, 100);
+        assert_eq!(
+            client.config.pool_config.idle_timeout,
+            std::time::Duration::from_secs(90)
+        );
+        assert_eq!(
+            client.config.pool_config.cleanup_interval,
+            std::time::Duration::from_secs(30)
+        );
+        assert!(matches!(
+            client.config.redirect_policy,
+            RedirectPolicy::Limited(10)
+        ));
+        assert_eq!(client.config.user_agent.as_deref(), Some("asupersync/0.1"));
+    }
+
+    #[test]
+    fn builder_overrides_pool_and_redirect_and_user_agent() {
+        let client = HttpClient::builder()
+            .max_connections_per_host(12)
+            .max_total_connections(240)
+            .idle_timeout(std::time::Duration::from_secs(15))
+            .cleanup_interval(std::time::Duration::from_secs(5))
+            .no_redirects()
+            .no_user_agent()
+            .build();
+
+        assert_eq!(client.config.pool_config.max_connections_per_host, 12);
+        assert_eq!(client.config.pool_config.max_total_connections, 240);
+        assert_eq!(
+            client.config.pool_config.idle_timeout,
+            std::time::Duration::from_secs(15)
+        );
+        assert_eq!(
+            client.config.pool_config.cleanup_interval,
+            std::time::Duration::from_secs(5)
+        );
+        assert!(matches!(
+            client.config.redirect_policy,
+            RedirectPolicy::None
+        ));
+        assert!(client.config.user_agent.is_none());
+    }
+
+    #[test]
+    fn builder_pool_config_and_max_redirects() {
+        let pool_config = PoolConfig::builder()
+            .max_connections_per_host(3)
+            .max_total_connections(32)
+            .idle_timeout(std::time::Duration::from_secs(7))
+            .cleanup_interval(std::time::Duration::from_secs(3))
+            .build();
+
+        let client = HttpClient::builder()
+            .pool_config(pool_config)
+            .max_redirects(2)
+            .user_agent("asupersync-test/2.0")
+            .build();
+
+        assert_eq!(client.config.pool_config.max_connections_per_host, 3);
+        assert_eq!(client.config.pool_config.max_total_connections, 32);
+        assert_eq!(
+            client.config.pool_config.idle_timeout,
+            std::time::Duration::from_secs(7)
+        );
+        assert_eq!(
+            client.config.pool_config.cleanup_interval,
+            std::time::Duration::from_secs(3)
+        );
+        assert!(matches!(
+            client.config.redirect_policy,
+            RedirectPolicy::Limited(2)
+        ));
+        assert_eq!(
+            client.config.user_agent.as_deref(),
+            Some("asupersync-test/2.0")
+        );
     }
 
     #[test]

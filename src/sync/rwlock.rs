@@ -334,9 +334,10 @@ impl<T> RwLock<T> {
             let wake_writer = if !state.writer_queue.is_empty() && !state.reader_waiters.is_empty()
             {
                 // Both are waiting. Wake the oldest to ensure fairness.
+                // We use wrapping arithmetic cast to i64 to handle u64 wrap-around safely.
                 let writer_id = state.writer_queue.front().unwrap().id;
                 let reader_id = state.reader_waiters.front().unwrap().id;
-                writer_id < reader_id
+                writer_id.wrapping_sub(reader_id).cast_signed() < 0
             } else {
                 !state.writer_queue.is_empty()
             };
@@ -546,7 +547,7 @@ impl<T> Drop for WriteFuture<'_, '_, T> {
                     if !state.writer_queue.is_empty() && !state.reader_waiters.is_empty() {
                         let writer_id = state.writer_queue.front().unwrap().id;
                         let reader_id = state.reader_waiters.front().unwrap().id;
-                        writer_id < reader_id
+                        writer_id.wrapping_sub(reader_id).cast_signed() < 0
                     } else {
                         !state.writer_queue.is_empty()
                     };
@@ -563,6 +564,7 @@ impl<T> Drop for WriteFuture<'_, '_, T> {
                 }
             }
         } else {
+            // We incremented writer_waiters but never got a waiter_id (e.g. panic during push_back)
             state.writer_waiters = state.writer_waiters.saturating_sub(1);
             if state.writer_waiters == 0 && !state.writer_active {
                 let wakers = RwLock::<T>::drain_reader_waiters(&mut state);
@@ -909,7 +911,7 @@ impl<T> Drop for OwnedWriteFuture<'_, T> {
                     if !state.writer_queue.is_empty() && !state.reader_waiters.is_empty() {
                         let writer_id = state.writer_queue.front().unwrap().id;
                         let reader_id = state.reader_waiters.front().unwrap().id;
-                        writer_id < reader_id
+                        writer_id.wrapping_sub(reader_id).cast_signed() < 0
                     } else {
                         !state.writer_queue.is_empty()
                     };
@@ -926,6 +928,7 @@ impl<T> Drop for OwnedWriteFuture<'_, T> {
                 }
             }
         } else {
+            // We incremented writer_waiters but never got a waiter_id (e.g. panic during push_back)
             state.writer_waiters = state.writer_waiters.saturating_sub(1);
             if state.writer_waiters == 0 && !state.writer_active {
                 let wakers = RwLock::<T>::drain_reader_waiters(&mut state);

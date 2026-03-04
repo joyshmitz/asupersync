@@ -368,8 +368,8 @@ impl SemaphorePermit<'_> {
     }
 
     /// Forgets the permit without releasing it back to the semaphore.
-    pub fn forget(self) {
-        let _ = std::mem::ManuallyDrop::new(self);
+    pub fn forget(mut self) {
+        self.count = 0;
     }
 }
 
@@ -442,6 +442,11 @@ impl OwnedSemaphorePermit {
     #[must_use]
     pub fn count(&self) -> usize {
         self.count
+    }
+
+    /// Forgets the permit without releasing it back to the semaphore.
+    pub fn forget(mut self) {
+        self.count = 0;
     }
 }
 
@@ -1476,5 +1481,20 @@ mod tests {
         assert!(format!("{cancelled:?}").contains("Cancelled"));
         assert!(closed.to_string().contains("closed"));
         assert!(cancelled.to_string().contains("cancelled"));
+    }
+
+    #[test]
+    fn owned_permit_forget_leaks_permits_but_not_arc() {
+        init_test("owned_permit_forget_leaks_permits_but_not_arc");
+        let sem = std::sync::Arc::new(Semaphore::new(2));
+        let permit = OwnedSemaphorePermit::try_acquire_arc(&sem, 1).expect("should acquire");
+        permit.forget();
+
+        let avail_leaked = sem.available_permits();
+        crate::assert_with_log!(avail_leaked == 1, "after forget", 1usize, avail_leaked);
+
+        let strong = std::sync::Arc::strong_count(&sem);
+        crate::assert_with_log!(strong == 1, "arc count", 1usize, strong);
+        crate::test_complete!("owned_permit_forget_leaks_permits_but_not_arc");
     }
 }

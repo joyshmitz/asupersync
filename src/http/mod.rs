@@ -49,6 +49,7 @@ pub mod h3_native;
 pub mod pool;
 
 pub use body::{Body, Empty, Frame, Full, HeaderMap, HeaderName, HeaderValue, SizeHint};
+pub use h1::http_client::HttpClientBuilder;
 #[cfg(feature = "http3")]
 pub use h3::H3Error;
 #[cfg(all(feature = "http3-compat", not(feature = "http3")))]

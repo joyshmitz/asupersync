@@ -30,7 +30,7 @@ SCENARIO_ID="E2E-SUITE-DOCTOR-INVARIANT-ANALYZER"
 export TEST_LOG_LEVEL="${TEST_LOG_LEVEL:-info}"
 export RUST_LOG="${RUST_LOG:-asupersync=info}"
 export TEST_SEED="${TEST_SEED:-0xDEADBEEF}"
-RCH_SCAN_TIMEOUT="${RCH_SCAN_TIMEOUT:-240}"
+RCH_SCAN_TIMEOUT="${RCH_SCAN_TIMEOUT:-900}"
 RCH_RETRY_ATTEMPTS="${RCH_RETRY_ATTEMPTS:-3}"
 
 RCH_BIN="${RCH_BIN:-$HOME/.local/bin/rch}"
@@ -73,7 +73,9 @@ run_analysis_call() {
     local attempt_log=""
 
     for ((attempt = 1; attempt <= RCH_RETRY_ATTEMPTS; attempt++)); do
-        local target_dir="/tmp/rch-doctor-invariant-analyzer-${TIMESTAMP}-${run_id}-attempt${attempt}"
+        # Keep one deterministic target dir per script invocation so run1/run2
+        # and retries reuse compiled artifacts instead of cold-compiling each call.
+        local target_dir="/tmp/rch-doctor-invariant-analyzer-${TIMESTAMP}"
         local -a run_cmd=(
             env "CARGO_TARGET_DIR=${target_dir}" \
             cargo run --quiet --features cli --bin asupersync --

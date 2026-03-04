@@ -3496,7 +3496,7 @@ mod tests {
         {
             let mut acquire_fut = pool.acquire(&cx_handle);
             // SAFETY: acquire_fut lives on the stack and we do not move it.
-            let pinned = unsafe { std::pin::Pin::new_unchecked(&mut acquire_fut) };
+            let pinned = std::pin::Pin::new(&mut acquire_fut);
             let poll_result = pinned.poll(&mut task_cx);
             // Should be Pending — pool is full.
             let is_pending = poll_result.is_pending();

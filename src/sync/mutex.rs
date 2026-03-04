@@ -535,20 +535,31 @@ mod tests {
         crate::test_phase!(test_name);
     }
 
-    fn poll_once<T>(future: &mut impl Future<Output = T>) -> Option<T> {
+    fn poll_once<T, F: Future<Output = T> + Unpin>(future: &mut F) -> Option<T> {
         let waker = Waker::noop();
         let mut cx = Context::from_waker(waker);
-        match unsafe { Pin::new_unchecked(future) }.poll(&mut cx) {
+        match Pin::new(future).poll(&mut cx) {
             Poll::Ready(v) => Some(v),
             Poll::Pending => None,
         }
     }
 
-    fn poll_until_ready<T>(future: &mut impl Future<Output = T>) -> T {
+    fn poll_until_ready<T, F: Future<Output = T> + Unpin>(future: &mut F) -> T {
         let waker = Waker::noop();
         let mut cx = Context::from_waker(waker);
         loop {
-            match unsafe { Pin::new_unchecked(&mut *future) }.poll(&mut cx) {
+            match Pin::new(&mut *future).poll(&mut cx) {
+                Poll::Ready(v) => return v,
+                Poll::Pending => std::thread::yield_now(),
+            }
+        }
+    }
+
+    fn poll_pinned_until_ready<T, F: Future<Output = T>>(mut future: Pin<&mut F>) -> T {
+        let waker = Waker::noop();
+        let mut cx = Context::from_waker(waker);
+        loop {
+            match future.as_mut().poll(&mut cx) {
                 Poll::Ready(v) => return v,
                 Poll::Pending => std::thread::yield_now(),
             }
@@ -938,8 +949,8 @@ mod tests {
         let mutex = Arc::new(Mutex::new(0_u32));
 
         // Lock via the owned async path.
-        let mut fut = OwnedMutexGuard::lock(Arc::clone(&mutex), &cx);
-        let mut guard = poll_until_ready(&mut fut).expect("async lock should succeed");
+        let mut fut = std::pin::pin!(OwnedMutexGuard::lock(Arc::clone(&mutex), &cx));
+        let mut guard = poll_pinned_until_ready(fut.as_mut()).expect("async lock should succeed");
         *guard = 99;
         drop(guard);
 

@@ -341,7 +341,7 @@ pub fn first_ok_to_result<T, E>(result: FirstOkResult<T, E>) -> Result<T, FirstO
         .iter()
         .position(|(_, f)| matches!(f, FirstOkFailure::Cancelled(_)))
     {
-        let attempted = result.failures.len();
+        let _attempted = result.failures.len();
         let mut failures = result.failures;
         let cancel_failure = failures.remove(cancel_idx);
         let FirstOkFailure::Cancelled(reason) = cancel_failure.1 else {
@@ -361,7 +361,7 @@ pub fn first_ok_to_result<T, E>(result: FirstOkResult<T, E>) -> Result<T, FirstO
         return Err(FirstOkError::Cancelled {
             reason,
             errors_before_cancel: errors_before,
-            attempted_before_cancel: attempted,
+            attempted_before_cancel: cancel_idx, // Number of attempts before the cancelled one
         });
     }
 
@@ -630,7 +630,7 @@ mod tests {
                 ..
             } => {
                 assert_eq!(errors_before_cancel.len(), 1);
-                assert_eq!(attempted_before_cancel, 2);
+                assert_eq!(attempted_before_cancel, 1);
             }
             _ => panic!("Expected Cancelled"),
         }

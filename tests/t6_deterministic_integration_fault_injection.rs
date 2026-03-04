@@ -1669,3 +1669,321 @@ mod messaging_cross_system_equivalence {
         assert!(js_429.is_capacity_error());
     }
 }
+
+// ─── C-RTY-03: Connection Pool Retry ────────────────────────────────────────
+
+mod pool_connection_retry {
+    use asupersync::combinator::RetryPolicy;
+    use asupersync::database::pool::{
+        ConnectionManager, DbPool, DbPoolConfig, DbPoolError,
+    };
+    use std::fmt;
+    use std::sync::atomic::{AtomicBool, AtomicUsize, Ordering};
+    use std::sync::Arc;
+    use std::time::{Duration, Instant};
+
+    // ── Test fixtures ───────────────────────────────────────────────────
+
+    #[derive(Debug)]
+    struct TestConn(usize);
+
+    #[derive(Debug)]
+    struct TestErr(String);
+
+    impl fmt::Display for TestErr {
+        fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
+            write!(f, "{}", self.0)
+        }
+    }
+    impl std::error::Error for TestErr {}
+
+    /// Shared counters accessible from both the manager and tests.
+    #[derive(Clone)]
+    struct Counters {
+        connect_calls: Arc<AtomicUsize>,
+        fail_count: Arc<AtomicUsize>,
+        fail_connect: Arc<AtomicBool>,
+    }
+
+    impl Counters {
+        fn new() -> Self {
+            Self {
+                connect_calls: Arc::new(AtomicUsize::new(0)),
+                fail_count: Arc::new(AtomicUsize::new(0)),
+                fail_connect: Arc::new(AtomicBool::new(false)),
+            }
+        }
+
+        fn calls(&self) -> usize {
+            self.connect_calls.load(Ordering::SeqCst)
+        }
+
+        fn fail_next(&self, n: usize) {
+            self.fail_count.store(n, Ordering::SeqCst);
+        }
+
+        fn set_permanent_fail(&self, fail: bool) {
+            self.fail_connect.store(fail, Ordering::SeqCst);
+        }
+    }
+
+    struct FlakeyManager {
+        next_id: AtomicUsize,
+        counters: Counters,
+    }
+
+    impl FlakeyManager {
+        fn new(counters: Counters) -> Self {
+            Self {
+                next_id: AtomicUsize::new(1),
+                counters,
+            }
+        }
+    }
+
+    impl ConnectionManager for FlakeyManager {
+        type Connection = TestConn;
+        type Error = TestErr;
+
+        fn connect(&self) -> Result<Self::Connection, Self::Error> {
+            self.counters.connect_calls.fetch_add(1, Ordering::SeqCst);
+
+            if self.counters.fail_connect.load(Ordering::SeqCst) {
+                return Err(TestErr("permanently refused".into()));
+            }
+
+            let remaining = self.counters.fail_count.load(Ordering::SeqCst);
+            if remaining > 0 {
+                self.counters.fail_count.fetch_sub(1, Ordering::SeqCst);
+                return Err(TestErr("transient failure".into()));
+            }
+
+            let id = self.next_id.fetch_add(1, Ordering::SeqCst);
+            Ok(TestConn(id))
+        }
+
+        fn is_valid(&self, _conn: &Self::Connection) -> bool {
+            true
+        }
+    }
+
+    fn fast_retry_policy(max_attempts: u32) -> RetryPolicy {
+        RetryPolicy::new()
+            .with_max_attempts(max_attempts)
+            .with_initial_delay(Duration::from_millis(1))
+            .with_max_delay(Duration::from_millis(10))
+            .no_jitter()
+    }
+
+    fn make_pool(counters: &Counters) -> DbPool<FlakeyManager> {
+        DbPool::new(FlakeyManager::new(counters.clone()), DbPoolConfig::default())
+    }
+
+    fn make_pool_with_config(counters: &Counters, config: DbPoolConfig) -> DbPool<FlakeyManager> {
+        DbPool::new(FlakeyManager::new(counters.clone()), config)
+    }
+
+    // ── Tests ───────────────────────────────────────────────────────────
+
+    #[test]
+    fn c_rty_03_first_attempt_immediate_success() {
+        // Contract: first attempt is immediate — no delay when first attempt succeeds.
+        let ctr = Counters::new();
+        let pool = make_pool(&ctr);
+        let policy = fast_retry_policy(3);
+        let start = Instant::now();
+
+        let conn = pool.get_with_retry(&policy).unwrap();
+        assert!(start.elapsed() < Duration::from_millis(50));
+        assert_eq!(conn.get().0, 1);
+        assert_eq!(ctr.calls(), 1);
+    }
+
+    #[test]
+    fn c_rty_03_retries_on_transient_connect_failure() {
+        // Contract: on connection failure, retry with backoff.
+        let ctr = Counters::new();
+        ctr.fail_next(2); // Fail first 2, succeed on 3rd.
+        let pool = make_pool(&ctr);
+        let policy = fast_retry_policy(5);
+
+        let conn = pool.get_with_retry(&policy).unwrap();
+        assert_eq!(conn.get().0, 1);
+        assert_eq!(ctr.calls(), 3);
+    }
+
+    #[test]
+    fn c_rty_03_bounded_by_max_attempts() {
+        // Contract: total attempts bounded by max_attempts.
+        let ctr = Counters::new();
+        ctr.set_permanent_fail(true);
+        let pool = make_pool(&ctr);
+        let policy = fast_retry_policy(3);
+
+        let result = pool.get_with_retry(&policy);
+        assert!(matches!(result, Err(DbPoolError::Connect(_))));
+        // 3 attempts: attempt 1 (immediate), then 2 retries, then exhausted.
+        assert_eq!(ctr.calls(), 3);
+    }
+
+    #[test]
+    fn c_rty_03_bounded_by_connection_timeout() {
+        // Contract: total time bounded by connection_timeout.
+        let ctr = Counters::new();
+        ctr.set_permanent_fail(true);
+        let config = DbPoolConfig::default()
+            .connection_timeout(Duration::from_millis(50));
+        let pool = make_pool_with_config(&ctr, config);
+        // Many attempts allowed, but timeout should kick in.
+        let policy = RetryPolicy::new()
+            .with_max_attempts(100)
+            .with_initial_delay(Duration::from_millis(20))
+            .with_max_delay(Duration::from_millis(20))
+            .no_jitter();
+
+        let start = Instant::now();
+        let result = pool.get_with_retry(&policy);
+        let elapsed = start.elapsed();
+
+        assert!(
+            matches!(result, Err(DbPoolError::Timeout)),
+            "expected Timeout, got {result:?}"
+        );
+        // Should have timed out around 50ms, not waited for all 100 attempts.
+        assert!(elapsed < Duration::from_millis(200));
+        assert_eq!(pool.stats().total_timeouts, 1);
+    }
+
+    #[test]
+    fn c_rty_03_no_retry_on_closed_pool() {
+        // Contract: Closed is not retryable — return immediately.
+        let ctr = Counters::new();
+        let pool = make_pool(&ctr);
+        pool.close();
+        let policy = fast_retry_policy(5);
+
+        let result = pool.get_with_retry(&policy);
+        assert!(matches!(result, Err(DbPoolError::Closed)));
+        // Should NOT have called connect at all.
+        assert_eq!(ctr.calls(), 0);
+    }
+
+    #[test]
+    fn c_rty_03_retries_on_full_pool() {
+        // Contract: Full pool triggers retry (capacity may free up).
+        let ctr = Counters::new();
+        let pool = make_pool_with_config(&ctr, DbPoolConfig::with_max_size(1));
+        let policy = fast_retry_policy(3);
+
+        // Hold one connection to make pool full.
+        let _held = pool.get().unwrap();
+
+        let result = pool.get_with_retry(&policy);
+        // All 3 attempts see Full, then give up.
+        assert!(matches!(result, Err(DbPoolError::Full)));
+    }
+
+    #[test]
+    fn c_rty_03_no_resource_leak_on_failure() {
+        // Contract: no resource leak on any failure path.
+        let ctr = Counters::new();
+        ctr.set_permanent_fail(true);
+        let pool = make_pool_with_config(&ctr, DbPoolConfig::with_max_size(3));
+        let policy = fast_retry_policy(3);
+
+        let _ = pool.get_with_retry(&policy);
+        let _ = pool.get_with_retry(&policy);
+
+        // Total should be 0 — failed connects roll back capacity.
+        assert_eq!(pool.stats().total, 0);
+        assert_eq!(pool.stats().idle, 0);
+
+        // Now allow connections — pool should still have full capacity.
+        ctr.set_permanent_fail(false);
+        let _c1 = pool.get_with_retry(&policy).unwrap();
+        let _c2 = pool.get_with_retry(&policy).unwrap();
+        let _c3 = pool.get_with_retry(&policy).unwrap();
+        assert_eq!(pool.stats().total, 3);
+    }
+
+    #[test]
+    fn c_rty_03_backoff_delay_increases() {
+        // Verify exponential backoff is applied between retries.
+        let ctr = Counters::new();
+        ctr.fail_next(3); // Fail 3 times, succeed on 4th.
+        let pool = make_pool(&ctr);
+        let policy = RetryPolicy::new()
+            .with_max_attempts(5)
+            .with_initial_delay(Duration::from_millis(10))
+            .with_max_delay(Duration::from_millis(100))
+            .with_multiplier(2.0)
+            .no_jitter();
+
+        let start = Instant::now();
+        let conn = pool.get_with_retry(&policy).unwrap();
+        let elapsed = start.elapsed();
+
+        assert_eq!(conn.get().0, 1);
+        assert_eq!(ctr.calls(), 4);
+        // Expected delays: 10ms + 20ms + 40ms = 70ms total minimum sleep.
+        assert!(
+            elapsed >= Duration::from_millis(60),
+            "expected at least ~70ms of backoff, got {elapsed:?}"
+        );
+    }
+
+    #[test]
+    fn c_rty_03_single_attempt_no_retry() {
+        // max_attempts=1 means no retries at all.
+        let ctr = Counters::new();
+        ctr.set_permanent_fail(true);
+        let pool = make_pool(&ctr);
+        let policy = fast_retry_policy(1);
+
+        let result = pool.get_with_retry(&policy);
+        assert!(matches!(result, Err(DbPoolError::Connect(_))));
+        assert_eq!(ctr.calls(), 1);
+    }
+
+    #[test]
+    fn c_rty_03_retry_policy_defaults_match_contract() {
+        // Contract C-RTY-01 defaults: 3 attempts, 100ms initial, 30s max, 2.0 mult, 0.1 jitter.
+        let policy = RetryPolicy::new();
+        assert_eq!(policy.max_attempts, 3);
+        assert_eq!(policy.initial_delay, Duration::from_millis(100));
+        assert_eq!(policy.max_delay, Duration::from_secs(30));
+        assert!((policy.multiplier - 2.0).abs() < f64::EPSILON);
+        assert!((policy.jitter - 0.1).abs() < f64::EPSILON);
+    }
+
+    #[test]
+    fn c_rty_03_stats_track_timeout() {
+        // Timeout counter should increment on connection_timeout breach.
+        let ctr = Counters::new();
+        ctr.set_permanent_fail(true);
+        let config = DbPoolConfig::default()
+            .connection_timeout(Duration::from_millis(10));
+        let pool = make_pool_with_config(&ctr, config);
+        let policy = RetryPolicy::new()
+            .with_max_attempts(100)
+            .with_initial_delay(Duration::from_millis(5))
+            .no_jitter();
+
+        let _ = pool.get_with_retry(&policy);
+        assert!(pool.stats().total_timeouts >= 1);
+    }
+
+    #[test]
+    fn c_rty_03_recover_mid_sequence() {
+        // Connections fail for 2 attempts, then manager recovers.
+        let ctr = Counters::new();
+        ctr.fail_next(2);
+        let pool = make_pool(&ctr);
+        let policy = fast_retry_policy(5);
+
+        let conn = pool.get_with_retry(&policy).unwrap();
+        // Should have succeeded on attempt 3.
+        assert_eq!(ctr.calls(), 3);
+        assert_eq!(conn.get().0, 1);
+    }
+}

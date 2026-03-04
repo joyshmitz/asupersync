@@ -22,10 +22,10 @@
 //! let changes = endpoints.poll_discover();
 //! ```
 
+use parking_lot::Mutex;
 use std::collections::HashSet;
 use std::fmt;
 use std::net::{SocketAddr, ToSocketAddrs};
-use std::sync::Mutex;
 use std::time::{Duration, Instant};
 
 // ─── Change type ────────────────────────────────────────────────────────────
@@ -101,7 +101,7 @@ impl<K: Clone + Eq + std::hash::Hash + fmt::Debug + Send + Sync + 'static> Disco
     type Error = std::convert::Infallible;
 
     fn poll_discover(&self) -> Result<Vec<Change<K>>, Self::Error> {
-        let mut delivered = self.delivered.lock().unwrap();
+        let mut delivered = self.delivered.lock();
         if *delivered {
             return Ok(Vec::new());
         }
@@ -123,7 +123,7 @@ impl<K: fmt::Debug> fmt::Debug for StaticList<K> {
     fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
         f.debug_struct("StaticList")
             .field("endpoints", &self.endpoints)
-            .field("delivered", &*self.delivered.lock().unwrap())
+            .field("delivered", &*self.delivered.lock())
             .finish()
     }
 }
@@ -238,18 +238,18 @@ impl DnsServiceDiscovery {
     /// Get the number of successful resolutions.
     #[must_use]
     pub fn resolve_count(&self) -> u64 {
-        self.state.lock().unwrap().resolve_count
+        self.state.lock().resolve_count
     }
 
     /// Get the number of failed resolutions.
     #[must_use]
     pub fn error_count(&self) -> u64 {
-        self.state.lock().unwrap().error_count
+        self.state.lock().error_count
     }
 
     /// Force a re-resolution on the next poll.
     pub fn invalidate(&self) {
-        self.state.lock().unwrap().last_resolve = None;
+        self.state.lock().last_resolve = None;
     }
 
     /// Perform DNS resolution synchronously.
@@ -272,7 +272,7 @@ impl Discover for DnsServiceDiscovery {
     type Error = DnsDiscoveryError;
 
     fn poll_discover(&self) -> Result<Vec<Change<SocketAddr>>, DnsDiscoveryError> {
-        let mut state = self.state.lock().unwrap();
+        let mut state = self.state.lock();
 
         if !self.needs_resolve(&state) {
             return Ok(Vec::new());
@@ -314,13 +314,13 @@ impl Discover for DnsServiceDiscovery {
     }
 
     fn endpoints(&self) -> Vec<SocketAddr> {
-        self.state.lock().unwrap().current.iter().copied().collect()
+        self.state.lock().current.iter().copied().collect()
     }
 }
 
 impl fmt::Debug for DnsServiceDiscovery {
     fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
-        let state = self.state.lock().unwrap();
+        let state = self.state.lock();
         f.debug_struct("DnsServiceDiscovery")
             .field("hostname", &self.config.hostname)
             .field("port", &self.config.port)

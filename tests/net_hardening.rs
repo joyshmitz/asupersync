@@ -25,6 +25,7 @@ use std::time::Duration;
 
 use asupersync::io::{AsyncRead, AsyncWrite, ReadBuf};
 use asupersync::net::UdpSocket;
+use asupersync::net::happy_eyeballs::{self, HappyEyeballsConfig};
 use asupersync::net::tcp::stream::TcpStreamBuilder;
 use asupersync::net::{TcpListener, TcpStream};
 
@@ -587,4 +588,46 @@ fn udp_concurrent_sends() {
     });
 
     test_complete!("udp_concurrent_sends");
+}
+
+// =========================================================================
+// Networking enhancements (Track-H)
+// =========================================================================
+
+/// H.1 regression guard: Happy Eyeballs falls back from a failed first address.
+#[test]
+fn happy_eyeballs_fallback_to_reachable_address() {
+    init_test("happy_eyeballs_fallback_to_reachable_address");
+
+    block_on(async {
+        let listener = TcpListener::bind("127.0.0.1:0").await.unwrap();
+        let reachable_addr = listener.local_addr().unwrap();
+
+        // Allocate an ephemeral port and release it to obtain an address that should refuse.
+        let refused_addr = {
+            let probe = std::net::TcpListener::bind("127.0.0.1:0").unwrap();
+            let addr = probe.local_addr().unwrap();
+            drop(probe);
+            addr
+        };
+
+        let accept = thread::spawn(move || block_on(listener.accept()));
+
+        let config = HappyEyeballsConfig {
+            first_family_delay: Duration::from_millis(10),
+            attempt_delay: Duration::from_millis(10),
+            connect_timeout: Duration::from_millis(200),
+            overall_timeout: Duration::from_secs(2),
+        };
+
+        let stream = happy_eyeballs::connect(&[refused_addr, reachable_addr], &config)
+            .await
+            .expect("happy eyeballs should connect via fallback address");
+        assert_eq!(stream.peer_addr().unwrap(), reachable_addr);
+
+        drop(stream);
+        let _ = accept.join();
+    });
+
+    test_complete!("happy_eyeballs_fallback_to_reachable_address");
 }
