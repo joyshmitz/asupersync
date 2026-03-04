@@ -449,8 +449,12 @@ mod tests {
     #[test]
     fn token_pack_unpack_max_values() {
         init_test("token_pack_unpack_max_values");
-        // Test with maximum values that fit in 32 bits each
-        let token = SlabToken::new(u32::MAX - 1, u32::MAX - 1);
+        #[cfg(target_pointer_width = "64")]
+        let max_index = u32::MAX - 1;
+        #[cfg(target_pointer_width = "32")]
+        let max_index = 0xFF_FFFF - 1;
+        
+        let token = SlabToken::new(max_index, SlabToken::MAX_GENERATION);
         let packed = token.to_usize();
         let unpacked = SlabToken::from_usize(packed);
 

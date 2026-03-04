@@ -290,11 +290,11 @@ impl HealthWatcher {
     /// last call to `changed` (or since construction).
     pub fn changed(&mut self) -> bool {
         let current = self.service.version.load(Ordering::Acquire);
-        if current != self.last_version {
+        if current == self.last_version {
+            false
+        } else {
             self.last_version = current;
             true
-        } else {
-            false
         }
     }
 

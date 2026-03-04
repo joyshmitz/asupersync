@@ -9,6 +9,29 @@
 
 use serde_json::Value;
 use std::fs;
+use std::path::PathBuf;
+use std::process::Command;
+use std::sync::{Mutex, OnceLock};
+
+fn repo_root() -> PathBuf {
+    PathBuf::from(env!("CARGO_MANIFEST_DIR"))
+}
+
+fn verify_matrix_lock() -> std::sync::MutexGuard<'static, ()> {
+    static LOCK: OnceLock<Mutex<()>> = OnceLock::new();
+    LOCK.get_or_init(|| Mutex::new(()))
+        .lock()
+        .expect("verify-matrix lock poisoned")
+}
+
+fn parse_lifecycle_path(stdout: &str) -> Option<String> {
+    stdout
+        .lines()
+        .find_map(|line| line.strip_prefix("Artifact lifecycle policy: "))
+        .map(str::trim)
+        .filter(|path| !path.is_empty())
+        .map(ToString::to_string)
+}
 
 fn validate_suite_summary_v3(summary: &Value) -> Vec<String> {
     let mut errors = Vec::new();
@@ -333,4 +356,86 @@ fn run_all_orchestrator_enforces_redaction_mode_and_quality_threshold_contract()
             "run_all_e2e.sh missing redaction/quality contract token: {token}"
         );
     }
+}
+
+#[test]
+fn verify_matrix_emits_lifecycle_with_redaction_mode_contract() {
+    let _guard = verify_matrix_lock();
+    let output = Command::new("bash")
+        .arg("scripts/run_all_e2e.sh")
+        .arg("--verify-matrix")
+        .env("ARTIFACT_REDACTION_MODE", "strict")
+        .env("LOG_QUALITY_MIN_SCORE", "85")
+        .current_dir(repo_root())
+        .output()
+        .expect("run verify-matrix");
+
+    let stdout = String::from_utf8_lossy(&output.stdout);
+    let stderr = String::from_utf8_lossy(&output.stderr);
+    assert!(
+        output.status.success(),
+        "verify-matrix failed\nstdout:\n{stdout}\nstderr:\n{stderr}"
+    );
+
+    let lifecycle_path =
+        parse_lifecycle_path(&stdout).expect("verify-matrix output should include lifecycle path");
+    let lifecycle_json = fs::read_to_string(&lifecycle_path)
+        .unwrap_or_else(|err| panic!("read lifecycle artifact at {lifecycle_path}: {err}"));
+    let lifecycle: Value =
+        serde_json::from_str(&lifecycle_json).expect("parse lifecycle artifact JSON");
+
+    assert_eq!(
+        lifecycle
+            .get("schema_version")
+            .and_then(Value::as_str)
+            .unwrap_or(""),
+        "e2e-artifact-lifecycle-policy-v1",
+        "unexpected lifecycle schema_version"
+    );
+    assert_eq!(
+        lifecycle
+            .get("redaction_policy")
+            .and_then(|policy| policy.get("mode"))
+            .and_then(Value::as_str)
+            .unwrap_or(""),
+        "strict",
+        "lifecycle artifact should preserve selected redaction mode"
+    );
+    assert!(
+        lifecycle
+            .get("retention_days")
+            .and_then(Value::as_i64)
+            .is_some_and(|days| days > 0),
+        "retention_days must be positive"
+    );
+    assert!(
+        lifecycle
+            .get("suites")
+            .and_then(Value::as_array)
+            .is_some_and(|rows| !rows.is_empty()),
+        "suites matrix must be non-empty"
+    );
+}
+
+#[test]
+fn verify_matrix_rejects_none_redaction_mode_in_ci() {
+    let _guard = verify_matrix_lock();
+    let output = Command::new("bash")
+        .arg("scripts/run_all_e2e.sh")
+        .arg("--verify-matrix")
+        .env("CI", "1")
+        .env("ARTIFACT_REDACTION_MODE", "none")
+        .current_dir(repo_root())
+        .output()
+        .expect("run verify-matrix with CI redaction policy violation");
+
+    let stderr = String::from_utf8_lossy(&output.stderr);
+    assert!(
+        !output.status.success(),
+        "verify-matrix should fail when CI uses ARTIFACT_REDACTION_MODE=none"
+    );
+    assert!(
+        stderr.contains("ARTIFACT_REDACTION_MODE=none is forbidden in CI"),
+        "expected CI redaction policy error, got stderr:\n{stderr}"
+    );
 }

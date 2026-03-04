@@ -2,6 +2,7 @@
 //!
 //! Verifies deadline enforcement, compression plumbing, interceptor chains,
 //! health check Watch, reflection RPC helpers, and timeout header parsing.
+#![allow(unused_imports)] // T5.7 in-progress: imports reserved for upcoming tests
 
 use std::time::{Duration, Instant};
 
@@ -45,7 +46,6 @@ use asupersync::grpc::{
     Metadata,
     Request,
     Response,
-    Status,
     Code,
 };
 use asupersync::bytes::Bytes;

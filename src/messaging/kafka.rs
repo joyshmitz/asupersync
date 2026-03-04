@@ -1322,6 +1322,7 @@ mod tests {
 
             let first = producer
                 .send(&cx, "orders", None, b"first", Some(2))
+                .await
                 .unwrap();
             let second = producer
                 .send_with_headers(
@@ -1331,6 +1332,7 @@ mod tests {
                     b"second",
                     &[("trace-id", b"abc-123")],
                 )
+                .await
                 .unwrap();
 
             assert_eq!(first.topic, "orders");
@@ -1341,6 +1343,7 @@ mod tests {
 
             let third = producer
                 .send(&cx, "orders", None, b"third", Some(2))
+                .await
                 .unwrap();
             assert_eq!(third.offset, first.offset + 1);
 
@@ -1353,7 +1356,7 @@ mod tests {
     fn producer_rejects_blank_topic_name() {
         run_test_with_cx(|cx| async move {
             let producer = KafkaProducer::new(ProducerConfig::default()).unwrap();
-            let err = producer.send(&cx, "   ", None, b"x", None).unwrap_err();
+            let err = producer.send(&cx, "   ", None, b"x", None).await.unwrap_err();
             assert!(matches!(err, KafkaError::InvalidTopic(topic) if topic.is_empty()));
         });
     }

@@ -294,6 +294,7 @@ impl Future for RaceConnections {
                             winner = Some(stream);
                         }
                         completed.push((i, None));
+                        break;
                     }
                     Poll::Ready(Err(e)) => {
                         completed.push((i, Some(e)));

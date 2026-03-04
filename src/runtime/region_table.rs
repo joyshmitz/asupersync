@@ -82,8 +82,11 @@ impl RegionTable {
     }
 
     /// Inserts a new region record into the arena.
-    pub fn insert(&mut self, record: RegionRecord) -> ArenaIndex {
-        self.regions.insert(record)
+    pub fn insert(&mut self, mut record: RegionRecord) -> ArenaIndex {
+        self.regions.insert_with(|idx| {
+            record.id = RegionId::from_arena(idx);
+            record
+        })
     }
 
     /// Inserts a new region record produced by `f` into the arena.
@@ -93,7 +96,11 @@ impl RegionTable {
     where
         F: FnOnce(ArenaIndex) -> RegionRecord,
     {
-        self.regions.insert_with(f)
+        self.regions.insert_with(|idx| {
+            let mut record = f(idx);
+            record.id = RegionId::from_arena(idx);
+            record
+        })
     }
 
     /// Removes a region record from the arena.
