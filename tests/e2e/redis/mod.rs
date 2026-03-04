@@ -113,7 +113,7 @@ fn redis_e2e_get_set_incr_and_pipeline() {
 
         let mut pipe = client.pipeline();
         pipe.cmd(&["PING"]);
-        pipe.cmd_bytes(&[b"ECHO", b"hi"]);
+        pipe.cmd_bytes(&[&b"ECHO"[..], &b"hi"[..]]);
         let responses = pipe.exec(&cx).await.expect("pipeline exec");
         assert_eq!(responses.len(), 2);
         assert_eq!(

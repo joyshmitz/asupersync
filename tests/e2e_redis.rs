@@ -262,7 +262,7 @@ fn redis_e2e_cmd_bytes_binary_echo() {
         let client = RedisClient::connect(&cx, &url).await.expect("connect");
         let payload = b"hi\x00there";
         let resp = client
-            .cmd_bytes(&cx, &[b"ECHO", payload])
+            .cmd_bytes(&cx, &[&b"ECHO"[..], payload.as_ref()])
             .await
             .expect("ECHO");
         assert_with_log!(

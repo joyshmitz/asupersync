@@ -738,7 +738,12 @@ mod tests {
             .decode_message(&mut buf)
             .expect("decode must succeed")
             .expect("frame must decode");
-        crate::assert_with_log!(decoded == original, "decoded matches original", original, decoded);
+        crate::assert_with_log!(
+            decoded == original,
+            "decoded matches original",
+            original,
+            decoded
+        );
         crate::test_complete!("test_framed_codec_gzip_roundtrip");
     }
 

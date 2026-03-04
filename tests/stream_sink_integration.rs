@@ -49,12 +49,8 @@ fn collect_sync<S: Stream + Unpin>(mut stream: S) -> Vec<S::Item> {
     let waker = noop_waker();
     let mut cx = Context::from_waker(&waker);
     let mut items = Vec::new();
-    loop {
-        match Pin::new(&mut stream).poll_next(&mut cx) {
-            Poll::Ready(Some(item)) => items.push(item),
-            Poll::Ready(None) => break,
-            Poll::Pending => break, // stop on first Pending for sync streams
-        }
+    while let Poll::Ready(Some(item)) = Pin::new(&mut stream).poll_next(&mut cx) {
+        items.push(item);
     }
     items
 }
@@ -594,7 +590,7 @@ fn try_fold_with_filter_map_pipeline() {
     // filter_map → wrap in Ok → try_fold(sum)
     let pipeline = iter(vec!["1", "two", "3", "four", "5"])
         .filter_map(|s| s.parse::<i32>().ok()) // 1, 3, 5
-        .map(|x| Ok::<i32, &str>(x))
+        .map(Ok::<i32, &str>)
         .try_fold(0i32, |acc, x| Ok::<i32, &str>(acc + x));
 
     let mut future = pipeline;

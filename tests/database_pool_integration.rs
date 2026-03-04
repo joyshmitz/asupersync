@@ -11,8 +11,8 @@ mod common;
 
 use asupersync::database::pool::{ConnectionManager, DbPool, DbPoolConfig, DbPoolError};
 use std::fmt;
-use std::sync::atomic::{AtomicBool, AtomicUsize, Ordering};
 use std::sync::Arc;
+use std::sync::atomic::{AtomicBool, AtomicUsize, Ordering};
 use std::time::Duration;
 
 // ─── Test infrastructure ─────────────────────────────────────────────────────
@@ -480,7 +480,10 @@ mod pg_error_tests {
         ];
         for err in &cases {
             let display = format!("{err}");
-            assert!(!display.is_empty(), "Display should not be empty for {err:?}");
+            assert!(
+                !display.is_empty(),
+                "Display should not be empty for {err:?}"
+            );
         }
         asupersync::test_complete!("pg_error_display_all_variants");
     }

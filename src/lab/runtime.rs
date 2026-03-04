@@ -1042,13 +1042,15 @@ impl LabRuntime {
     /// This simulates clock drift or NTP corrections. A warning is logged
     /// because large jumps may affect lease/timeout correctness.
     pub fn inject_clock_skew(&mut self, skew_nanos: u64) {
-        let _old_time = self.virtual_time;
         self.advance_time(skew_nanos);
 
         crate::tracing_compat::warn!(
             "virtual clock jump detected: old_time_ms={}, new_time_ms={}, jump_ms={} \
              -- may affect lease/timeout correctness",
-            old_time.as_nanos() / 1_000_000,
+            self.virtual_time
+                .as_nanos()
+                .saturating_sub(u128::from(skew_nanos))
+                / 1_000_000,
             self.virtual_time.as_nanos() / 1_000_000,
             skew_nanos / 1_000_000
         );
@@ -2154,10 +2156,10 @@ impl LabScheduler {
     /// Schedules a task in the ready lane on its assigned worker.
     pub fn schedule(&mut self, task: TaskId, priority: u8) {
         if !self.scheduled.insert(task) {
-            println!("LabScheduler already scheduled {:?}", task);
+            println!("LabScheduler already scheduled {task:?}");
             return;
         }
-        println!("LabScheduler scheduling {:?}", task);
+        println!("LabScheduler scheduling {task:?}");
 
         let worker = self.assign_worker(task);
         self.workers[worker].schedule(task, priority);

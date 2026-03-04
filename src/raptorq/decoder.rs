@@ -3017,7 +3017,6 @@ mod tests {
             .find(|sym| !sym.is_source && sym.esi >= k as u32)
             .expect("must include at least one repair symbol");
         tampered.data[0] ^= 0x5A;
-        let _tampered_esi = tampered.esi;
 
         let err = decoder
             .decode(&received)

@@ -719,12 +719,10 @@ mod tests {
             overall_timeout: Duration::from_secs(2),
         };
 
-        let runtime = crate::runtime::Builder::new().build().unwrap();
-        let addrs_clone = addrs.clone();
-        let config_clone = config.clone();
+        let runtime = crate::runtime::RuntimeBuilder::new().build().unwrap();
         let handle = runtime
             .handle()
-            .spawn(async move { connect(&addrs_clone, &config_clone).await });
+            .spawn(async move { connect(&addrs, &config).await });
 
         let result = runtime.block_on(handle);
         assert!(
