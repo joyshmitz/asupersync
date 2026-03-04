@@ -121,10 +121,14 @@ impl SignalKind {
     #[cfg(windows)]
     #[must_use]
     pub const fn as_raw_value(&self) -> Option<i32> {
+        // signal_hook::consts::SIGBREAK is 21 on Windows (Ctrl+Break).
+        // We use the literal here because `const fn` cannot call non-const
+        // items from external crates.
+        const SIGBREAK: i32 = 21;
         match self {
             Self::Interrupt => Some(libc::SIGINT),
             Self::Terminate => Some(libc::SIGTERM),
-            Self::Quit => Some(libc::SIGBREAK),
+            Self::Quit => Some(SIGBREAK),
             _ => None,
         }
     }
@@ -302,9 +306,9 @@ mod tests {
         );
         let quit = SignalKind::Quit.as_raw_value();
         crate::assert_with_log!(
-            quit == Some(libc::SIGBREAK),
+            quit == Some(signal_hook::consts::SIGBREAK),
             "quit",
-            Some(libc::SIGBREAK),
+            Some(signal_hook::consts::SIGBREAK),
             quit
         );
         let user1 = SignalKind::User1.as_raw_value();

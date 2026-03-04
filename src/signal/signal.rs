@@ -18,7 +18,7 @@ use std::collections::HashMap;
 use std::sync::atomic::{AtomicU64, Ordering};
 #[cfg(any(unix, windows))]
 use std::sync::{Arc, OnceLock};
-#[cfg(any(unix, windows))]
+#[cfg(unix)]
 use std::thread;
 
 #[cfg(any(unix, windows))]
@@ -82,10 +82,11 @@ impl SignalSlot {
 #[derive(Debug)]
 struct SignalDispatcher {
     slots: HashMap<SignalKind, Arc<SignalSlot>>,
+    #[cfg(unix)]
     _handle: signal_hook::iterator::Handle,
 }
 
-#[cfg(any(unix, windows))]
+#[cfg(unix)]
 impl SignalDispatcher {
     fn start() -> io::Result<Self> {
         let mut slots = HashMap::with_capacity(8);
@@ -119,6 +120,45 @@ impl SignalDispatcher {
             slots,
             _handle: handle,
         })
+    }
+
+    fn slot(&self, kind: SignalKind) -> Option<Arc<SignalSlot>> {
+        self.slots.get(&kind).cloned()
+    }
+
+    #[cfg(test)]
+    fn inject(&self, kind: SignalKind) {
+        if let Some(slot) = self.slots.get(&kind) {
+            slot.record_delivery();
+        }
+    }
+}
+
+#[cfg(windows)]
+impl SignalDispatcher {
+    #[allow(unsafe_code)] // signal_hook::low_level::register requires unsafe
+    fn start() -> io::Result<Self> {
+        let mut slots = HashMap::with_capacity(4);
+        for kind in all_signal_kinds() {
+            slots.insert(kind, Arc::new(SignalSlot::new()));
+        }
+
+        // On Windows, signal_hook::iterator is unavailable. Use low-level
+        // register() which installs CRT signal handlers that invoke our
+        // callback directly — no dispatcher thread needed.
+        for kind in all_signal_kinds() {
+            let raw = raw_signal_for_kind(kind);
+            let slot = slots.get(&kind).expect("slot just inserted").clone();
+            // SAFETY: our closure only touches atomics and Notify (both
+            // Send+Sync) and performs no allocations or locks.
+            unsafe {
+                signal_hook::low_level::register(raw, move || {
+                    slot.record_delivery();
+                })?;
+            }
+        }
+
+        Ok(Self { slots })
     }
 
     fn slot(&self, kind: SignalKind) -> Option<Arc<SignalSlot>> {
@@ -201,7 +241,7 @@ fn signal_kind_from_raw(raw: i32) -> Option<SignalKind> {
         Some(SignalKind::Interrupt)
     } else if raw == libc::SIGTERM {
         Some(SignalKind::Terminate)
-    } else if raw == libc::SIGBREAK {
+    } else if raw == signal_hook::consts::SIGBREAK {
         Some(SignalKind::Quit)
     } else {
         None
@@ -554,7 +594,7 @@ mod tests {
             Some(SignalKind::Terminate),
             terminate
         );
-        let quit = signal_kind_from_raw(libc::SIGBREAK);
+        let quit = signal_kind_from_raw(signal_hook::consts::SIGBREAK);
         crate::assert_with_log!(
             quit == Some(SignalKind::Quit),
             "SIGBREAK mapped",
