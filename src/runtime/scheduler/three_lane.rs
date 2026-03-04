@@ -90,6 +90,7 @@ const ADAPTIVE_EPROCESS_LAMBDA: f64 = 0.5;
 // runaway idle burn on noisy wake paths.
 const SPIN_LIMIT: u32 = 8;
 const YIELD_LIMIT: u32 = 2;
+const SHORT_WAIT_LE_5MS_NANOS: u64 = 5_000_000;
 
 type LocalReadyQueue = Mutex<Vec<TaskId>>;
 
@@ -120,6 +121,58 @@ fn select_backoff_deadline(
             .into_iter()
             .flatten()
             .min()
+    }
+}
+
+#[inline]
+fn record_backoff_deadline_selection(
+    metrics: &mut PreemptionMetrics,
+    io_phase: IoPhaseOutcome,
+    timer_deadline: Option<Time>,
+    global_deadline: Option<Time>,
+) {
+    if matches!(io_phase, IoPhaseOutcome::Follower)
+        && (timer_deadline.is_some() || global_deadline.is_some())
+    {
+        metrics.follower_shared_deadline_ignored += 1;
+    }
+}
+
+#[inline]
+fn record_backoff_timeout_park(
+    metrics: &mut PreemptionMetrics,
+    io_phase: IoPhaseOutcome,
+    nanos: u64,
+) {
+    metrics.backoff_parks_total += 1;
+    metrics.backoff_timeout_parks_total += 1;
+    metrics.backoff_timeout_nanos_total = metrics.backoff_timeout_nanos_total.saturating_add(nanos);
+    if nanos <= SHORT_WAIT_LE_5MS_NANOS {
+        metrics.short_wait_le_5ms += 1;
+    }
+    if matches!(io_phase, IoPhaseOutcome::Follower) {
+        metrics.follower_timeout_parks += 1;
+    }
+}
+
+#[inline]
+fn should_skip_backoff_timeout_park(io_phase: IoPhaseOutcome, nanos: u64) -> bool {
+    matches!(io_phase, IoPhaseOutcome::Follower) && nanos <= SHORT_WAIT_LE_5MS_NANOS
+}
+
+#[inline]
+fn record_backoff_short_wait_skip(metrics: &mut PreemptionMetrics, io_phase: IoPhaseOutcome) {
+    if matches!(io_phase, IoPhaseOutcome::Follower) {
+        metrics.follower_short_wait_skip_le_5ms += 1;
+    }
+}
+
+#[inline]
+fn record_backoff_indefinite_park(metrics: &mut PreemptionMetrics, io_phase: IoPhaseOutcome) {
+    metrics.backoff_parks_total += 1;
+    metrics.backoff_indefinite_parks += 1;
+    if matches!(io_phase, IoPhaseOutcome::Follower) {
+        metrics.follower_indefinite_parks += 1;
     }
 }
 
@@ -1454,6 +1507,25 @@ pub struct PreemptionMetrics {
     pub adaptive_reward_ema: f64,
     /// Anytime-valid e-process value for the adaptive reward stream.
     pub adaptive_e_value: f64,
+    /// Total backoff parks performed.
+    pub backoff_parks_total: u64,
+    /// Backoff parks that armed a timeout.
+    pub backoff_timeout_parks_total: u64,
+    /// Backoff parks with indefinite sleep (no deadline armed).
+    pub backoff_indefinite_parks: u64,
+    /// Sum of timeout durations armed for backoff parks (nanoseconds).
+    pub backoff_timeout_nanos_total: u64,
+    /// Timeout parks with short waits (<= 5ms).
+    pub short_wait_le_5ms: u64,
+    /// Follower loops where shared timer/global deadlines were ignored.
+    pub follower_shared_deadline_ignored: u64,
+    /// Timeout parks performed while in follower I/O phase.
+    pub follower_timeout_parks: u64,
+    /// Indefinite parks performed while in follower I/O phase.
+    pub follower_indefinite_parks: u64,
+    /// Follower short-timeout (<= 5ms) parks intentionally skipped to avoid
+    /// wake-timeout futex churn.
+    pub follower_short_wait_skip_le_5ms: u64,
 }
 
 /// Deterministic witness for cancel-lane fairness guarantees.
@@ -1849,6 +1921,12 @@ impl ThreeLaneWorker {
                         .as_ref()
                         .and_then(TimerDriverHandle::next_deadline);
                     let global_deadline = self.global.peek_earliest_deadline();
+                    record_backoff_deadline_selection(
+                        &mut self.preemption_metrics,
+                        io_phase,
+                        timer_deadline,
+                        global_deadline,
+                    );
 
                     let next_deadline = select_backoff_deadline(
                         io_phase,
@@ -1865,6 +1943,21 @@ impl ThreeLaneWorker {
                             .map_or(Time::ZERO, TimerDriverHandle::now);
                         if next_deadline > now {
                             let nanos = next_deadline.duration_since(now);
+                            if should_skip_backoff_timeout_park(io_phase, nanos) {
+                                // Followers with micro-timeout deadlines tend to churn through
+                                // repeated short futex waits. Skip arming the short timeout and
+                                // immediately re-enter the scheduling loop.
+                                record_backoff_short_wait_skip(
+                                    &mut self.preemption_metrics,
+                                    io_phase,
+                                );
+                                break;
+                            }
+                            record_backoff_timeout_park(
+                                &mut self.preemption_metrics,
+                                io_phase,
+                                nanos,
+                            );
                             self.parker.park_timeout(Duration::from_nanos(nanos));
                         } else {
                             // If deadline is due or passed, don't park - break to process timers/tasks.
@@ -1872,6 +1965,7 @@ impl ThreeLaneWorker {
                         }
                     } else {
                         // Followers park indefinitely.
+                        record_backoff_indefinite_park(&mut self.preemption_metrics, io_phase);
                         self.parker.park();
                     }
                     // After waking, re-check queues by continuing the loop.
@@ -3415,6 +3509,102 @@ mod tests {
             selected, global_deadline,
             "leader/no-io path should continue using earliest deadline across all sources"
         );
+    }
+
+    #[test]
+    fn backoff_metrics_count_follower_shared_deadline_ignores() {
+        let mut metrics = PreemptionMetrics::default();
+        record_backoff_deadline_selection(
+            &mut metrics,
+            IoPhaseOutcome::Follower,
+            Some(Time::from_nanos(100)),
+            Some(Time::from_nanos(200)),
+        );
+        assert_eq!(metrics.follower_shared_deadline_ignored, 1);
+
+        // Non-follower paths should not increment follower-only suppression counters.
+        record_backoff_deadline_selection(
+            &mut metrics,
+            IoPhaseOutcome::NoProgress,
+            Some(Time::from_nanos(100)),
+            Some(Time::from_nanos(200)),
+        );
+        assert_eq!(metrics.follower_shared_deadline_ignored, 1);
+    }
+
+    #[test]
+    fn backoff_metrics_count_follower_without_shared_deadlines_is_noop() {
+        let mut metrics = PreemptionMetrics::default();
+        record_backoff_deadline_selection(&mut metrics, IoPhaseOutcome::Follower, None, None);
+        assert_eq!(
+            metrics.follower_shared_deadline_ignored, 0,
+            "follower should only count suppressions when a shared deadline was present"
+        );
+    }
+
+    #[test]
+    fn backoff_metrics_count_short_waits_and_follower_timeout_parks() {
+        let mut metrics = PreemptionMetrics::default();
+        record_backoff_timeout_park(&mut metrics, IoPhaseOutcome::Follower, 4_000_000);
+        record_backoff_timeout_park(&mut metrics, IoPhaseOutcome::NoProgress, 6_000_000);
+
+        assert_eq!(metrics.backoff_parks_total, 2);
+        assert_eq!(metrics.backoff_timeout_parks_total, 2);
+        assert_eq!(metrics.backoff_timeout_nanos_total, 10_000_000);
+        assert_eq!(metrics.short_wait_le_5ms, 1);
+        assert_eq!(metrics.follower_timeout_parks, 1);
+    }
+
+    #[test]
+    fn backoff_metrics_count_short_wait_threshold_is_inclusive() {
+        let mut metrics = PreemptionMetrics::default();
+        record_backoff_timeout_park(
+            &mut metrics,
+            IoPhaseOutcome::Follower,
+            SHORT_WAIT_LE_5MS_NANOS,
+        );
+        assert_eq!(
+            metrics.short_wait_le_5ms, 1,
+            "<= 5ms threshold should include exactly 5ms"
+        );
+    }
+
+    #[test]
+    fn skip_backoff_timeout_park_is_follower_and_short_wait_only() {
+        assert!(should_skip_backoff_timeout_park(
+            IoPhaseOutcome::Follower,
+            4_000_000
+        ));
+        assert!(!should_skip_backoff_timeout_park(
+            IoPhaseOutcome::Follower,
+            6_000_000
+        ));
+        assert!(!should_skip_backoff_timeout_park(
+            IoPhaseOutcome::NoProgress,
+            4_000_000
+        ));
+    }
+
+    #[test]
+    fn backoff_metrics_count_follower_short_wait_skip_decisions() {
+        let mut metrics = PreemptionMetrics::default();
+        record_backoff_short_wait_skip(&mut metrics, IoPhaseOutcome::Follower);
+        record_backoff_short_wait_skip(&mut metrics, IoPhaseOutcome::NoProgress);
+
+        assert_eq!(metrics.follower_short_wait_skip_le_5ms, 1);
+        assert_eq!(metrics.backoff_parks_total, 0);
+        assert_eq!(metrics.backoff_timeout_parks_total, 0);
+    }
+
+    #[test]
+    fn backoff_metrics_count_indefinite_parks() {
+        let mut metrics = PreemptionMetrics::default();
+        record_backoff_indefinite_park(&mut metrics, IoPhaseOutcome::Follower);
+        record_backoff_indefinite_park(&mut metrics, IoPhaseOutcome::NoProgress);
+
+        assert_eq!(metrics.backoff_parks_total, 2);
+        assert_eq!(metrics.backoff_indefinite_parks, 2);
+        assert_eq!(metrics.follower_indefinite_parks, 1);
     }
 
     #[test]
