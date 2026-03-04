@@ -104,6 +104,13 @@ enum IoPhaseOutcome {
     NoProgress,
 }
 
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+enum BackoffTimeoutDecision {
+    ParkTimeout { nanos: u64 },
+    SkipShortFollowerTimeout,
+    DeadlineDue,
+}
+
 #[inline]
 fn select_backoff_deadline(
     io_phase: IoPhaseOutcome,
@@ -158,6 +165,24 @@ fn record_backoff_timeout_park(
 #[inline]
 fn should_skip_backoff_timeout_park(io_phase: IoPhaseOutcome, nanos: u64) -> bool {
     matches!(io_phase, IoPhaseOutcome::Follower) && nanos <= SHORT_WAIT_LE_5MS_NANOS
+}
+
+#[inline]
+fn classify_backoff_timeout_decision(
+    io_phase: IoPhaseOutcome,
+    next_deadline: Time,
+    now: Time,
+) -> BackoffTimeoutDecision {
+    if next_deadline <= now {
+        BackoffTimeoutDecision::DeadlineDue
+    } else {
+        let nanos = next_deadline.duration_since(now);
+        if should_skip_backoff_timeout_park(io_phase, nanos) {
+            BackoffTimeoutDecision::SkipShortFollowerTimeout
+        } else {
+            BackoffTimeoutDecision::ParkTimeout { nanos }
+        }
+    }
 }
 
 #[inline]
@@ -1528,6 +1553,55 @@ pub struct PreemptionMetrics {
     pub follower_short_wait_skip_le_5ms: u64,
 }
 
+impl PreemptionMetrics {
+    const RATIO_BPS_SCALE: u64 = 10_000;
+
+    #[inline]
+    fn ratio_bps(numerator: u64, denominator: u64) -> u16 {
+        if denominator == 0 {
+            return 0;
+        }
+        let raw = numerator
+            .saturating_mul(Self::RATIO_BPS_SCALE)
+            .saturating_div(denominator)
+            .min(Self::RATIO_BPS_SCALE);
+        raw as u16
+    }
+
+    /// Returns the average timeout-park duration in nanoseconds.
+    ///
+    /// Returns `0` when no timeout parks have been recorded.
+    #[must_use]
+    pub fn avg_timeout_park_nanos(&self) -> u64 {
+        if self.backoff_timeout_parks_total == 0 {
+            return 0;
+        }
+        self.backoff_timeout_nanos_total
+            .saturating_div(self.backoff_timeout_parks_total)
+    }
+
+    /// Returns the proportion of timeout parks that were short waits
+    /// (<= 5ms) in basis points.
+    ///
+    /// `10_000` means 100%.
+    #[must_use]
+    pub fn short_wait_ratio_bps(&self) -> u16 {
+        Self::ratio_bps(self.short_wait_le_5ms, self.backoff_timeout_parks_total)
+    }
+
+    /// Returns the follower short-wait avoidance rate in basis points.
+    ///
+    /// This compares follower short-timeout skips vs follower short-timeout
+    /// opportunities (skip + timeout park).
+    #[must_use]
+    pub fn follower_short_wait_avoidance_bps(&self) -> u16 {
+        let opportunities = self
+            .follower_short_wait_skip_le_5ms
+            .saturating_add(self.follower_timeout_parks);
+        Self::ratio_bps(self.follower_short_wait_skip_le_5ms, opportunities)
+    }
+}
+
 /// Deterministic witness for cancel-lane fairness guarantees.
 ///
 /// This compiles the runtime fairness argument into an auditable artifact:
@@ -1941,9 +2015,16 @@ impl ThreeLaneWorker {
                             .timer_driver
                             .as_ref()
                             .map_or(Time::ZERO, TimerDriverHandle::now);
-                        if next_deadline > now {
-                            let nanos = next_deadline.duration_since(now);
-                            if should_skip_backoff_timeout_park(io_phase, nanos) {
+                        match classify_backoff_timeout_decision(io_phase, next_deadline, now) {
+                            BackoffTimeoutDecision::ParkTimeout { nanos } => {
+                                record_backoff_timeout_park(
+                                    &mut self.preemption_metrics,
+                                    io_phase,
+                                    nanos,
+                                );
+                                self.parker.park_timeout(Duration::from_nanos(nanos));
+                            }
+                            BackoffTimeoutDecision::SkipShortFollowerTimeout => {
                                 // Followers with micro-timeout deadlines tend to churn through
                                 // repeated short futex waits. Skip arming the short timeout and
                                 // immediately re-enter the scheduling loop.
@@ -1953,15 +2034,10 @@ impl ThreeLaneWorker {
                                 );
                                 break;
                             }
-                            record_backoff_timeout_park(
-                                &mut self.preemption_metrics,
-                                io_phase,
-                                nanos,
-                            );
-                            self.parker.park_timeout(Duration::from_nanos(nanos));
-                        } else {
-                            // If deadline is due or passed, don't park - break to process timers/tasks.
-                            break;
+                            BackoffTimeoutDecision::DeadlineDue => {
+                                // If deadline is due or passed, don't park - break to process timers/tasks.
+                                break;
+                            }
                         }
                     } else {
                         // Followers park indefinitely.
@@ -3586,6 +3662,54 @@ mod tests {
     }
 
     #[test]
+    fn classify_backoff_timeout_decision_handles_due_short_and_long_waits() {
+        let now = Time::from_nanos(1_000);
+
+        let due = classify_backoff_timeout_decision(IoPhaseOutcome::Follower, now, now);
+        assert_eq!(due, BackoffTimeoutDecision::DeadlineDue);
+
+        let short_follower = classify_backoff_timeout_decision(
+            IoPhaseOutcome::Follower,
+            Time::from_nanos(1_000 + 4_000_000),
+            now,
+        );
+        assert_eq!(
+            short_follower,
+            BackoffTimeoutDecision::SkipShortFollowerTimeout
+        );
+
+        let threshold_follower = classify_backoff_timeout_decision(
+            IoPhaseOutcome::Follower,
+            Time::from_nanos(1_000 + SHORT_WAIT_LE_5MS_NANOS),
+            now,
+        );
+        assert_eq!(
+            threshold_follower,
+            BackoffTimeoutDecision::SkipShortFollowerTimeout
+        );
+
+        let long_follower = classify_backoff_timeout_decision(
+            IoPhaseOutcome::Follower,
+            Time::from_nanos(1_000 + 6_000_000),
+            now,
+        );
+        assert_eq!(
+            long_follower,
+            BackoffTimeoutDecision::ParkTimeout { nanos: 6_000_000 }
+        );
+
+        let short_leader = classify_backoff_timeout_decision(
+            IoPhaseOutcome::NoProgress,
+            Time::from_nanos(1_000 + 4_000_000),
+            now,
+        );
+        assert_eq!(
+            short_leader,
+            BackoffTimeoutDecision::ParkTimeout { nanos: 4_000_000 }
+        );
+    }
+
+    #[test]
     fn backoff_metrics_count_follower_short_wait_skip_decisions() {
         let mut metrics = PreemptionMetrics::default();
         record_backoff_short_wait_skip(&mut metrics, IoPhaseOutcome::Follower);
@@ -3605,6 +3729,30 @@ mod tests {
         assert_eq!(metrics.backoff_parks_total, 2);
         assert_eq!(metrics.backoff_indefinite_parks, 2);
         assert_eq!(metrics.follower_indefinite_parks, 1);
+    }
+
+    #[test]
+    fn preemption_metrics_backoff_summary_helpers_handle_zero_denominators() {
+        let metrics = PreemptionMetrics::default();
+        assert_eq!(metrics.avg_timeout_park_nanos(), 0);
+        assert_eq!(metrics.short_wait_ratio_bps(), 0);
+        assert_eq!(metrics.follower_short_wait_avoidance_bps(), 0);
+    }
+
+    #[test]
+    fn preemption_metrics_backoff_summary_helpers_compute_expected_values() {
+        let metrics = PreemptionMetrics {
+            backoff_timeout_parks_total: 4,
+            backoff_timeout_nanos_total: 20,
+            short_wait_le_5ms: 2,
+            follower_short_wait_skip_le_5ms: 3,
+            follower_timeout_parks: 1,
+            ..PreemptionMetrics::default()
+        };
+
+        assert_eq!(metrics.avg_timeout_park_nanos(), 5);
+        assert_eq!(metrics.short_wait_ratio_bps(), 5_000);
+        assert_eq!(metrics.follower_short_wait_avoidance_bps(), 7_500);
     }
 
     #[test]
