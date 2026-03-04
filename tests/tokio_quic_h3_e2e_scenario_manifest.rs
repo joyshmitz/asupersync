@@ -12,7 +12,7 @@
 use asupersync::cx::Cx;
 use asupersync::http::h3_native::{
     H3ConnectionState, H3ControlState, H3Frame, H3NativeError, H3PseudoHeaders, H3QpackMode,
-    H3RequestHead, H3ResponseHead, H3Settings, H3RequestStreamState,
+    H3RequestHead, H3RequestStreamState, H3ResponseHead, H3Settings,
 };
 use asupersync::net::quic_native::connection::{
     NativeQuicConnection, NativeQuicConnectionConfig, NativeQuicConnectionError,
@@ -59,11 +59,7 @@ fn server_config() -> NativeQuicConnectionConfig {
 }
 
 /// Performs a full 6-step simulated handshake on a client/server pair.
-fn establish_pair(
-    cx: &Cx,
-    client: &mut NativeQuicConnection,
-    server: &mut NativeQuicConnection,
-) {
+fn establish_pair(cx: &Cx, client: &mut NativeQuicConnection, server: &mut NativeQuicConnection) {
     client.begin_handshake(cx).expect("client begin_handshake");
     server.begin_handshake(cx).expect("server begin_handshake");
     client
@@ -72,12 +68,8 @@ fn establish_pair(
     server
         .on_handshake_keys_available(cx)
         .expect("server handshake keys");
-    client
-        .on_1rtt_keys_available(cx)
-        .expect("client 1rtt keys");
-    server
-        .on_1rtt_keys_available(cx)
-        .expect("server 1rtt keys");
+    client.on_1rtt_keys_available(cx).expect("client 1rtt keys");
+    server.on_1rtt_keys_available(cx).expect("server 1rtt keys");
     client
         .on_handshake_confirmed(cx)
         .expect("client handshake confirmed");
@@ -142,9 +134,7 @@ fn es_03_key_update_after_confirmed() {
     establish_pair(&cx, &mut client, &mut server);
 
     assert!(!client.tls().local_key_phase());
-    let evt = client
-        .request_local_key_update(&cx)
-        .expect("request");
+    let evt = client.request_local_key_update(&cx).expect("request");
     assert!(matches!(evt, KeyUpdateEvent::LocalUpdateScheduled { .. }));
     client.commit_local_key_update(&cx).expect("commit");
     assert!(client.tls().local_key_phase());
@@ -161,7 +151,10 @@ fn es_04_peer_key_phase_change() {
     let evt = server.on_peer_key_phase(&cx, true).expect("peer phase");
     assert!(matches!(
         evt,
-        KeyUpdateEvent::RemoteUpdateAccepted { new_phase: true, .. }
+        KeyUpdateEvent::RemoteUpdateAccepted {
+            new_phase: true,
+            ..
+        }
     ));
     assert!(server.tls().remote_key_phase());
 }
@@ -267,20 +260,21 @@ fn ec_03_loss_via_ack_gap() {
     // Send packets 0-4
     for _i in 0..5 {
         client
-            .on_packet_sent(&cx, PacketNumberSpace::ApplicationData, 1200, true, true, 1000)
+            .on_packet_sent(
+                &cx,
+                PacketNumberSpace::ApplicationData,
+                1200,
+                true,
+                true,
+                1000,
+            )
             .expect("send");
     }
     assert!(client.transport().bytes_in_flight() > 0);
 
     // ACK only packets 2,3,4 (skip 0,1 → loss detection trigger)
     let ack_event = client
-        .on_ack_received(
-            &cx,
-            PacketNumberSpace::ApplicationData,
-            &[2, 3, 4],
-            0,
-            2000,
-        )
+        .on_ack_received(&cx, PacketNumberSpace::ApplicationData, &[2, 3, 4], 0, 2000)
         .expect("ack");
     // At least some packets should be acked
     assert!(ack_event.acked_packets > 0 || ack_event.acked_bytes > 0);
@@ -297,12 +291,26 @@ fn ec_04_bytes_in_flight_tracking() {
     assert_eq!(client.transport().bytes_in_flight(), 0);
 
     client
-        .on_packet_sent(&cx, PacketNumberSpace::ApplicationData, 1200, true, true, 1000)
+        .on_packet_sent(
+            &cx,
+            PacketNumberSpace::ApplicationData,
+            1200,
+            true,
+            true,
+            1000,
+        )
         .expect("send pkt 0");
     assert_eq!(client.transport().bytes_in_flight(), 1200);
 
     client
-        .on_packet_sent(&cx, PacketNumberSpace::ApplicationData, 800, true, true, 2000)
+        .on_packet_sent(
+            &cx,
+            PacketNumberSpace::ApplicationData,
+            800,
+            true,
+            true,
+            2000,
+        )
         .expect("send pkt 1");
     assert_eq!(client.transport().bytes_in_flight(), 2000);
 
@@ -323,9 +331,7 @@ fn ec_05_drain_timeout() {
     establish_pair(&cx, &mut client, &mut server);
 
     // Begin close → draining
-    client
-        .begin_close(&cx, 1_000_000, 0)
-        .expect("begin close");
+    client.begin_close(&cx, 1_000_000, 0).expect("begin close");
     assert_eq!(client.state(), QuicConnectionState::Draining);
 }
 
@@ -360,8 +366,11 @@ fn eh_01_full_request_cycle() {
     assert_eq!(req.pseudo.path.as_deref(), Some("/api/v1/data"));
 
     // Build a response
-    let resp = H3ResponseHead::new(200, vec![("content-type".into(), "application/json".into())])
-        .expect("valid response");
+    let resp = H3ResponseHead::new(
+        200,
+        vec![("content-type".into(), "application/json".into())],
+    )
+    .expect("valid response");
     assert_eq!(resp.status, 200);
 }
 
@@ -468,8 +477,7 @@ fn ed_01_graceful_close() {
     establish_pair(&cx, &mut conn, &mut server);
 
     assert_eq!(conn.state(), QuicConnectionState::Established);
-    conn.begin_close(&cx, 1_000_000, 0)
-        .expect("begin close");
+    conn.begin_close(&cx, 1_000_000, 0).expect("begin close");
     assert_eq!(conn.state(), QuicConnectionState::Draining);
 }
 
