@@ -377,13 +377,22 @@ where
             return Err(ReuniteError { read: self, write });
         }
 
-        // Take the shared state - we know both Arcs point to the same allocation
-        // so we can safely unwrap after dropping one reference
+        // Drop the write half first to release its Arc reference, then
+        // try_unwrap the read half's Arc.  If a background task still holds
+        // a reference (e.g. a SplitWritePermit), try_unwrap will fail —
+        // return a ReuniteError rather than panicking.
         drop(write);
-        let shared = Arc::try_unwrap(self.shared)
-            .ok()
-            .expect("reunite should succeed after ID check")
-            .into_inner();
+        let shared = match Arc::try_unwrap(self.shared) {
+            Ok(mutex) => mutex.into_inner(),
+            Err(arc) => {
+                // Reconstruct halves so the caller can retry later.
+                let write = WebSocketWrite {
+                    shared: Arc::clone(&arc),
+                };
+                let read = Self { shared: arc };
+                return Err(ReuniteError { read, write });
+            }
+        };
 
         Ok(WebSocket {
             io: shared.io,
