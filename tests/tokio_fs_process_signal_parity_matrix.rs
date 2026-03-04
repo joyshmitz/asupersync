@@ -475,8 +475,8 @@ fn signal_fallback_contract_is_explicit_in_source() {
     let ctrl_c_src = load_source("src/signal/ctrl_c.rs");
 
     for token in [
-        "#[cfg(not(unix))]",
-        "signal handling is only available on Unix in this build",
+        "#[cfg(not(any(unix, windows)))]",
+        "signal handling is unavailable on this platform/build",
     ] {
         assert!(
             signal_src.contains(token),
@@ -485,7 +485,7 @@ fn signal_fallback_contract_is_explicit_in_source() {
     }
 
     for token in [
-        "#[cfg(not(unix))]",
+        "#[cfg(not(any(unix, windows)))]",
         "Ctrl+C handling is unavailable on this platform/build",
     ] {
         assert!(
