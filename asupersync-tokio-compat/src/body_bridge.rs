@@ -47,16 +47,16 @@ impl IntoHttpBody<()> {
     ///
     /// The entire payload is returned in a single `DATA` frame on the first
     /// poll, followed by `None` on subsequent polls.
-    pub fn full(data: bytes::Bytes) -> IntoHttpBody<()> {
-        IntoHttpBody {
+    pub const fn full(data: bytes::Bytes) -> Self {
+        Self {
             inner: BodyKind::Full(Some(data)),
             trailers: None,
         }
     }
 
     /// Create an empty body.
-    pub fn empty() -> IntoHttpBody<()> {
-        IntoHttpBody {
+    pub const fn empty() -> Self {
+        Self {
             inner: BodyKind::Full(None),
             trailers: None,
         }
@@ -65,7 +65,7 @@ impl IntoHttpBody<()> {
 
 impl<B> IntoHttpBody<B> {
     /// Create a body from a byte stream.
-    pub fn streaming(stream: B) -> Self {
+    pub const fn streaming(stream: B) -> Self {
         Self {
             inner: BodyKind::Stream(stream),
             trailers: None,
@@ -107,13 +107,12 @@ impl http_body::Body for IntoHttpBody<()> {
         match &mut self.inner {
             BodyKind::Full(data) => {
                 if let Some(bytes) = data.take() {
-                    if <bytes::Bytes>::is_empty(&bytes) {
+                    if bytes.is_empty() {
                         // Skip empty data frame, go straight to trailers.
-                        if let Some(trailers) = self.trailers.take() {
-                            Poll::Ready(Some(Ok(Frame::trailers(trailers))))
-                        } else {
-                            Poll::Ready(None)
-                        }
+                        self.trailers.take().map_or_else(
+                            || Poll::Ready(None),
+                            |trailers| Poll::Ready(Some(Ok(Frame::trailers(trailers)))),
+                        )
                     } else {
                         Poll::Ready(Some(Ok(Frame::data(bytes))))
                     }
@@ -123,7 +122,7 @@ impl http_body::Body for IntoHttpBody<()> {
                     Poll::Ready(None)
                 }
             }
-            BodyKind::Stream(_) => unreachable!("IntoHttpBody<()> cannot be Stream"),
+            BodyKind::Stream(()) => unreachable!("IntoHttpBody<()> cannot be Stream"),
         }
     }
 
@@ -138,7 +137,7 @@ impl http_body::Body for IntoHttpBody<()> {
         match &self.inner {
             BodyKind::Full(Some(data)) => http_body::SizeHint::with_exact(data.len() as u64),
             BodyKind::Full(None) => http_body::SizeHint::with_exact(0),
-            BodyKind::Stream(_) => http_body::SizeHint::default(),
+            BodyKind::Stream(()) => http_body::SizeHint::default(),
         }
     }
 }
@@ -227,7 +226,7 @@ impl<E: std::fmt::Display> std::fmt::Display for BodyLimitError<E> {
 
 impl<E: std::fmt::Debug + std::fmt::Display> std::error::Error for BodyLimitError<E> {}
 
-/// Adapter that converts an asupersync gRPC service into a tower::Service
+/// Adapter that converts an asupersync gRPC service into a `tower::Service`
 /// compatible with tonic's transport layer.
 ///
 /// This bridges the gap between asupersync's native gRPC implementation
@@ -249,12 +248,12 @@ pub struct GrpcServiceAdapter<S> {
 
 impl<S> GrpcServiceAdapter<S> {
     /// Wrap an asupersync gRPC service for use with tonic's transport.
-    pub fn new(service: S) -> Self {
+    pub const fn new(service: S) -> Self {
         Self { inner: service }
     }
 
     /// Get a reference to the inner service.
-    pub fn inner(&self) -> &S {
+    pub const fn inner(&self) -> &S {
         &self.inner
     }
 
@@ -283,6 +282,7 @@ impl<S: std::fmt::Debug> std::fmt::Debug for GrpcServiceAdapter<S> {
 #[cfg(test)]
 mod tests {
     use super::*;
+    use http_body::Body;
 
     #[test]
     fn full_body_single_frame() {
@@ -310,7 +310,7 @@ mod tests {
     #[test]
     fn empty_body_is_end_stream() {
         let body = IntoHttpBody::empty();
-        assert!(http_body::Body::is_end_stream(&body));
+        assert!(Body::is_end_stream(&body));
     }
 
     #[test]
@@ -327,7 +327,10 @@ mod tests {
 
         // First: data.
         let frame = body.as_mut().poll_frame(&mut cx);
-        assert!(matches!(frame, Poll::Ready(Some(Ok(ref f))) if f.is_data()));
+        match &frame {
+            Poll::Ready(Some(Ok(f))) => assert!(f.is_data()),
+            other => panic!("expected data frame, got {other:?}"),
+        }
 
         // Second: trailers.
         let frame = body.as_mut().poll_frame(&mut cx);
@@ -348,14 +351,14 @@ mod tests {
     #[test]
     fn size_hint_for_full_body() {
         let body = IntoHttpBody::full(bytes::Bytes::from_static(b"12345"));
-        let hint = http_body::Body::size_hint(&body);
+        let hint = Body::size_hint(&body);
         assert_eq!(hint.exact(), Some(5));
     }
 
     #[test]
     fn size_hint_for_empty_body() {
         let body = IntoHttpBody::empty();
-        let hint = http_body::Body::size_hint(&body);
+        let hint = Body::size_hint(&body);
         assert_eq!(hint.exact(), Some(0));
     }
 
