@@ -257,10 +257,7 @@ impl<A: Actor> ActorHandle<A> {
     /// them by having `stop()` drain buffered messages first.
     pub fn stop(&self) {
         self.state.store(ActorState::Stopping);
-        if let Some(inner) = self.inner.upgrade() {
-            let mut guard = inner.write();
-            guard.cancel_requested = true;
-        }
+        self.sender.close();
         self.sender.wake_receiver();
     }
 
@@ -292,10 +289,6 @@ impl<A: Actor> ActorHandle<A> {
     /// Sets `cancel_requested` on the actor's context, causing the actor loop
     /// to exit at the next cancellation check point. The actor will call
     /// `on_stop` before returning.
-    ///
-    /// Currently identical to [`stop`](Self::stop). A future improvement
-    /// should differentiate them: `stop()` would drain buffered messages
-    /// while `abort()` exits immediately.
     pub fn abort(&self) {
         self.state.store(ActorState::Stopping);
         if let Some(inner) = self.inner.upgrade() {
@@ -716,24 +709,32 @@ async fn run_actor_loop<A: Actor>(mut actor: A, cx: Cx, cell: &mut ActorCell<A::
 
     cell.state.store(ActorState::Stopping);
 
+    let is_aborted = cx.is_cancel_requested();
+
     // Phase 3: Drain remaining buffered messages.
-    // Two-phase mailbox guarantee: no message silently dropped. We seal the
-    // mailbox to prevent any new reservations or commits, then drain all
-    // messages currently in the queue before running on_stop.
+    // Two-phase mailbox guarantee: no message silently dropped (unless aborted).
+    // We seal the mailbox to prevent any new reservations or commits, then
+    // process remaining messages if gracefully stopped. If aborted, we just
+    // empty the mailbox to drop the messages.
     cell.mailbox.close();
 
-    let mut drained: u64 = 0;
-    while let Ok(msg) = cell.mailbox.try_recv() {
-        actor.handle(&cx, msg).await;
-        drained += 1;
-    }
-    if drained > 0 {
-        debug!(drained = drained, "actor::mailbox_drained");
-        cx.trace("actor::mailbox_drained");
+    if !is_aborted {
+        let mut drained: u64 = 0;
+        while let Ok(msg) = cell.mailbox.try_recv() {
+            actor.handle(&cx, msg).await;
+            drained += 1;
+        }
+        if drained > 0 {
+            debug!(drained = drained, "actor::mailbox_drained");
+            cx.trace("actor::mailbox_drained");
+        }
+    } else {
+        while let Ok(_msg) = cell.mailbox.try_recv() {}
     }
 
     // Phase 4: Cleanup
     cx.trace("actor::on_stop");
+    let _mask = cx.masked(); // allow async cleanup even if aborted
     actor.on_stop(&cx).await;
 
     actor

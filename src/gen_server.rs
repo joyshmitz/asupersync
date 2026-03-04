@@ -1053,14 +1053,26 @@ impl<S: GenServer> GenServerHandle<S> {
     }
 
     /// Signals the server to stop gracefully.
+    ///
+    /// Closes the mailbox and waits for the server to process remaining messages.
     pub fn stop(&self) {
+        self.state.store(ActorState::Stopping);
+        self.sender.close();
+        // Ensure a server blocked in `mailbox.recv()` is woken so it can observe
+        // the mailbox closure and run drain/on_stop deterministically.
+        self.sender.wake_receiver();
+    }
+
+    /// Request the server to stop immediately by aborting its task.
+    ///
+    /// Sets `cancel_requested` on the server's context, causing the loop
+    /// to exit at the next cancellation check point.
+    pub fn abort(&self) {
         self.state.store(ActorState::Stopping);
         if let Some(inner) = self.inner.upgrade() {
             let mut guard = inner.write();
             guard.cancel_requested = true;
         }
-        // Ensure a server blocked in `mailbox.recv()` is woken so it can observe
-        // the cancellation request and run drain/on_stop deterministically.
         self.sender.wake_receiver();
     }
 
@@ -1382,9 +1394,11 @@ async fn run_gen_server_loop<S: GenServer>(
 
     // Phase 3: Drain remaining messages.
     // Calls during drain: reply with error (caller should not depend on drain).
-    // Casts during drain: process normally.
+    // Casts during drain: process normally if gracefully stopped, skip if aborted.
     let drain_limit = cell.mailbox.capacity() as u64;
     let mut drained: u64 = 0;
+    let is_aborted = cx.is_cancel_requested();
+    
     while let Ok(envelope) = cell.mailbox.try_recv() {
         match envelope {
             Envelope::Call {
@@ -1395,10 +1409,14 @@ async fn run_gen_server_loop<S: GenServer>(
                 cx.trace("gen_server::drain_abort_call");
             }
             Envelope::Cast { msg } => {
-                server.handle_cast(&cx, msg).await;
+                if !is_aborted {
+                    server.handle_cast(&cx, msg).await;
+                }
             }
             Envelope::Info { msg } => {
-                server.handle_info(&cx, msg).await;
+                if !is_aborted {
+                    server.handle_info(&cx, msg).await;
+                }
             }
         }
         drained += 1;
