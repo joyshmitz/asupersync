@@ -23,6 +23,9 @@ use asupersync::cli::{
     screen_engine_contract, structured_logging_contract, validate_core_diagnostics_report,
     validate_core_diagnostics_report_contract,
 };
+use asupersync::observability::{
+    TASK_CONSOLE_WIRE_SCHEMA_V1, TaskConsoleWireSnapshot, TaskDetailsWire, TaskSummaryWire,
+};
 use asupersync::trace::{
     CompressionMode, IssueSeverity, ReplayEvent, TRACE_FILE_VERSION, TRACE_MAGIC, TraceFileError,
     TraceReader, VerificationOptions, verify_trace,
@@ -300,6 +303,8 @@ enum DoctorCommand {
     FrankenExport(DoctorFrankenExportArgs),
     /// Package doctor_asupersync CLI artifacts and deterministic config templates
     PackageCli(DoctorPackageCliArgs),
+    /// Render a deterministic runtime task-console wire snapshot from JSON input
+    TaskConsoleView(DoctorTaskConsoleViewArgs),
 }
 
 #[derive(Args, Debug)]
@@ -457,6 +462,21 @@ struct DoctorPackageCliArgs {
     /// Perform install/run smoke checks from packaged artifacts
     #[arg(long = "smoke", action = ArgAction::SetTrue)]
     smoke: bool,
+}
+
+#[derive(Args, Debug)]
+struct DoctorTaskConsoleViewArgs {
+    /// Path to task-console wire snapshot JSON
+    #[arg(long = "snapshot")]
+    snapshot: PathBuf,
+
+    /// Maximum number of tasks to include in output
+    #[arg(long = "max-tasks", default_value_t = 128)]
+    max_tasks: usize,
+
+    /// Allow non-canonical schema versions without failing
+    #[arg(long = "allow-schema-mismatch", action = ArgAction::SetTrue)]
+    allow_schema_mismatch: bool,
 }
 
 // =========================================================================
@@ -828,6 +848,7 @@ fn run_doctor(args: DoctorArgs, output: &mut Output) -> Result<(), CliError> {
         DoctorCommand::ReportExport(export_args) => doctor_report_export(&export_args, output),
         DoctorCommand::FrankenExport(export_args) => doctor_franken_export(&export_args, output),
         DoctorCommand::PackageCli(package_args) => doctor_package_cli(&package_args, output),
+        DoctorCommand::TaskConsoleView(view_args) => doctor_task_console_view(&view_args, output),
     }
 }
 
@@ -992,6 +1013,82 @@ fn doctor_scenario_coverage_pack_smoke(
     Ok(())
 }
 
+fn doctor_task_console_view(
+    args: &DoctorTaskConsoleViewArgs,
+    output: &mut Output,
+) -> Result<(), CliError> {
+    let raw = fs::read_to_string(&args.snapshot).map_err(|err| {
+        CliError::new(
+            "doctor_task_console_io_error",
+            "Failed to read task-console snapshot",
+        )
+        .detail(err.to_string())
+        .context("snapshot", args.snapshot.display().to_string())
+        .exit_code(ExitCode::RUNTIME_ERROR)
+    })?;
+
+    let snapshot = TaskConsoleWireSnapshot::from_json(&raw).map_err(|err| {
+        CliError::new(
+            "doctor_task_console_parse_error",
+            "Failed to parse task-console snapshot JSON",
+        )
+        .detail(err.to_string())
+        .context("snapshot", args.snapshot.display().to_string())
+        .exit_code(ExitCode::USER_ERROR)
+    })?;
+
+    if !snapshot.has_expected_schema() && !args.allow_schema_mismatch {
+        return Err(CliError::new(
+            "doctor_task_console_schema_error",
+            "Unexpected task-console schema version",
+        )
+        .detail(format!(
+            "Expected '{}', got '{}'",
+            TASK_CONSOLE_WIRE_SCHEMA_V1, snapshot.schema_version
+        ))
+        .context("snapshot", args.snapshot.display().to_string())
+        .context("expected_schema", TASK_CONSOLE_WIRE_SCHEMA_V1.to_string())
+        .context("found_schema", snapshot.schema_version.clone())
+        .exit_code(ExitCode::USER_ERROR));
+    }
+
+    let payload = build_task_console_view_output(snapshot, &args.snapshot, args.max_tasks);
+    output.write(&payload).map_err(|err| {
+        CliError::new("output_error", "Failed to write output").detail(err.to_string())
+    })?;
+    Ok(())
+}
+
+fn build_task_console_view_output(
+    snapshot: TaskConsoleWireSnapshot,
+    source_snapshot: &Path,
+    max_tasks: usize,
+) -> DoctorTaskConsoleViewOutput {
+    let schema_matches_expected = snapshot.has_expected_schema();
+    let TaskConsoleWireSnapshot {
+        schema_version,
+        generated_at,
+        summary,
+        tasks,
+    } = snapshot;
+    let total_tasks = tasks.len();
+    let shown_tasks = total_tasks.min(max_tasks);
+    let truncated = shown_tasks < total_tasks;
+    let tasks = tasks.into_iter().take(shown_tasks).collect();
+    DoctorTaskConsoleViewOutput {
+        schema_version,
+        expected_schema_version: TASK_CONSOLE_WIRE_SCHEMA_V1.to_string(),
+        schema_matches_expected,
+        source_snapshot: source_snapshot.display().to_string(),
+        generated_at_nanos: generated_at.as_nanos(),
+        total_tasks,
+        shown_tasks,
+        truncated,
+        summary,
+        tasks,
+    }
+}
+
 #[derive(Debug, serde::Serialize, PartialEq, Eq)]
 struct DoctorReportExportOutput {
     schema_version: String,
@@ -1131,6 +1228,80 @@ impl Outputtable for DoctorScenarioCoveragePackSmokeOutput {
     fn human_format(&self) -> String {
         serde_json::to_string_pretty(&self.report)
             .unwrap_or_else(|_| "failed to render scenario coverage-pack smoke payload".to_string())
+    }
+}
+
+#[derive(Debug, serde::Serialize, PartialEq, Eq)]
+struct DoctorTaskConsoleViewOutput {
+    schema_version: String,
+    expected_schema_version: String,
+    schema_matches_expected: bool,
+    source_snapshot: String,
+    generated_at_nanos: u64,
+    total_tasks: usize,
+    shown_tasks: usize,
+    truncated: bool,
+    summary: TaskSummaryWire,
+    tasks: Vec<TaskDetailsWire>,
+}
+
+impl Outputtable for DoctorTaskConsoleViewOutput {
+    fn human_format(&self) -> String {
+        let mut lines = vec![
+            format!("Schema: {}", self.schema_version),
+            format!("Expected schema: {}", self.expected_schema_version),
+            format!("Schema match: {}", self.schema_matches_expected),
+            format!("Snapshot: {}", self.source_snapshot),
+            format!("Generated at (nanos): {}", self.generated_at_nanos),
+            format!(
+                "Summary: total={} created={} running={} cancelling={} completed={} stuck={}",
+                self.summary.total_tasks,
+                self.summary.created,
+                self.summary.running,
+                self.summary.cancelling,
+                self.summary.completed,
+                self.summary.stuck_count
+            ),
+            format!(
+                "Tasks shown: {}/{}{}",
+                self.shown_tasks,
+                self.total_tasks,
+                if self.truncated { " (truncated)" } else { "" }
+            ),
+        ];
+
+        if !self.summary.by_region.is_empty() {
+            lines.push("By region:".to_string());
+            for region in &self.summary.by_region {
+                lines.push(format!(
+                    "  {} -> {} tasks",
+                    region.region_id, region.task_count
+                ));
+            }
+        }
+
+        if self.tasks.is_empty() {
+            lines.push("Tasks: <none>".to_string());
+            return lines.join("\n");
+        }
+
+        lines.push("Tasks:".to_string());
+        for task in &self.tasks {
+            lines.push(format!(
+                "  {} region={} state={} phase={} polls={} remaining={} age_ns={} wake_pending={} obligations={} waiters={}",
+                task.id,
+                task.region_id,
+                task.state.name(),
+                task.phase,
+                task.poll_count,
+                task.polls_remaining,
+                task.age_nanos,
+                task.wake_pending,
+                task.obligations.len(),
+                task.waiters.len()
+            ));
+        }
+        lines.join("\n")
     }
 }
 
@@ -4304,9 +4475,54 @@ fn format_scaled(bytes: u64, unit: u64, label: &str) -> String {
 #[cfg(test)]
 mod tests {
     use super::*;
+    use asupersync::observability::{TaskRegionCountWire, TaskStateInfo};
     use asupersync::trace::{TraceMetadata, TraceWriter};
     use clap::Parser;
     use tempfile::NamedTempFile;
+
+    fn sample_task_console_snapshot() -> TaskConsoleWireSnapshot {
+        let summary = TaskSummaryWire {
+            total_tasks: 2,
+            created: 0,
+            running: 2,
+            cancelling: 0,
+            completed: 0,
+            stuck_count: 0,
+            by_region: vec![TaskRegionCountWire {
+                region_id: asupersync::RegionId::new_for_test(3, 0),
+                task_count: 2,
+            }],
+        };
+        let task_a = TaskDetailsWire {
+            id: asupersync::TaskId::new_for_test(1, 0),
+            region_id: asupersync::RegionId::new_for_test(3, 0),
+            state: TaskStateInfo::Running,
+            phase: "Running".to_string(),
+            poll_count: 4,
+            polls_remaining: 16,
+            created_at: Time::from_nanos(10),
+            age_nanos: 100,
+            time_since_last_poll_nanos: Some(5),
+            wake_pending: false,
+            obligations: vec![],
+            waiters: vec![],
+        };
+        let task_b = TaskDetailsWire {
+            id: asupersync::TaskId::new_for_test(9, 0),
+            region_id: asupersync::RegionId::new_for_test(3, 0),
+            state: TaskStateInfo::Running,
+            phase: "Running".to_string(),
+            poll_count: 2,
+            polls_remaining: 18,
+            created_at: Time::from_nanos(8),
+            age_nanos: 120,
+            time_since_last_poll_nanos: None,
+            wake_pending: true,
+            obligations: vec![],
+            waiters: vec![],
+        };
+        TaskConsoleWireSnapshot::new(Time::from_nanos(88), summary, vec![task_b, task_a])
+    }
 
     fn make_sample_trace() -> NamedTempFile {
         let file = NamedTempFile::new().expect("create temp file");
@@ -4633,6 +4849,67 @@ mod tests {
         assert_eq!(args.binary_name, "doctor_asupersync");
         assert_eq!(args.default_profile, DoctorPackageProfile::Ci);
         assert!(args.smoke);
+    }
+
+    #[test]
+    fn doctor_task_console_view_command_parses() {
+        let cli = Cli::try_parse_from([
+            "asupersync",
+            "doctor",
+            "task-console-view",
+            "--snapshot",
+            "artifacts/task_console.json",
+            "--max-tasks",
+            "32",
+            "--allow-schema-mismatch",
+        ])
+        .expect("parse doctor task-console-view args");
+
+        let Command::Doctor(DoctorArgs {
+            command: DoctorCommand::TaskConsoleView(args),
+        }) = cli.command
+        else {
+            panic!("expected doctor task-console-view command");
+        };
+        assert_eq!(args.snapshot, PathBuf::from("artifacts/task_console.json"));
+        assert_eq!(args.max_tasks, 32);
+        assert!(args.allow_schema_mismatch);
+    }
+
+    #[test]
+    fn build_task_console_view_output_truncates_tasks() {
+        let snapshot = sample_task_console_snapshot();
+        let view =
+            build_task_console_view_output(snapshot, Path::new("fixtures/task_console.json"), 1);
+        assert!(view.schema_matches_expected);
+        assert_eq!(view.source_snapshot, "fixtures/task_console.json");
+        assert_eq!(view.total_tasks, 2);
+        assert_eq!(view.shown_tasks, 1);
+        assert!(view.truncated);
+    }
+
+    #[test]
+    fn doctor_task_console_view_rejects_schema_mismatch_by_default() {
+        let temp = tempfile::tempdir().expect("tempdir");
+        let path = temp.path().join("task_console_snapshot.json");
+        let mut snapshot = sample_task_console_snapshot();
+        snapshot.schema_version = "asupersync.task_console_wire.experimental".to_string();
+        fs::write(
+            &path,
+            snapshot.to_json().expect("serialize task console snapshot"),
+        )
+        .expect("write task console snapshot");
+
+        let args = DoctorTaskConsoleViewArgs {
+            snapshot: path,
+            max_tasks: 8,
+            allow_schema_mismatch: false,
+        };
+        let mut output = Output::with_writer(OutputFormat::Json, std::io::Cursor::new(Vec::new()));
+        let err =
+            doctor_task_console_view(&args, &mut output).expect_err("schema mismatch should fail");
+        assert_eq!(err.error_type, "doctor_task_console_schema_error");
+        assert!(err.detail.contains(TASK_CONSOLE_WIRE_SCHEMA_V1));
     }
 
     #[test]

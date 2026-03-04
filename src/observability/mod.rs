@@ -82,7 +82,9 @@ pub use resource_accounting::{
     AdmissionKindStats, ObligationKindStats, ResourceAccounting, ResourceAccountingSnapshot,
 };
 pub use task_inspector::{
-    TaskDetails, TaskInspector, TaskInspectorConfig, TaskStateInfo, TaskSummary,
+    TASK_CONSOLE_WIRE_SCHEMA_V1, TaskConsoleWireSnapshot, TaskDetails, TaskDetailsWire,
+    TaskInspector, TaskInspectorConfig, TaskRegionCountWire, TaskStateInfo, TaskSummary,
+    TaskSummaryWire,
 };
 
 /// Configuration for observability and logging.

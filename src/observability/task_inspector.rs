@@ -26,6 +26,7 @@ use crate::runtime::state::RuntimeState;
 use crate::time::TimerDriverHandle;
 use crate::tracing_compat::{debug, info, trace, warn};
 use crate::types::{ObligationId, Outcome, RegionId, TaskId, Time};
+use serde::{Deserialize, Serialize};
 use std::collections::BTreeMap;
 use std::fmt::Write as _;
 use std::sync::Arc;
@@ -140,7 +141,7 @@ impl TaskDetails {
 }
 
 /// Simplified task state for inspection (matches TaskState but serializable).
-#[derive(Debug, Clone)]
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
 pub enum TaskStateInfo {
     /// Initial state after spawn.
     Created,
@@ -166,6 +167,190 @@ pub enum TaskStateInfo {
         /// Outcome kind.
         outcome: String,
     },
+}
+
+/// Stable schema identifier for task-inspector wire snapshots.
+pub const TASK_CONSOLE_WIRE_SCHEMA_V1: &str = "asupersync.task_console_wire.v1";
+
+/// Deterministic wire payload for task-inspector snapshots.
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+pub struct TaskConsoleWireSnapshot {
+    /// Schema version identifier.
+    pub schema_version: String,
+    /// Logical timestamp of snapshot capture.
+    pub generated_at: Time,
+    /// Aggregate task-state counters.
+    pub summary: TaskSummaryWire,
+    /// Task-level records sorted by `TaskId`.
+    pub tasks: Vec<TaskDetailsWire>,
+}
+
+impl TaskConsoleWireSnapshot {
+    /// Build a wire snapshot with deterministic task ordering.
+    #[must_use]
+    pub fn new(
+        generated_at: Time,
+        summary: TaskSummaryWire,
+        mut tasks: Vec<TaskDetailsWire>,
+    ) -> Self {
+        tasks.sort_unstable_by_key(|record| record.id);
+        Self {
+            schema_version: TASK_CONSOLE_WIRE_SCHEMA_V1.to_string(),
+            generated_at,
+            summary,
+            tasks,
+        }
+    }
+
+    /// Returns true when the payload schema matches the expected version.
+    #[must_use]
+    pub fn has_expected_schema(&self) -> bool {
+        self.schema_version == TASK_CONSOLE_WIRE_SCHEMA_V1
+    }
+
+    /// Encode snapshot as compact JSON.
+    ///
+    /// # Errors
+    ///
+    /// Returns `serde_json::Error` when serialization fails.
+    pub fn to_json(&self) -> Result<String, serde_json::Error> {
+        serde_json::to_string(self)
+    }
+
+    /// Encode snapshot as pretty JSON.
+    ///
+    /// # Errors
+    ///
+    /// Returns `serde_json::Error` when serialization fails.
+    pub fn to_pretty_json(&self) -> Result<String, serde_json::Error> {
+        serde_json::to_string_pretty(self)
+    }
+
+    /// Decode snapshot from JSON.
+    ///
+    /// # Errors
+    ///
+    /// Returns `serde_json::Error` when parsing fails.
+    pub fn from_json(payload: &str) -> Result<Self, serde_json::Error> {
+        serde_json::from_str(payload)
+    }
+}
+
+/// Region-level task count in wire payloads.
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+pub struct TaskRegionCountWire {
+    /// Region identifier.
+    pub region_id: RegionId,
+    /// Number of tasks currently owned by this region.
+    pub task_count: usize,
+}
+
+/// Summary section for task-inspector wire snapshots.
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+pub struct TaskSummaryWire {
+    /// Total number of tasks.
+    pub total_tasks: usize,
+    /// Tasks in `Created`.
+    pub created: usize,
+    /// Tasks in `Running`.
+    pub running: usize,
+    /// Tasks in any cancellation phase.
+    pub cancelling: usize,
+    /// Completed tasks.
+    pub completed: usize,
+    /// Number of tasks classified as potentially stuck.
+    pub stuck_count: usize,
+    /// Region distribution, sorted by `RegionId`.
+    pub by_region: Vec<TaskRegionCountWire>,
+}
+
+impl From<TaskSummary> for TaskSummaryWire {
+    fn from(summary: TaskSummary) -> Self {
+        let by_region = summary
+            .by_region
+            .into_iter()
+            .map(|(region_id, task_count)| TaskRegionCountWire {
+                region_id,
+                task_count,
+            })
+            .collect();
+        Self {
+            total_tasks: summary.total_tasks,
+            created: summary.created,
+            running: summary.running,
+            cancelling: summary.cancelling,
+            completed: summary.completed,
+            stuck_count: summary.stuck_count,
+            by_region,
+        }
+    }
+}
+
+/// Task-level section for task-inspector wire snapshots.
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+pub struct TaskDetailsWire {
+    /// Task identifier.
+    pub id: TaskId,
+    /// Owning region.
+    pub region_id: RegionId,
+    /// High-level task state.
+    pub state: TaskStateInfo,
+    /// Coarse-grained atomic phase.
+    pub phase: String,
+    /// Poll count since task creation.
+    pub poll_count: u64,
+    /// Remaining poll budget.
+    pub polls_remaining: u32,
+    /// Task creation logical timestamp.
+    pub created_at: Time,
+    /// Task age in nanoseconds.
+    pub age_nanos: u64,
+    /// Time since last poll in nanoseconds when available.
+    pub time_since_last_poll_nanos: Option<u64>,
+    /// Whether a wake is pending.
+    pub wake_pending: bool,
+    /// Held obligations sorted by `ObligationId`.
+    pub obligations: Vec<ObligationId>,
+    /// Waiting tasks sorted by `TaskId`.
+    pub waiters: Vec<TaskId>,
+}
+
+impl From<TaskDetails> for TaskDetailsWire {
+    fn from(task: TaskDetails) -> Self {
+        let mut obligations = task.obligations;
+        obligations.sort_unstable();
+        let mut waiters = task.waiters;
+        waiters.sort_unstable();
+        Self {
+            id: task.id,
+            region_id: task.region_id,
+            state: task.state,
+            phase: phase_name(task.phase).to_string(),
+            poll_count: task.poll_count,
+            polls_remaining: task.polls_remaining,
+            created_at: task.created_at,
+            age_nanos: duration_to_nanos(task.age),
+            time_since_last_poll_nanos: task.time_since_last_poll.map(duration_to_nanos),
+            wake_pending: task.wake_pending,
+            obligations,
+            waiters,
+        }
+    }
+}
+
+fn duration_to_nanos(duration: Duration) -> u64 {
+    duration.as_nanos().min(u128::from(u64::MAX)) as u64
+}
+
+fn phase_name(phase: TaskPhase) -> &'static str {
+    match phase {
+        TaskPhase::Created => "Created",
+        TaskPhase::Running => "Running",
+        TaskPhase::CancelRequested => "CancelRequested",
+        TaskPhase::Cancelling => "Cancelling",
+        TaskPhase::Finalizing => "Finalizing",
+        TaskPhase::Completed => "Completed",
+    }
 }
 
 impl TaskStateInfo {
@@ -400,10 +585,7 @@ impl TaskInspector {
         self.find_stuck_tasks(self.config.stuck_task_threshold)
     }
 
-    /// Get a summary of all tasks.
-    #[must_use]
-    pub fn summary(&self) -> TaskSummary {
-        let tasks = self.list_tasks();
+    fn summarize_tasks(tasks: &[TaskDetails], stuck_threshold: Duration) -> TaskSummary {
         let mut by_region: BTreeMap<RegionId, usize> = BTreeMap::new();
         let mut created = 0;
         let mut running = 0;
@@ -411,7 +593,7 @@ impl TaskInspector {
         let mut completed = 0;
         let mut stuck_count = 0;
 
-        for task in &tasks {
+        for task in tasks {
             *by_region.entry(task.region_id).or_insert(0) += 1;
 
             match &task.state {
@@ -423,29 +605,13 @@ impl TaskInspector {
                 TaskStateInfo::Completed { .. } => completed += 1,
             }
 
-            // Count stuck tasks
-            if task.age > self.config.stuck_task_threshold
-                && !task.is_terminal()
-                && !task.wake_pending
-            {
+            if task.age > stuck_threshold && !task.is_terminal() && !task.wake_pending {
                 stuck_count += 1;
             }
         }
 
-        let total_tasks = tasks.len();
-
-        debug!(
-            total = total_tasks,
-            created = created,
-            running = running,
-            cancelling = cancelling,
-            completed = completed,
-            stuck = stuck_count,
-            "task summary computed"
-        );
-
         TaskSummary {
-            total_tasks,
+            total_tasks: tasks.len(),
             created,
             running,
             cancelling,
@@ -453,6 +619,56 @@ impl TaskInspector {
             by_region,
             stuck_count,
         }
+    }
+
+    /// Get a summary of all tasks.
+    #[must_use]
+    pub fn summary(&self) -> TaskSummary {
+        let tasks = self.list_tasks();
+        let summary = Self::summarize_tasks(&tasks, self.config.stuck_task_threshold);
+
+        debug!(
+            total = summary.total_tasks,
+            created = summary.created,
+            running = summary.running,
+            cancelling = summary.cancelling,
+            completed = summary.completed,
+            stuck = summary.stuck_count,
+            "task summary computed"
+        );
+
+        summary
+    }
+
+    /// Build a deterministic wire snapshot suitable for console or dashboard consumers.
+    #[must_use]
+    pub fn wire_snapshot(&self) -> TaskConsoleWireSnapshot {
+        let tasks = self.list_tasks();
+        let summary = Self::summarize_tasks(&tasks, self.config.stuck_task_threshold);
+        let wire_tasks = tasks.into_iter().map(TaskDetailsWire::from).collect();
+        TaskConsoleWireSnapshot::new(
+            self.current_time(),
+            TaskSummaryWire::from(summary),
+            wire_tasks,
+        )
+    }
+
+    /// Serialize a wire snapshot as compact JSON.
+    ///
+    /// # Errors
+    ///
+    /// Returns `serde_json::Error` when serialization fails.
+    pub fn wire_snapshot_json(&self) -> Result<String, serde_json::Error> {
+        self.wire_snapshot().to_json()
+    }
+
+    /// Serialize a wire snapshot as pretty JSON.
+    ///
+    /// # Errors
+    ///
+    /// Returns `serde_json::Error` when serialization fails.
+    pub fn wire_snapshot_pretty_json(&self) -> Result<String, serde_json::Error> {
+        self.wire_snapshot().to_pretty_json()
     }
 
     /// Render task summary to console (if available).
@@ -829,5 +1045,95 @@ mod tests {
         assert!(!details.is_terminal());
         assert!(!details.obligations.is_empty());
         assert!(!details.waiters.is_empty());
+    }
+
+    #[test]
+    fn wire_snapshot_round_trip_and_schema() {
+        let summary = TaskSummaryWire {
+            total_tasks: 2,
+            created: 0,
+            running: 1,
+            cancelling: 1,
+            completed: 0,
+            stuck_count: 0,
+            by_region: vec![TaskRegionCountWire {
+                region_id: RegionId::new_for_test(1, 0),
+                task_count: 2,
+            }],
+        };
+        let first = TaskDetailsWire {
+            id: TaskId::new_for_test(1, 0),
+            region_id: RegionId::new_for_test(1, 0),
+            state: TaskStateInfo::Running,
+            phase: "Running".to_string(),
+            poll_count: 4,
+            polls_remaining: 10,
+            created_at: Time::from_nanos(100),
+            age_nanos: 200,
+            time_since_last_poll_nanos: Some(30),
+            wake_pending: true,
+            obligations: vec![ObligationId::new_for_test(2, 0)],
+            waiters: vec![TaskId::new_for_test(3, 0)],
+        };
+        let second = TaskDetailsWire {
+            id: TaskId::new_for_test(5, 0),
+            region_id: RegionId::new_for_test(1, 0),
+            state: TaskStateInfo::CancelRequested {
+                reason: "Timeout".to_string(),
+            },
+            phase: "CancelRequested".to_string(),
+            poll_count: 2,
+            polls_remaining: 3,
+            created_at: Time::from_nanos(80),
+            age_nanos: 220,
+            time_since_last_poll_nanos: None,
+            wake_pending: false,
+            obligations: vec![],
+            waiters: vec![],
+        };
+
+        let snapshot =
+            TaskConsoleWireSnapshot::new(Time::from_nanos(999), summary, vec![second, first]);
+        assert!(snapshot.has_expected_schema());
+        assert_eq!(snapshot.schema_version, TASK_CONSOLE_WIRE_SCHEMA_V1);
+        assert_eq!(snapshot.tasks[0].id, TaskId::new_for_test(1, 0));
+        assert_eq!(snapshot.tasks[1].id, TaskId::new_for_test(5, 0));
+
+        let encoded = snapshot.to_json().expect("wire snapshot must encode");
+        let decoded =
+            TaskConsoleWireSnapshot::from_json(&encoded).expect("wire snapshot must decode");
+        assert_eq!(decoded, snapshot);
+    }
+
+    #[test]
+    fn details_wire_normalizes_collections_and_phase_name() {
+        let details = TaskDetails {
+            id: TaskId::new_for_test(10, 0),
+            region_id: RegionId::new_for_test(1, 0),
+            state: TaskStateInfo::Finalizing {
+                reason: "Shutdown".to_string(),
+            },
+            phase: TaskPhase::Finalizing,
+            poll_count: 7,
+            polls_remaining: 9,
+            created_at: Time::from_nanos(10),
+            age: Duration::from_nanos(99),
+            time_since_last_poll: Some(Duration::from_nanos(7)),
+            wake_pending: false,
+            obligations: vec![
+                ObligationId::new_for_test(3, 0),
+                ObligationId::new_for_test(1, 0),
+            ],
+            waiters: vec![TaskId::new_for_test(8, 0), TaskId::new_for_test(2, 0)],
+        };
+
+        let wire = TaskDetailsWire::from(details);
+        assert_eq!(wire.phase, "Finalizing");
+        assert_eq!(wire.age_nanos, 99);
+        assert_eq!(wire.time_since_last_poll_nanos, Some(7));
+        assert_eq!(wire.obligations[0], ObligationId::new_for_test(1, 0));
+        assert_eq!(wire.obligations[1], ObligationId::new_for_test(3, 0));
+        assert_eq!(wire.waiters[0], TaskId::new_for_test(2, 0));
+        assert_eq!(wire.waiters[1], TaskId::new_for_test(8, 0));
     }
 }
