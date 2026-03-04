@@ -19,8 +19,7 @@ const DOC_PATH: &str = "docs/doctor_logging_quality_governance.md";
 const LOGGING_CONTRACT_DOC: &str = "docs/doctor_logging_contract.md";
 const OBSERVABILITY_DOC: &str = "docs/doctor_observability_taxonomy.md";
 const RULES_FIXTURE_PATH: &str = "tests/fixtures/doctor_logging_quality/log_quality_rules.json";
-const STREAM_FIXTURE_PATH: &str =
-    "tests/fixtures/doctor_logging_quality/sample_event_stream.json";
+const STREAM_FIXTURE_PATH: &str = "tests/fixtures/doctor_logging_quality/sample_event_stream.json";
 const RULES_SCHEMA_VERSION: &str = "doctor-log-quality-rules-v1";
 const STREAM_SCHEMA_VERSION: &str = "doctor-log-quality-event-stream-v1";
 
@@ -254,11 +253,7 @@ fn is_suppressed(
     None
 }
 
-fn validate_envelope(
-    event_index: usize,
-    event: &LogEvent,
-    rules: &RulesFixture,
-) -> Vec<Violation> {
+fn validate_envelope(event_index: usize, event: &LogEvent, rules: &RulesFixture) -> Vec<Violation> {
     let mut violations = Vec::new();
     for rule in &rules.envelope_rules {
         let value = match rule.field.as_str() {
@@ -283,8 +278,7 @@ fn validate_envelope(
             }
             "one_of" => {
                 if let Some(arr) = rule.expected.as_array() {
-                    !arr.iter()
-                        .any(|v| v.as_str().is_some_and(|s| s == value))
+                    !arr.iter().any(|v| v.as_str().is_some_and(|s| s == value))
                 } else {
                     false
                 }
@@ -301,8 +295,11 @@ fn validate_envelope(
         };
 
         if violated {
-            let suppressed =
-                is_suppressed(&rule.rule_id, event, &rules.suppression_policy.suppression_entries);
+            let suppressed = is_suppressed(
+                &rule.rule_id,
+                event,
+                &rules.suppression_policy.suppression_entries,
+            );
             violations.push(Violation {
                 event_index,
                 rule_id: rule.rule_id.clone(),
@@ -352,7 +349,13 @@ fn validate_correlation(events: &[LogEvent], rules: &RulesFixture) -> Vec<Violat
                 // Events must be ordered by (flow_id, event_kind, trace_id)
                 let keys: Vec<(&str, &str, &str)> = events
                     .iter()
-                    .map(|e| (e.flow_id.as_str(), e.event_kind.as_str(), e.trace_id.as_str()))
+                    .map(|e| {
+                        (
+                            e.flow_id.as_str(),
+                            e.event_kind.as_str(),
+                            e.trace_id.as_str(),
+                        )
+                    })
                     .collect();
                 for i in 1..keys.len() {
                     if keys[i] < keys[i - 1] {
@@ -528,19 +531,22 @@ fn rules_fixture_bead_id() {
 fn rules_fixture_contract_versions() {
     let rules = load_rules();
     assert_eq!(rules.baseline_contract_version, "doctor-logging-v1");
-    assert_eq!(rules.observability_contract_version, "doctor-observability-v1");
+    assert_eq!(
+        rules.observability_contract_version,
+        "doctor-observability-v1"
+    );
 }
 
 #[test]
 fn envelope_rules_have_unique_ids() {
     let rules = load_rules();
-    let ids: Vec<&str> = rules.envelope_rules.iter().map(|r| r.rule_id.as_str()).collect();
+    let ids: Vec<&str> = rules
+        .envelope_rules
+        .iter()
+        .map(|r| r.rule_id.as_str())
+        .collect();
     let unique: BTreeSet<&str> = ids.iter().copied().collect();
-    assert_eq!(
-        ids.len(),
-        unique.len(),
-        "Envelope rule IDs must be unique"
-    );
+    assert_eq!(ids.len(), unique.len(), "Envelope rule IDs must be unique");
 }
 
 #[test]
@@ -691,14 +697,20 @@ fn outcome_defaults_map_to_valid_severities() {
 #[test]
 fn conflict_escalation_is_critical() {
     let rules = load_rules();
-    assert_eq!(rules.severity_classification.conflict_escalation, "critical");
+    assert_eq!(
+        rules.severity_classification.conflict_escalation,
+        "critical"
+    );
 }
 
 #[test]
 fn outcome_success_maps_to_info() {
     let rules = load_rules();
     assert_eq!(
-        rules.severity_classification.outcome_defaults.get("success"),
+        rules
+            .severity_classification
+            .outcome_defaults
+            .get("success"),
         Some(&"info".to_string())
     );
 }
@@ -719,10 +731,7 @@ fn outcome_cancelled_maps_to_warning() {
 fn outcome_failed_maps_to_error() {
     let rules = load_rules();
     assert_eq!(
-        rules
-            .severity_classification
-            .outcome_defaults
-            .get("failed"),
+        rules.severity_classification.outcome_defaults.get("failed"),
         Some(&"error".to_string())
     );
 }
@@ -830,9 +839,24 @@ fn scoring_thresholds_are_ordered() {
 #[test]
 fn scoring_deductions_have_required_keys() {
     let rules = load_rules();
-    assert!(rules.quality_scoring.deductions.contains_key("error_violation"));
-    assert!(rules.quality_scoring.deductions.contains_key("warning_violation"));
-    assert!(rules.quality_scoring.deductions.contains_key("suppressed_violation"));
+    assert!(
+        rules
+            .quality_scoring
+            .deductions
+            .contains_key("error_violation")
+    );
+    assert!(
+        rules
+            .quality_scoring
+            .deductions
+            .contains_key("warning_violation")
+    );
+    assert!(
+        rules
+            .quality_scoring
+            .deductions
+            .contains_key("suppressed_violation")
+    );
 }
 
 #[test]
@@ -874,7 +898,8 @@ fn single_error_reduces_score() {
         suppressed: false,
     }];
     let score = compute_quality_score(&violations, &rules.quality_scoring);
-    let expected = rules.quality_scoring.max_score - rules.quality_scoring.deductions["error_violation"];
+    let expected =
+        rules.quality_scoring.max_score - rules.quality_scoring.deductions["error_violation"];
     assert_eq!(score, expected);
 }
 
@@ -985,7 +1010,13 @@ fn event_stream_is_lexically_ordered() {
     let keys: Vec<(&str, &str, &str)> = stream
         .events
         .iter()
-        .map(|e| (e.flow_id.as_str(), e.event_kind.as_str(), e.trace_id.as_str()))
+        .map(|e| {
+            (
+                e.flow_id.as_str(),
+                e.event_kind.as_str(),
+                e.trace_id.as_str(),
+            )
+        })
         .collect();
     for i in 1..keys.len() {
         assert!(
@@ -1049,9 +1080,9 @@ fn envelope_validation_golden_stream_produces_expected_violations() {
 
     // Check against expected violations
     for expected in &stream.expected_violations {
-        let found = all_violations.iter().any(|v| {
-            v.event_index == expected.event_index && v.rule_id == expected.rule_id
-        });
+        let found = all_violations
+            .iter()
+            .any(|v| v.event_index == expected.event_index && v.rule_id == expected.rule_id);
         assert!(
             found,
             "Expected violation not found: event_index={}, rule_id={}",
@@ -1132,7 +1163,10 @@ fn validator_output_is_deterministic() {
 
     let run1 = run();
     let run2 = run();
-    assert_eq!(run1, run2, "Validator output must be deterministic across runs");
+    assert_eq!(
+        run1, run2,
+        "Validator output must be deterministic across runs"
+    );
 }
 
 #[test]
