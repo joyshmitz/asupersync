@@ -874,23 +874,23 @@ fn t37c_03_atomic_write_error_fidelity() {
 fn t37c_04_process_lifecycle_protocol() {
     let process_src = load_source("src/process.rs");
 
-    // Command builder API surface
-    for token in [
+    // Command builder API surface — methods may have generics so match on "fn name"
+    for method in [
         "pub struct Command",
-        "fn new<",
-        "fn arg(",
-        "fn args(",
-        "fn env(",
-        "fn current_dir(",
-        "fn stdin(",
-        "fn stdout(",
-        "fn stderr(",
-        "fn kill_on_drop(",
-        "fn spawn(",
+        "fn new",
+        "fn arg",
+        "fn args",
+        "fn env",
+        "fn current_dir",
+        "fn stdin",
+        "fn stdout",
+        "fn stderr",
+        "fn kill_on_drop",
+        "fn spawn",
     ] {
         assert!(
-            process_src.contains(token),
-            "[T37C-04/PR-G1] process lifecycle: src/process.rs missing Command method: {token}"
+            process_src.contains(method),
+            "[T37C-04/PR-G1] process lifecycle: src/process.rs missing Command method: {method}"
         );
     }
 
