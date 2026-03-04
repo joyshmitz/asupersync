@@ -182,6 +182,65 @@ This markdown file is the human-readable authority; the JSON file is the canonic
 
 ---
 
+## 11. T3.7 Deterministic Conformance and Fault-Injection Contract Pack
+
+This section closes `asupersync-2oh2u.3.7` by defining executable conformance contracts and adversarial fault-injection scenarios across all three T3 domains (filesystem, process, signal), with deterministic pass/fail semantics, reproducible repro commands, and diagnostics mapped to owning beads and modules.
+
+### 11.1 Filesystem Conformance Contracts
+
+| Contract ID | Contract Focus | Pass Criteria | Violation Diagnostics | Owner Modules | Evidence Artifacts | Repro Command |
+|---|---|---|---|---|---|---|
+| `T37C-01` | VFS deterministic replay and fault-injection seam | `Vfs` trait requires `Send + Sync`; `VfsFile` requires `AsyncRead + AsyncWrite + AsyncSeek + Send + Unpin`; `UnixVfs` implements `Vfs`; trait methods return `io::Result` enabling mock error injection for ENOSPC, EIO, EACCES fault scenarios. | Emit `FS-G3` diagnostic with owner `src/fs/vfs.rs` and failing conformance assertion. | `src/fs/vfs.rs` | `src/fs/vfs.rs`, `tests/tokio_fs_process_signal_parity_matrix.rs` | `rch exec -- cargo test --test tokio_fs_process_signal_parity_matrix t37c_01 -- --nocapture` |
+| `T37C-02` | FS cancel-safety protocol across async operations | `File::open` and `File::create` are cancel-safe (no partial handle leak); read/write operations handle partial completion cleanly; `sync_all`/`sync_data` are cancel-safe (atomic completion); `WritePermit` pattern is documented for cancel-safe writes. | Emit `FS-G2` diagnostic with owner `src/fs/file.rs` and the cancel-safety invariant that failed. | `src/fs/file.rs`, `src/fs/mod.rs` | `src/fs/file.rs`, `src/fs/mod.rs`, `tests/tokio_fs_process_signal_parity_matrix.rs` | `rch exec -- cargo test --test tokio_fs_process_signal_parity_matrix t37c_02 -- --nocapture` |
+| `T37C-03` | Atomic write and error fidelity | `write_atomic` exists in `path_ops` with complete-or-nothing semantics; `try_exists` returns `io::Result<bool>`; IO errors preserve `ErrorKind` through async boundaries. | Emit `FS-G1` diagnostic with owner `src/fs/path_ops.rs` and the missing API or fidelity invariant. | `src/fs/path_ops.rs`, `src/fs/mod.rs` | `src/fs/path_ops.rs`, `src/fs/mod.rs`, `tests/tokio_fs_process_signal_parity_matrix.rs` | `rch exec -- cargo test --test tokio_fs_process_signal_parity_matrix t37c_03 -- --nocapture` |
+
+### 11.2 Process Conformance Contracts
+
+| Contract ID | Contract Focus | Pass Criteria | Violation Diagnostics | Owner Modules | Evidence Artifacts | Repro Command |
+|---|---|---|---|---|---|---|
+| `T37C-04` | Process lifecycle protocol conformance | `Command` builder provides `new`/`arg`/`args`/`env`/`current_dir`/`stdin`/`stdout`/`stderr`/`kill_on_drop`/`spawn`; `Child` provides `id`/`kill`/`try_wait`/`wait_async`/`wait_with_output_async`; `ExitStatus` provides `code`/`success`; `Stdio` provides `inherit`/`piped`/`null`. | Emit `PR-G1` diagnostic with owner `src/process.rs` and missing lifecycle method. | `src/process.rs` | `src/process.rs`, `tests/tokio_fs_process_signal_parity_matrix.rs` | `rch exec -- cargo test --test tokio_fs_process_signal_parity_matrix t37c_04 -- --nocapture` |
+| `T37C-05` | Process cancellation and kill_on_drop cleanup | `kill_on_drop` setter exists on `Command`; `Child::kill` returns `Result`; `Drop` impl on `Child` handles cleanup when `kill_on_drop(true)` is set; no zombie process leaks on cancellation paths. | Emit `PR-G4` diagnostic with owner `src/process.rs` and the cleanup invariant that failed. | `src/process.rs` | `src/process.rs`, `tests/tokio_fs_process_signal_parity_matrix.rs` | `rch exec -- cargo test --test tokio_fs_process_signal_parity_matrix t37c_05 -- --nocapture` |
+| `T37C-06` | Process error classification and spawn fault injection | `ProcessError` has `Io`, `NotFound`, `PermissionDenied`, `Signaled` variants; `NotFound` and `PermissionDenied` include program name for diagnostics; `Signaled` includes signal number; `Command::spawn` maps `ENOENT` to `NotFound` and `EACCES` to `PermissionDenied`. | Emit `PR-G3` diagnostic with owner `src/process.rs` and missing error variant or mapping. | `src/process.rs` | `src/process.rs`, `tests/tokio_fs_process_signal_parity_matrix.rs` | `rch exec -- cargo test --test tokio_fs_process_signal_parity_matrix t37c_06 -- --nocapture` |
+
+### 11.3 Signal Conformance Contracts
+
+| Contract ID | Contract Focus | Pass Criteria | Violation Diagnostics | Owner Modules | Evidence Artifacts | Repro Command |
+|---|---|---|---|---|---|---|
+| `T37C-07` | Signal delivery monotonicity and coalescing correctness | `Signal::recv` returns `Option<()>`; delivery counter uses `AtomicU64` with monotonic increments (`fetch_add`); `seen_deliveries` tracking prevents double-delivery; `SignalKind` covers `Interrupt`, `Terminate`, `Hangup`, `Quit`, `User1`, `User2`, `Child`, `Pipe`, `Alarm`. | Emit `SG-G3` diagnostic with owner `src/signal/signal.rs` and the delivery invariant that failed. | `src/signal/signal.rs`, `src/signal/kind.rs` | `src/signal/signal.rs`, `src/signal/kind.rs`, `tests/tokio_fs_process_signal_parity_matrix.rs` | `rch exec -- cargo test --test tokio_fs_process_signal_parity_matrix t37c_07 -- --nocapture` |
+| `T37C-08` | Shutdown convergence and graceful outcome classification | `ShutdownController::new`/`subscribe`/`shutdown` exist; `ShutdownReceiver::wait`/`is_shutting_down` exist; `GracefulOutcome` has `Completed(T)` and `ShutdownSignaled` variants; `with_graceful_shutdown` correctly races future against shutdown receiver; concurrent/repeated shutdown calls converge to stable state. | Emit `SG-G4` diagnostic with owner `src/signal/shutdown.rs` and the convergence or classification invariant that failed. | `src/signal/shutdown.rs`, `src/signal/graceful.rs` | `src/signal/shutdown.rs`, `src/signal/graceful.rs`, `tests/tokio_fs_process_signal_parity_matrix.rs` | `rch exec -- cargo test --test tokio_fs_process_signal_parity_matrix t37c_08 -- --nocapture` |
+
+### 11.4 Reproducible Artifact and Archive Requirements
+
+- Primary contract artifact set:
+  - `docs/tokio_fs_process_signal_parity_matrix.md`
+  - `docs/tokio_fs_process_signal_parity_matrix.json`
+  - `tests/tokio_fs_process_signal_parity_matrix.rs`
+- Every contract violation MUST report:
+  - Contract ID (`T37C-*`) and mapped gap ID (`FS-G*`, `PR-G*`, or `SG-G*`),
+  - owning module path,
+  - reproduction command, and
+  - test case name that failed.
+- Deterministic replay command for full T3.7 suite:
+  - `rch exec -- cargo test --test tokio_fs_process_signal_parity_matrix -- --nocapture`
+- Archive policy reference:
+  - `docs/tokio_evidence_checklist.md`
+  - `docs/tokio_replay_artifact_schema_policy.md`
+
+### 11.5 Fault-Injection Scenario Matrix
+
+| Scenario | Domain | Injection Point | Expected Behavior | Owner Module | Mapped Gap |
+|---|---|---|---|---|---|
+| FI-01: ENOSPC on write | filesystem | `Vfs::write` / `VfsFile` write path | `io::Error` with `ErrorKind::Other` or platform-specific; caller observes error without partial state | `src/fs/vfs.rs` | `FS-G3` |
+| FI-02: EIO on read | filesystem | `Vfs::read` / `VfsFile` read path | `io::Error` propagated; no silent data corruption | `src/fs/vfs.rs` | `FS-G3` |
+| FI-03: EACCES on open | filesystem | `Vfs::open` | `io::Error` with `PermissionDenied`; no handle leak | `src/fs/vfs.rs` | `FS-G3` |
+| FI-04: Invalid program spawn | process | `Command::spawn` with nonexistent binary | `ProcessError::NotFound` with program name | `src/process.rs` | `PR-G3` |
+| FI-05: Permission denied spawn | process | `Command::spawn` with non-executable path | `ProcessError::PermissionDenied` with program name | `src/process.rs` | `PR-G3` |
+| FI-06: Signal on unsupported platform | signal | `signal(kind)` on non-Unix | `io::Error` with unsupported message; deterministic fallback | `src/signal/signal.rs` | `SG-G1` |
+| FI-07: Burst signal delivery | signal | Rapid `inject()` calls on signal slot | Monotonic delivery counter; no lost signals; `recv()` observes all | `src/signal/signal.rs` | `SG-G3` |
+| FI-08: Concurrent shutdown race | signal | Multiple threads calling `shutdown()` simultaneously | Exactly one transition; all subscribers notified; idempotent | `src/signal/shutdown.rs` | `SG-G4` |
+
+---
+
 ## 9. Drift-Detection Rules (Anti-Staleness)
 
 The following rules define stale/misleading parity drift and MUST be enforced by tests/CI:

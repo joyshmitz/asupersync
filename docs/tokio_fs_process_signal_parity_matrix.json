@@ -1,7 +1,7 @@
 {
   "bead_id": "asupersync-2oh2u.3.1",
   "title": "[T3.1] Build complete filesystem/process/signal parity matrix",
-  "version": 2,
+  "version": 3,
   "generated_at": "2026-03-03",
   "domains": ["filesystem", "process", "signal"],
   "source_markdown": "docs/tokio_fs_process_signal_parity_matrix.md",
@@ -235,6 +235,159 @@
       "known_divergence_risk": "ctrl_c availability assumptions can fail off unix"
     }
   ],
+  "conformance_contracts": [
+    {
+      "id": "T37C-01",
+      "bead_id": "asupersync-2oh2u.3.7",
+      "domain": "filesystem",
+      "focus": "VFS deterministic replay and fault-injection seam",
+      "pass_criteria": [
+        "Vfs trait requires Send + Sync",
+        "VfsFile requires AsyncRead + AsyncWrite + AsyncSeek + Send + Unpin",
+        "UnixVfs implements Vfs",
+        "Vfs methods return io::Result enabling mock error injection"
+      ],
+      "failure_semantics": "emit FS-G3 diagnostic with owner src/fs/vfs.rs and failing conformance assertion",
+      "owner_modules": ["src/fs/vfs.rs"],
+      "artifacts": ["src/fs/vfs.rs", "tests/tokio_fs_process_signal_parity_matrix.rs"],
+      "contract_tests": ["t37c_01_vfs_deterministic_seam"],
+      "mapped_gap": "FS-G3",
+      "reproduction_command": "rch exec -- cargo test --test tokio_fs_process_signal_parity_matrix t37c_01 -- --nocapture"
+    },
+    {
+      "id": "T37C-02",
+      "bead_id": "asupersync-2oh2u.3.7",
+      "domain": "filesystem",
+      "focus": "FS cancel-safety protocol across async operations",
+      "pass_criteria": [
+        "File::open and File::create are cancel-safe",
+        "WritePermit pattern documented for cancel-safe writes",
+        "sync_all and sync_data are cancel-safe"
+      ],
+      "failure_semantics": "emit FS-G2 diagnostic with owner src/fs/file.rs and the cancel-safety invariant that failed",
+      "owner_modules": ["src/fs/file.rs", "src/fs/mod.rs"],
+      "artifacts": ["src/fs/file.rs", "src/fs/mod.rs", "tests/tokio_fs_process_signal_parity_matrix.rs"],
+      "contract_tests": ["t37c_02_fs_cancel_safety_protocol"],
+      "mapped_gap": "FS-G2",
+      "reproduction_command": "rch exec -- cargo test --test tokio_fs_process_signal_parity_matrix t37c_02 -- --nocapture"
+    },
+    {
+      "id": "T37C-03",
+      "bead_id": "asupersync-2oh2u.3.7",
+      "domain": "filesystem",
+      "focus": "atomic write and error fidelity",
+      "pass_criteria": [
+        "write_atomic exists in path_ops with complete-or-nothing semantics",
+        "try_exists returns io::Result<bool>",
+        "IO errors preserve ErrorKind through async boundaries"
+      ],
+      "failure_semantics": "emit FS-G1 diagnostic with owner src/fs/path_ops.rs and missing API or fidelity invariant",
+      "owner_modules": ["src/fs/path_ops.rs", "src/fs/mod.rs"],
+      "artifacts": ["src/fs/path_ops.rs", "src/fs/mod.rs", "tests/tokio_fs_process_signal_parity_matrix.rs"],
+      "contract_tests": ["t37c_03_atomic_write_error_fidelity"],
+      "mapped_gap": "FS-G1",
+      "reproduction_command": "rch exec -- cargo test --test tokio_fs_process_signal_parity_matrix t37c_03 -- --nocapture"
+    },
+    {
+      "id": "T37C-04",
+      "bead_id": "asupersync-2oh2u.3.7",
+      "domain": "process",
+      "focus": "process lifecycle protocol conformance",
+      "pass_criteria": [
+        "Command builder provides new/arg/args/env/current_dir/stdin/stdout/stderr/kill_on_drop/spawn",
+        "Child provides id/kill/try_wait/wait_async/wait_with_output_async",
+        "ExitStatus provides code/success",
+        "Stdio provides inherit/piped/null"
+      ],
+      "failure_semantics": "emit PR-G1 diagnostic with owner src/process.rs and missing lifecycle method",
+      "owner_modules": ["src/process.rs"],
+      "artifacts": ["src/process.rs", "tests/tokio_fs_process_signal_parity_matrix.rs"],
+      "contract_tests": ["t37c_04_process_lifecycle_protocol"],
+      "mapped_gap": "PR-G1",
+      "reproduction_command": "rch exec -- cargo test --test tokio_fs_process_signal_parity_matrix t37c_04 -- --nocapture"
+    },
+    {
+      "id": "T37C-05",
+      "bead_id": "asupersync-2oh2u.3.7",
+      "domain": "process",
+      "focus": "process cancellation and kill_on_drop cleanup",
+      "pass_criteria": [
+        "kill_on_drop setter exists on Command",
+        "Child::kill returns Result",
+        "Drop impl handles cleanup when kill_on_drop(true) is set"
+      ],
+      "failure_semantics": "emit PR-G4 diagnostic with owner src/process.rs and the cleanup invariant that failed",
+      "owner_modules": ["src/process.rs"],
+      "artifacts": ["src/process.rs", "tests/tokio_fs_process_signal_parity_matrix.rs"],
+      "contract_tests": ["t37c_05_process_kill_on_drop"],
+      "mapped_gap": "PR-G4",
+      "reproduction_command": "rch exec -- cargo test --test tokio_fs_process_signal_parity_matrix t37c_05 -- --nocapture"
+    },
+    {
+      "id": "T37C-06",
+      "bead_id": "asupersync-2oh2u.3.7",
+      "domain": "process",
+      "focus": "process error classification and spawn fault injection",
+      "pass_criteria": [
+        "ProcessError has Io, NotFound, PermissionDenied, Signaled variants",
+        "NotFound and PermissionDenied include program name",
+        "Signaled includes signal number",
+        "Command::spawn maps ENOENT to NotFound and EACCES to PermissionDenied"
+      ],
+      "failure_semantics": "emit PR-G3 diagnostic with owner src/process.rs and missing error variant or mapping",
+      "owner_modules": ["src/process.rs"],
+      "artifacts": ["src/process.rs", "tests/tokio_fs_process_signal_parity_matrix.rs"],
+      "contract_tests": ["t37c_06_process_error_classification"],
+      "mapped_gap": "PR-G3",
+      "reproduction_command": "rch exec -- cargo test --test tokio_fs_process_signal_parity_matrix t37c_06 -- --nocapture"
+    },
+    {
+      "id": "T37C-07",
+      "bead_id": "asupersync-2oh2u.3.7",
+      "domain": "signal",
+      "focus": "signal delivery monotonicity and coalescing correctness",
+      "pass_criteria": [
+        "Signal::recv returns Option<()>",
+        "delivery counter uses AtomicU64 with monotonic fetch_add",
+        "seen_deliveries tracking prevents double-delivery",
+        "SignalKind covers Interrupt, Terminate, Hangup, Quit, User1, User2, Child, Pipe, Alarm"
+      ],
+      "failure_semantics": "emit SG-G3 diagnostic with owner src/signal/signal.rs and the delivery invariant that failed",
+      "owner_modules": ["src/signal/signal.rs", "src/signal/kind.rs"],
+      "artifacts": ["src/signal/signal.rs", "src/signal/kind.rs", "tests/tokio_fs_process_signal_parity_matrix.rs"],
+      "contract_tests": ["t37c_07_signal_delivery_monotonicity"],
+      "mapped_gap": "SG-G3",
+      "reproduction_command": "rch exec -- cargo test --test tokio_fs_process_signal_parity_matrix t37c_07 -- --nocapture"
+    },
+    {
+      "id": "T37C-08",
+      "bead_id": "asupersync-2oh2u.3.7",
+      "domain": "signal",
+      "focus": "shutdown convergence and graceful outcome classification",
+      "pass_criteria": [
+        "ShutdownController provides new/subscribe/shutdown",
+        "ShutdownReceiver provides wait/is_shutting_down",
+        "GracefulOutcome has Completed(T) and ShutdownSignaled variants",
+        "with_graceful_shutdown correctly races future against shutdown receiver"
+      ],
+      "failure_semantics": "emit SG-G4 diagnostic with owner src/signal/shutdown.rs and the convergence or classification invariant that failed",
+      "owner_modules": ["src/signal/shutdown.rs", "src/signal/graceful.rs"],
+      "artifacts": ["src/signal/shutdown.rs", "src/signal/graceful.rs", "tests/tokio_fs_process_signal_parity_matrix.rs"],
+      "contract_tests": ["t37c_08_shutdown_convergence"],
+      "mapped_gap": "SG-G4",
+      "reproduction_command": "rch exec -- cargo test --test tokio_fs_process_signal_parity_matrix t37c_08 -- --nocapture"
+    }
+  ],
+  "fault_injection_scenarios": [
+    {"id": "FI-01", "domain": "filesystem", "injection_point": "Vfs::write / VfsFile write path", "expected_behavior": "io::Error propagated without partial state", "owner_module": "src/fs/vfs.rs", "mapped_gap": "FS-G3"},
+    {"id": "FI-02", "domain": "filesystem", "injection_point": "Vfs::read / VfsFile read path", "expected_behavior": "io::Error propagated; no silent data corruption", "owner_module": "src/fs/vfs.rs", "mapped_gap": "FS-G3"},
+    {"id": "FI-03", "domain": "filesystem", "injection_point": "Vfs::open", "expected_behavior": "io::Error with PermissionDenied; no handle leak", "owner_module": "src/fs/vfs.rs", "mapped_gap": "FS-G3"},
+    {"id": "FI-04", "domain": "process", "injection_point": "Command::spawn with nonexistent binary", "expected_behavior": "ProcessError::NotFound with program name", "owner_module": "src/process.rs", "mapped_gap": "PR-G3"},
+    {"id": "FI-05", "domain": "process", "injection_point": "Command::spawn with non-executable path", "expected_behavior": "ProcessError::PermissionDenied with program name", "owner_module": "src/process.rs", "mapped_gap": "PR-G3"},
+    {"id": "FI-06", "domain": "signal", "injection_point": "signal(kind) on non-Unix", "expected_behavior": "io::Error with unsupported message", "owner_module": "src/signal/signal.rs", "mapped_gap": "SG-G1"},
+    {"id": "FI-07", "domain": "signal", "injection_point": "rapid inject() calls on signal slot", "expected_behavior": "monotonic counter; no lost signals", "owner_module": "src/signal/signal.rs", "mapped_gap": "SG-G3"},
+    {"id": "FI-08", "domain": "signal", "injection_point": "concurrent shutdown() calls", "expected_behavior": "exactly one transition; all subscribers notified; idempotent", "owner_module": "src/signal/shutdown.rs", "mapped_gap": "SG-G4"}
+  ],
   "signal_contracts": [
     {
       "id": "SGC-01",
@@ -356,12 +509,23 @@
       "id": "T3-DRIFT-07",
       "rule": "all signal contract owner/artifact paths must exist and each reproduction command must be rch-routed",
       "enforced_by": ["tests/tokio_fs_process_signal_parity_matrix.rs"]
+    },
+    {
+      "id": "T3-DRIFT-08",
+      "rule": "conformance_contracts must include T37C-01..T37C-08 with bead_id, domain, pass_criteria, owner_modules, mapped_gap, and reproduction_command",
+      "enforced_by": ["tests/tokio_fs_process_signal_parity_matrix.rs"]
+    },
+    {
+      "id": "T3-DRIFT-09",
+      "rule": "all conformance contract owner/artifact paths must exist and each reproduction command must be rch-routed",
+      "enforced_by": ["tests/tokio_fs_process_signal_parity_matrix.rs"]
     }
   ],
   "ci_commands": [
     "rch exec -- cargo test -p asupersync --test tokio_fs_process_signal_parity_matrix -- --nocapture",
     "rch exec -- cargo test -p asupersync --test e2e_signal -- --nocapture",
     "rch exec -- cargo test -p asupersync ctrl_c_not_available -- --nocapture",
-    "rch exec -- cargo test -p asupersync signal_recv_observes_delivery -- --nocapture"
+    "rch exec -- cargo test -p asupersync signal_recv_observes_delivery -- --nocapture",
+    "rch exec -- cargo test --test tokio_fs_process_signal_parity_matrix t37c -- --nocapture"
   ]
 }
