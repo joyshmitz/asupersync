@@ -37,6 +37,7 @@
 //! - [`client`]: Client infrastructure
 //! - [`health`]: gRPC Health Checking Protocol
 //! - [`interceptor`]: Interceptor middleware and layers
+//! - [`web`]: gRPC-Web protocol support (HTTP/1.1, base64 text mode)
 
 pub mod client;
 pub mod codec;
@@ -47,6 +48,7 @@ pub mod server;
 pub mod service;
 pub mod status;
 pub mod streaming;
+pub mod web;
 
 // Re-export commonly used types
 pub use client::{
@@ -84,4 +86,8 @@ pub use status::{Code, GrpcError, Status};
 pub use streaming::{
     Bidirectional, ClientStreaming, Metadata, MetadataValue, Request, Response, ServerStreaming,
     Streaming, StreamingRequest,
+};
+pub use web::{
+    ContentType as WebContentType, TrailerFrame, WebFrame, WebFrameCodec, base64_decode,
+    base64_encode, decode_trailers, encode_trailers, is_grpc_web_request, is_text_mode,
 };
