@@ -324,13 +324,14 @@ fn fixture_pack_ids_are_unique() {
 #[test]
 fn fixture_pack_ids_lexically_sorted() {
     let pack = load_fixture_pack();
-    let ids: Vec<&str> = pack.fixtures.iter().map(|f| f.fixture_id.as_str()).collect();
+    let ids: Vec<&str> = pack
+        .fixtures
+        .iter()
+        .map(|f| f.fixture_id.as_str())
+        .collect();
     let mut sorted = ids.clone();
     sorted.sort();
-    assert_eq!(
-        ids, sorted,
-        "Fixture IDs must be lexically sorted"
-    );
+    assert_eq!(ids, sorted, "Fixture IDs must be lexically sorted");
 }
 
 #[test]
@@ -846,7 +847,12 @@ fn scorecard_escalate_recommendation() {
     };
 
     // Escalate: score drops below escalate_below_score, but delta is above rollback threshold
-    let entry = make_scorecard_entry("scenario-escalate", 42, 35, vec!["unresolved-finding-1".to_string()]);
+    let entry = make_scorecard_entry(
+        "scenario-escalate",
+        42,
+        35,
+        vec!["unresolved-finding-1".to_string()],
+    );
     let recommendation = compute_recommendation(&thresholds, &entry);
     assert_eq!(recommendation, "escalate");
 }
@@ -896,7 +902,10 @@ fn scorecard_report_roundtrip_serde() {
     let json = serde_json::to_string(&report).expect("serialize report");
     let deserialized: RemediationVerificationScorecardReport =
         serde_json::from_str(&json).expect("deserialize report");
-    assert_eq!(report, deserialized, "Scorecard report must roundtrip through serde");
+    assert_eq!(
+        report, deserialized,
+        "Scorecard report must roundtrip through serde"
+    );
 }
 
 // ═══════════════════════════════════════════════════════════════════
@@ -905,20 +914,33 @@ fn scorecard_report_roundtrip_serde() {
 
 #[test]
 fn state_reducer_preview_to_approved() {
-    let checkpoints = vec!["checkpoint_diff_review", "checkpoint_risk_ack",
-        "checkpoint_rollback_ready", "checkpoint_apply_authorization"];
+    let checkpoints = vec![
+        "checkpoint_diff_review",
+        "checkpoint_risk_ack",
+        "checkpoint_rollback_ready",
+        "checkpoint_apply_authorization",
+    ];
     let approved: Vec<String> = checkpoints.iter().map(|s| s.to_string()).collect();
 
     // All checkpoints approved => transition allowed
-    let all_approved = checkpoints.iter().all(|cp| approved.contains(&cp.to_string()));
-    assert!(all_approved, "All checkpoints must be approved for preview→approved");
+    let all_approved = checkpoints
+        .iter()
+        .all(|cp| approved.contains(&cp.to_string()));
+    assert!(
+        all_approved,
+        "All checkpoints must be approved for preview→approved"
+    );
 }
 
 #[test]
 fn state_reducer_preview_to_rejected() {
     let approved: Vec<String> = vec!["checkpoint_diff_review".to_string()];
-    let required = vec!["checkpoint_diff_review", "checkpoint_risk_ack",
-        "checkpoint_rollback_ready", "checkpoint_apply_authorization"];
+    let required = vec![
+        "checkpoint_diff_review",
+        "checkpoint_risk_ack",
+        "checkpoint_rollback_ready",
+        "checkpoint_apply_authorization",
+    ];
 
     // Not all checkpoints approved => rejected
     let all_approved = required.iter().all(|cp| approved.contains(&cp.to_string()));
@@ -1010,13 +1032,11 @@ fn patch_plan_construction_determinism() {
             "@@ -42,3 +42,3 @@".to_string(),
         ],
         impacted_invariants: vec!["INV-LOCK-01".to_string(), "INV-LOCK-02".to_string()],
-        approval_checkpoints: vec![
-            GuidedRemediationCheckpoint {
-                checkpoint_id: "checkpoint_diff_review".to_string(),
-                stage_order: 0,
-                prompt: "Review proposed diff".to_string(),
-            },
-        ],
+        approval_checkpoints: vec![GuidedRemediationCheckpoint {
+            checkpoint_id: "checkpoint_diff_review".to_string(),
+            stage_order: 0,
+            prompt: "Review proposed diff".to_string(),
+        }],
         risk_flags: vec!["concurrent_access".to_string()],
         rollback_artifact_pointer: "artifacts/plan-001/rollback.json".to_string(),
         rollback_instructions: vec!["git apply --reverse plan-001.patch".to_string()],
@@ -1033,7 +1053,10 @@ fn patch_plan_construction_determinism() {
     let json = serde_json::to_string(&plan).expect("serialize plan");
     let deserialized: GuidedRemediationPatchPlan =
         serde_json::from_str(&json).expect("deserialize plan");
-    assert_eq!(plan, deserialized, "Patch plan must roundtrip through serde");
+    assert_eq!(
+        plan, deserialized,
+        "Patch plan must roundtrip through serde"
+    );
 }
 
 // ═══════════════════════════════════════════════════════════════════
@@ -1047,7 +1070,10 @@ fn drift_detection_remediation_profile_mismatch() {
         visual_profile: "frankentui-alert".to_string(),
         ..golden.clone()
     };
-    assert_ne!(golden, mutated, "Profile drift must be detected for remediation snapshots");
+    assert_ne!(
+        golden, mutated,
+        "Profile drift must be detected for remediation snapshots"
+    );
 }
 
 #[test]
@@ -1057,7 +1083,10 @@ fn drift_detection_remediation_panel_mismatch() {
         focused_panel: "trust_panel".to_string(),
         ..golden.clone()
     };
-    assert_ne!(golden, mutated, "Panel drift must be detected for remediation snapshots");
+    assert_ne!(
+        golden, mutated,
+        "Panel drift must be detected for remediation snapshots"
+    );
 }
 
 #[test]
@@ -1067,7 +1096,10 @@ fn drift_detection_remediation_digest_mismatch() {
         stage_digest: "len:3|preview|approved|applied".to_string(),
         ..golden.clone()
     };
-    assert_ne!(golden, mutated, "Digest drift must be detected for remediation snapshots");
+    assert_ne!(
+        golden, mutated,
+        "Digest drift must be detected for remediation snapshots"
+    );
 }
 
 #[test]
@@ -1077,7 +1109,10 @@ fn drift_detection_remediation_viewport_mismatch() {
         viewport_width: golden.viewport_width + 10,
         ..golden.clone()
     };
-    assert_ne!(golden, mutated, "Viewport drift must be detected for remediation snapshots");
+    assert_ne!(
+        golden, mutated,
+        "Viewport drift must be detected for remediation snapshots"
+    );
 }
 
 // ═══════════════════════════════════════════════════════════════════
@@ -1171,8 +1206,7 @@ fn e2e_artifact_manifest_construction() {
 
     // Roundtrip
     let json = serde_json::to_string(&manifest).expect("serialize");
-    let _: DoctorVisualHarnessArtifactManifest =
-        serde_json::from_str(&json).expect("deserialize");
+    let _: DoctorVisualHarnessArtifactManifest = serde_json::from_str(&json).expect("deserialize");
 }
 
 // ═══════════════════════════════════════════════════════════════════
