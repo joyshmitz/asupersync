@@ -24,7 +24,6 @@
 // Phase 0 stubs return errors immediately; async is for API consistency
 // with eventual rdkafka integration.
 
-
 use crate::cx::Cx;
 use parking_lot::Mutex;
 #[cfg(feature = "kafka")]
@@ -398,6 +397,7 @@ fn next_stub_offset(topic: &str, partition: i32) -> i64 {
     let entry = offsets.entry((topic.to_string(), partition)).or_insert(0);
     let offset = *entry;
     *entry += 1;
+    drop(offsets);
     offset
 }
 

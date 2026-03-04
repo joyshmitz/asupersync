@@ -7,6 +7,7 @@ use asupersync::channel::mpsc;
 use asupersync::channel::session::tracked_channel;
 use asupersync::cx::Cx;
 use asupersync::lab::{LabConfig, LabRuntime};
+#[cfg(feature = "kafka")]
 use asupersync::messaging::{
     KafkaConsumer, KafkaConsumerConfig, KafkaError, KafkaProducer, ProducerConfig,
     TopicPartitionOffset,
@@ -14,6 +15,7 @@ use asupersync::messaging::{
 use asupersync::types::{Budget, CancelReason};
 use parking_lot::Mutex;
 use std::sync::Arc;
+#[cfg(feature = "kafka")]
 use std::time::Duration;
 
 // =========================================================================
@@ -394,6 +396,7 @@ fn e2e_tracked_mpsc_leak_detection_panics() {
     });
 }
 
+#[cfg(feature = "kafka")]
 #[test]
 fn e2e_kafka_consumer_lifecycle() {
     common::init_test_logging();
@@ -452,6 +455,7 @@ fn e2e_kafka_consumer_lifecycle() {
     });
 }
 
+#[cfg(feature = "kafka")]
 #[test]
 fn e2e_kafka_producer_delivery_ack_metadata() {
     common::init_test_logging();

@@ -230,7 +230,7 @@ impl TopicPartitionOffset {
 }
 
 /// A record returned from a Kafka consumer poll.
-#[derive(Debug, Clone, PartialEq)]
+#[derive(Debug, Clone, PartialEq, Eq)]
 pub struct ConsumerRecord {
     /// Topic name.
     pub topic: String,
@@ -304,6 +304,7 @@ impl KafkaConsumer {
             .collect();
         state.positions.clear();
         state.committed_offsets.clear();
+        drop(state);
         Ok(())
     }
 
@@ -344,17 +345,18 @@ impl KafkaConsumer {
             return Err(KafkaError::Config("offsets cannot be empty".to_string()));
         }
 
-        {
+        let subscribed_topics = {
             let state = self.state.lock();
-            for tpo in offsets {
-                if !state.subscribed_topics.contains(&tpo.topic) {
-                    return Err(KafkaError::InvalidTopic(tpo.topic.clone()));
-                }
-                if tpo.offset < 0 {
-                    return Err(KafkaError::Config(
-                        "offsets must be non-negative".to_string(),
-                    ));
-                }
+            state.subscribed_topics.clone()
+        };
+        for tpo in offsets {
+            if !subscribed_topics.contains(&tpo.topic) {
+                return Err(KafkaError::InvalidTopic(tpo.topic.clone()));
+            }
+            if tpo.offset < 0 {
+                return Err(KafkaError::Config(
+                    "offsets must be non-negative".to_string(),
+                ));
             }
         }
 
@@ -364,6 +366,7 @@ impl KafkaConsumer {
                 .committed_offsets
                 .insert((tpo.topic.clone(), tpo.partition), tpo.offset);
         }
+        drop(state);
         Ok(())
     }
 
@@ -391,6 +394,7 @@ impl KafkaConsumer {
         state
             .positions
             .insert((tpo.topic.clone(), tpo.partition), tpo.offset);
+        drop(state);
         Ok(())
     }
 
@@ -405,6 +409,7 @@ impl KafkaConsumer {
             state.assigned_partitions.clear();
             state.committed_offsets.clear();
             state.positions.clear();
+            drop(state);
         }
         Ok(())
     }

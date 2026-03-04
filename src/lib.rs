@@ -219,7 +219,7 @@ pub mod tls;
 pub mod fs;
 #[cfg(not(target_arch = "wasm32"))]
 pub mod grpc;
-#[cfg(all(not(target_arch = "wasm32"), feature = "kafka"))]
+#[cfg(not(target_arch = "wasm32"))]
 pub mod messaging;
 #[cfg(unix)]
 pub mod process;
