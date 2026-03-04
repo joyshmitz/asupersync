@@ -58,7 +58,10 @@ fn t910_02_contract_references_bead_and_program() {
     init_test("t910_02_contract_references_bead_and_program");
 
     let doc = load_contract();
-    assert!(doc.contains("asupersync-2oh2u.11.10"), "must reference bead");
+    assert!(
+        doc.contains("asupersync-2oh2u.11.10"),
+        "must reference bead"
+    );
     assert!(doc.contains("[T9.10]"), "must reference T9.10");
 
     test_complete!("t910_02_contract_references_bead_and_program");
@@ -112,10 +115,7 @@ fn t910_05_personas_cover_all_tracks() {
     // Each track should appear in persona table
     for track in ["T3", "T4", "T5", "T6", "T7"] {
         test_section!(track);
-        assert!(
-            doc.contains(track),
-            "persona table missing track: {track}"
-        );
+        assert!(doc.contains(track), "persona table missing track: {track}");
     }
 
     test_complete!("t910_05_personas_cover_all_tracks");
@@ -200,14 +200,17 @@ fn t910_10_kpi_thresholds_have_hard_and_soft_fail() {
 
     let doc = load_contract();
 
-    assert!(doc.contains("Hard-Fail"), "must define hard-fail thresholds");
-    assert!(doc.contains("Soft-Fail"), "must define soft-fail thresholds");
+    assert!(
+        doc.contains("Hard-Fail"),
+        "must define hard-fail thresholds"
+    );
+    assert!(
+        doc.contains("Soft-Fail"),
+        "must define soft-fail thresholds"
+    );
 
     // Each KPI should have a threshold row
-    let threshold_rows = doc
-        .lines()
-        .filter(|l| l.starts_with("| FK-"))
-        .count();
+    let threshold_rows = doc.lines().filter(|l| l.starts_with("| FK-")).count();
     assert!(
         threshold_rows >= 8,
         "must have threshold rows for all 8 KPIs, found {threshold_rows}"
@@ -298,10 +301,7 @@ fn t910_14_results_schema_includes_required_fields() {
         "outcome",
     ] {
         test_section!(field);
-        assert!(
-            doc.contains(field),
-            "results schema missing field: {field}"
-        );
+        assert!(doc.contains(field), "results schema missing field: {field}");
     }
 
     test_complete!("t910_14_results_schema_includes_required_fields");
@@ -385,10 +385,7 @@ fn t910_19_downstream_binding_defined() {
         "asupersync-2oh2u.10.9",
     ] {
         test_section!(bead);
-        assert!(
-            doc.contains(bead),
-            "must reference downstream bead: {bead}"
-        );
+        assert!(doc.contains(bead), "must reference downstream bead: {bead}");
     }
 
     test_complete!("t910_19_downstream_binding_defined");
@@ -410,10 +407,26 @@ fn t910_20_kpi_pass_fail_evaluation() {
     }
 
     let thresholds = [
-        KpiThreshold { id: "FK-01", soft_fail: 30.0, hard_fail: 60.0 },
-        KpiThreshold { id: "FK-02", soft_fail: 60.0, hard_fail: 120.0 },
-        KpiThreshold { id: "FK-05", soft_fail: 0.10, hard_fail: 0.30 },
-        KpiThreshold { id: "FK-08", soft_fail: 0.10, hard_fail: 0.50 },
+        KpiThreshold {
+            id: "FK-01",
+            soft_fail: 30.0,
+            hard_fail: 60.0,
+        },
+        KpiThreshold {
+            id: "FK-02",
+            soft_fail: 60.0,
+            hard_fail: 120.0,
+        },
+        KpiThreshold {
+            id: "FK-05",
+            soft_fail: 0.10,
+            hard_fail: 0.30,
+        },
+        KpiThreshold {
+            id: "FK-08",
+            soft_fail: 0.10,
+            hard_fail: 0.50,
+        },
     ];
 
     for t in &thresholds {
@@ -444,12 +457,18 @@ fn t910_21_lab_results_json_schema_validation() {
 
     // Build a synthetic lab result and validate schema
     let mut kpis = BTreeMap::new();
-    kpis.insert("FK-01".to_string(), serde_json::json!({
-        "value": 15, "unit": "minutes", "threshold": 30, "status": "pass"
-    }));
-    kpis.insert("FK-02".to_string(), serde_json::json!({
-        "value": 45, "unit": "minutes", "threshold": 60, "status": "pass"
-    }));
+    kpis.insert(
+        "FK-01".to_string(),
+        serde_json::json!({
+            "value": 15, "unit": "minutes", "threshold": 30, "status": "pass"
+        }),
+    );
+    kpis.insert(
+        "FK-02".to_string(),
+        serde_json::json!({
+            "value": 45, "unit": "minutes", "threshold": 60, "status": "pass"
+        }),
+    );
 
     let result = serde_json::json!({
         "schema_version": "migration-lab-results-v1",

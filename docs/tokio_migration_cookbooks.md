@@ -148,7 +148,30 @@ let contents = asupersync::fs::read_to_string("config.toml").await?;
 - AP-T3-02: Ignoring process exit codes in pipeline
 - AP-T3-03: Signal handler that allocates (not async-signal-safe)
 
-### 4.5 Evidence
+### 4.5 Failure Modes
+
+| Failure | Symptom | Mitigation |
+|---------|---------|------------|
+| FM-T3-01 | File descriptor exhaustion | Use bounded concurrency for fs ops |
+| FM-T3-02 | Zombie processes from missed wait() | Use structured process guard (auto-reap) |
+| FM-T3-03 | Signal delivered before handler registered | Register handlers at process startup |
+
+### 4.6 Edge Cases
+
+- Symlink race conditions (TOCTOU between stat and open)
+- Process spawn with inherited file descriptors leaking
+- Signal coalescing (multiple SIGCHLD collapsed into one)
+- Permission denied errors on temporary directory cleanup
+
+### 4.7 Rollback Decision Points
+
+| Checkpoint | Rollback Criterion | Action |
+|-----------|-------------------|--------|
+| After R3-01/02 fs migration | Data loss or corruption | Revert to tokio::fs immediately |
+| After R3-03 process migration | Zombie process count > 0 | Revert to tokio::process |
+| After R3-04 signal migration | Missed signals detected | Revert to tokio::signal |
+
+### 4.8 Evidence
 
 - Playbook: `docs/tokio_fs_process_signal_migration_playbook.md`
 - E2E tests: `tests/tokio_fs_process_signal_e2e.rs`
@@ -173,13 +196,48 @@ implementations, preserving RFC 9000/9114 compliance.
 | R4-04 | quinn::Connection | asupersync::net::quic::Connection | Stream mux |
 | R4-05 | QPACK encoder | asupersync::http::h3::qpack | Header compression |
 
-### 5.3 Anti-Patterns
+### 5.3 Before/After
+
+```rust
+// Before: quinn + h3
+let endpoint = quinn::Endpoint::client("0.0.0.0:0".parse()?)?;
+let connection = endpoint.connect(addr, "example.com")?.await?;
+
+// After: asupersync
+let endpoint = asupersync::net::quic::Endpoint::client("0.0.0.0:0".parse()?)?;
+let connection = endpoint.connect(addr, "example.com")?.await?;
+```
+
+### 5.4 Anti-Patterns
 
 - AP-T4-01: Ignoring QUIC connection migration events
 - AP-T4-02: Not handling 0-RTT replay attacks
 - AP-T4-03: Hardcoded congestion control parameters
 
-### 5.4 Evidence
+### 5.5 Failure Modes
+
+| Failure | Symptom | Mitigation |
+|---------|---------|------------|
+| FM-T4-01 | Handshake timeout on lossy networks | Tune initial RTT estimate; enable retry |
+| FM-T4-02 | Stream reset storm under congestion | Implement per-stream backpressure |
+| FM-T4-03 | QPACK decoder blocked on missing dynamic table entries | Bound dynamic table size; fall-back to static |
+
+### 5.6 Edge Cases
+
+- Connection migration during active streams (IP address change)
+- 0-RTT data rejected by server (replay protection)
+- MAX_STREAMS limit reached mid-request
+- Stateless reset received after connection close
+
+### 5.7 Rollback Decision Points
+
+| Checkpoint | Rollback Criterion | Action |
+|-----------|-------------------|--------|
+| After R4-01 endpoint migration | Handshake failure > 5% | Revert to quinn |
+| After R4-02/03 H3 migration | Request success rate < 99% | Revert to h3 crate |
+| After R4-05 QPACK migration | Header decode errors > 0 | Revert QPACK, file bug |
+
+### 5.8 Evidence
 
 - E2E tests: `tests/tokio_quic_h3_e2e_scenario_manifest.rs`
 - Forensic log schema: `artifacts/quic_h3_forensic_log_schema_v1.json`
@@ -204,13 +262,50 @@ layer equivalents. See dedicated runbook at
 | R5-04 | tower::Layer | asupersync::service::Layer | Middleware |
 | R5-05 | tonic-web | asupersync::grpc::web | gRPC-web bridge |
 
-### 6.3 Anti-Patterns
+### 6.3 Before/After
+
+```rust
+// Before: axum + tokio
+use axum::{Router, routing::get, Json};
+let app = Router::new().route("/api", get(handler));
+axum::serve(listener, app).await?;
+
+// After: asupersync
+use asupersync::web::{Router, routing::get, Json};
+let app = Router::new().route("/api", get(handler));
+asupersync::web::serve(listener, app).await?;
+```
+
+### 6.4 Anti-Patterns
 
 - AP-T5-01: Direct tokio::spawn in request handlers (use regions)
 - AP-T5-02: Missing correlation ID propagation through middleware chain
 - AP-T5-03: Unbounded request body without max_body_size
 
-### 6.4 Evidence
+### 6.5 Failure Modes
+
+| Failure | Symptom | Mitigation |
+|---------|---------|------------|
+| FM-T5-01 | Middleware ordering change breaks auth | Document middleware stack order requirements |
+| FM-T5-02 | gRPC deadline not propagated through layers | Use CancelAware wrapper for all service calls |
+| FM-T5-03 | Extractor type mismatch at runtime | Use compile-time extractor validation |
+
+### 6.6 Edge Cases
+
+- Request body dropped before fully consumed (backpressure signal)
+- WebSocket upgrade during middleware chain processing
+- gRPC bidirectional streaming with client-side cancellation
+- Middleware timeout firing during body streaming
+
+### 6.7 Rollback Decision Points
+
+| Checkpoint | Rollback Criterion | Action |
+|-----------|-------------------|--------|
+| After R5-01 router migration | Route matching regression | Revert to axum::Router |
+| After R5-03 gRPC migration | Streaming error rate > 0.1% | Revert to tonic |
+| After R5-04 middleware migration | Auth/CORS failures | Revert to tower::Layer |
+
+### 6.8 Evidence
 
 - Runbook: `docs/tokio_web_grpc_migration_runbook.md`
 - Parity map: `docs/tokio_web_grpc_parity_map.md`
@@ -236,13 +331,48 @@ and message broker adapters with asupersync equivalents.
 | R6-04 | rdkafka::producer | asupersync compatible producer | Kafka adapter |
 | R6-05 | nats::Client | asupersync compatible client | NATS adapter |
 
-### 7.3 Anti-Patterns
+### 7.3 Before/After
+
+```rust
+// Before: sqlx + tokio
+let pool = sqlx::PgPool::connect("postgres://...").await?;
+let row = sqlx::query("SELECT 1").fetch_one(&pool).await?;
+
+// After: asupersync
+let pool = asupersync::database::postgres::Pool::connect("postgres://...").await?;
+let row = pool.query("SELECT 1").fetch_one().await?;
+```
+
+### 7.4 Anti-Patterns
 
 - AP-T6-01: Leaking pooled connections (missing release on error paths)
 - AP-T6-02: Unbounded message queue without backpressure
 - AP-T6-03: Blocking database calls in async context
 
-### 7.4 Evidence
+### 7.5 Failure Modes
+
+| Failure | Symptom | Mitigation |
+|---------|---------|------------|
+| FM-T6-01 | Pool exhaustion under load | Configure max_connections; add wait timeout |
+| FM-T6-02 | Transaction deadlock | Use consistent lock ordering; set statement_timeout |
+| FM-T6-03 | Message broker reconnect loop | Exponential backoff with jitter; circuit breaker |
+
+### 7.6 Edge Cases
+
+- Connection reset during transaction (needs rollback detection)
+- Kafka partition rebalance during consume
+- Redis cluster failover mid-pipeline
+- NATS message redelivery after ack timeout
+
+### 7.7 Rollback Decision Points
+
+| Checkpoint | Rollback Criterion | Action |
+|-----------|-------------------|--------|
+| After R6-01 pool migration | Connection leak detected | Revert to deadpool |
+| After R6-02 Postgres migration | Query regression > 10% | Revert to sqlx |
+| After R6-04 Kafka migration | Message loss > 0 | Revert to rdkafka immediately |
+
+### 7.8 Evidence
 
 - Migration packs: `docs/tokio_t6_migration_packs.md`
 - Contract: `docs/tokio_db_messaging_migration_packs_contract.md`
@@ -268,13 +398,49 @@ asupersync-tokio-compat adapter layer for incremental migration.
 | R7-04 | tokio::io traits | compat::io | I/O trait bridge |
 | R7-05 | hyper::body | compat::body | HTTP body bridge |
 
-### 8.3 Anti-Patterns
+### 8.3 Before/After
+
+```rust
+// Before: bare tokio crate dependency
+[dependencies]
+tokio = { version = "1", features = ["full"] }
+
+// After: asupersync with compat bridge
+[dependencies]
+asupersync = "0.1"
+asupersync-tokio-compat = { version = "0.1", features = ["full"] }
+```
+
+### 8.4 Anti-Patterns
 
 - AP-T7-01: Running both runtimes with separate thread pools (use bridge)
 - AP-T7-02: Mixing tokio::spawn and asupersync::spawn without coordination
 - AP-T7-03: Not propagating cancellation across runtime boundary
 
-### 8.4 Evidence
+### 8.5 Failure Modes
+
+| Failure | Symptom | Mitigation |
+|---------|---------|------------|
+| FM-T7-01 | Deadlock between runtimes | Single bridge executor; never block on cross-runtime call |
+| FM-T7-02 | Timer drift in bridge layer | Use unified time source; test with deterministic clock |
+| FM-T7-03 | Cancel not reaching tokio future | Wrap with CancelAware; verify propagation in tests |
+
+### 8.6 Edge Cases
+
+- Tokio crate spawns background task that outlives region
+- Hyper connection pool reuse across cancel boundary
+- Tower middleware state shared between bridge and native services
+- Body stream backpressure across runtime boundary
+
+### 8.7 Rollback Decision Points
+
+| Checkpoint | Rollback Criterion | Action |
+|-----------|-------------------|--------|
+| After R7-01 runtime bridge | Latency overhead > 1ms per call | Profile bridge path |
+| After R7-04 I/O bridge | Throughput < 80% of direct tokio | Optimize or revert |
+| After R7-05 body bridge | Data corruption in body round-trip | Revert immediately |
+
+### 8.8 Evidence
 
 - Support matrix: `docs/tokio_interop_support_matrix.md`
 - Adapter arch: `docs/tokio_adapter_boundary_architecture.md`
@@ -327,3 +493,12 @@ rch exec -- cargo test --test tokio_migration_cookbook_enforcement -- --nocaptur
 
 This document is a prerequisite for:
 - `asupersync-2oh2u.11.10` (T9.10: user-journey migration labs)
+- `asupersync-2oh2u.11.4` (T9.4: production-grade reference applications)
+
+---
+
+## 13. Revision History
+
+| Date | Author | Change |
+|------|--------|--------|
+| 2026-03-04 | SapphireHill | Initial creation; 6 domain cookbooks, 30 recipes, failure modes, edge cases, rollback points |

@@ -197,7 +197,10 @@ fn t813_04_all_fixture_files_exist() {
         );
     }
 
-    assert!(files.len() >= 6, "corpus must have at least 6 track fixtures");
+    assert!(
+        files.len() >= 6,
+        "corpus must have at least 6 track fixtures"
+    );
 
     test_complete!("t813_04_all_fixture_files_exist");
 }
@@ -212,10 +215,7 @@ fn t813_05_fixture_files_are_valid_json() {
     for (id, filename) in &files {
         test_section!(id);
         let fixture = load_fixture(filename);
-        assert!(
-            fixture.is_object(),
-            "fixture {id} must be a JSON object"
-        );
+        assert!(fixture.is_object(), "fixture {id} must be a JSON object");
     }
 
     test_complete!("t813_05_fixture_files_are_valid_json");
@@ -453,7 +453,13 @@ fn t813_15_change_log_entries_have_required_fields() {
 
     for (i, entry) in log.iter().enumerate() {
         test_section!(&format!("entry_{i}"));
-        for field in ["date", "author", "action", "fixtures_affected", "justification"] {
+        for field in [
+            "date",
+            "author",
+            "action",
+            "fixtures_affected",
+            "justification",
+        ] {
             assert!(
                 !entry[field].is_null(),
                 "GC-07: change_log entry {i} missing field: {field}"
@@ -601,10 +607,7 @@ fn t813_20_fixture_ids_are_unique() {
     let manifest = load_manifest();
     let fixtures = manifest["fixtures"].as_array().unwrap();
 
-    let mut ids: Vec<&str> = fixtures
-        .iter()
-        .filter_map(|f| f["id"].as_str())
-        .collect();
+    let mut ids: Vec<&str> = fixtures.iter().filter_map(|f| f["id"].as_str()).collect();
     let total = ids.len();
     ids.sort_unstable();
     ids.dedup();
@@ -695,10 +698,15 @@ fn t813_24_contract_references_bead_and_gates() {
 
     let doc = std::fs::read_to_string(contract_path()).unwrap();
 
-    assert!(doc.contains("asupersync-2oh2u.10.13"), "must reference bead");
+    assert!(
+        doc.contains("asupersync-2oh2u.10.13"),
+        "must reference bead"
+    );
     assert!(doc.contains("[T8.13]"), "must reference T8.13");
 
-    for gate in ["GC-01", "GC-02", "GC-03", "GC-04", "GC-05", "GC-06", "GC-07", "GC-08"] {
+    for gate in [
+        "GC-01", "GC-02", "GC-03", "GC-04", "GC-05", "GC-06", "GC-07", "GC-08",
+    ] {
         assert!(doc.contains(gate), "missing gate: {gate}");
     }
 
@@ -712,7 +720,10 @@ fn t813_25_contract_defines_schema_evolution_rules() {
     let doc = std::fs::read_to_string(contract_path()).unwrap();
 
     assert!(doc.contains("Breaking"), "must define breaking changes");
-    assert!(doc.contains("non-breaking"), "must define non-breaking changes");
+    assert!(
+        doc.contains("non-breaking"),
+        "must define non-breaking changes"
+    );
     assert!(
         doc.contains("version bump"),
         "must require version bump for breaking"

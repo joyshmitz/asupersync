@@ -22,14 +22,12 @@ fn project_root() -> &'static Path {
 
 fn load_doc() -> String {
     let path = project_root().join("docs/tokio_interop_support_matrix.md");
-    std::fs::read_to_string(&path)
-        .unwrap_or_else(|_| panic!("Cannot read {}", path.display()))
+    std::fs::read_to_string(&path).unwrap_or_else(|_| panic!("Cannot read {}", path.display()))
 }
 
 fn load_source(rel: &str) -> String {
     let path = project_root().join(rel);
-    std::fs::read_to_string(&path)
-        .unwrap_or_else(|_| panic!("Cannot read {}", path.display()))
+    std::fs::read_to_string(&path).unwrap_or_else(|_| panic!("Cannot read {}", path.display()))
 }
 
 // ===========================================================================
@@ -103,9 +101,20 @@ fn doc_defines_tier_response_windows() {
 // ===========================================================================
 
 const ALL_CRATES: &[&str] = &[
-    "reqwest", "axum", "tonic", "sea-orm", "hyper", "bb8", "sqlx",
-    "rumqttc", "diesel-async", "tower", "rdkafka", "tower-http",
-    "lapin", "deadpool",
+    "reqwest",
+    "axum",
+    "tonic",
+    "sea-orm",
+    "hyper",
+    "bb8",
+    "sqlx",
+    "rumqttc",
+    "diesel-async",
+    "tower",
+    "rdkafka",
+    "tower-http",
+    "lapin",
+    "deadpool",
 ];
 
 #[test]
@@ -158,10 +167,7 @@ fn doc_lists_all_feature_gates() {
 fn feature_gates_match_cargo_toml() {
     let toml = load_source("asupersync-tokio-compat/Cargo.toml");
     for gate in &["hyper-bridge", "tower-bridge", "tokio-io"] {
-        assert!(
-            toml.contains(gate),
-            "feature gate {gate} not in Cargo.toml"
-        );
+        assert!(toml.contains(gate), "feature gate {gate} not in Cargo.toml");
     }
 }
 
@@ -215,8 +221,8 @@ fn doc_has_supported_and_unsupported_columns() {
 fn doc_has_evidence_links_for_all_tiers() {
     let doc = load_doc();
     for eid in &[
-        "E-01", "E-02", "E-03", "E-04", "E-05", "E-06", "E-07", "E-08", "E-09", "E-10",
-        "E-11", "E-12",
+        "E-01", "E-02", "E-03", "E-04", "E-05", "E-06", "E-07", "E-08", "E-09", "E-10", "E-11",
+        "E-12",
     ] {
         assert!(doc.contains(eid), "missing evidence link: {eid}");
     }
@@ -273,7 +279,14 @@ fn doc_classifies_breakage_severities() {
 #[test]
 fn doc_defines_escalation_flow() {
     let doc = load_doc();
-    let steps = ["Detection", "Triage", "Assignment", "Fix", "Verification", "Release"];
+    let steps = [
+        "Detection",
+        "Triage",
+        "Assignment",
+        "Fix",
+        "Verification",
+        "Release",
+    ];
     for step in &steps {
         assert!(doc.contains(step), "escalation step missing: {step}");
     }
@@ -295,14 +308,20 @@ fn doc_lists_current_gaps() {
 fn gaps_have_severity_and_owner() {
     let doc = load_doc();
     // Every gap row should have a severity and owner column
-    assert!(doc.contains("Severity"), "gap table must have Severity column");
+    assert!(
+        doc.contains("Severity"),
+        "gap table must have Severity column"
+    );
     assert!(doc.contains("Owner"), "gap table must have Owner column");
 }
 
 #[test]
 fn gap_rationale_section_exists() {
     let doc = load_doc();
-    assert!(doc.contains("Gap Rationale"), "gap rationale section missing");
+    assert!(
+        doc.contains("Gap Rationale"),
+        "gap rationale section missing"
+    );
     assert!(
         doc.contains("Downstream dependency"),
         "gap ranking criterion missing"
@@ -333,10 +352,7 @@ fn doc_defines_drift_detection_rules() {
 fn dc01_adapter_compile_check_is_hard_fail() {
     let doc = load_doc();
     // DC-01 should be hard-fail and every CI run
-    let dc01_line = doc
-        .lines()
-        .find(|l| l.contains("DC-01"))
-        .unwrap_or("");
+    let dc01_line = doc.lines().find(|l| l.contains("DC-01")).unwrap_or("");
     assert!(
         dc01_line.contains("Yes") || dc01_line.contains("yes"),
         "DC-01 must be hard-fail"
@@ -357,10 +373,16 @@ fn freshness_policy_defined() {
 #[test]
 fn doc_specifies_json_schema() {
     let doc = load_doc();
-    assert!(doc.contains("schema_version"), "JSON schema must have schema_version");
+    assert!(
+        doc.contains("schema_version"),
+        "JSON schema must have schema_version"
+    );
     assert!(doc.contains("crates"), "JSON schema must have crates array");
     assert!(doc.contains("gaps"), "JSON schema must have gaps array");
-    assert!(doc.contains("drift_checks"), "JSON schema must have drift_checks array");
+    assert!(
+        doc.contains("drift_checks"),
+        "JSON schema must have drift_checks array"
+    );
 }
 
 #[test]
@@ -427,7 +449,14 @@ fn doc_binds_to_downstream_beads() {
 
 #[test]
 fn adapter_modules_in_doc_exist_in_source() {
-    let modules = ["hyper_bridge", "body_bridge", "tower_bridge", "io", "cancel", "blocking"];
+    let modules = [
+        "hyper_bridge",
+        "body_bridge",
+        "tower_bridge",
+        "io",
+        "cancel",
+        "blocking",
+    ];
     let compat_dir = project_root().join("asupersync-tokio-compat/src");
     for m in &modules {
         let path = compat_dir.join(format!("{m}.rs"));
@@ -469,5 +498,9 @@ fn no_duplicate_test_names() {
         .filter_map(|l| l.trim_start().strip_prefix("fn ")?.split('(').next())
         .collect();
     let unique: BTreeSet<&str> = fn_names.iter().copied().collect();
-    assert_eq!(fn_names.len(), unique.len(), "duplicate test function names");
+    assert_eq!(
+        fn_names.len(),
+        unique.len(),
+        "duplicate test function names"
+    );
 }

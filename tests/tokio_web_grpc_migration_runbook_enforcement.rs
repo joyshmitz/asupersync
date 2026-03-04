@@ -47,7 +47,10 @@ fn t510_01_runbook_exists_and_is_substantial() {
 
     assert!(runbook_path().exists(), "migration runbook must exist");
     let doc = load_runbook();
-    assert!(doc.len() > 3000, "runbook must be substantial (>3000 chars)");
+    assert!(
+        doc.len() > 3000,
+        "runbook must be substantial (>3000 chars)"
+    );
 
     test_complete!("t510_01_runbook_exists_and_is_substantial");
 }
@@ -138,7 +141,12 @@ fn t510_06_http_migration_has_four_phases() {
 
     let doc = load_runbook();
 
-    for phase in ["Inventory", "Adapter Bridge", "Direct Replacement", "Verification"] {
+    for phase in [
+        "Inventory",
+        "Adapter Bridge",
+        "Direct Replacement",
+        "Verification",
+    ] {
         test_section!(phase);
         assert!(doc.contains(phase), "HTTP migration missing phase: {phase}");
     }
@@ -152,11 +160,7 @@ fn t510_07_grpc_migration_has_four_phases() {
 
     let doc = load_runbook();
 
-    for phase in [
-        "Service Definition",
-        "Interceptor Chain",
-        "gRPC-web Bridge",
-    ] {
+    for phase in ["Service Definition", "Interceptor Chain", "gRPC-web Bridge"] {
         test_section!(phase);
         assert!(doc.contains(phase), "gRPC migration missing phase: {phase}");
     }
@@ -193,7 +197,10 @@ fn t510_09_health_check_verification_present() {
 
     let doc = load_runbook();
 
-    assert!(doc.contains("Health Check"), "must have health check section");
+    assert!(
+        doc.contains("Health Check"),
+        "must have health check section"
+    );
     assert!(
         doc.contains("/health") || doc.contains("health service"),
         "must reference health endpoints"
@@ -212,7 +219,10 @@ fn t510_10_performance_monitoring_thresholds_present() {
         doc.contains("Performance Monitoring"),
         "must have performance monitoring"
     );
-    assert!(doc.contains("p50") || doc.contains("p99"), "must define latency percentiles");
+    assert!(
+        doc.contains("p50") || doc.contains("p99"),
+        "must define latency percentiles"
+    );
     assert!(
         doc.contains("Error rate") || doc.contains("error rate"),
         "must define error rate thresholds"
@@ -229,10 +239,7 @@ fn t510_11_incident_escalation_defined() {
 
     assert!(doc.contains("Escalation"), "must define escalation policy");
     for severity in ["P0", "P1", "P2", "P3"] {
-        assert!(
-            doc.contains(severity),
-            "missing severity level: {severity}"
-        );
+        assert!(doc.contains(severity), "missing severity level: {severity}");
     }
 
     test_complete!("t510_11_incident_escalation_defined");
@@ -292,10 +299,7 @@ fn t510_14_evidence_links_reference_existing_artifacts() {
             .unwrap()
             .strip_suffix(".rs")
             .unwrap();
-        assert!(
-            doc.contains(stem),
-            "runbook must reference {test_file}"
-        );
+        assert!(doc.contains(stem), "runbook must reference {test_file}");
         assert!(
             base.join(test_file).exists(),
             "referenced test file must exist: {test_file}"
@@ -383,10 +387,7 @@ fn t510_18_downstream_dependencies_referenced() {
 
     for bead in ["asupersync-2oh2u.11.2", "asupersync-2oh2u.10.9"] {
         test_section!(bead);
-        assert!(
-            doc.contains(bead),
-            "must reference downstream bead: {bead}"
-        );
+        assert!(doc.contains(bead), "must reference downstream bead: {bead}");
     }
 
     test_complete!("t510_18_downstream_dependencies_referenced");

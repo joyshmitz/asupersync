@@ -47,7 +47,10 @@ fn t92_01_cookbook_exists_and_is_substantial() {
 
     assert!(cookbook_path().exists(), "cookbook doc must exist");
     let doc = load_cookbook();
-    assert!(doc.len() > 5000, "cookbook must be substantial (>5000 chars)");
+    assert!(
+        doc.len() > 5000,
+        "cookbook must be substantial (>5000 chars)"
+    );
 
     test_complete!("t92_01_cookbook_exists_and_is_substantial");
 }
@@ -68,9 +71,15 @@ fn t92_03_cookbook_has_uniform_structure() {
     init_test("t92_03_cookbook_has_uniform_structure");
 
     let doc = load_cookbook();
-    assert!(doc.contains("Cookbook Structure"), "must describe structure");
+    assert!(
+        doc.contains("Cookbook Structure"),
+        "must describe structure"
+    );
     assert!(doc.contains("Migration Recipes"), "must mention recipes");
-    assert!(doc.contains("Before/After") || doc.contains("Before"), "must have examples");
+    assert!(
+        doc.contains("Before/After") || doc.contains("Before"),
+        "must have examples"
+    );
     assert!(doc.contains("Anti-Pattern"), "must cover anti-patterns");
     assert!(doc.contains("Evidence"), "must have evidence links");
 
@@ -202,7 +211,10 @@ fn t92_09_evidence_links_reference_test_files() {
             .strip_suffix(".rs")
             .unwrap();
         assert!(doc.contains(stem), "must reference {test_file}");
-        assert!(base.join(test_file).exists(), "file must exist: {test_file}");
+        assert!(
+            base.join(test_file).exists(),
+            "file must exist: {test_file}"
+        );
     }
 
     test_complete!("t92_09_evidence_links_reference_test_files");
@@ -397,7 +409,10 @@ fn t92_21_ci_commands_present() {
     init_test("t92_21_ci_commands_present");
 
     let doc = load_cookbook();
-    assert!(doc.contains("cargo test"), "must include cargo test commands");
+    assert!(
+        doc.contains("cargo test"),
+        "must include cargo test commands"
+    );
     assert!(doc.contains("rch exec"), "must include rch exec");
 
     test_complete!("t92_21_ci_commands_present");
@@ -470,4 +485,279 @@ fn t92_25_cookbook_scope_table_has_all_tracks() {
     }
 
     test_complete!("t92_25_cookbook_scope_table_has_all_tracks");
+}
+
+// ============================================================================
+// Tests: Section 12 - Failure modes (AC-1 edge-case handling)
+// ============================================================================
+
+#[test]
+fn t92_26_each_track_has_failure_modes() {
+    init_test("t92_26_each_track_has_failure_modes");
+
+    let doc = load_cookbook();
+
+    for prefix in ["FM-T2-", "FM-T3-", "FM-T4-", "FM-T5-", "FM-T6-", "FM-T7-"] {
+        test_section!(prefix);
+        let count = doc.matches(prefix).count();
+        assert!(
+            count >= 2,
+            "track {prefix} must have at least 2 failure modes, found {count}"
+        );
+    }
+
+    test_complete!("t92_26_each_track_has_failure_modes");
+}
+
+#[test]
+fn t92_27_failure_modes_have_mitigation() {
+    init_test("t92_27_failure_modes_have_mitigation");
+
+    let doc = load_cookbook();
+    let mit_count = doc.matches("Mitigation").count();
+    assert!(
+        mit_count >= 6,
+        "each track failure mode table needs Mitigation column, found {mit_count}"
+    );
+
+    test_complete!("t92_27_failure_modes_have_mitigation");
+}
+
+// ============================================================================
+// Tests: Section 13 - Edge cases (AC-1)
+// ============================================================================
+
+#[test]
+fn t92_28_each_track_has_edge_cases() {
+    init_test("t92_28_each_track_has_edge_cases");
+
+    let doc = load_cookbook();
+    let count = doc.matches("Edge Cases").count();
+    assert!(
+        count >= 6,
+        "each track must have Edge Cases section, found {count}"
+    );
+
+    test_complete!("t92_28_each_track_has_edge_cases");
+}
+
+// ============================================================================
+// Tests: Section 14 - Rollback decision points (AC-1)
+// ============================================================================
+
+#[test]
+fn t92_29_each_track_has_rollback_decision_points() {
+    init_test("t92_29_each_track_has_rollback_decision_points");
+
+    let doc = load_cookbook();
+    let count = doc.matches("Rollback Decision Points").count();
+    assert!(
+        count >= 6,
+        "each track must have Rollback Decision Points, found {count}"
+    );
+
+    test_complete!("t92_29_each_track_has_rollback_decision_points");
+}
+
+#[test]
+fn t92_30_rollback_tables_have_criterion_and_action() {
+    init_test("t92_30_rollback_tables_have_criterion_and_action");
+
+    let doc = load_cookbook();
+    let crit_count = doc.matches("Rollback Criterion").count();
+    assert!(
+        crit_count >= 6,
+        "each rollback table needs Rollback Criterion header, found {crit_count}"
+    );
+
+    test_complete!("t92_30_rollback_tables_have_criterion_and_action");
+}
+
+// ============================================================================
+// Tests: Section 15 - Evidence file existence (AC-2)
+// ============================================================================
+
+#[test]
+fn t92_31_evidence_test_files_exist_on_disk() {
+    init_test("t92_31_evidence_test_files_exist_on_disk");
+
+    let base = Path::new(env!("CARGO_MANIFEST_DIR"));
+
+    let test_files = [
+        "tests/tokio_io_codec_cancellation_correctness.rs",
+        "tests/tokio_fs_process_signal_e2e.rs",
+        "tests/tokio_fs_process_signal_unit_test_matrix.rs",
+        "tests/tokio_quic_h3_e2e_scenario_manifest.rs",
+        "tests/web_grpc_e2e_service_scripts.rs",
+        "tests/web_grpc_exhaustive_unit.rs",
+        "tests/e2e_t6_data_path.rs",
+        "tests/t6_database_messaging_unit_matrix.rs",
+        "tests/tokio_interop_e2e_scenarios.rs",
+    ];
+
+    for f in &test_files {
+        test_section!(f);
+        assert!(base.join(f).exists(), "evidence test file missing: {f}");
+    }
+
+    test_complete!("t92_31_evidence_test_files_exist_on_disk");
+}
+
+#[test]
+fn t92_32_evidence_doc_files_exist_on_disk() {
+    init_test("t92_32_evidence_doc_files_exist_on_disk");
+
+    let base = Path::new(env!("CARGO_MANIFEST_DIR"));
+
+    let doc_files = [
+        "docs/tokio_io_parity_audit.md",
+        "docs/tokio_fs_process_signal_migration_playbook.md",
+        "docs/tokio_web_grpc_migration_runbook.md",
+        "docs/tokio_web_grpc_parity_map.md",
+        "docs/tokio_db_messaging_migration_packs_contract.md",
+        "docs/tokio_t6_migration_packs.md",
+        "docs/tokio_interop_support_matrix.md",
+        "docs/tokio_adapter_boundary_architecture.md",
+    ];
+
+    for f in &doc_files {
+        test_section!(f);
+        assert!(base.join(f).exists(), "evidence doc file missing: {f}");
+    }
+
+    test_complete!("t92_32_evidence_doc_files_exist_on_disk");
+}
+
+#[test]
+fn t92_33_golden_corpus_fixtures_exist() {
+    init_test("t92_33_golden_corpus_fixtures_exist");
+
+    let base = Path::new(env!("CARGO_MANIFEST_DIR"));
+    let corpus_dir = base.join("tests/fixtures/logging_golden_corpus");
+
+    assert!(
+        corpus_dir.join("manifest.json").exists(),
+        "manifest.json missing"
+    );
+
+    test_complete!("t92_33_golden_corpus_fixtures_exist");
+}
+
+// ============================================================================
+// Tests: Section 16 - Structured log expectations (AC-3)
+// ============================================================================
+
+#[test]
+fn t92_34_log_schema_fields_documented() {
+    init_test("t92_34_log_schema_fields_documented");
+
+    let doc = load_cookbook();
+    for field in [
+        "schema_version",
+        "scenario_id",
+        "correlation_id",
+        "outcome",
+        "replay_pointer",
+    ] {
+        test_section!(field);
+        assert!(doc.contains(field), "log schema field missing: {field}");
+    }
+
+    test_complete!("t92_34_log_schema_fields_documented");
+}
+
+// ============================================================================
+// Tests: Section 17 - User-friction KPIs (AC-4)
+// ============================================================================
+
+#[test]
+fn t92_35_friction_thresholds_quantified() {
+    init_test("t92_35_friction_thresholds_quantified");
+
+    let doc = load_cookbook();
+    assert!(doc.contains("30 min"), "migration time threshold missing");
+    assert!(doc.contains("2 hours"), "learning curve threshold missing");
+    assert!(
+        doc.contains("Zero downtime") || doc.contains("zero downtime"),
+        "zero downtime requirement missing"
+    );
+
+    test_complete!("t92_35_friction_thresholds_quantified");
+}
+
+#[test]
+fn t92_36_friction_validation_links_to_migration_labs() {
+    init_test("t92_36_friction_validation_links_to_migration_labs");
+
+    let doc = load_cookbook();
+    assert!(
+        doc.contains("T9.10") || doc.contains("asupersync-2oh2u.11.10"),
+        "friction assumptions must reference T9.10 migration labs"
+    );
+
+    test_complete!("t92_36_friction_validation_links_to_migration_labs");
+}
+
+// ============================================================================
+// Tests: Section 18 - Before/After code coverage
+// ============================================================================
+
+#[test]
+fn t92_37_each_track_has_before_after_code() {
+    init_test("t92_37_each_track_has_before_after_code");
+
+    let doc = load_cookbook();
+    let ba_count = doc.matches("Before/After").count();
+    assert!(
+        ba_count >= 6,
+        "each track must have Before/After section, found {ba_count}"
+    );
+
+    test_complete!("t92_37_each_track_has_before_after_code");
+}
+
+// ============================================================================
+// Tests: Section 19 - No deferred markers
+// ============================================================================
+
+#[test]
+fn t92_38_no_deferred_markers() {
+    init_test("t92_38_no_deferred_markers");
+
+    let doc = load_cookbook();
+    for marker in ["[DEFERRED]", "[TBD]", "[TODO]", "[PLACEHOLDER]"] {
+        assert!(!doc.contains(marker), "doc has {marker} marker");
+    }
+
+    test_complete!("t92_38_no_deferred_markers");
+}
+
+// ============================================================================
+// Tests: Section 20 - Downstream binding completeness
+// ============================================================================
+
+#[test]
+fn t92_39_downstream_binding_to_t9_4() {
+    init_test("t92_39_downstream_binding_to_t9_4");
+
+    let doc = load_cookbook();
+    assert!(
+        doc.contains("asupersync-2oh2u.11.4") || doc.contains("T9.4"),
+        "must bind to T9.4 reference applications"
+    );
+
+    test_complete!("t92_39_downstream_binding_to_t9_4");
+}
+
+#[test]
+fn t92_40_revision_history_present() {
+    init_test("t92_40_revision_history_present");
+
+    let doc = load_cookbook();
+    assert!(
+        doc.contains("Revision History"),
+        "must have Revision History section"
+    );
+
+    test_complete!("t92_40_revision_history_present");
 }
