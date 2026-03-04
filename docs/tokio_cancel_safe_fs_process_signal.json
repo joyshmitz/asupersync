@@ -1,0 +1,49 @@
+{
+  "bead_id": "asupersync-2oh2u.3.6",
+  "title": "[T3.6] Cancellation-Safe Integration: FS, Process, Signal Flows",
+  "version": 1,
+  "generated_at": "2026-03-04",
+  "generated_by": "SapphireHill",
+  "source_markdown": "docs/tokio_cancel_safe_fs_process_signal.md",
+  "domains": ["cancellation", "fs", "process", "signal", "integration", "structured-concurrency"],
+  "modules_tested": [
+    {"module": "src/fs/file.rs", "cancel_safe": true, "mechanism": "spawn_blocking_io atomic completion"},
+    {"module": "src/process.rs", "cancel_safe": true, "mechanism": "kill_on_drop + try_wait reap"},
+    {"module": "src/signal/signal.rs", "cancel_safe": true, "mechanism": "Monotone AtomicU64 counter"},
+    {"module": "src/signal/shutdown.rs", "cancel_safe": true, "mechanism": "Idempotent Notify broadcast"},
+    {"module": "src/signal/graceful.rs", "cancel_safe": true, "mechanism": "Region close protocol"}
+  ],
+  "invariants_proven": [
+    {"id": "INV-CS-1", "description": "Cancelled file operation leaves no partial state", "verdict": "PROVEN"},
+    {"id": "INV-CS-2", "description": "kill_on_drop prevents zombie processes after cancellation", "verdict": "PROVEN"},
+    {"id": "INV-CS-3", "description": "Signal delivery counter survives receiver cancellation", "verdict": "PROVEN"},
+    {"id": "INV-CS-4", "description": "Shutdown broadcast reaches all receivers even if some are cancelled", "verdict": "PROVEN"},
+    {"id": "INV-CS-5", "description": "Cross-module cancellation produces no obligation leaks", "verdict": "PROVEN"}
+  ],
+  "cross_module_scenarios": [
+    {"scenario": "Shutdown during file write", "behavior": "Write discarded; file in last-sync state", "leak_risk": "None"},
+    {"scenario": "Shutdown during process wait", "behavior": "Child killed via kill_on_drop", "leak_risk": "None with kill_on_drop(true)"},
+    {"scenario": "Shutdown during signal recv", "behavior": "recv cancelled; delivery preserved", "leak_risk": "None"},
+    {"scenario": "Concurrent fs + process + signal", "behavior": "Each independently cancel-safe", "leak_risk": "None"}
+  ],
+  "test_categories": [
+    {"prefix": "FC", "name": "FS cancel-safety", "count": 5},
+    {"prefix": "PC", "name": "Process cancel-safety", "count": 5},
+    {"prefix": "SC", "name": "Signal cancel-safety", "count": 4},
+    {"prefix": "IC", "name": "Cross-module integration", "count": 6},
+    {"prefix": "CT", "name": "Contract artifact validation", "count": 4}
+  ],
+  "drift_detection": [
+    {"id": "DRIFT-CS1", "trigger": "New async API without cancel-safety annotation", "action": "Require cancel-safety proof"},
+    {"id": "DRIFT-CS2", "trigger": "New obligation type without region tracking", "action": "Require leak-free proof"},
+    {"id": "DRIFT-CS3", "trigger": "New cross-module interaction pattern", "action": "Add integration cancel test"}
+  ],
+  "summary": {
+    "modules_tested": 5,
+    "invariants_proven": 5,
+    "all_invariants_pass": true,
+    "obligation_leaks": 0,
+    "total_tests": 24,
+    "overall_verdict": "PROVEN"
+  }
+}
