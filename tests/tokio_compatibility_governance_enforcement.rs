@@ -4,8 +4,9 @@
 //! [T9.6] Compatibility governance and deprecation policy enforcement.
 //!
 //! Validates compatibility tiers, deprecation process, breaking change
-//! management, governance board structure, version policy, and ecosystem
-//! compatibility rules.
+//! management, governance board structure, version policy, ecosystem
+//! compatibility rules, exception handling, escalation paths,
+//! invariant preservation, and staleness policy.
 //!
 //! Organisation:
 //!   1. Document existence and structure
@@ -17,6 +18,12 @@
 //!   7. Ecosystem compatibility
 //!   8. Quality gate definitions
 //!   9. Evidence link validation
+//!  10. Exception and waiver handling
+//!  11. Escalation paths
+//!  12. Invariant preservation
+//!  13. Staleness and freshness
+//!  14. Deprecation register schema
+//!  15. Audit cadence
 
 #[macro_use]
 mod common;
@@ -59,10 +66,7 @@ fn t96_02_policy_references_bead_and_program() {
     init_test("t96_02_policy_references_bead_and_program");
 
     let doc = load_policy();
-    assert!(
-        doc.contains("asupersync-2oh2u.11.6"),
-        "must reference bead"
-    );
+    assert!(doc.contains("asupersync-2oh2u.11.6"), "must reference bead");
     assert!(doc.contains("[T9.6]"), "must reference T9.6");
 
     test_complete!("t96_02_policy_references_bead_and_program");
@@ -239,10 +243,7 @@ fn t96_12_governance_board_composition_defined() {
         doc.contains("Program Lead"),
         "board must include Program Lead"
     );
-    assert!(
-        doc.contains("Track Lead"),
-        "board must include Track Leads"
-    );
+    assert!(doc.contains("Track Lead"), "board must include Track Leads");
     assert!(doc.contains("QA Lead"), "board must include QA Lead");
 
     test_complete!("t96_12_governance_board_composition_defined");
@@ -254,7 +255,10 @@ fn t96_13_decision_thresholds_defined() {
 
     let doc = load_policy();
 
-    assert!(doc.contains("2/3 majority"), "must define deprecation threshold");
+    assert!(
+        doc.contains("2/3 majority"),
+        "must define deprecation threshold"
+    );
     assert!(
         doc.contains("3/4 majority"),
         "must define breaking change threshold"
@@ -306,10 +310,7 @@ fn t96_16_support_policy_defined() {
         "must define support duration"
     );
     assert!(doc.contains("LTS"), "must define LTS policy");
-    assert!(
-        doc.contains("18 months"),
-        "LTS must have defined duration"
-    );
+    assert!(doc.contains("18 months"), "LTS must have defined duration");
 
     test_complete!("t96_16_support_policy_defined");
 }
@@ -325,10 +326,7 @@ fn t96_17_msrv_policy_defined() {
     let doc = load_policy();
 
     assert!(doc.contains("MSRV"), "must define MSRV policy");
-    assert!(
-        doc.contains("Latest stable"),
-        "must reference stable Rust"
-    );
+    assert!(doc.contains("Latest stable"), "must reference stable Rust");
 
     test_complete!("t96_17_msrv_policy_defined");
 }
@@ -475,4 +473,303 @@ fn t96_25_policy_has_code_blocks() {
     );
 
     test_complete!("t96_25_policy_has_code_blocks");
+}
+
+// ============================================================================
+// Tests: Section 10 - Exception and waiver handling
+// ============================================================================
+
+#[test]
+fn t96_26_waiver_types_defined() {
+    init_test("t96_26_waiver_types_defined");
+
+    let doc = load_policy();
+
+    for wv in ["WV-01", "WV-02", "WV-03", "WV-04"] {
+        test_section!(wv);
+        assert!(doc.contains(wv), "missing waiver type: {wv}");
+    }
+
+    test_complete!("t96_26_waiver_types_defined");
+}
+
+#[test]
+fn t96_27_waiver_constraints_documented() {
+    init_test("t96_27_waiver_constraints_documented");
+
+    let doc = load_policy();
+
+    for constraint in [
+        "justification",
+        "risk assessment",
+        "follow-up bead",
+        "enhanced monitoring",
+        "Expire automatically",
+    ] {
+        test_section!(constraint);
+        assert!(
+            doc.contains(constraint),
+            "missing waiver constraint: {constraint}"
+        );
+    }
+
+    test_complete!("t96_27_waiver_constraints_documented");
+}
+
+#[test]
+fn t96_28_waiver_register_schema_defined() {
+    init_test("t96_28_waiver_register_schema_defined");
+
+    let doc = load_policy();
+
+    assert!(
+        doc.contains("compat-waiver-v1"),
+        "must define waiver schema version"
+    );
+    assert!(
+        doc.contains("waiver_id"),
+        "waiver schema must have waiver_id"
+    );
+    assert!(
+        doc.contains("blast_radius"),
+        "waiver schema must have blast_radius"
+    );
+    assert!(
+        doc.contains("monitoring_plan"),
+        "waiver schema must have monitoring_plan"
+    );
+
+    test_complete!("t96_28_waiver_register_schema_defined");
+}
+
+// ============================================================================
+// Tests: Section 11 - Escalation paths
+// ============================================================================
+
+#[test]
+fn t96_29_escalation_triggers_defined() {
+    init_test("t96_29_escalation_triggers_defined");
+
+    let doc = load_policy();
+
+    for esc in ["ESC-01", "ESC-02", "ESC-03", "ESC-04", "ESC-05"] {
+        test_section!(esc);
+        assert!(doc.contains(esc), "missing escalation trigger: {esc}");
+    }
+
+    test_complete!("t96_29_escalation_triggers_defined");
+}
+
+#[test]
+fn t96_30_escalation_has_timelines() {
+    init_test("t96_30_escalation_has_timelines");
+
+    let doc = load_policy();
+
+    for timeline in ["4h", "24h", "48h", "1 week", "Same-day"] {
+        test_section!(timeline);
+        assert!(
+            doc.contains(timeline),
+            "escalation must include timeline: {timeline}"
+        );
+    }
+
+    test_complete!("t96_30_escalation_has_timelines");
+}
+
+#[test]
+fn t96_31_emergency_process_defined() {
+    init_test("t96_31_emergency_process_defined");
+
+    let doc = load_policy();
+
+    for step in ["EM-01", "EM-02", "EM-03", "EM-04", "EM-05", "EM-06"] {
+        test_section!(step);
+        assert!(doc.contains(step), "missing emergency step: {step}");
+    }
+
+    assert!(doc.contains("CVSS"), "must reference CVSS scoring");
+
+    test_complete!("t96_31_emergency_process_defined");
+}
+
+// ============================================================================
+// Tests: Section 12 - Invariant preservation
+// ============================================================================
+
+#[test]
+fn t96_32_invariant_preservation_defined() {
+    init_test("t96_32_invariant_preservation_defined");
+
+    let doc = load_policy();
+
+    for inv in ["INV-1", "INV-2", "INV-3", "INV-4", "INV-5"] {
+        test_section!(inv);
+        assert!(doc.contains(inv), "missing invariant: {inv}");
+    }
+
+    test_complete!("t96_32_invariant_preservation_defined");
+}
+
+#[test]
+fn t96_33_invariant_governance_constraints() {
+    init_test("t96_33_invariant_governance_constraints");
+
+    let doc = load_policy();
+
+    assert!(
+        doc.contains("No ambient authority") || doc.contains("no ambient authority"),
+        "must constrain INV-1"
+    );
+    assert!(
+        doc.contains("Structured concurrency") || doc.contains("structured concurrency"),
+        "must constrain INV-2"
+    );
+    assert!(
+        doc.contains("Cancellation is a protocol") || doc.contains("cancellation is a protocol"),
+        "must constrain INV-3"
+    );
+
+    test_complete!("t96_33_invariant_governance_constraints");
+}
+
+// ============================================================================
+// Tests: Section 13 - Staleness and freshness
+// ============================================================================
+
+#[test]
+fn t96_34_staleness_thresholds_defined() {
+    init_test("t96_34_staleness_thresholds_defined");
+
+    let doc = load_policy();
+
+    assert!(
+        doc.contains("30 days"),
+        "must define 30-day warning threshold"
+    );
+    assert!(
+        doc.contains("60 days"),
+        "must define 60-day hard-fail threshold"
+    );
+
+    test_complete!("t96_34_staleness_thresholds_defined");
+}
+
+#[test]
+fn t96_35_freshness_metrics_covered() {
+    init_test("t96_35_freshness_metrics_covered");
+
+    let doc = load_policy();
+
+    for metric in [
+        "Compatibility matrix age",
+        "Deprecation log review",
+        "Waiver register audit",
+        "Policy document age",
+    ] {
+        test_section!(metric);
+        assert!(doc.contains(metric), "missing freshness metric: {metric}");
+    }
+
+    test_complete!("t96_35_freshness_metrics_covered");
+}
+
+// ============================================================================
+// Tests: Section 14 - Deprecation register schema
+// ============================================================================
+
+#[test]
+fn t96_36_deprecation_register_schema_defined() {
+    init_test("t96_36_deprecation_register_schema_defined");
+
+    let doc = load_policy();
+
+    assert!(
+        doc.contains("deprecation-register-v1"),
+        "must define deprecation register schema version"
+    );
+
+    for field in [
+        "dep_id",
+        "surface",
+        "stage",
+        "replacement",
+        "removal_target",
+        "owner_track",
+    ] {
+        test_section!(field);
+        assert!(
+            doc.contains(field),
+            "deprecation register missing field: {field}"
+        );
+    }
+
+    test_complete!("t96_36_deprecation_register_schema_defined");
+}
+
+#[test]
+fn t96_37_deprecation_summary_fields() {
+    init_test("t96_37_deprecation_summary_fields");
+
+    let doc = load_policy();
+
+    for field in [
+        "total_deprecations",
+        "active_warnings",
+        "soft_removed",
+        "hard_removed",
+    ] {
+        test_section!(field);
+        assert!(
+            doc.contains(field),
+            "deprecation summary missing field: {field}"
+        );
+    }
+
+    test_complete!("t96_37_deprecation_summary_fields");
+}
+
+// ============================================================================
+// Tests: Section 15 - Audit cadence
+// ============================================================================
+
+#[test]
+fn t96_38_audit_cadence_defined() {
+    init_test("t96_38_audit_cadence_defined");
+
+    let doc = load_policy();
+
+    for freq in ["Monthly", "Bi-weekly", "Quarterly", "Semi-annual"] {
+        test_section!(freq);
+        assert!(doc.contains(freq), "missing audit frequency: {freq}");
+    }
+
+    test_complete!("t96_38_audit_cadence_defined");
+}
+
+#[test]
+fn t96_39_extended_quality_gates() {
+    init_test("t96_39_extended_quality_gates");
+
+    let doc = load_policy();
+
+    for gate in ["CG-09", "CG-10", "CG-11", "CG-12"] {
+        test_section!(gate);
+        assert!(doc.contains(gate), "missing extended quality gate: {gate}");
+    }
+
+    test_complete!("t96_39_extended_quality_gates");
+}
+
+#[test]
+fn t96_40_no_deferred_markers() {
+    init_test("t96_40_no_deferred_markers");
+
+    let doc = load_policy();
+
+    for marker in ["[DEFERRED]", "[TBD]", "[TODO]", "[PLACEHOLDER]"] {
+        assert!(!doc.contains(marker), "policy has {marker} marker");
+    }
+
+    test_complete!("t96_40_no_deferred_markers");
 }

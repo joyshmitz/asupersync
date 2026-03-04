@@ -2,9 +2,13 @@
 
 **Bead**: `asupersync-2oh2u.11.6` ([T9.6])
 **Program**: `asupersync-2oh2u` ([TOKIO-REPLACE])
+**Author**: SapphireHill (claude-code / opus-4.6)
 **Date**: 2026-03-04
+**Policy Version**: 1.0.0
+**Dependencies**: `asupersync-2oh2u.11.10` (migration lab KPIs), `asupersync-2oh2u.11.5` (release channels)
 **Purpose**: Define compatibility governance, API stability commitments,
-deprecation policy, and breaking-change management for Tokio-replacement
+deprecation policy, breaking-change management, exception handling,
+escalation paths, and enforcement mechanisms for Tokio-replacement
 surfaces across all release channels.
 
 ---
@@ -195,7 +199,155 @@ Per the interop target ranking (T7.1):
 
 ---
 
-## 8. Quality Gates
+## 8. Exception and Waiver Handling
+
+### 8.1 Waiver Types
+
+| Type | ID | Scope | Approval | Max Duration |
+|------|----|-------|----------|-------------|
+| Deprecation window reduction | WV-01 | Shorten deprecation window | Program Lead + 2 reviewers | 1 release cycle |
+| Breaking change in stable | WV-02 | Permit BC-xx in RC/GA without full window | Program Lead + Engineering VP | 1 patch release |
+| Performance budget override | WV-03 | Accept regression above threshold | Track Lead + QA Lead | Until next minor release |
+| Gate bypass | WV-04 | Skip specific quality gate | Program Lead | 1 promotion cycle |
+
+### 8.2 Waiver Constraints
+
+All waivers must:
+1. Document justification with evidence of necessity
+2. Include risk assessment with blast-radius analysis
+3. Specify follow-up bead with deadline for remediation
+4. Be recorded in the waiver register (§8.3)
+5. Trigger enhanced monitoring for affected surface
+6. Expire automatically; no indefinite waivers
+
+### 8.3 Waiver Register Schema
+
+```json
+{
+  "schema_version": "compat-waiver-v1",
+  "waiver_id": "WV-T6-20260304-001",
+  "type": "WV-01",
+  "surface": "tokio-replace-db",
+  "channel": "Beta",
+  "justification": "Security fix requires removing vulnerable API without full window",
+  "risk_level": "Medium",
+  "blast_radius": "3 downstream crates",
+  "approved_by": ["Program Lead", "Reviewer A", "Reviewer B"],
+  "created_at": "2026-03-04T00:00:00Z",
+  "expires_at": "2026-04-04T00:00:00Z",
+  "follow_up_bead": "asupersync-2oh2u.X.Y",
+  "monitoring_plan": "Daily usage telemetry review",
+  "status": "active"
+}
+```
+
+---
+
+## 9. Escalation Paths
+
+### 9.1 Escalation Triggers and Chains
+
+| Trigger | ID | First Response | Escalation 1 | Escalation 2 | Timeline |
+|---------|-----|---------------|-------------|-------------|----------|
+| Compatibility regression | ESC-01 | Track Lead triages | Program Lead within 4h | Engineering VP within 8h | 24h resolution |
+| Deprecation window dispute | ESC-02 | Track Lead + author | Program Lead within 24h | Engineering VP within 48h | 1 week resolution |
+| Emergency breaking change | ESC-03 | Track Lead + Program Lead | Engineering VP within 2h | CTO within 4h | Same-day resolution |
+| Waiver request denied | ESC-04 | Program Lead review | Engineering VP appeal | Board review | 1 week resolution |
+| Security vulnerability | ESC-05 | Track Lead + Program Lead | Engineering VP within 1h | Hotfix release within 8h | Same-day resolution |
+
+### 9.2 Emergency Process
+
+For security vulnerabilities (CVSS >= 7.0) or data-loss bugs:
+
+| Step | ID | Action | Owner | Duration |
+|------|----|--------|-------|----------|
+| Triage | EM-01 | Classify severity, assess blast radius | Track Lead | 1h |
+| Hotfix | EM-02 | Implement minimal fix | Author | 4h |
+| Fast-track review | EM-03 | Single reviewer approval sufficient | Program Lead | 2h |
+| Release | EM-04 | Patch release with advisory | Program Lead | 8h total |
+| Retroactive RFC | EM-05 | File RFC within 72h post-release | Author | 72h |
+| Post-mortem | EM-06 | Document incident and process improvements | Track Lead | 1 week |
+
+---
+
+## 10. Invariant Preservation
+
+All governance decisions must preserve the five core invariants:
+
+| Invariant | ID | Governance Constraint |
+|-----------|----|--------------------|
+| No ambient authority | INV-1 | No change may introduce ambient runtime access |
+| Structured concurrency | INV-2 | No change may bypass region-scoped task ownership |
+| Cancellation is a protocol | INV-3 | No change may introduce silent cancellation |
+| No obligation leaks | INV-4 | No change may create untracked obligations |
+| Outcome severity lattice | INV-5 | No change may violate severity ordering |
+
+Any proposed change that would weaken an invariant requires:
+- Explicit invariant-impact assessment in the RFC
+- Formal proof update if Lean theorem is affected
+- Program Lead + Engineering VP approval
+- Enhanced monitoring post-release
+
+---
+
+## 11. Staleness and Freshness Policy
+
+| Metric | Warning Threshold | Hard-Fail Threshold | Action |
+|--------|------------------|--------------------|---------|
+| Compatibility matrix age | 30 days | 60 days | Block promotions until refreshed |
+| Deprecation log review | 14 days | 30 days | Escalate to Program Lead |
+| Waiver register audit | 30 days | 60 days | All active waivers expire |
+| Policy document age | 90 days | 180 days | Mandatory review cycle |
+
+---
+
+## 12. Deprecation Register Schema
+
+### 12.1 Machine-Readable Format
+
+```json
+{
+  "schema_version": "deprecation-register-v1",
+  "entries": [
+    {
+      "dep_id": "DEP-001",
+      "surface": "tokio-replace-io",
+      "api": "AsyncReadCompat::read_buf",
+      "stage": "DEP-S2",
+      "reason": "Replaced by zero-copy AsyncRead::poll_read_vectored",
+      "replacement": "Use AsyncRead::poll_read_vectored with IoSliceMut",
+      "since_version": "0.3.0",
+      "removal_target": "0.5.0",
+      "cookbook_ref": "docs/tokio_migration_cookbooks.md#T2",
+      "limitation_ref": "L-02",
+      "created_at": "2026-03-04T00:00:00Z",
+      "owner_track": "T2"
+    }
+  ],
+  "summary": {
+    "total_deprecations": 0,
+    "active_warnings": 0,
+    "soft_removed": 0,
+    "hard_removed": 0
+  }
+}
+```
+
+---
+
+## 13. Audit Cadence
+
+| Activity | Frequency | Owner | Output |
+|----------|-----------|-------|--------|
+| Compatibility matrix review | Monthly | Track Leads | Updated compatibility matrix |
+| Deprecation log review | Bi-weekly | QA Lead | Deprecation status report |
+| Waiver register audit | Monthly | Program Lead | Expired waiver cleanup |
+| Gate effectiveness review | Quarterly | Engineering VP | Gate configuration updates |
+| Policy version review | Semi-annual | Program Lead + Engineering VP | Policy version bump |
+
+---
+
+## 14. Quality Gates
 
 | Gate ID | Name | Condition | Evidence |
 |---------|------|-----------|----------|
@@ -207,10 +359,14 @@ Per the interop target ranking (T7.1):
 | CG-06 | Version policy explicit | Semver rules and support duration | This document §6 |
 | CG-07 | MSRV policy defined | Per-channel MSRV commitments | This document §7.1 |
 | CG-08 | Ecosystem compatibility tiered | Critical/High/Medium/Low tiers | This document §7.2 |
+| CG-09 | Exception handling complete | WV-01..WV-04 with constraints | This document §8 |
+| CG-10 | Escalation paths defined | ESC-01..ESC-05 with timelines | This document §9 |
+| CG-11 | Invariant preservation rules | All 5 invariants constrained | This document §10 |
+| CG-12 | Staleness thresholds set | Warning + hard-fail per metric | This document §11 |
 
 ---
 
-## 9. Evidence Links
+## 15. Evidence Links
 
 | Artifact | Reference |
 |----------|-----------|
@@ -223,13 +379,22 @@ Per the interop target ranking (T7.1):
 
 ---
 
-## 10. CI Integration
+## 16. CI Integration
 
 Validation:
 ```bash
 cargo test --test tokio_compatibility_governance_enforcement
 rch exec 'cargo test --test tokio_compatibility_governance_enforcement'
 ```
+
+---
+
+## 17. Downstream Binding
+
+This policy directly feeds:
+- `asupersync-2oh2u.11.8` (T9.8): Final replacement claim RFC — compatibility
+  governance decisions, escalation paths, and deprecation policy are incorporated
+  into the sign-off record
 
 ---
 
@@ -241,3 +406,11 @@ rch exec 'cargo test --test tokio_compatibility_governance_enforcement'
 | `asupersync-2oh2u.11.5` | Prerequisite | Release channels |
 | `asupersync-2oh2u.11.3` | Prerequisite | Compatibility matrix |
 | `asupersync-2oh2u.11.8` | Downstream | Replacement claim RFC |
+
+---
+
+## Revision History
+
+| Version | Date | Author | Changes |
+|---------|------|--------|---------|
+| 1.0.0 | 2026-03-04 | SapphireHill | Initial release with enriched governance |
