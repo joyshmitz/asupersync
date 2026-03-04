@@ -35,7 +35,7 @@
 use super::client::{Message, MessageAssembler, WebSocket, WebSocketConfig};
 use super::close::{CloseHandshake, CloseReason, CloseState};
 use super::frame::{Frame, FrameCodec, Opcode, WsError};
-use crate::bytes::{Bytes, BytesMut};
+use crate::bytes::{Buf, Bytes, BytesMut};
 use crate::codec::{Decoder, Encoder};
 use crate::cx::Cx;
 use crate::io::{AsyncRead, AsyncWrite, ReadBuf};
@@ -381,8 +381,8 @@ where
 
     /// Internal: flush the write buffer.
     async fn flush_write_buf(&self) -> Result<(), WsError> {
-        use std::future::poll_fn;
         use crate::bytes::Buf;
+        use std::future::poll_fn;
 
         let _permit = acquire_write_permit(&self.shared).await;
 

@@ -24,8 +24,8 @@ use parking_lot::RwLock;
 use std::collections::HashMap;
 use std::future::Future;
 use std::pin::Pin;
-use std::sync::atomic::{AtomicU64, Ordering};
 use std::sync::Arc;
+use std::sync::atomic::{AtomicU64, Ordering};
 
 use super::service::{NamedService, ServiceDescriptor, ServiceHandler};
 use super::status::Status;

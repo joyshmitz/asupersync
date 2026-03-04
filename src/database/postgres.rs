@@ -1649,6 +1649,14 @@ impl PgConnection {
         Outcome::Ok(conn)
     }
 
+    #[inline]
+    fn cancel_in_flight<T>(&mut self, cx: &Cx) -> Outcome<T, PgError> {
+        // Once a caller cancels mid-flight we can't safely continue decoding
+        // protocol messages for subsequent operations, so close this connection.
+        self.inner.closed = true;
+        Outcome::Cancelled(cancelled_reason(cx))
+    }
+
     /// Send the startup message.
     async fn send_startup(&mut self, options: &PgConnectOptions) -> Result<(), PgError> {
         let mut buf = MessageBuffer::new();
@@ -1974,6 +1982,10 @@ impl PgConnection {
         let mut rows = Vec::with_capacity(16);
 
         loop {
+            if cx.is_cancel_requested() {
+                return self.cancel_in_flight(cx);
+            }
+
             let (msg_type, data) = match self.read_message().await {
                 Ok(m) => m,
                 Err(e) => return Outcome::Err(e),
@@ -2090,6 +2102,10 @@ impl PgConnection {
         let mut affected_rows = 0u64;
 
         loop {
+            if cx.is_cancel_requested() {
+                return self.cancel_in_flight(cx);
+            }
+
             let (msg_type, data) = match self.read_message().await {
                 Ok(m) => m,
                 Err(e) => return Outcome::Err(e),
@@ -2256,7 +2272,7 @@ impl PgConnection {
             return Outcome::Err(e);
         }
 
-        self.read_extended_query_results().await
+        self.read_extended_query_results(cx).await
     }
 
     /// Execute a parameterized query and return the first row.
@@ -2328,7 +2344,7 @@ impl PgConnection {
             return Outcome::Err(e);
         }
 
-        self.read_extended_execute_results().await
+        self.read_extended_execute_results(cx).await
     }
 
     /// Prepare a named statement for repeated execution.
@@ -2382,6 +2398,10 @@ impl PgConnection {
         let mut columns = Vec::new();
 
         loop {
+            if cx.is_cancel_requested() {
+                return self.cancel_in_flight(cx);
+            }
+
             let (msg_type, data) = match self.read_message().await {
                 Ok(m) => m,
                 Err(e) => return Outcome::Err(e),
@@ -2466,7 +2486,7 @@ impl PgConnection {
             return Outcome::Err(e);
         }
 
-        self.read_extended_query_results().await
+        self.read_extended_query_results(cx).await
     }
 
     /// Execute a prepared statement returning affected row count.
@@ -2503,7 +2523,7 @@ impl PgConnection {
             return Outcome::Err(e);
         }
 
-        self.read_extended_execute_results().await
+        self.read_extended_execute_results(cx).await
     }
 
     /// Close a prepared statement, freeing server-side resources.
@@ -2530,6 +2550,10 @@ impl PgConnection {
         }
 
         loop {
+            if cx.is_cancel_requested() {
+                return self.cancel_in_flight(cx);
+            }
+
             let (msg_type, data) = match self.read_message().await {
                 Ok(m) => m,
                 Err(e) => return Outcome::Err(e),
@@ -2846,12 +2870,16 @@ impl PgConnection {
     ///
     /// Expects: ParseComplete?, BindComplete, RowDescription?, DataRow*,
     /// CommandComplete, ReadyForQuery.
-    async fn read_extended_query_results(&mut self) -> Outcome<Vec<PgRow>, PgError> {
+    async fn read_extended_query_results(&mut self, cx: &Cx) -> Outcome<Vec<PgRow>, PgError> {
         let mut columns: Option<Arc<Vec<PgColumn>>> = None;
         let mut column_indices: Option<Arc<BTreeMap<String, usize>>> = None;
         let mut rows = Vec::with_capacity(16);
 
         loop {
+            if cx.is_cancel_requested() {
+                return self.cancel_in_flight(cx);
+            }
+
             let (msg_type, data) = match self.read_message().await {
                 Ok(m) => m,
                 Err(e) => return Outcome::Err(e),
@@ -2905,10 +2933,14 @@ impl PgConnection {
     }
 
     /// Read results from Extended Query Protocol (execute/command path).
-    async fn read_extended_execute_results(&mut self) -> Outcome<u64, PgError> {
+    async fn read_extended_execute_results(&mut self, cx: &Cx) -> Outcome<u64, PgError> {
         let mut affected_rows = 0u64;
 
         loop {
+            if cx.is_cancel_requested() {
+                return self.cancel_in_flight(cx);
+            }
+
             let (msg_type, data) = match self.read_message().await {
                 Ok(m) => m,
                 Err(e) => return Outcome::Err(e),
@@ -4808,5 +4840,18 @@ mod tests {
         assert_user_cancelled(run(conn.query_prepared(&cx, &stmt, &params)));
         assert_user_cancelled(run(conn.execute_prepared(&cx, &stmt, &params)));
         assert_user_cancelled(run(conn.close_statement(&cx, &stmt)));
+    }
+
+    #[test]
+    fn extended_readers_cancel_midflight_and_close_connection() {
+        let cx = cancelled_cx();
+
+        let mut query_conn = make_test_connection();
+        assert_user_cancelled(run(query_conn.read_extended_query_results(&cx)));
+        assert!(query_conn.inner.closed);
+
+        let mut execute_conn = make_test_connection();
+        assert_user_cancelled(run(execute_conn.read_extended_execute_results(&cx)));
+        assert!(execute_conn.inner.closed);
     }
 }

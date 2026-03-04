@@ -740,7 +740,7 @@ impl SlidingWindowRateLimiter {
 
         // Cleanup expired entries inline, decrementing the running cost total.
         while let Some((t, c)) = window.front() {
-            if now_millis.saturating_sub(*t) >= period_millis {
+            if period_millis > 0 && now_millis.saturating_sub(*t) >= period_millis {
                 let evicted_cost = *c;
                 window.pop_front();
                 self.window_cost.fetch_sub(evicted_cost, Ordering::Relaxed);
@@ -784,7 +784,7 @@ impl SlidingWindowRateLimiter {
 
         // Inline cleanup
         while let Some((t, c)) = window.front() {
-            if now_millis.saturating_sub(*t) >= period_millis {
+            if period_millis > 0 && now_millis.saturating_sub(*t) >= period_millis {
                 let evicted_cost = *c;
                 window.pop_front();
                 self.window_cost.fetch_sub(evicted_cost, Ordering::Relaxed);
@@ -796,6 +796,10 @@ impl SlidingWindowRateLimiter {
         let usage = self.window_cost.load(Ordering::Relaxed);
         if usage.saturating_add(cost) <= self.policy.rate {
             return Duration::ZERO;
+        }
+
+        if period_millis == 0 {
+            return Duration::MAX;
         }
 
         // Find when enough capacity frees up

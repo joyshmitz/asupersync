@@ -453,7 +453,7 @@ mod tests {
         let max_index = u32::MAX - 1;
         #[cfg(target_pointer_width = "32")]
         let max_index = 0xFF_FFFF - 1;
-        
+
         let token = SlabToken::new(max_index, SlabToken::MAX_GENERATION);
         let packed = token.to_usize();
         let unpacked = SlabToken::from_usize(packed);

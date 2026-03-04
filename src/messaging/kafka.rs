@@ -676,7 +676,8 @@ impl KafkaProducer {
                 payload,
                 partition,
                 None,
-            ).await
+            )
+            .await
         }
 
         #[cfg(not(feature = "kafka"))]
@@ -732,7 +733,8 @@ impl KafkaProducer {
                 payload,
                 None,
                 Some(headers),
-            ).await
+            )
+            .await
         }
 
         #[cfg(not(feature = "kafka"))]
@@ -1356,7 +1358,10 @@ mod tests {
     fn producer_rejects_blank_topic_name() {
         run_test_with_cx(|cx| async move {
             let producer = KafkaProducer::new(ProducerConfig::default()).unwrap();
-            let err = producer.send(&cx, "   ", None, b"x", None).await.unwrap_err();
+            let err = producer
+                .send(&cx, "   ", None, b"x", None)
+                .await
+                .unwrap_err();
             assert!(matches!(err, KafkaError::InvalidTopic(topic) if topic.is_empty()));
         });
     }

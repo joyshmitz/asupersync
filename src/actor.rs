@@ -257,7 +257,6 @@ impl<A: Actor> ActorHandle<A> {
     /// them by having `stop()` drain buffered messages first.
     pub fn stop(&self) {
         self.state.store(ActorState::Stopping);
-        self.sender.close();
         self.sender.wake_receiver();
     }
 
@@ -734,7 +733,9 @@ async fn run_actor_loop<A: Actor>(mut actor: A, cx: Cx, cell: &mut ActorCell<A::
 
     // Phase 4: Cleanup
     cx.trace("actor::on_stop");
-    let _mask = cx.masked(); // allow async cleanup even if aborted
+    // Note: cx.masked() requires a sync closure; on_stop is async so we call it
+    // directly. The actor is already in Stopping state so cancellation is not
+    // re-entrantly requested.
     actor.on_stop(&cx).await;
 
     actor

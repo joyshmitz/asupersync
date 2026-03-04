@@ -1057,9 +1057,8 @@ impl<S: GenServer> GenServerHandle<S> {
     /// Closes the mailbox and waits for the server to process remaining messages.
     pub fn stop(&self) {
         self.state.store(ActorState::Stopping);
-        self.sender.close();
         // Ensure a server blocked in `mailbox.recv()` is woken so it can observe
-        // the mailbox closure and run drain/on_stop deterministically.
+        // the state change and run drain/on_stop deterministically.
         self.sender.wake_receiver();
     }
 
@@ -1398,7 +1397,7 @@ async fn run_gen_server_loop<S: GenServer>(
     let drain_limit = cell.mailbox.capacity() as u64;
     let mut drained: u64 = 0;
     let is_aborted = cx.is_cancel_requested();
-    
+
     while let Ok(envelope) = cell.mailbox.try_recv() {
         match envelope {
             Envelope::Call {

@@ -25,7 +25,7 @@
 use super::close::{CloseConfig, CloseHandshake, CloseReason, CloseState};
 use super::frame::{Frame, FrameCodec, Opcode, WsError};
 use super::handshake::{ClientHandshake, HandshakeError, HttpResponse, WsUrl};
-use crate::bytes::{Bytes, BytesMut};
+use crate::bytes::{Buf, Bytes, BytesMut};
 use crate::codec::{Decoder, Encoder};
 use crate::cx::Cx;
 use crate::io::{AsyncRead, AsyncWrite, ReadBuf};
@@ -565,19 +565,19 @@ where
     /// Internal: send a single frame.
     async fn send_frame(&mut self, frame: Frame) -> Result<(), WsError> {
         use std::future::poll_fn;
-        use crate::bytes::Buf;
 
         self.codec.encode(frame, &mut self.write_buf)?;
 
         while !self.write_buf.is_empty() {
-            let n = poll_fn(|cx| Pin::new(&mut self.io).poll_write(cx, self.write_buf.chunk())).await?;
+            let n =
+                poll_fn(|cx| Pin::new(&mut self.io).poll_write(cx, &self.write_buf[..])).await?;
             if n == 0 {
                 return Err(WsError::Io(io::Error::new(
                     io::ErrorKind::WriteZero,
                     "write returned 0",
                 )));
             }
-            self.write_buf.advance(n);
+            let _ = self.write_buf.split_to(n);
         }
 
         Ok(())

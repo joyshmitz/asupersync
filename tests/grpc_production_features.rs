@@ -6,51 +6,51 @@
 
 use std::time::{Duration, Instant};
 
+use asupersync::bytes::Bytes;
+use asupersync::grpc::server::Interceptor;
+use asupersync::grpc::service::{NamedService, ServiceDescriptor, ServiceHandler};
 use asupersync::grpc::{
-    // Server
-    CallContext,
-    Server,
-    ServerBuilder,
-    ServerConfig,
-    parse_grpc_timeout,
-    format_grpc_timeout,
-    // Health
-    HealthService,
-    HealthServiceBuilder,
-    HealthReporter,
-    HealthWatcher,
-    ServingStatus,
-    HealthCheckRequest,
-    HealthCheckResponse,
-    // Reflection
-    ReflectionService,
-    ReflectionListServicesRequest,
-    ReflectionDescribeServiceRequest,
-    ReflectedMethod,
-    // Interceptors
-    InterceptorLayer,
-    TimeoutInterceptor,
-    TracingInterceptor,
-    LoggingInterceptor,
     BearerAuthInterceptor,
     BearerAuthValidator,
-    RateLimitInterceptor,
-    MetadataPropagator,
-    FnInterceptor,
+    // Server
+    CallContext,
     // Client
     Channel,
     ChannelBuilder,
     ChannelConfig,
+    Code,
     CompressionEncoding,
+    FnInterceptor,
+    HealthCheckRequest,
+    HealthCheckResponse,
+    HealthReporter,
+    // Health
+    HealthService,
+    HealthServiceBuilder,
+    HealthWatcher,
+    // Interceptors
+    InterceptorLayer,
+    LoggingInterceptor,
     // Types
     Metadata,
+    MetadataPropagator,
+    RateLimitInterceptor,
+    ReflectedMethod,
+    ReflectionDescribeServiceRequest,
+    ReflectionListServicesRequest,
+    // Reflection
+    ReflectionService,
     Request,
     Response,
-    Code,
+    Server,
+    ServerBuilder,
+    ServerConfig,
+    ServingStatus,
+    TimeoutInterceptor,
+    TracingInterceptor,
+    format_grpc_timeout,
+    parse_grpc_timeout,
 };
-use asupersync::bytes::Bytes;
-use asupersync::grpc::server::Interceptor;
-use asupersync::grpc::service::{NamedService, ServiceDescriptor, ServiceHandler};
 
 // ---------------------------------------------------------------------------
 // Test service stubs
@@ -74,8 +74,7 @@ impl ServiceHandler for GreeterService {
                 "/helloworld.Greeter/SayHelloStream",
             ),
         ];
-        static DESC: ServiceDescriptor =
-            ServiceDescriptor::new("Greeter", "helloworld", METHODS);
+        static DESC: ServiceDescriptor = ServiceDescriptor::new("Greeter", "helloworld", METHODS);
         &DESC
     }
 
@@ -137,15 +136,15 @@ fn parse_grpc_timeout_seconds() {
 
 #[test]
 fn parse_grpc_timeout_millis() {
-    assert_eq!(parse_grpc_timeout("5000m"), Some(Duration::from_millis(5000)));
+    assert_eq!(
+        parse_grpc_timeout("5000m"),
+        Some(Duration::from_millis(5000))
+    );
 }
 
 #[test]
 fn parse_grpc_timeout_micros() {
-    assert_eq!(
-        parse_grpc_timeout("100u"),
-        Some(Duration::from_micros(100))
-    );
+    assert_eq!(parse_grpc_timeout("100u"), Some(Duration::from_micros(100)));
 }
 
 #[test]
@@ -231,7 +230,10 @@ fn call_context_from_metadata_header_overrides_default() {
     );
     let deadline = ctx.deadline().expect("deadline should be set");
     let diff = deadline.duration_since(now);
-    assert!(diff < Duration::from_secs(2), "should use 1s header not 60s default");
+    assert!(
+        diff < Duration::from_secs(2),
+        "should use 1s header not 60s default"
+    );
 }
 
 #[test]
@@ -421,9 +423,8 @@ fn reflection_describe_service_async() {
     reflection.register_handler(&GreeterService);
 
     let request = Request::new(ReflectionDescribeServiceRequest::new("helloworld.Greeter"));
-    let response =
-        futures_lite::future::block_on(reflection.describe_service_async(&request))
-            .expect("describe should succeed");
+    let response = futures_lite::future::block_on(reflection.describe_service_async(&request))
+        .expect("describe should succeed");
     let svc = &response.get_ref().service;
     assert_eq!(svc.name, "helloworld.Greeter");
     assert_eq!(svc.methods.len(), 2);
@@ -437,8 +438,7 @@ fn reflection_describe_service_async() {
 fn reflection_describe_missing_service_async() {
     let reflection = ReflectionService::new();
     let request = Request::new(ReflectionDescribeServiceRequest::new("missing.Service"));
-    let result =
-        futures_lite::future::block_on(reflection.describe_service_async(&request));
+    let result = futures_lite::future::block_on(reflection.describe_service_async(&request));
     assert!(result.is_err());
     let status = result.unwrap_err();
     assert_eq!(status.code(), Code::NotFound);
@@ -517,8 +517,7 @@ fn interceptor_layer_forward_order() {
 
 #[test]
 fn interceptor_layer_response_reverse_order() {
-    let layer = InterceptorLayer::new()
-        .layer(asupersync::grpc::logging_interceptor());
+    let layer = InterceptorLayer::new().layer(asupersync::grpc::logging_interceptor());
 
     let mut response = Response::new(Bytes::new());
     layer.intercept_response(&mut response).unwrap();
@@ -671,10 +670,12 @@ fn server_builder_compression_config() {
         server.config().send_compression,
         Some(CompressionEncoding::Gzip)
     );
-    assert!(server
-        .config()
-        .accept_compression
-        .contains(&CompressionEncoding::Gzip));
+    assert!(
+        server
+            .config()
+            .accept_compression
+            .contains(&CompressionEncoding::Gzip)
+    );
 }
 
 #[test]
@@ -723,9 +724,11 @@ fn server_builder_reflection_captures_all_services() {
         .build();
 
     // Reflection service is registered
-    assert!(server
-        .get_service("grpc.reflection.v1alpha.ServerReflection")
-        .is_some());
+    assert!(
+        server
+            .get_service("grpc.reflection.v1alpha.ServerReflection")
+            .is_some()
+    );
     // All three services present
     assert_eq!(server.service_names().len(), 3);
 }

@@ -10,14 +10,12 @@ use std::collections::BTreeSet;
 use std::path::Path;
 
 fn load_doc() -> String {
-    let path =
-        Path::new(env!("CARGO_MANIFEST_DIR")).join("docs/tokio_t6_migration_packs.md");
+    let path = Path::new(env!("CARGO_MANIFEST_DIR")).join("docs/tokio_t6_migration_packs.md");
     std::fs::read_to_string(path).expect("migration packs document must exist")
 }
 
 fn load_json() -> Value {
-    let path =
-        Path::new(env!("CARGO_MANIFEST_DIR")).join("docs/tokio_t6_migration_packs.json");
+    let path = Path::new(env!("CARGO_MANIFEST_DIR")).join("docs/tokio_t6_migration_packs.json");
     let raw = std::fs::read_to_string(path).expect("migration packs JSON must exist");
     serde_json::from_str(&raw).expect("migration packs JSON must parse")
 }
@@ -504,10 +502,7 @@ fn json_has_evidence_links() {
     ];
 
     for key in required_keys {
-        assert!(
-            evidence.contains_key(key),
-            "evidence_links missing: {key}"
-        );
+        assert!(evidence.contains_key(key), "evidence_links missing: {key}");
     }
 }
 
@@ -531,15 +526,15 @@ fn json_has_dependency_tracking() {
         .as_array()
         .expect("blocked_by must be an array");
     assert!(
-        blocked_by.iter().any(|d| {
-            d["bead"].as_str() == Some("asupersync-2oh2u.6.12")
-        }),
+        blocked_by
+            .iter()
+            .any(|d| { d["bead"].as_str() == Some("asupersync-2oh2u.6.12") }),
         "blocked_by must include T6.12"
     );
     assert!(
-        blocked_by.iter().any(|d| {
-            d["bead"].as_str() == Some("asupersync-2oh2u.6.10")
-        }),
+        blocked_by
+            .iter()
+            .any(|d| { d["bead"].as_str() == Some("asupersync-2oh2u.6.10") }),
         "blocked_by must include T6.10"
     );
 }
@@ -595,17 +590,13 @@ fn referenced_source_files_exist() {
 
     for source in sources {
         let path = Path::new(env!("CARGO_MANIFEST_DIR")).join(source);
-        assert!(
-            path.exists(),
-            "referenced source file must exist: {source}"
-        );
+        assert!(path.exists(), "referenced source file must exist: {source}");
     }
 }
 
 #[test]
 fn e2e_test_file_exists() {
-    let path =
-        Path::new(env!("CARGO_MANIFEST_DIR")).join("tests/e2e_t6_data_path.rs");
+    let path = Path::new(env!("CARGO_MANIFEST_DIR")).join("tests/e2e_t6_data_path.rs");
     assert!(
         path.exists(),
         "e2e_t6_data_path.rs must exist (T6.13 dependency)"

@@ -29,7 +29,7 @@ use super::client::{Message, MessageAssembler, WebSocketConfig};
 use super::close::{CloseHandshake, CloseReason};
 use super::frame::{Frame, FrameCodec, Opcode, WsError};
 use super::handshake::{AcceptResponse, HandshakeError, HttpRequest, ServerHandshake};
-use crate::bytes::BytesMut;
+use crate::bytes::{Buf, BytesMut};
 use crate::codec::{Decoder, Encoder};
 use crate::cx::Cx;
 use crate::io::{AsyncRead, AsyncWrite, ReadBuf};
@@ -466,13 +466,14 @@ where
 
     /// Internal: send a single frame.
     async fn send_frame(&mut self, frame: Frame) -> Result<(), WsError> {
-        use std::future::poll_fn;
         use crate::bytes::Buf;
+        use std::future::poll_fn;
 
         self.codec.encode(frame, &mut self.write_buf)?;
 
         while !self.write_buf.is_empty() {
-            let n = poll_fn(|cx| Pin::new(&mut self.io).poll_write(cx, self.write_buf.chunk())).await?;
+            let n =
+                poll_fn(|cx| Pin::new(&mut self.io).poll_write(cx, self.write_buf.chunk())).await?;
             if n == 0 {
                 return Err(WsError::Io(io::Error::new(
                     io::ErrorKind::WriteZero,
