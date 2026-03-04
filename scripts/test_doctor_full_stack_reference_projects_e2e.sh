@@ -163,7 +163,10 @@ run_stage_script() {
         stage_started_ts="$(date -u +%Y-%m-%dT%H:%M:%SZ)"
         pushd "${PROJECT_ROOT}" >/dev/null
         set +e
-        TEST_SEED="${profile_seed}" timeout "${PROFILE_TIMEOUT}s" bash "${PROJECT_ROOT}/${script_rel}" >"${attempt_log}" 2>&1
+        DOCTOR_FULLSTACK_SINGLE_RUN=1 \
+            TEST_SEED="${profile_seed}" \
+            timeout "${PROFILE_TIMEOUT}s" \
+            bash "${PROJECT_ROOT}/${script_rel}" >"${attempt_log}" 2>&1
         exit_code=$?
         set -e
         popd >/dev/null

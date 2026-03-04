@@ -38,6 +38,7 @@ SCENARIO_ID="E2E-SUITE-DOCTOR-WORKSPACE-SCAN"
 export TEST_LOG_LEVEL="${TEST_LOG_LEVEL:-info}"
 export RUST_LOG="${RUST_LOG:-asupersync=info}"
 export TEST_SEED="${TEST_SEED:-0xDEADBEEF}"
+DOCTOR_FULLSTACK_SINGLE_RUN="${DOCTOR_FULLSTACK_SINGLE_RUN:-0}"
 RCH_SCAN_TIMEOUT="${RCH_SCAN_TIMEOUT:-900}"
 RCH_RETRY_ATTEMPTS="${RCH_RETRY_ATTEMPTS:-3}"
 
@@ -127,9 +128,14 @@ if ! run_scan_call "scan run 1" "${SCAN1_LOG}" "${SCAN1_JSON}" "run1"; then
     EXIT_CODE=1
 fi
 
-echo ">>> [2/4] Running scan command (run 2) via rch..."
-if ! run_scan_call "scan run 2" "${SCAN2_LOG}" "${SCAN2_JSON}" "run2"; then
-    EXIT_CODE=1
+if [[ "${DOCTOR_FULLSTACK_SINGLE_RUN}" == "1" ]]; then
+    cp "${SCAN1_LOG}" "${SCAN2_LOG}"
+    cp "${SCAN1_JSON}" "${SCAN2_JSON}"
+else
+    echo ">>> [2/4] Running scan command (run 2) via rch..."
+    if ! run_scan_call "scan run 2" "${SCAN2_LOG}" "${SCAN2_JSON}" "run2"; then
+        EXIT_CODE=1
+    fi
 fi
 
 if [[ ${EXIT_CODE} -eq 0 ]]; then

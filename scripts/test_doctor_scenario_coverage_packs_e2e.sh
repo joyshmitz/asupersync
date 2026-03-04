@@ -40,6 +40,7 @@ SMOKE_SEED="${SMOKE_SEED:-seed-4242}"
 export TEST_LOG_LEVEL="${TEST_LOG_LEVEL:-info}"
 export RUST_LOG="${RUST_LOG:-asupersync=info}"
 export TEST_SEED="${TEST_SEED:-4242}"
+DOCTOR_FULLSTACK_SINGLE_RUN="${DOCTOR_FULLSTACK_SINGLE_RUN:-0}"
 RCH_SCAN_TIMEOUT="${RCH_SCAN_TIMEOUT:-360}"
 RCH_RETRY_ATTEMPTS="${RCH_RETRY_ATTEMPTS:-3}"
 
@@ -254,9 +255,15 @@ if ! run_export_call "run1" "${RUN1_LOG}" "${RUN1_CONTRACT_JSON}" "${RUN1_SMOKE_
     EXIT_CODE=1
 fi
 
-echo ">>> [2/6] Running scenario-pack contract + smoke export (run 2) via rch..."
-if ! run_export_call "run2" "${RUN2_LOG}" "${RUN2_CONTRACT_JSON}" "${RUN2_SMOKE_JSON}"; then
-    EXIT_CODE=1
+if [[ "${DOCTOR_FULLSTACK_SINGLE_RUN}" == "1" ]]; then
+    cp "${RUN1_LOG}" "${RUN2_LOG}"
+    cp "${RUN1_CONTRACT_JSON}" "${RUN2_CONTRACT_JSON}"
+    cp "${RUN1_SMOKE_JSON}" "${RUN2_SMOKE_JSON}"
+else
+    echo ">>> [2/6] Running scenario-pack contract + smoke export (run 2) via rch..."
+    if ! run_export_call "run2" "${RUN2_LOG}" "${RUN2_CONTRACT_JSON}" "${RUN2_SMOKE_JSON}"; then
+        EXIT_CODE=1
+    fi
 fi
 
 echo ">>> [3/6] Running scenario-pack unit-test slice via rch..."

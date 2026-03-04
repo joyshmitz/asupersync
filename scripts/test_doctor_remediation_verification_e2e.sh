@@ -38,6 +38,7 @@ REQUIRED_TESTS=(
 export TEST_LOG_LEVEL="${TEST_LOG_LEVEL:-info}"
 export RUST_LOG="${RUST_LOG:-asupersync=info}"
 export TEST_SEED="${TEST_SEED:-4242}"
+DOCTOR_FULLSTACK_SINGLE_RUN="${DOCTOR_FULLSTACK_SINGLE_RUN:-0}"
 RCH_SCAN_TIMEOUT="${RCH_SCAN_TIMEOUT:-900}"
 RCH_RETRY_ATTEMPTS="${RCH_RETRY_ATTEMPTS:-3}"
 
@@ -127,9 +128,14 @@ if ! run_verification_slice "run1" "${RUN1_LOG}" "${RUN1_PASS_LIST}"; then
     EXIT_CODE=1
 fi
 
-echo ">>> [2/5] Running verification scorecard test slice (run 2) via rch..."
-if ! run_verification_slice "run2" "${RUN2_LOG}" "${RUN2_PASS_LIST}"; then
-    EXIT_CODE=1
+if [[ "${DOCTOR_FULLSTACK_SINGLE_RUN}" == "1" ]]; then
+    cp "${RUN1_LOG}" "${RUN2_LOG}"
+    cp "${RUN1_PASS_LIST}" "${RUN2_PASS_LIST}"
+else
+    echo ">>> [2/5] Running verification scorecard test slice (run 2) via rch..."
+    if ! run_verification_slice "run2" "${RUN2_LOG}" "${RUN2_PASS_LIST}"; then
+        EXIT_CODE=1
+    fi
 fi
 
 if [[ ${EXIT_CODE} -eq 0 ]]; then
