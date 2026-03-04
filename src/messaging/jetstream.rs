@@ -105,6 +105,47 @@ impl From<NatsError> for JsError {
     }
 }
 
+impl JsError {
+    /// Whether this error is transient and may succeed on retry.
+    #[must_use]
+    pub fn is_transient(&self) -> bool {
+        match self {
+            Self::Nats(e) => e.is_transient(),
+            Self::Api { code, .. } => matches!(code, 503 | 408),
+            Self::NotAcked => true,
+            _ => false,
+        }
+    }
+
+    /// Whether this error indicates a connection-level failure.
+    #[must_use]
+    pub fn is_connection_error(&self) -> bool {
+        matches!(self, Self::Nats(e) if e.is_connection_error())
+    }
+
+    /// Whether this error indicates resource/capacity exhaustion.
+    #[must_use]
+    pub fn is_capacity_error(&self) -> bool {
+        matches!(self, Self::Api { code: 429, .. })
+    }
+
+    /// Whether this error is a timeout.
+    #[must_use]
+    pub fn is_timeout(&self) -> bool {
+        match self {
+            Self::Nats(e) => e.is_timeout(),
+            Self::Api { code: 408, .. } | Self::NotAcked => true,
+            _ => false,
+        }
+    }
+
+    /// Whether the operation should be retried.
+    #[must_use]
+    pub fn is_retryable(&self) -> bool {
+        self.is_transient()
+    }
+}
+
 /// Stream configuration.
 #[derive(Debug, Clone)]
 pub struct StreamConfig {

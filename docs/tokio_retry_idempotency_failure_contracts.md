@@ -125,9 +125,9 @@ fn error_code(&self) -> Option<&str>;
 ```
 
 Current status:
-- PostgreSQL: has `is_serialization_failure`, `is_deadlock`, `is_unique_violation`
-- MySQL: has server error code/state, but NO classification methods
-- SQLite: errors as strings, NO classification methods
+- PostgreSQL: Implemented (all methods)
+- MySQL: Implemented (all methods)
+- SQLite: Implemented (all applicable methods; `is_serialization_failure`/`is_deadlock` N/A)
 
 ### C-ERR-05: Messaging Error Classification
 
@@ -140,6 +140,12 @@ fn is_capacity_error(&self) -> bool;  // queue full, rate limited
 fn is_timeout(&self) -> bool;
 fn is_retryable(&self) -> bool;
 ```
+
+Current status:
+- NATS: Implemented (`src/messaging/nats.rs`)
+- JetStream: Implemented (`src/messaging/jetstream.rs`)
+- Kafka: Implemented (`src/messaging/kafka.rs`)
+- Redis: Implemented (`src/messaging/redis.rs`)
 
 ## 3. Idempotency Contracts
 
@@ -286,6 +292,15 @@ Timeouts MUST act as backpressure release valves:
 | PostgreSQL | Implemented | Implemented | Implemented | Implemented | Implemented |
 | MySQL | Implemented | Implemented | Implemented | Implemented | Implemented |
 | SQLite | Implemented | Implemented | N/A | N/A | Implemented |
+
+### Messaging Error Classification Status (C-ERR-05)
+
+| Backend | `is_transient` | `is_connection_error` | `is_capacity_error` | `is_timeout` | `is_retryable` |
+|---------|---------------|----------------------|---------------------|--------------|----------------|
+| NATS | Implemented | Implemented | Implemented | Implemented | Implemented |
+| JetStream | Implemented | Implemented | Implemented | Implemented | Implemented |
+| Kafka | Implemented | Implemented | Implemented | Implemented | Implemented |
+| Redis | Implemented | Implemented | Implemented | Implemented | Implemented |
 
 ### Idempotency Status
 

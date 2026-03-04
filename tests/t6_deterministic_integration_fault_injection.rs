@@ -1,4 +1,5 @@
 //! T6.10 — Deterministic integration and fault-injection suites for database and messaging.
+#![cfg(any(feature = "sqlite", feature = "postgres", feature = "mysql"))]
 //!
 //! Bead: `asupersync-2oh2u.6.10`
 //! Track: T6 (Database and messaging ecosystem closure)
@@ -19,8 +20,8 @@
 
 mod retry_integration {
     use asupersync::combinator::retry::{
-        calculate_delay, total_delay_budget, AlwaysRetry, NeverRetry, RetryError, RetryIf,
-        RetryPolicy, RetryPredicate, RetryResult, RetryState,
+        AlwaysRetry, NeverRetry, RetryError, RetryIf, RetryPolicy, RetryPredicate, RetryResult,
+        RetryState, calculate_delay, total_delay_budget,
     };
     use std::time::Duration;
 
@@ -35,13 +36,25 @@ mod retry_integration {
             .no_jitter();
 
         // Attempt 1 (first retry): 100ms * 2^0 = 100ms
-        assert_eq!(calculate_delay(&policy, 1, None), Duration::from_millis(100));
+        assert_eq!(
+            calculate_delay(&policy, 1, None),
+            Duration::from_millis(100)
+        );
         // Attempt 2: 100ms * 2^1 = 200ms
-        assert_eq!(calculate_delay(&policy, 2, None), Duration::from_millis(200));
+        assert_eq!(
+            calculate_delay(&policy, 2, None),
+            Duration::from_millis(200)
+        );
         // Attempt 3: 100ms * 2^2 = 400ms
-        assert_eq!(calculate_delay(&policy, 3, None), Duration::from_millis(400));
+        assert_eq!(
+            calculate_delay(&policy, 3, None),
+            Duration::from_millis(400)
+        );
         // Attempt 4: 100ms * 2^3 = 800ms
-        assert_eq!(calculate_delay(&policy, 4, None), Duration::from_millis(800));
+        assert_eq!(
+            calculate_delay(&policy, 4, None),
+            Duration::from_millis(800)
+        );
     }
 
     #[test]
@@ -92,7 +105,10 @@ mod retry_integration {
         for attempt in 1..=5 {
             let d1 = calculate_delay(&policy, attempt, Some(&mut rng1));
             let d2 = calculate_delay(&policy, attempt, Some(&mut rng2));
-            assert_eq!(d1, d2, "attempt {attempt}: same seed must produce same delay");
+            assert_eq!(
+                d1, d2,
+                "attempt {attempt}: same seed must produce same delay"
+            );
         }
     }
 
@@ -311,10 +327,7 @@ mod error_classification {
                 err.is_constraint_violation(),
                 "code {code} should be constraint violation"
             );
-            assert!(
-                !err.is_transient(),
-                "code {code} should NOT be transient"
-            );
+            assert!(!err.is_transient(), "code {code} should NOT be transient");
         }
     }
 
@@ -333,7 +346,10 @@ mod error_classification {
     #[test]
     fn c_err_04_pg_connection_error_variants() {
         // I/O error
-        let io_err = PgError::Io(std::io::Error::new(std::io::ErrorKind::BrokenPipe, "broken"));
+        let io_err = PgError::Io(std::io::Error::new(
+            std::io::ErrorKind::BrokenPipe,
+            "broken",
+        ));
         assert!(io_err.is_connection_error());
         assert!(io_err.is_transient());
 
@@ -452,16 +468,16 @@ mod mysql_error_classification {
                 err.is_connection_error(),
                 "code {code} should be connection error"
             );
-            assert!(
-                err.is_transient(),
-                "code {code} should be transient"
-            );
+            assert!(err.is_transient(), "code {code} should be transient");
         }
     }
 
     #[test]
     fn c_err_04_mysql_io_and_closed_are_connection_errors() {
-        let io_err = MySqlError::Io(std::io::Error::new(std::io::ErrorKind::BrokenPipe, "broken"));
+        let io_err = MySqlError::Io(std::io::Error::new(
+            std::io::ErrorKind::BrokenPipe,
+            "broken",
+        ));
         assert!(io_err.is_connection_error());
         assert!(io_err.is_transient());
 
@@ -541,10 +557,7 @@ mod sqlite_error_classification {
                 err.is_constraint_violation(),
                 "'{msg}' should be constraint violation"
             );
-            assert!(
-                !err.is_transient(),
-                "'{msg}' should NOT be transient"
-            );
+            assert!(!err.is_transient(), "'{msg}' should NOT be transient");
         }
     }
 
@@ -697,8 +710,7 @@ mod cross_backend_equivalence {
             sql_state: "23000".to_string(),
             message: "duplicate".to_string(),
         };
-        let sqlite_constraint =
-            SqliteError::Sqlite("UNIQUE constraint failed: t.col".to_string());
+        let sqlite_constraint = SqliteError::Sqlite("UNIQUE constraint failed: t.col".to_string());
 
         assert!(!pg_constraint.is_retryable());
         assert!(!mysql_constraint.is_retryable());
@@ -1007,7 +1019,10 @@ mod rate_limiter_integration {
 
         // retry_after should return a positive duration
         let wait = limiter.retry_after(1, now);
-        assert!(wait > Duration::ZERO, "retry_after should be positive when tokens exhausted");
+        assert!(
+            wait > Duration::ZERO,
+            "retry_after should be positive when tokens exhausted"
+        );
     }
 
     #[test]
@@ -1097,7 +1112,10 @@ mod failure_escalation {
         let failure: RetryFailure<&str> = RetryFailure::Cancelled(reason);
 
         let display = failure.to_string();
-        assert!(display.contains("cancelled"), "must mention cancellation: {display}");
+        assert!(
+            display.contains("cancelled"),
+            "must mention cancellation: {display}"
+        );
     }
 
     #[test]
@@ -1178,8 +1196,7 @@ mod contract_artifacts {
 
         // All backends should now have retry
         let backends = c_txn_04["backends_with_retry"].as_array().unwrap();
-        let backend_names: HashSet<&str> =
-            backends.iter().map(|b| b.as_str().unwrap()).collect();
+        let backend_names: HashSet<&str> = backends.iter().map(|b| b.as_str().unwrap()).collect();
         assert!(backend_names.contains("postgresql"));
         assert!(backend_names.contains("mysql"));
         assert!(backend_names.contains("sqlite"));
@@ -1209,7 +1226,9 @@ mod contract_artifacts {
     #[test]
     fn t69_error_classification_extended_implemented() {
         let json = load_t69_json();
-        let err_contracts = json["contracts"]["error_classification"].as_array().unwrap();
+        let err_contracts = json["contracts"]["error_classification"]
+            .as_array()
+            .unwrap();
         let c_err_04 = err_contracts
             .iter()
             .find(|c| c["id"] == "C-ERR-04")
@@ -1257,7 +1276,9 @@ mod contract_artifacts {
         for (key, path_val) in modules {
             let path = path_val.as_str().unwrap();
             assert!(
-                std::path::Path::new(path).extension().is_some_and(|ext| ext.eq_ignore_ascii_case("rs")),
+                std::path::Path::new(path)
+                    .extension()
+                    .is_some_and(|ext| ext.eq_ignore_ascii_case("rs")),
                 "module {key} path {path} should end in .rs"
             );
             assert!(
@@ -1279,7 +1300,10 @@ mod contract_artifacts {
             let impl_count = info["implemented"].as_u64().unwrap()
                 + info.get("partial").and_then(|v| v.as_u64()).unwrap_or(0)
                 + info.get("defined").and_then(|v| v.as_u64()).unwrap_or(0)
-                + info.get("not_implemented").and_then(|v| v.as_u64()).unwrap_or(0);
+                + info
+                    .get("not_implemented")
+                    .and_then(|v| v.as_u64())
+                    .unwrap_or(0);
             assert_eq!(
                 count, impl_count,
                 "T6.5 domain {domain}: count {count} != sum {impl_count}"
@@ -1293,11 +1317,355 @@ mod contract_artifacts {
             let sum = info["implemented"].as_u64().unwrap()
                 + info.get("partial").and_then(|v| v.as_u64()).unwrap_or(0)
                 + info.get("defined").and_then(|v| v.as_u64()).unwrap_or(0)
-                + info.get("not_implemented").and_then(|v| v.as_u64()).unwrap_or(0);
+                + info
+                    .get("not_implemented")
+                    .and_then(|v| v.as_u64())
+                    .unwrap_or(0);
             assert_eq!(
                 count, sum,
                 "T6.9 domain {domain}: count {count} != sum {sum}"
             );
         }
+    }
+}
+
+// ─── Messaging Error Classification (C-ERR-05) ──────────────────────────────
+
+mod nats_error_classification {
+    use asupersync::messaging::nats::NatsError;
+
+    #[test]
+    fn c_err_05_nats_io_is_transient_and_connection() {
+        let err = NatsError::Io(std::io::Error::new(
+            std::io::ErrorKind::ConnectionReset,
+            "reset",
+        ));
+        assert!(err.is_transient());
+        assert!(err.is_connection_error());
+        assert!(err.is_retryable());
+        assert!(!err.is_capacity_error());
+    }
+
+    #[test]
+    fn c_err_05_nats_closed_is_transient() {
+        let err = NatsError::Closed;
+        assert!(err.is_transient());
+        assert!(err.is_connection_error());
+        assert!(err.is_retryable());
+    }
+
+    #[test]
+    fn c_err_05_nats_not_connected_is_transient() {
+        let err = NatsError::NotConnected;
+        assert!(err.is_transient());
+        assert!(err.is_connection_error());
+        assert!(err.is_retryable());
+    }
+
+    #[test]
+    fn c_err_05_nats_timeout_detected() {
+        let err = NatsError::Io(std::io::Error::new(
+            std::io::ErrorKind::TimedOut,
+            "timed out",
+        ));
+        assert!(err.is_timeout());
+        assert!(err.is_transient());
+    }
+
+    #[test]
+    fn c_err_05_nats_protocol_is_not_transient() {
+        let err = NatsError::Protocol("bad frame".to_string());
+        assert!(!err.is_transient());
+        assert!(!err.is_retryable());
+        assert!(!err.is_connection_error());
+    }
+
+    #[test]
+    fn c_err_05_nats_cancelled_is_not_retryable() {
+        let err = NatsError::Cancelled;
+        assert!(!err.is_transient());
+        assert!(!err.is_retryable());
+    }
+
+    #[test]
+    fn c_err_05_nats_invalid_url_is_not_retryable() {
+        let err = NatsError::InvalidUrl("bad://url".to_string());
+        assert!(!err.is_transient());
+        assert!(!err.is_retryable());
+    }
+}
+
+mod jetstream_error_classification {
+    use asupersync::messaging::jetstream::JsError;
+    use asupersync::messaging::nats::NatsError;
+
+    #[test]
+    fn c_err_05_js_nats_io_delegates_transient() {
+        let err = JsError::Nats(NatsError::Io(std::io::Error::new(
+            std::io::ErrorKind::BrokenPipe,
+            "pipe",
+        )));
+        assert!(err.is_transient());
+        assert!(err.is_connection_error());
+        assert!(err.is_retryable());
+    }
+
+    #[test]
+    fn c_err_05_js_api_503_is_transient() {
+        let err = JsError::Api {
+            code: 503,
+            description: "no responders".to_string(),
+        };
+        assert!(err.is_transient());
+        assert!(err.is_retryable());
+        assert!(!err.is_connection_error());
+    }
+
+    #[test]
+    fn c_err_05_js_api_408_is_timeout() {
+        let err = JsError::Api {
+            code: 408,
+            description: "request timeout".to_string(),
+        };
+        assert!(err.is_timeout());
+        assert!(err.is_transient());
+    }
+
+    #[test]
+    fn c_err_05_js_api_429_is_capacity() {
+        let err = JsError::Api {
+            code: 429,
+            description: "too many requests".to_string(),
+        };
+        assert!(err.is_capacity_error());
+        assert!(!err.is_transient());
+    }
+
+    #[test]
+    fn c_err_05_js_not_acked_is_timeout_and_transient() {
+        let err = JsError::NotAcked;
+        assert!(err.is_timeout());
+        assert!(err.is_transient());
+        assert!(err.is_retryable());
+    }
+
+    #[test]
+    fn c_err_05_js_stream_not_found_is_permanent() {
+        let err = JsError::StreamNotFound("missing".to_string());
+        assert!(!err.is_transient());
+        assert!(!err.is_retryable());
+        assert!(!err.is_connection_error());
+    }
+
+    #[test]
+    fn c_err_05_js_invalid_config_is_permanent() {
+        let err = JsError::InvalidConfig("bad".to_string());
+        assert!(!err.is_transient());
+        assert!(!err.is_retryable());
+    }
+}
+
+mod kafka_error_classification {
+    use asupersync::messaging::kafka::KafkaError;
+
+    #[test]
+    fn c_err_05_kafka_io_is_transient_and_connection() {
+        let err = KafkaError::Io(std::io::Error::new(
+            std::io::ErrorKind::ConnectionRefused,
+            "refused",
+        ));
+        assert!(err.is_transient());
+        assert!(err.is_connection_error());
+        assert!(err.is_retryable());
+    }
+
+    #[test]
+    fn c_err_05_kafka_broker_is_transient() {
+        let err = KafkaError::Broker("leader not available".to_string());
+        assert!(err.is_transient());
+        assert!(err.is_connection_error());
+        assert!(err.is_retryable());
+    }
+
+    #[test]
+    fn c_err_05_kafka_queue_full_is_capacity_and_retryable() {
+        let err = KafkaError::QueueFull;
+        assert!(err.is_capacity_error());
+        assert!(err.is_transient());
+        assert!(err.is_retryable());
+    }
+
+    #[test]
+    fn c_err_05_kafka_message_too_large_is_capacity_not_retryable() {
+        let err = KafkaError::MessageTooLarge {
+            size: 2_000_000,
+            max_size: 1_000_000,
+        };
+        assert!(err.is_capacity_error());
+        assert!(!err.is_retryable(), "message too large is not retryable");
+    }
+
+    #[test]
+    fn c_err_05_kafka_timeout_detected() {
+        let err = KafkaError::Io(std::io::Error::new(
+            std::io::ErrorKind::TimedOut,
+            "timed out",
+        ));
+        assert!(err.is_timeout());
+    }
+
+    #[test]
+    fn c_err_05_kafka_invalid_topic_is_permanent() {
+        let err = KafkaError::InvalidTopic("".to_string());
+        assert!(!err.is_transient());
+        assert!(!err.is_retryable());
+    }
+
+    #[test]
+    fn c_err_05_kafka_config_is_permanent() {
+        let err = KafkaError::Config("bad setting".to_string());
+        assert!(!err.is_transient());
+        assert!(!err.is_retryable());
+    }
+
+    #[test]
+    fn c_err_05_kafka_cancelled_is_not_retryable() {
+        let err = KafkaError::Cancelled;
+        assert!(!err.is_transient());
+        assert!(!err.is_retryable());
+    }
+}
+
+mod redis_error_classification {
+    use asupersync::messaging::redis::RedisError;
+
+    #[test]
+    fn c_err_05_redis_io_is_transient_and_connection() {
+        let err = RedisError::Io(std::io::Error::new(
+            std::io::ErrorKind::ConnectionReset,
+            "reset",
+        ));
+        assert!(err.is_transient());
+        assert!(err.is_connection_error());
+        assert!(err.is_retryable());
+    }
+
+    #[test]
+    fn c_err_05_redis_pool_exhausted_is_capacity_and_transient() {
+        let err = RedisError::PoolExhausted;
+        assert!(err.is_transient());
+        assert!(err.is_capacity_error());
+        assert!(err.is_retryable());
+        assert!(!err.is_connection_error());
+    }
+
+    #[test]
+    fn c_err_05_redis_timeout_detected() {
+        let err = RedisError::Io(std::io::Error::new(
+            std::io::ErrorKind::TimedOut,
+            "timed out",
+        ));
+        assert!(err.is_timeout());
+        assert!(err.is_transient());
+    }
+
+    #[test]
+    fn c_err_05_redis_protocol_is_permanent() {
+        let err = RedisError::Protocol("unexpected response".to_string());
+        assert!(!err.is_transient());
+        assert!(!err.is_retryable());
+    }
+
+    #[test]
+    fn c_err_05_redis_server_error_is_permanent() {
+        let err = RedisError::Redis("ERR unknown command".to_string());
+        assert!(!err.is_transient());
+        assert!(!err.is_retryable());
+    }
+
+    #[test]
+    fn c_err_05_redis_cancelled_is_not_retryable() {
+        let err = RedisError::Cancelled;
+        assert!(!err.is_transient());
+        assert!(!err.is_retryable());
+    }
+
+    #[test]
+    fn c_err_05_redis_invalid_url_is_permanent() {
+        let err = RedisError::InvalidUrl("bad".to_string());
+        assert!(!err.is_transient());
+        assert!(!err.is_retryable());
+    }
+}
+
+// ─── Cross-Messaging Error Classification Equivalence ────────────────────────
+
+mod messaging_cross_system_equivalence {
+    use asupersync::messaging::jetstream::JsError;
+    use asupersync::messaging::kafka::KafkaError;
+    use asupersync::messaging::nats::NatsError;
+    use asupersync::messaging::redis::RedisError;
+
+    #[test]
+    fn c_err_05_all_io_errors_are_transient() {
+        let nats = NatsError::Io(std::io::Error::new(std::io::ErrorKind::Other, "io"));
+        let kafka = KafkaError::Io(std::io::Error::new(std::io::ErrorKind::Other, "io"));
+        let redis = RedisError::Io(std::io::Error::new(std::io::ErrorKind::Other, "io"));
+        let js = JsError::Nats(NatsError::Io(std::io::Error::new(
+            std::io::ErrorKind::Other,
+            "io",
+        )));
+
+        assert!(nats.is_transient(), "NATS I/O must be transient");
+        assert!(kafka.is_transient(), "Kafka I/O must be transient");
+        assert!(redis.is_transient(), "Redis I/O must be transient");
+        assert!(js.is_transient(), "JetStream/NATS I/O must be transient");
+    }
+
+    #[test]
+    fn c_err_05_all_cancelled_are_not_retryable() {
+        let nats = NatsError::Cancelled;
+        let kafka = KafkaError::Cancelled;
+        let redis = RedisError::Cancelled;
+
+        assert!(!nats.is_retryable(), "NATS cancelled must not be retryable");
+        assert!(
+            !kafka.is_retryable(),
+            "Kafka cancelled must not be retryable"
+        );
+        assert!(
+            !redis.is_retryable(),
+            "Redis cancelled must not be retryable"
+        );
+    }
+
+    #[test]
+    fn c_err_05_all_io_errors_are_connection_errors() {
+        let nats = NatsError::Io(std::io::Error::new(std::io::ErrorKind::Other, "io"));
+        let kafka = KafkaError::Io(std::io::Error::new(std::io::ErrorKind::Other, "io"));
+        let redis = RedisError::Io(std::io::Error::new(std::io::ErrorKind::Other, "io"));
+
+        assert!(nats.is_connection_error());
+        assert!(kafka.is_connection_error());
+        assert!(redis.is_connection_error());
+    }
+
+    #[test]
+    fn c_err_05_capacity_errors_are_system_specific() {
+        // NATS core has no capacity errors (fire-and-forget)
+        assert!(!NatsError::Cancelled.is_capacity_error());
+
+        // Kafka: QueueFull is capacity
+        assert!(KafkaError::QueueFull.is_capacity_error());
+
+        // Redis: PoolExhausted is capacity
+        assert!(RedisError::PoolExhausted.is_capacity_error());
+
+        // JetStream: 429 is capacity
+        let js_429 = JsError::Api {
+            code: 429,
+            description: "rate limited".to_string(),
+        };
+        assert!(js_429.is_capacity_error());
     }
 }

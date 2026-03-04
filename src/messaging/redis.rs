@@ -59,6 +59,38 @@ impl From<io::Error> for RedisError {
     }
 }
 
+impl RedisError {
+    /// Whether this error is transient and may succeed on retry.
+    #[must_use]
+    pub fn is_transient(&self) -> bool {
+        matches!(self, Self::Io(_) | Self::PoolExhausted)
+    }
+
+    /// Whether this error indicates a connection-level failure.
+    #[must_use]
+    pub fn is_connection_error(&self) -> bool {
+        matches!(self, Self::Io(_))
+    }
+
+    /// Whether this error indicates resource/capacity exhaustion.
+    #[must_use]
+    pub fn is_capacity_error(&self) -> bool {
+        matches!(self, Self::PoolExhausted)
+    }
+
+    /// Whether this error is a timeout.
+    #[must_use]
+    pub fn is_timeout(&self) -> bool {
+        matches!(self, Self::Io(e) if e.kind() == io::ErrorKind::TimedOut)
+    }
+
+    /// Whether the operation should be retried.
+    #[must_use]
+    pub fn is_retryable(&self) -> bool {
+        self.is_transient()
+    }
+}
+
 fn push_u64_decimal(buf: &mut Vec<u8>, mut n: u64) {
     let mut tmp = [0u8; 20];
     let mut i = tmp.len();

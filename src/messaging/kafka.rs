@@ -114,6 +114,41 @@ impl From<io::Error> for KafkaError {
     }
 }
 
+impl KafkaError {
+    /// Whether this error is transient and may succeed on retry.
+    #[must_use]
+    pub fn is_transient(&self) -> bool {
+        matches!(
+            self,
+            Self::Io(_) | Self::Broker(_) | Self::QueueFull | Self::Transaction(_)
+        )
+    }
+
+    /// Whether this error indicates a connection-level failure.
+    #[must_use]
+    pub fn is_connection_error(&self) -> bool {
+        matches!(self, Self::Io(_) | Self::Broker(_))
+    }
+
+    /// Whether this error indicates resource/capacity exhaustion.
+    #[must_use]
+    pub fn is_capacity_error(&self) -> bool {
+        matches!(self, Self::QueueFull | Self::MessageTooLarge { .. })
+    }
+
+    /// Whether this error is a timeout.
+    #[must_use]
+    pub fn is_timeout(&self) -> bool {
+        matches!(self, Self::Io(e) if e.kind() == io::ErrorKind::TimedOut)
+    }
+
+    /// Whether the operation should be retried.
+    #[must_use]
+    pub fn is_retryable(&self) -> bool {
+        matches!(self, Self::Io(_) | Self::Broker(_) | Self::QueueFull)
+    }
+}
+
 #[cfg(feature = "kafka")]
 #[derive(Debug)]
 struct KafkaContext;

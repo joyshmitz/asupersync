@@ -109,7 +109,7 @@
           "nats": ["io_error", "transient_server_err"],
           "redis": ["io_error", "connection_reset"]
         },
-        "status": "not_implemented"
+        "status": "implemented"
       },
       {
         "id": "C-ERR-04",
@@ -167,7 +167,13 @@
           "is_timeout",
           "is_retryable"
         ],
-        "status": "not_implemented"
+        "backend_status": {
+          "nats": "implemented",
+          "jetstream": "implemented",
+          "kafka": "implemented",
+          "redis": "implemented"
+        },
+        "status": "implemented"
       }
     ],
     "idempotency": [
@@ -334,7 +340,7 @@
     "total_contracts": 19,
     "domains": {
       "retry": {"count": 5, "implemented": 3, "partial": 0, "defined": 1, "not_implemented": 1},
-      "error_classification": {"count": 3, "implemented": 1, "partial": 0, "defined": 0, "not_implemented": 2},
+      "error_classification": {"count": 3, "implemented": 3, "partial": 0, "defined": 0, "not_implemented": 0},
       "idempotency": {"count": 3, "implemented": 0, "partial": 1, "defined": 1, "not_implemented": 1},
       "delivery": {"count": 3, "implemented": 0, "partial": 0, "defined": 3, "not_implemented": 0},
       "failure_propagation": {"count": 3, "implemented": 0, "partial": 0, "defined": 3, "not_implemented": 0},
@@ -345,7 +351,7 @@
       {"id": "RTY-G1", "severity": "closed", "description": "MySQL/SQLite transaction retry — IMPLEMENTED"},
       {"id": "ERR-G1", "severity": "closed", "description": "MySQL/SQLite error classification methods — IMPLEMENTED"},
       {"id": "ERR-G2", "severity": "closed", "description": "PostgreSQL is_transient/is_connection_error — IMPLEMENTED"},
-      {"id": "ERR-G3", "severity": "medium", "description": "Messaging error classification methods missing"},
+      {"id": "ERR-G3", "severity": "closed", "description": "Messaging error classification methods — IMPLEMENTED"},
       {"id": "RTY-G2", "severity": "medium", "description": "Connection pool retry not implemented"},
       {"id": "IMP-G1", "severity": "low", "description": "Request-level idempotency keys not implemented"}
     ]
