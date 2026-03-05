@@ -18,6 +18,10 @@ quote = "1.0"
 proc-macro2 = "1.0"
 
 [dev-dependencies]
+<<<<<<< Updated upstream
+=======
+asupersync = { version = "0.1.0", path = ".." }
+>>>>>>> Stashed changes
 trybuild = "1.0"
 
 [lints.rust]

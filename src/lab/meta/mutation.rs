@@ -480,22 +480,43 @@ fn mutation_cancel_propagation(harness: &mut MetaHarness) {
 fn baseline_actor_leak(harness: &mut MetaHarness) {
     let now = harness.now();
     let region = harness.next_region();
+<<<<<<< Updated upstream
     harness.oracles.actor_leak.on_spawn(actor(100), region, now);
     harness.oracles.actor_leak.on_stop(actor(100), now);
+=======
+    let actor_id = actor(1);
+
+    harness.oracles.actor_leak.on_spawn(actor_id, region, now);
+    harness.oracles.actor_leak.on_stop(actor_id, now);
+>>>>>>> Stashed changes
     harness.oracles.actor_leak.on_region_close(region, now);
 }
 
 fn mutation_actor_leak(harness: &mut MetaHarness) {
     let now = harness.now();
     let region = harness.next_region();
+<<<<<<< Updated upstream
     harness.oracles.actor_leak.on_spawn(actor(100), region, now);
+=======
+    let actor_id = actor(1);
+
+    harness.oracles.actor_leak.on_spawn(actor_id, region, now);
+>>>>>>> Stashed changes
     harness.oracles.actor_leak.on_region_close(region, now);
 }
 
 fn baseline_supervision_restart(harness: &mut MetaHarness) {
     let now = harness.now();
+<<<<<<< Updated upstream
     harness.oracles.supervision.register_supervisor(
         actor(200),
+=======
+    let supervisor = actor(1);
+    let child = actor(2);
+
+    harness.oracles.supervision.register_supervisor(
+        supervisor,
+>>>>>>> Stashed changes
         RestartPolicy::OneForOne,
         2,
         EscalationPolicy::Escalate,
@@ -503,18 +524,37 @@ fn baseline_supervision_restart(harness: &mut MetaHarness) {
     harness
         .oracles
         .supervision
+<<<<<<< Updated upstream
         .register_child(actor(200), actor(201));
     harness
         .oracles
         .supervision
         .on_child_failed(actor(200), actor(201), now, "test error".into());
     harness.oracles.supervision.on_restart(actor(201), 1, now);
+=======
+        .register_child(supervisor, child);
+    harness
+        .oracles
+        .supervision
+        .on_child_failed(supervisor, child, now, "child failed".to_string());
+
+    // Within restart budget: no escalation required.
+    harness.oracles.supervision.on_restart(child, 2, now);
+>>>>>>> Stashed changes
 }
 
 fn mutation_supervision_restart(harness: &mut MetaHarness) {
     let now = harness.now();
+<<<<<<< Updated upstream
     harness.oracles.supervision.register_supervisor(
         actor(200),
+=======
+    let supervisor = actor(1);
+    let child = actor(2);
+
+    harness.oracles.supervision.register_supervisor(
+        supervisor,
+>>>>>>> Stashed changes
         RestartPolicy::OneForOne,
         2,
         EscalationPolicy::Escalate,
@@ -522,16 +562,28 @@ fn mutation_supervision_restart(harness: &mut MetaHarness) {
     harness
         .oracles
         .supervision
+<<<<<<< Updated upstream
         .register_child(actor(200), actor(201));
     harness
         .oracles
         .supervision
         .on_child_failed(actor(200), actor(201), now, "test error".into());
     harness.oracles.supervision.on_restart(actor(201), 3, now);
+=======
+        .register_child(supervisor, child);
+    harness
+        .oracles
+        .supervision
+        .on_child_failed(supervisor, child, now, "child failed".to_string());
+
+    // Exceeds restart budget without escalation: should violate supervision invariant.
+    harness.oracles.supervision.on_restart(child, 3, now);
+>>>>>>> Stashed changes
 }
 
 fn baseline_mailbox_capacity(harness: &mut MetaHarness) {
     let now = harness.now();
+<<<<<<< Updated upstream
     harness
         .oracles
         .mailbox
@@ -541,10 +593,20 @@ fn baseline_mailbox_capacity(harness: &mut MetaHarness) {
     // Baseline must fully drain the mailbox so the "no silent drops" invariant holds.
     harness.oracles.mailbox.on_receive(actor(300), now);
     harness.oracles.mailbox.on_receive(actor(300), now);
+=======
+    let actor_id = actor(1);
+
+    harness.oracles.mailbox.configure_mailbox(actor_id, 2, true);
+    harness.oracles.mailbox.on_send(actor_id, now);
+    harness.oracles.mailbox.on_send(actor_id, now);
+    harness.oracles.mailbox.on_receive(actor_id, now);
+    harness.oracles.mailbox.on_receive(actor_id, now);
+>>>>>>> Stashed changes
 }
 
 fn mutation_mailbox_capacity(harness: &mut MetaHarness) {
     let now = harness.now();
+<<<<<<< Updated upstream
     harness
         .oracles
         .mailbox
@@ -587,6 +649,14 @@ fn mutation_rref_access(harness: &mut MetaHarness) {
     harness.oracles.rref_access.on_task_spawn(task, region_b);
     // Cross-region access: violation.
     harness.oracles.rref_access.on_rref_access(rref, task, now);
+=======
+    let actor_id = actor(1);
+
+    harness.oracles.mailbox.configure_mailbox(actor_id, 2, true);
+    harness.oracles.mailbox.on_send(actor_id, now);
+    harness.oracles.mailbox.on_send(actor_id, now);
+    harness.oracles.mailbox.on_send(actor_id, now);
+>>>>>>> Stashed changes
 }
 
 /// Maps an oracle violation to its invariant name.
