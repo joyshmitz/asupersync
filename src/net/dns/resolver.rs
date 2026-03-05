@@ -21,6 +21,7 @@ use super::lookup::{HappyEyeballs, LookupIp, LookupMx, LookupSrv, LookupTxt};
 use crate::cx::Cx;
 use crate::net::TcpStream;
 use crate::runtime::spawn_blocking;
+use crate::runtime::spawn_blocking::spawn_blocking_on_thread;
 use crate::time::timeout;
 use crate::types::Time;
 
@@ -167,8 +168,9 @@ impl Resolver {
         }
         let host = host.to_string();
 
-        // Run DNS resolution on blocking pool for true async behavior.
-        let lookup = Box::pin(spawn_blocking(move || {
+        // Keep DNS resolution off the runtime thread even when a current `Cx`
+        // exists without a blocking pool handle.
+        let lookup = Box::pin(spawn_blocking_dns(move || {
             let mut last_error = None;
 
             for _attempt in 0..=retries {
@@ -307,8 +309,9 @@ impl Resolver {
             return Err(DnsError::Timeout);
         }
 
-        // Run connection on blocking pool for true async behavior.
-        let connect = Box::pin(spawn_blocking(move || {
+        // Keep blocking connect off the runtime thread even when a current
+        // `Cx` exists without a blocking pool handle.
+        let connect = Box::pin(spawn_blocking_dns(move || {
             let stream =
                 StdTcpStream::connect(addr).map_err(|e| DnsError::Connection(e.to_string()))?;
 
@@ -384,6 +387,22 @@ fn timeout_now() -> Time {
         }
     }
     crate::time::wall_now()
+}
+
+async fn spawn_blocking_dns<F, T>(f: F) -> Result<T, DnsError>
+where
+    F: FnOnce() -> Result<T, DnsError> + Send + 'static,
+    T: Send + 'static,
+{
+    if let Some(cx) = Cx::current() {
+        if cx.blocking_pool_handle().is_some() {
+            return spawn_blocking(f).await;
+        }
+    }
+
+    // No pool available? Force a background thread so DNS and connect fallbacks
+    // do not block the runtime worker thread.
+    spawn_blocking_on_thread(f).await
 }
 
 #[cfg(test)]
@@ -484,6 +503,29 @@ mod tests {
         crate::assert_with_log!(timed_out, "timed out", true, timed_out);
 
         crate::test_complete!("resolver_timeout_zero");
+    }
+
+    #[test]
+    fn resolver_blocking_dns_uses_fallback_thread_without_pool() {
+        init_test("resolver_blocking_dns_uses_fallback_thread_without_pool");
+        let cx: Cx = Cx::for_testing();
+        let _guard = Cx::set_current(Some(cx));
+        let current_id = std::thread::current().id();
+
+        let thread_id = future::block_on(async {
+            spawn_blocking_dns(|| Ok::<_, DnsError>(std::thread::current().id()))
+                .await
+                .unwrap()
+        });
+
+        crate::assert_with_log!(
+            thread_id != current_id,
+            "uses fallback thread",
+            false,
+            thread_id == current_id
+        );
+
+        crate::test_complete!("resolver_blocking_dns_uses_fallback_thread_without_pool");
     }
 
     #[test]

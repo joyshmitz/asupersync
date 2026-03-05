@@ -444,33 +444,27 @@ where
     async fn read_more(&self) -> Result<usize, WsError> {
         use std::future::poll_fn;
 
-        // Ensure we have space
-        {
-            let mut shared = self.shared.lock();
-            if shared.read_buf.capacity() - shared.read_buf.len() < 4096 {
-                shared.read_buf.reserve(8192);
-            }
-        }
-
-        // Read into temporary buffer to avoid holding lock during poll
-        let mut temp = [0u8; 4096];
-        let n = poll_fn(|poll_cx| {
+        poll_fn(|poll_cx| {
+            let mut temp = [0u8; 4096];
             let mut shared = self.shared.lock();
             let mut read_buf = ReadBuf::new(&mut temp);
             match Pin::new(&mut shared.io).poll_read(poll_cx, &mut read_buf) {
-                Poll::Ready(Ok(())) => Poll::Ready(Ok(read_buf.filled().len())),
+                Poll::Ready(Ok(())) => {
+                    let n = read_buf.filled().len();
+                    if n > 0 {
+                        // Ensure we have space
+                        if shared.read_buf.capacity() - shared.read_buf.len() < n {
+                            shared.read_buf.reserve(8192.max(n));
+                        }
+                        shared.read_buf.extend_from_slice(&temp[..n]);
+                    }
+                    Poll::Ready(Ok(n))
+                }
                 Poll::Ready(Err(e)) => Poll::Ready(Err(WsError::Io(e))),
                 Poll::Pending => Poll::Pending,
             }
         })
-        .await?;
-
-        if n > 0 {
-            let mut shared = self.shared.lock();
-            shared.read_buf.extend_from_slice(&temp[..n]);
-        }
-
-        Ok(n)
+        .await
     }
 }
 
