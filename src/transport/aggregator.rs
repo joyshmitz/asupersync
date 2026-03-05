@@ -825,7 +825,6 @@ impl SymbolReorderer {
                 }
                 state.next_expected = seq.saturating_add(1);
                 state.last_delivery = now;
-                self.timeout_deliveries.fetch_add(1, Ordering::Relaxed);
                 ready.push(symbol);
             }
             // else: buffer full, drop the symbol

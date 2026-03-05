@@ -569,6 +569,9 @@ impl MacaroonToken {
                     ..
                 } => {
                     // Recover the caveat key from vid.
+                    if vid.len() != AUTH_KEY_SIZE {
+                        return Err(VerificationError::InvalidSignature);
+                    }
                     let caveat_key_bytes = xor_pad(sig.as_bytes(), vid);
                     let caveat_key = AuthKey::from_bytes(
                         caveat_key_bytes
