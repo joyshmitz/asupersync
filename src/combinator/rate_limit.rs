@@ -235,6 +235,11 @@ pub struct RateLimiter {
     /// Waiting queue for FIFO ordering.
     wait_queue: RwLock<VecDeque<QueueEntry>>,
 
+    /// Number of pending (result == None) entries. Maintained atomically
+    /// so `try_acquire` can check if anyone is actually waiting without
+    /// being blocked by zombie entries (granted/timed-out but not claimed).
+    pending_queue_count: AtomicU32,
+
     /// Next entry ID.
     next_id: AtomicU64,
 
@@ -267,6 +272,7 @@ impl RateLimiter {
                 last_refill: 0,
             }),
             wait_queue: RwLock::new(VecDeque::with_capacity(16)),
+            pending_queue_count: AtomicU32::new(0),
             next_id: AtomicU64::new(0),
             total_allowed: AtomicU64::new(0),
             total_rejected: AtomicU64::new(0),
@@ -353,8 +359,7 @@ impl RateLimiter {
     #[allow(clippy::cast_precision_loss)]
     pub fn try_acquire(&self, cost: u32, now: Time) -> bool {
         // Prevent barging if there are queued operations to preserve FIFO fairness
-        let queue = self.wait_queue.read();
-        if !queue.is_empty() {
+        if self.pending_queue_count.load(Ordering::Relaxed) > 0 {
             return false;
         }
 
@@ -368,7 +373,6 @@ impl RateLimiter {
         if state.tokens >= cost_f {
             state.tokens -= cost_f;
             drop(state); // Release bucket lock immediately
-            drop(queue); // Release queue lock
 
             self.total_allowed.fetch_add(1, Ordering::Relaxed);
             true
@@ -523,6 +527,7 @@ impl RateLimiter {
             result: None,
         });
 
+        self.pending_queue_count.fetch_add(1, Ordering::Relaxed);
         self.total_waited.fetch_add(1, Ordering::Relaxed);
 
         Ok(entry_id)
@@ -539,10 +544,15 @@ impl RateLimiter {
         let mut queue = self.wait_queue.write();
 
         // First, timeout expired entries
+        let mut timeout_count = 0u32;
         for entry in queue.iter_mut() {
             if entry.result.is_none() && now_millis >= entry.deadline_millis {
                 entry.result = Some(Err(RejectionReason::Timeout));
+                timeout_count += 1;
             }
+        }
+        if timeout_count > 0 {
+            self.pending_queue_count.fetch_sub(timeout_count, Ordering::Relaxed);
         }
 
         // Try to grant awaiting entries
@@ -566,6 +576,7 @@ impl RateLimiter {
             if state.tokens >= cost_f {
                 state.tokens -= cost_f;
                 entry.result = Some(Ok(()));
+                self.pending_queue_count.fetch_sub(1, Ordering::Relaxed);
 
                 if first_granted.is_none() {
                     first_granted = Some(entry.id);
@@ -663,6 +674,8 @@ impl RateLimiter {
                 // allowed from the rate limiter's perspective, just not consumed.
                 drop(state);
                 let _ = self.process_queue(now);
+            } else if entry.result.is_none() {
+                self.pending_queue_count.fetch_sub(1, Ordering::Relaxed);
             }
         }
     }
@@ -679,6 +692,7 @@ impl RateLimiter {
 
         let mut queue = self.wait_queue.write();
         queue.clear();
+        self.pending_queue_count.store(0, Ordering::Relaxed);
     }
 }
 
