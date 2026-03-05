@@ -754,6 +754,10 @@ fn blocking_worker_loop(inner: &BlockingPoolInner) -> bool {
             // Always signal completion so waiters are unblocked, even
             // if the task panicked.
             task.completion.signal_done();
+            // Loop immediately to drain the queue before checking shutdown
+            // or park/retire conditions. Without this, the worker falls through
+            // to the shutdown check and may exit with queued work remaining.
+            continue;
         }
 
         // No work available, check shutdown
