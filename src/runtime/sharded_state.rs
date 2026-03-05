@@ -404,7 +404,7 @@ impl<'a> ShardGuard<'a> {
         let obligations = shards
             .obligations
             .lock()
-            .expect("obligations lock poisoned");
+            .unwrap_or_else(std::sync::PoisonError::into_inner);
         #[cfg(debug_assertions)]
         lock_order::after_lock(LockShard::Obligations);
         Self {
@@ -444,7 +444,7 @@ impl<'a> ShardGuard<'a> {
         let obligations = shards
             .obligations
             .lock()
-            .expect("obligations lock poisoned");
+            .unwrap_or_else(std::sync::PoisonError::into_inner);
         #[cfg(debug_assertions)]
         lock_order::after_lock(LockShard::Obligations);
 
@@ -492,7 +492,7 @@ impl<'a> ShardGuard<'a> {
         let obligations = shards
             .obligations
             .lock()
-            .expect("obligations lock poisoned");
+            .unwrap_or_else(std::sync::PoisonError::into_inner);
         #[cfg(debug_assertions)]
         lock_order::after_lock(LockShard::Obligations);
 
@@ -527,7 +527,7 @@ impl<'a> ShardGuard<'a> {
         let obligations = shards
             .obligations
             .lock()
-            .expect("obligations lock poisoned");
+            .unwrap_or_else(std::sync::PoisonError::into_inner);
         #[cfg(debug_assertions)]
         lock_order::after_lock(LockShard::Obligations);
 
@@ -576,7 +576,7 @@ impl<'a> ShardGuard<'a> {
         let obligations = shards
             .obligations
             .lock()
-            .expect("obligations lock poisoned");
+            .unwrap_or_else(std::sync::PoisonError::into_inner);
         #[cfg(debug_assertions)]
         lock_order::after_lock(LockShard::Obligations);
 
@@ -650,7 +650,7 @@ impl<'a> ShardGuard<'a> {
         let obligations = shards
             .obligations
             .lock()
-            .expect("obligations lock poisoned");
+            .unwrap_or_else(std::sync::PoisonError::into_inner);
         #[cfg(debug_assertions)]
         lock_order::after_lock(LockShard::Obligations);
 

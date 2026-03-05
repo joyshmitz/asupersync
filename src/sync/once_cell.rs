@@ -543,12 +543,13 @@ struct WaitInit<'a, T> {
 impl<T> Future for WaitInit<'_, T> {
     type Output = ();
 
-    fn poll(mut self: Pin<&mut Self>, cx: &mut Context<'_>) -> Poll<()> {
-        let state = self.cell.state.load(Ordering::Acquire);
+    fn poll(self: Pin<&mut Self>, cx: &mut Context<'_>) -> Poll<()> {
+        let this = self.get_mut();
+        let state = this.cell.state.load(Ordering::Acquire);
         if state == INITIALIZING {
-            self.cell.register_waker(cx.waker(), &mut self.waiter_id);
+            this.cell.register_waker(cx.waker(), &mut this.waiter_id);
             // Double-check after registering.
-            if self.cell.state.load(Ordering::Acquire) == INITIALIZING {
+            if this.cell.state.load(Ordering::Acquire) == INITIALIZING {
                 Poll::Pending
             } else {
                 // Do not clear waiter_id here. If state changed after register_waker
