@@ -113,7 +113,7 @@ mod oneshot {
     impl<T> Sender<T> {
         pub fn send(self, value: T) {
             let waker = {
-                let mut guard = self.shared.lock().unwrap();
+                let mut guard = self.shared.lock().unwrap_or_else(|e| e.into_inner());
                 guard.value = Some(value);
                 guard.waker.take()
             };
@@ -126,13 +126,13 @@ mod oneshot {
     impl<T> Receiver<T> {
         /// Try to take the value. Returns `Some` if available.
         pub fn try_recv(&self) -> Option<T> {
-            let mut guard = self.shared.lock().unwrap();
+            let mut guard = self.shared.lock().unwrap_or_else(|e| e.into_inner());
             guard.value.take()
         }
 
         /// Register a waker to be notified when a value is sent.
         pub fn register_waker(&self, waker: &Waker) {
-            let mut guard = self.shared.lock().unwrap();
+            let mut guard = self.shared.lock().unwrap_or_else(|e| e.into_inner());
             if guard.waker.as_ref().is_none_or(|w| !w.will_wake(waker)) {
                 guard.waker = Some(waker.clone());
             }
@@ -194,7 +194,7 @@ impl<S> Buffer<S> {
     /// Returns the number of pending (buffered) requests.
     #[must_use]
     pub fn pending(&self) -> usize {
-        *self.shared.pending.lock().unwrap()
+        *self.shared.pending.lock().unwrap_or_else(|e| e.into_inner())
     }
 
     /// Returns `true` if the buffer is full.
@@ -211,13 +211,13 @@ impl<S> Buffer<S> {
 
     /// Close the buffer, rejecting new requests.
     pub fn close(&self) {
-        *self.shared.closed.lock().unwrap() = true;
+        *self.shared.closed.lock().unwrap_or_else(|e| e.into_inner()) = true;
     }
 
     /// Returns `true` if the buffer has been closed.
     #[must_use]
     pub fn is_closed(&self) -> bool {
-        *self.shared.closed.lock().unwrap()
+        *self.shared.closed.lock().unwrap_or_else(|e| e.into_inner())
     }
 }
 
@@ -368,12 +368,12 @@ where
     type Future = BufferFuture<S::Response, S::Error>;
 
     fn poll_ready(&mut self, cx: &mut Context<'_>) -> Poll<Result<(), Self::Error>> {
-        if *self.shared.closed.lock().unwrap() {
+        if *self.shared.closed.lock().unwrap_or_else(|e| e.into_inner()) {
             return Poll::Ready(Err(BufferError::Closed));
         }
-        let pending = *self.shared.pending.lock().unwrap();
+        let pending = *self.shared.pending.lock().unwrap_or_else(|e| e.into_inner());
         if pending >= self.shared.capacity {
-            let mut wakers = self.shared.ready_wakers.lock().unwrap();
+            let mut wakers = self.shared.ready_wakers.lock().unwrap_or_else(|e| e.into_inner());
             wakers.push(cx.waker().clone());
             Poll::Pending
         } else {
@@ -382,12 +382,12 @@ where
     }
 
     fn call(&mut self, req: Request) -> Self::Future {
-        if *self.shared.closed.lock().unwrap() {
+        if *self.shared.closed.lock().unwrap_or_else(|e| e.into_inner()) {
             return BufferFuture::error(BufferError::Closed);
         }
 
         {
-            let mut pending = self.shared.pending.lock().unwrap();
+            let mut pending = self.shared.pending.lock().unwrap_or_else(|e| e.into_inner());
             if *pending >= self.shared.capacity {
                 return BufferFuture::error(BufferError::Full);
             }
@@ -401,7 +401,7 @@ where
         let (tx, rx) = oneshot::channel();
 
         let result = {
-            let mut inner = self.shared.inner.lock().unwrap();
+            let mut inner = self.shared.inner.lock().unwrap_or_else(|e| e.into_inner());
             // Poll the inner service's future to completion.
             let noop_waker = std::task::Waker::from(Arc::new(NoopWaker));
             let mut cx = Context::from_waker(&noop_waker);
@@ -424,11 +424,11 @@ where
 
         // Decrement pending count and wake any callers blocked on poll_ready.
         {
-            let mut pending = self.shared.pending.lock().unwrap();
+            let mut pending = self.shared.pending.lock().unwrap_or_else(|e| e.into_inner());
             *pending = pending.saturating_sub(1);
         }
         let wakers: Vec<_> = {
-            let mut ready_wakers = self.shared.ready_wakers.lock().unwrap();
+            let mut ready_wakers = self.shared.ready_wakers.lock().unwrap_or_else(|e| e.into_inner());
             std::mem::take(&mut *ready_wakers)
         };
         for w in wakers {
