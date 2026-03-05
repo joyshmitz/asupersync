@@ -1259,18 +1259,18 @@ mod tests {
     fn test_adaptive_hedge_policy_uses_sliding_window_latest_samples() {
         let min_delay = Duration::from_millis(1);
         let max_delay = Duration::from_secs(1);
-        let mut policy = AdaptiveHedgePolicy::new(5, 0.5, min_delay, max_delay);
+        let mut policy = AdaptiveHedgePolicy::new(10, 0.5, min_delay, max_delay);
 
-        for millis in 1..=10 {
+        for millis in 1..=20 {
             policy.record(Duration::from_millis(millis));
         }
 
-        // Window retains only the latest 5 samples: [6,7,8,9,10]
-        assert_eq!(policy.window_size(), 5);
-        assert_eq!(policy.sample_count(), 5);
+        // Window retains only the latest 10 samples: [11,12,13,14,15,16,17,18,19,20]
+        assert_eq!(policy.window_size(), 10);
+        assert_eq!(policy.sample_count(), 10);
 
-        // Rank = ceil((5 + 1) * (1 - 0.5)) = 3, zero-indexed -> 2, value -> 8ms.
-        assert_eq!(policy.next_hedge_delay(), Duration::from_millis(8));
+        // Rank = ceil((10 + 1) * (1 - 0.5)) = 6, zero-indexed -> 5, value -> 16ms.
+        assert_eq!(policy.next_hedge_delay(), Duration::from_millis(16));
     }
 
     #[test]

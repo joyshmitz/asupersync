@@ -17,8 +17,13 @@ fn duration_nanos_saturating_u64(duration: Duration) -> u64 {
     }
 }
 
-#[allow(clippy::cast_possible_truncation, clippy::cast_sign_loss)]
+#[allow(
+    clippy::cast_possible_truncation,
+    clippy::cast_sign_loss,
+    clippy::cast_precision_loss
+)]
 fn decay_nanos(current: u64, decay_factor: f64) -> u64 {
+    // Peak-EWMA uses fractional decay; conversion through f64 is intentional.
     let decayed = (current as f64) * decay_factor;
     if !decayed.is_finite() || decayed <= 0.0 {
         0
