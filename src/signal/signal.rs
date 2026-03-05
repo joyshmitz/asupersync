@@ -18,7 +18,7 @@ use std::collections::HashMap;
 use std::sync::atomic::{AtomicU64, Ordering};
 #[cfg(any(unix, windows))]
 use std::sync::{Arc, OnceLock};
-#[cfg(unix)]
+#[cfg(any(unix, windows))]
 use std::thread;
 
 #[cfg(any(unix, windows))]
@@ -75,6 +75,27 @@ impl SignalSlot {
     fn record_delivery(&self) {
         self.deliveries.fetch_add(1, Ordering::Release);
         self.notify.notify_waiters();
+    }
+
+    /// Signal-safe delivery: only bumps the atomic counter.
+    ///
+    /// This must be used in contexts where locking is forbidden (e.g. CRT
+    /// signal handlers on Windows). A background poller thread calls
+    /// [`notify_if_changed`] to wake async waiters.
+    #[cfg(windows)]
+    fn record_delivery_signal_safe(&self) {
+        self.deliveries.fetch_add(1, Ordering::Release);
+    }
+
+    /// Wake waiters if the delivery counter has advanced past `last_seen`.
+    /// Returns the current counter value.
+    #[cfg(windows)]
+    fn notify_if_changed(&self, last_seen: u64) -> u64 {
+        let current = self.deliveries.load(Ordering::Acquire);
+        if current != last_seen {
+            self.notify.notify_waiters();
+        }
+        current
     }
 }
 
@@ -145,18 +166,41 @@ impl SignalDispatcher {
 
         // On Windows, signal_hook::iterator is unavailable. Use low-level
         // register() which installs CRT signal handlers that invoke our
-        // callback directly — no dispatcher thread needed.
+        // callback directly.
+        //
+        // IMPORTANT: CRT signal handlers run in signal context where locking
+        // is forbidden. We use `record_delivery_signal_safe` (atomic-only) in
+        // the handler and spawn a background poller thread to call
+        // `notify_waiters` from a safe context.
         for kind in all_signal_kinds() {
             let raw = raw_signal_for_kind(kind);
             let slot = slots.get(&kind).expect("slot just inserted").clone();
-            // SAFETY: our closure only touches atomics and Notify (both
-            // Send+Sync) and performs no allocations or locks.
+            // SAFETY: our closure only touches an atomic counter — no
+            // allocations, locks, or non-reentrant calls.
             unsafe {
                 signal_hook::low_level::register(raw, move || {
-                    slot.record_delivery();
+                    slot.record_delivery_signal_safe();
                 })?;
             }
         }
+
+        // Background thread polls atomic counters and wakes async waiters
+        // from a safe (non-signal) context.
+        let poller_slots: Vec<Arc<SignalSlot>> = slots.values().cloned().collect();
+        thread::Builder::new()
+            .name("asupersync-signal-poll-win".to_string())
+            .spawn(move || {
+                let mut last_seen: Vec<u64> = vec![0; poller_slots.len()];
+                loop {
+                    thread::sleep(std::time::Duration::from_millis(1));
+                    for (i, slot) in poller_slots.iter().enumerate() {
+                        last_seen[i] = slot.notify_if_changed(last_seen[i]);
+                    }
+                }
+            })
+            .map_err(|e| {
+                io::Error::other(format!("failed to spawn signal poller: {e}"))
+            })?;
 
         Ok(Self { slots })
     }
