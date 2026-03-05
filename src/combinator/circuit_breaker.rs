@@ -407,6 +407,11 @@ impl CircuitBreaker {
         // Clamp probes to supported range so half-open accounting cannot violate
         // caller policy by allowing zero or overflowing values.
         policy.half_open_max_probes = normalize_half_open_max_probes(policy.half_open_max_probes);
+        
+        // Clamp success_threshold to 0xFFFF (16 bits) because it is packed into 16 bits
+        // in State::HalfOpen. If it exceeds 0xFFFF, it would wrap around and trap the
+        // breaker in HalfOpen permanently.
+        policy.success_threshold = policy.success_threshold.min(0xFFFF);
 
         let sliding_window = policy
             .sliding_window

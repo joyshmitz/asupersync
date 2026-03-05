@@ -288,11 +288,23 @@ impl Bulkhead {
     /// Returns `Some(permit)` if acquired immediately, `None` if bulkhead is full.
     #[must_use]
     pub fn try_acquire(&self, weight: u32) -> Option<BulkheadPermit<'_>> {
+        // Prevent barging if there are queued operations
+        if self.pending_queue_count.load(Ordering::Relaxed) > 0 {
+            return None;
+        }
+
         let mut available = self.available_permits.load(Ordering::Acquire);
         loop {
             if available < weight {
                 return None;
             }
+            
+            // Re-check pending count inside the CAS loop to prevent TOCTOU races
+            // where an enqueue happens right after our initial check.
+            if self.pending_queue_count.load(Ordering::Relaxed) > 0 {
+                return None;
+            }
+
             match self.available_permits.compare_exchange_weak(
                 available,
                 available - weight,

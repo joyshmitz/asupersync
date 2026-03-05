@@ -352,6 +352,12 @@ impl RateLimiter {
     #[must_use]
     #[allow(clippy::cast_precision_loss)]
     pub fn try_acquire(&self, cost: u32, now: Time) -> bool {
+        // Prevent barging if there are queued operations to preserve FIFO fairness
+        let queue = self.wait_queue.read();
+        if !queue.is_empty() {
+            return false;
+        }
+
         let mut state = self.state.lock();
         let now_millis = now.as_millis();
 
@@ -362,6 +368,7 @@ impl RateLimiter {
         if state.tokens >= cost_f {
             state.tokens -= cost_f;
             drop(state); // Release bucket lock immediately
+            drop(queue); // Release queue lock
 
             self.total_allowed.fetch_add(1, Ordering::Relaxed);
             true
