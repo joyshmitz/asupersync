@@ -2,21 +2,20 @@
 
 use crate::cx::Cx;
 use crate::security::authenticated::AuthenticatedSymbol;
-use crate::time::{Sleep, TimeSource, WallClock};
+use crate::time::Sleep;
 use crate::transport::error::StreamError;
 use crate::transport::{ChannelWaiter, SharedChannel, SymbolSet};
 use crate::types::Time;
 use smallvec::SmallVec;
 use std::future::Future;
 use std::pin::Pin;
+use std::sync::Arc;
 use std::sync::atomic::{AtomicBool, Ordering};
-use std::sync::{Arc, OnceLock};
 use std::task::{Context, Poll, Waker};
 use std::time::Duration;
 
 fn wall_clock_now() -> Time {
-    static CLOCK: OnceLock<WallClock> = OnceLock::new();
-    CLOCK.get_or_init(WallClock::new).now()
+    crate::time::wall_now()
 }
 
 fn duration_to_nanos(duration: Duration) -> u64 {

@@ -5,17 +5,15 @@
 //! an [`Elapsed`] error is returned.
 
 use super::{Layer, Service};
-use crate::time::{Elapsed, Sleep, TimeSource, WallClock};
+use crate::time::{Elapsed, Sleep};
 use crate::types::Time;
 use std::future::Future;
 use std::pin::Pin;
-use std::sync::OnceLock;
 use std::task::{Context, Poll};
 use std::time::Duration;
 
 fn wall_clock_now() -> Time {
-    static CLOCK: OnceLock<WallClock> = OnceLock::new();
-    CLOCK.get_or_init(WallClock::new).now()
+    crate::time::wall_now()
 }
 
 fn duration_to_nanos(duration: Duration) -> u64 {

@@ -64,7 +64,7 @@ use crate::runtime::blocking_pool::BlockingPoolHandle;
 use crate::runtime::io_driver::{IoDriverHandle, IoRegistration};
 use crate::runtime::reactor::{Interest, Source};
 use crate::runtime::task_handle::JoinError;
-use crate::time::{TimeSource, TimerDriverHandle, WallClock, timeout};
+use crate::time::{TimerDriverHandle, timeout};
 use crate::trace::distributed::{LogicalClockHandle, LogicalTime};
 use crate::trace::{TraceBufferHandle, TraceEvent};
 use crate::tracing_compat::{debug, error, info, trace};
@@ -76,7 +76,7 @@ use std::cell::RefCell;
 use std::future::Future;
 use std::marker::PhantomData;
 use std::pin::Pin;
-use std::sync::{Arc, OnceLock};
+use std::sync::Arc;
 use std::task::{Wake, Waker};
 use std::time::Duration;
 
@@ -85,8 +85,7 @@ type NamedFutures<T> = Vec<NamedFuture<T>>;
 
 /// Get the current wall clock time.
 fn wall_clock_now() -> Time {
-    static CLOCK: OnceLock<WallClock> = OnceLock::new();
-    CLOCK.get_or_init(WallClock::new).now()
+    crate::time::wall_now()
 }
 
 fn noop_waker() -> Waker {

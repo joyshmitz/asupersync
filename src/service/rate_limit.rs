@@ -4,17 +4,14 @@
 //! a token bucket algorithm. Requests are only allowed when tokens are available.
 
 use super::{Layer, Service};
-use crate::time::{TimeSource, WallClock};
 use crate::types::Time;
 use std::future::Future;
 use std::pin::Pin;
-use std::sync::OnceLock;
 use std::task::{Context, Poll};
 use std::time::Duration;
 
 fn wall_clock_now() -> Time {
-    static CLOCK: OnceLock<WallClock> = OnceLock::new();
-    CLOCK.get_or_init(WallClock::new).now()
+    crate::time::wall_now()
 }
 
 /// A layer that rate-limits requests using a token bucket.

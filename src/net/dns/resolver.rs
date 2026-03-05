@@ -12,7 +12,7 @@
 //! with future async DNS implementations.
 
 use std::net::{IpAddr, SocketAddr, TcpStream as StdTcpStream, ToSocketAddrs};
-use std::sync::{Arc, OnceLock};
+use std::sync::Arc;
 use std::time::Duration;
 
 use super::cache::{CacheConfig, CacheStats, DnsCache};
@@ -21,7 +21,7 @@ use super::lookup::{HappyEyeballs, LookupIp, LookupMx, LookupSrv, LookupTxt};
 use crate::cx::Cx;
 use crate::net::TcpStream;
 use crate::runtime::spawn_blocking;
-use crate::time::{TimeSource, WallClock, timeout};
+use crate::time::timeout;
 use crate::types::Time;
 
 /// DNS resolver configuration.
@@ -378,13 +378,12 @@ impl Clone for Resolver {
 }
 
 fn timeout_now() -> Time {
-    static CLOCK: OnceLock<WallClock> = OnceLock::new();
     if let Some(current) = Cx::current() {
         if let Some(driver) = current.timer_driver() {
             return driver.now();
         }
     }
-    CLOCK.get_or_init(WallClock::new).now()
+    crate::time::wall_now()
 }
 
 #[cfg(test)]
