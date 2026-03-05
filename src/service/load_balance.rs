@@ -387,6 +387,10 @@ impl<S: Clone, T: Strategy> LoadBalancer<S, T> {
             .pick(&loads)
             .ok_or(LoadBalanceError::NoBackends)?;
 
+        if idx >= backends.len() {
+            return Err(LoadBalanceError::NoBackends);
+        }
+
         backends[idx].load.increment();
         let load_metric = Arc::clone(&backends[idx].load);
         let mut svc = backends[idx].service.clone();

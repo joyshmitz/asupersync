@@ -198,18 +198,21 @@ impl TcpStreamInner {
         let mut guard = self.state.lock();
 
         // Store this direction's waker for combined dispatch.
-        if interest.is_readable() {
-            if !guard
+        // Use independent checks (not else-if) so that callers passing
+        // combined interest (READABLE | WRITABLE) update both wakers.
+        if interest.is_readable()
+            && !guard
                 .read_waker
                 .as_ref()
                 .is_some_and(|w| w.will_wake(cx.waker()))
-            {
-                guard.read_waker = Some(cx.waker().clone());
-            }
-        } else if !guard
-            .write_waker
-            .as_ref()
-            .is_some_and(|w| w.will_wake(cx.waker()))
+        {
+            guard.read_waker = Some(cx.waker().clone());
+        }
+        if interest.is_writable()
+            && !guard
+                .write_waker
+                .as_ref()
+                .is_some_and(|w| w.will_wake(cx.waker()))
         {
             guard.write_waker = Some(cx.waker().clone());
         }

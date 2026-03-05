@@ -140,8 +140,10 @@ impl Encoder<GrpcMessage> for GrpcCodec {
         // Write compressed flag
         dst.put_u8(u8::from(item.compressed));
 
-        // Write length (big-endian)
-        dst.put_u32(item.data.len() as u32);
+        // Write length (big-endian). gRPC uses u32 length prefixes, so reject
+        // payloads that overflow the 4-byte field rather than silently truncating.
+        let length = u32::try_from(item.data.len()).map_err(|_| GrpcError::MessageTooLarge)?;
+        dst.put_u32(length);
 
         // Write data
         dst.extend_from_slice(&item.data);

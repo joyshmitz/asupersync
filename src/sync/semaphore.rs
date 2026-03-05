@@ -375,7 +375,9 @@ impl SemaphorePermit<'_> {
 
 impl Drop for SemaphorePermit<'_> {
     fn drop(&mut self) {
-        self.semaphore.add_permits(self.count);
+        if self.count > 0 {
+            self.semaphore.add_permits(self.count);
+        }
     }
 }
 
@@ -452,7 +454,9 @@ impl OwnedSemaphorePermit {
 
 impl Drop for OwnedSemaphorePermit {
     fn drop(&mut self) {
-        self.semaphore.add_permits(self.count);
+        if self.count > 0 {
+            self.semaphore.add_permits(self.count);
+        }
     }
 }
 
