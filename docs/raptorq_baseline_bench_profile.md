@@ -173,7 +173,7 @@ Coverage intent:
 Current default policy note (profile-pack schema v3):
 
 - `x86-avx2-balanced-v1` is split-biased for `mul_slices2` (`mul_window_min > mul_window_max`), so auto mode keeps dual-mul on the sequential path by default.
-- `addmul_slices2` still uses the bounded fused window (`12KiB..16KiB`, lane floor `2KiB`) to preserve known positive regions and avoid small-lane regressions.
+- `addmul_slices2` uses the bounded fused window (`24576..32768`, lane floor `8192`) from the 2026-03-04 deterministic corpus refresh, preserving balanced-lane gains while filtering asymmetric/small-lane regressions.
 
 ### E5 Profile-Pack Capture (`asupersync-36m6p.1`, 2026-02-22)
 
@@ -209,6 +209,9 @@ Observed host/profile snapshot in all three runs:
 - `architecture_class = generic-scalar`
 - `profile_pack = scalar-conservative-v1`
 - `replay_pointer = replay:rq-e-gf256-profile-pack-v2`
+- Historical note: this 2026-02-22 packet predates the later profile-pack
+  schema/policy refresh. Current defaults and test contracts are anchored to
+  `replay:rq-e-gf256-profile-pack-v3`.
 
 Track-E/E5 interpretation: this packet validates deterministic profile-pack policy wiring and mode forcing, but does not yet prove SIMD-profile-pack material uplift because the active kernel path was scalar on these runs.
 
