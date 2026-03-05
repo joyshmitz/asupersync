@@ -390,7 +390,19 @@ fn parse_part_headers(data: &[u8]) -> HashMap<String, String> {
 fn parse_disposition_param(disposition: &str, param: &str) -> Option<String> {
     let search = format!("{param}=");
     let lower = disposition.to_ascii_lowercase();
-    let idx = lower.find(&search)?;
+    // Find the param ensuring it's not a suffix of another param (e.g. "name=" inside "filename=").
+    // The match must be preceded by start-of-string, ';', space, or tab.
+    let idx = {
+        let mut start = 0;
+        loop {
+            let pos = lower[start..].find(&search)?;
+            let abs = start + pos;
+            if abs == 0 || matches!(lower.as_bytes()[abs - 1], b';' | b' ' | b'\t') {
+                break abs;
+            }
+            start = abs + 1;
+        }
+    };
     let after = &disposition[idx + search.len()..];
 
     after.strip_prefix('"').map_or_else(
@@ -494,6 +506,14 @@ mod tests {
     fn parse_disposition_unquoted() {
         let d = "form-data; name=username";
         assert_eq!(parse_disposition_param(d, "name").unwrap(), "username");
+    }
+
+    #[test]
+    fn parse_disposition_name_not_confused_with_filename() {
+        // Regression: "name=" must not match inside "filename="
+        let d = r#"form-data; filename="photo.jpg"; name="field""#;
+        assert_eq!(parse_disposition_param(d, "name").unwrap(), "field");
+        assert_eq!(parse_disposition_param(d, "filename").unwrap(), "photo.jpg");
     }
 
     #[test]
