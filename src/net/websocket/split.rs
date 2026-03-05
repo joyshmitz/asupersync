@@ -66,7 +66,7 @@ struct WebSocketShared<IO> {
     /// Negotiated subprotocol (if any).
     protocol: Option<String>,
     /// Pending pong payloads to send.
-    pending_pongs: Vec<Bytes>,
+    pending_pongs: std::collections::VecDeque<Bytes>,
     /// True while one half is performing a frame write sequence.
     writer_active: bool,
     /// Wakers for waiters blocked on `writer_active`.
@@ -270,9 +270,8 @@ where
             // Send any pending pongs (under lock)
             {
                 let shared = &mut *self.shared.lock();
-                // cancel-safe: remove(0) takes one at a time from the front without reversing the whole queue
-                while !shared.pending_pongs.is_empty() {
-                    let payload = shared.pending_pongs.remove(0);
+                // cancel-safe: pop_front() takes one at a time from the front without reversing the whole queue
+                while let Some(payload) = shared.pending_pongs.pop_front() {
                     let pong = Frame::pong(payload);
                     let shared = &mut *shared;
                     shared.codec.encode(pong, &mut shared.write_buf)?;
@@ -299,7 +298,7 @@ where
                         if shared.pending_pongs.len() >= 16 {
                             shared.pending_pongs.clear();
                         }
-                        shared.pending_pongs.push(frame.payload);
+                        shared.pending_pongs.push_back(frame.payload);
                     }
                     Opcode::Pong => {
                         // Pong received - keepalive confirmed
@@ -775,9 +774,9 @@ mod tests {
             // Push multiple pong payloads
             {
                 let mut shared = read.shared.lock();
-                shared.pending_pongs.push(Bytes::from_static(b"pong-a"));
-                shared.pending_pongs.push(Bytes::from_static(b"pong-b"));
-                shared.pending_pongs.push(Bytes::from_static(b"pong-c"));
+                shared.pending_pongs.push_back(Bytes::from_static(b"pong-a"));
+                shared.pending_pongs.push_back(Bytes::from_static(b"pong-b"));
+                shared.pending_pongs.push_back(Bytes::from_static(b"pong-c"));
             }
 
             // Encode pongs (same block as recv() does)

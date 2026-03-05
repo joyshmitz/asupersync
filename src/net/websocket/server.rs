@@ -234,7 +234,7 @@ pub struct ServerWebSocket<IO> {
     /// Negotiated extensions.
     extensions: Vec<String>,
     /// Pending pong payloads to send.
-    pending_pongs: Vec<crate::bytes::Bytes>,
+    pending_pongs: std::collections::VecDeque<crate::bytes::Bytes>,
 }
 
 impl<IO> ServerWebSocket<IO>
@@ -255,7 +255,7 @@ where
             assembler: MessageAssembler::new(max_message_size),
             protocol: accept.protocol,
             extensions: accept.extensions,
-            pending_pongs: Vec::new(),
+            pending_pongs: std::collections::VecDeque::new(),
         }
     }
 
@@ -329,10 +329,8 @@ where
                 )));
             }
 
-            // Send any pending pongs in FIFO order (cancel-safe: remove(0) takes
-            // one at a time from the front without reversing the whole queue).
-            while !self.pending_pongs.is_empty() {
-                let payload = self.pending_pongs.remove(0);
+            // Send any pending pongs in FIFO order
+            while let Some(payload) = self.pending_pongs.pop_front() {
                 let pong = Frame::pong(payload);
                 self.send_frame(pong).await?;
             }
@@ -346,7 +344,7 @@ where
                         if self.pending_pongs.len() >= 16 {
                             self.pending_pongs.clear();
                         }
-                        self.pending_pongs.push(frame.payload);
+                        self.pending_pongs.push_back(frame.payload);
                     }
                     Opcode::Pong => {
                         // Pong received - keepalive confirmed
