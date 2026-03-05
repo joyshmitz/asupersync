@@ -1505,7 +1505,7 @@ mod tests {
         let text = String::from_utf8_lossy(&serialized);
         // The reason must not contain CRLF — injection attempt is neutralized.
         assert!(
-            !text.contains("X-Injected"),
+            !text.contains("\r\nX-Injected"),
             "CRLF injection must be stripped from reason phrase: {text}"
         );
         assert!(text.starts_with("HTTP/1.1 200 OKX-Injected: evil\r\n"));

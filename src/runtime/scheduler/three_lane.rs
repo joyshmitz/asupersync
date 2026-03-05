@@ -107,7 +107,6 @@ enum IoPhaseOutcome {
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 enum BackoffTimeoutDecision {
     ParkTimeout { nanos: u64 },
-    SkipShortFollowerTimeout,
     DeadlineDue,
 }
 
@@ -163,13 +162,8 @@ fn record_backoff_timeout_park(
 }
 
 #[inline]
-fn should_skip_backoff_timeout_park(io_phase: IoPhaseOutcome, nanos: u64) -> bool {
-    matches!(io_phase, IoPhaseOutcome::Follower) && nanos <= SHORT_WAIT_LE_5MS_NANOS
-}
-
-#[inline]
 fn classify_backoff_timeout_decision(
-    io_phase: IoPhaseOutcome,
+    _io_phase: IoPhaseOutcome,
     next_deadline: Time,
     now: Time,
 ) -> BackoffTimeoutDecision {
@@ -177,18 +171,12 @@ fn classify_backoff_timeout_decision(
         BackoffTimeoutDecision::DeadlineDue
     } else {
         let nanos = next_deadline.duration_since(now);
-        if should_skip_backoff_timeout_park(io_phase, nanos) {
-            BackoffTimeoutDecision::SkipShortFollowerTimeout
-        } else {
-            BackoffTimeoutDecision::ParkTimeout { nanos }
-        }
-    }
-}
-
-#[inline]
-fn record_backoff_short_wait_skip(metrics: &mut PreemptionMetrics, io_phase: IoPhaseOutcome) {
-    if matches!(io_phase, IoPhaseOutcome::Follower) {
-        metrics.follower_short_wait_skip_le_5ms += 1;
+        // Always park even for sub-5ms timeouts. The previous optimisation
+        // (SkipShortFollowerTimeout) would `break` the inner backoff loop,
+        // but the outer scheduling loop restarted with backoff=0, causing
+        // full SPIN_LIMIT+YIELD_LIMIT busy-loops without ever parking.
+        // A sub-5ms futex park is far cheaper than that spin storm.
+        BackoffTimeoutDecision::ParkTimeout { nanos }
     }
 }
 
@@ -2024,16 +2012,6 @@ impl ThreeLaneWorker {
                                 );
                                 self.parker.park_timeout(Duration::from_nanos(nanos));
                             }
-                            BackoffTimeoutDecision::SkipShortFollowerTimeout => {
-                                // Followers with micro-timeout deadlines tend to churn through
-                                // repeated short futex waits. Skip arming the short timeout and
-                                // immediately re-enter the scheduling loop.
-                                record_backoff_short_wait_skip(
-                                    &mut self.preemption_metrics,
-                                    io_phase,
-                                );
-                                break;
-                            }
                             BackoffTimeoutDecision::DeadlineDue => {
                                 // If deadline is due or passed, don't park - break to process timers/tasks.
                                 break;
@@ -3645,21 +3623,6 @@ mod tests {
         );
     }
 
-    #[test]
-    fn skip_backoff_timeout_park_is_follower_and_short_wait_only() {
-        assert!(should_skip_backoff_timeout_park(
-            IoPhaseOutcome::Follower,
-            4_000_000
-        ));
-        assert!(!should_skip_backoff_timeout_park(
-            IoPhaseOutcome::Follower,
-            6_000_000
-        ));
-        assert!(!should_skip_backoff_timeout_park(
-            IoPhaseOutcome::NoProgress,
-            4_000_000
-        ));
-    }
 
     #[test]
     fn classify_backoff_timeout_decision_handles_due_short_and_long_waits() {
@@ -3668,6 +3631,7 @@ mod tests {
         let due = classify_backoff_timeout_decision(IoPhaseOutcome::Follower, now, now);
         assert_eq!(due, BackoffTimeoutDecision::DeadlineDue);
 
+        // Sub-5ms follower timeouts now park instead of skipping (BUG-S1 fix).
         let short_follower = classify_backoff_timeout_decision(
             IoPhaseOutcome::Follower,
             Time::from_nanos(1_000 + 4_000_000),
@@ -3675,7 +3639,7 @@ mod tests {
         );
         assert_eq!(
             short_follower,
-            BackoffTimeoutDecision::SkipShortFollowerTimeout
+            BackoffTimeoutDecision::ParkTimeout { nanos: 4_000_000 }
         );
 
         let threshold_follower = classify_backoff_timeout_decision(
@@ -3685,7 +3649,9 @@ mod tests {
         );
         assert_eq!(
             threshold_follower,
-            BackoffTimeoutDecision::SkipShortFollowerTimeout
+            BackoffTimeoutDecision::ParkTimeout {
+                nanos: SHORT_WAIT_LE_5MS_NANOS
+            }
         );
 
         let long_follower = classify_backoff_timeout_decision(
@@ -3707,17 +3673,6 @@ mod tests {
             short_leader,
             BackoffTimeoutDecision::ParkTimeout { nanos: 4_000_000 }
         );
-    }
-
-    #[test]
-    fn backoff_metrics_count_follower_short_wait_skip_decisions() {
-        let mut metrics = PreemptionMetrics::default();
-        record_backoff_short_wait_skip(&mut metrics, IoPhaseOutcome::Follower);
-        record_backoff_short_wait_skip(&mut metrics, IoPhaseOutcome::NoProgress);
-
-        assert_eq!(metrics.follower_short_wait_skip_le_5ms, 1);
-        assert_eq!(metrics.backoff_parks_total, 0);
-        assert_eq!(metrics.backoff_timeout_parks_total, 0);
     }
 
     #[test]

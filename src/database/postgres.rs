@@ -1721,6 +1721,7 @@ impl PgConnection {
     fn cancel_in_flight<T>(&mut self, cx: &Cx) -> Outcome<T, PgError> {
         // Once a caller cancels mid-flight we can't safely continue decoding
         // protocol messages for subsequent operations, so close this connection.
+        let _ = self.inner.stream.shutdown(std::net::Shutdown::Both);
         self.inner.closed = true;
         Outcome::Cancelled(cancelled_reason(cx))
     }
@@ -2639,9 +2640,12 @@ impl PgConnection {
             // Drain errors during rollback are suppressed since the rollback
             // itself is the priority operation and a drain failure at that
             // point is non-fatal.
+            let _ = self.inner.stream.shutdown(std::net::Shutdown::Both);
+            self.inner.closed = true;
             if let Some(cx) = crate::cx::Cx::current() {
                 cx.trace(&format!("Failed to drain after ROLLBACK: {e}"));
             }
+            return Err(e);
         }
 
         Ok(())
@@ -2919,9 +2923,13 @@ impl PgConnection {
         let server_err = self.parse_error_response(data).unwrap_or_else(|e| e);
         match self.drain_to_ready().await {
             Ok(()) => server_err,
-            Err(drain_err) => PgError::Protocol(format!(
-                "{server_err}; additionally failed to drain to ReadyForQuery: {drain_err}"
-            )),
+            Err(drain_err) => {
+                let _ = self.inner.stream.shutdown(std::net::Shutdown::Both);
+                self.inner.closed = true;
+                PgError::Protocol(format!(
+                    "{server_err}; additionally failed to drain to ReadyForQuery: {drain_err}"
+                ))
+            }
         }
     }
 
