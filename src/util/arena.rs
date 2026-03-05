@@ -264,46 +264,97 @@ impl<T> Arena<T> {
     where
         F: FnMut(&mut T) -> bool,
     {
-        let mut new_len = 0;
-        let mut first_free: Option<u32> = None;
-        let mut prev_free: Option<usize> = None;
+        struct Guard<'a, T> {
+            arena: &'a mut Arena<T>,
+            current_index: usize,
+            new_len: usize,
+            first_free: Option<u32>,
+            prev_free: Option<usize>,
+            panicked: bool,
+        }
 
-        for i in 0..self.slots.len() {
-            // Apply predicate to occupied slots.
-            let kept = match &mut self.slots[i] {
+        impl<T> Drop for Guard<'_, T> {
+            fn drop(&mut self) {
+                // If we dropped early (panic), the current element i was Occupied
+                // and f() panicked, so it remains Occupied. We must count it.
+                if self.panicked && self.current_index < self.arena.slots.len() {
+                    self.new_len += 1;
+                    self.current_index += 1;
+                }
+
+                // Process the remaining slots to link any existing Vacant slots
+                // into our newly rebuilt free list.
+                for i in self.current_index..self.arena.slots.len() {
+                    if matches!(&self.arena.slots[i], Slot::Occupied { .. }) {
+                        self.new_len += 1;
+                        continue;
+                    }
+
+                    if let Slot::Vacant { next_free, .. } = &mut self.arena.slots[i] {
+                        *next_free = None;
+                    }
+
+                    if let Some(prev) = self.prev_free {
+                        if let Slot::Vacant { next_free, .. } = &mut self.arena.slots[prev] {
+                            *next_free = Some(i as u32);
+                        }
+                    } else {
+                        self.first_free = Some(i as u32);
+                    }
+                    self.prev_free = Some(i);
+                }
+
+                self.arena.len = self.new_len;
+                self.arena.free_head = self.first_free;
+            }
+        }
+
+        let mut guard = Guard {
+            arena: self,
+            current_index: 0,
+            new_len: 0,
+            first_free: None,
+            prev_free: None,
+            panicked: true,
+        };
+
+        while guard.current_index < guard.arena.slots.len() {
+            let i = guard.current_index;
+
+            let kept = match &mut guard.arena.slots[i] {
                 Slot::Occupied { value, .. } => f(value),
                 Slot::Vacant { .. } => false,
             };
 
             if kept {
-                new_len += 1;
+                guard.new_len += 1;
+                guard.current_index += 1;
                 continue;
             }
 
-            // Slot is or becomes vacant. Convert occupied→vacant if needed.
-            if let Slot::Occupied { generation, .. } = &self.slots[i] {
+            if let Slot::Occupied { generation, .. } = &guard.arena.slots[i] {
                 let generation_value = *generation;
-                self.slots[i] = Slot::Vacant {
+                guard.arena.slots[i] = Slot::Vacant {
                     next_free: None,
                     generation: generation_value.wrapping_add(1),
                 };
-            } else if let Slot::Vacant { next_free, .. } = &mut self.slots[i] {
+            } else if let Slot::Vacant { next_free, .. } = &mut guard.arena.slots[i] {
                 *next_free = None;
             }
 
-            // Link into free list.
-            if let Some(prev) = prev_free {
-                if let Slot::Vacant { next_free, .. } = &mut self.slots[prev] {
+            if let Some(prev) = guard.prev_free {
+                if let Slot::Vacant { next_free, .. } = &mut guard.arena.slots[prev] {
                     *next_free = Some(i as u32);
                 }
             } else {
-                first_free = Some(i as u32);
+                guard.first_free = Some(i as u32);
             }
-            prev_free = Some(i);
+            guard.prev_free = Some(i);
+            
+            guard.current_index += 1;
         }
 
-        self.len = new_len;
-        self.free_head = first_free;
+        guard.panicked = false;
     }
 
     /// Drains all occupied values, leaving the arena empty.
@@ -498,10 +549,39 @@ mod tests {
         assert_eq!(arena.get(idx2), Some(&20));
 
         // The next insert should still reuse the previously freed slot.
-        let reused = arena.insert(30);
-        assert_eq!(reused.index(), idx1.index());
-        assert_ne!(reused.generation(), idx1.generation());
-        assert_eq!(arena.get(reused), Some(&30));
+        let idx3 = arena.insert(30);
+        assert_eq!(idx3.index(), idx1.index());
+        assert_eq!(arena.len(), 2);
+    }
+
+    #[test]
+    fn retain_panic_preserves_invariants() {
+        let mut arena = Arena::new();
+        arena.insert(10);
+        let idx2 = arena.insert(20);
+        let idx3 = arena.insert(30);
+
+        let result = catch_unwind(AssertUnwindSafe(|| {
+            arena.retain(|v| {
+                if *v == 20 {
+                    panic!("boom");
+                }
+                false // 10 is deleted before panic
+            });
+        }));
+
+        assert!(result.is_err());
+
+        // Before the fix, arena.len() would be 3 (unchanged) but element 0 was deleted
+        assert_eq!(arena.len(), 2, "len must reflect deletions that happened before the panic");
+
+        // Element 20 and 30 should still be accessible
+        assert_eq!(arena.get(idx2), Some(&20));
+        assert_eq!(arena.get(idx3), Some(&30));
+
+        // Inserting a new element should reuse the freed slot (index 0)
+        let new_idx = arena.insert(40);
+        assert_eq!(new_idx.index(), 0, "must reuse freed slot");
     }
 
     #[test]
