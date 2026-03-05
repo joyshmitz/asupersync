@@ -603,8 +603,9 @@ fn backoff_metrics_consistency() {
     let workers = scheduler.take_workers();
     let mut worker = workers.into_iter().next().unwrap();
 
-    let metrics_holder: Arc<std::sync::Mutex<Option<asupersync::runtime::scheduler::three_lane::PreemptionMetrics>>> =
-        Arc::new(std::sync::Mutex::new(None));
+    let metrics_holder: Arc<
+        std::sync::Mutex<Option<asupersync::runtime::scheduler::three_lane::PreemptionMetrics>>,
+    > = Arc::new(std::sync::Mutex::new(None));
     let mh = metrics_holder.clone();
 
     let handle = std::thread::spawn(move || {
@@ -683,7 +684,11 @@ fn dispatch_latency_under_100ms() {
     scheduler.shutdown();
     handle.join().unwrap();
 
-    if let Some(dispatched_at) = *dispatch_time.lock().unwrap() {
+    let dispatched_at = {
+        let guard = dispatch_time.lock().unwrap();
+        *guard
+    };
+    if let Some(dispatched_at) = dispatched_at {
         let latency = dispatched_at.duration_since(inject_time);
         assert!(
             latency < Duration::from_millis(100),

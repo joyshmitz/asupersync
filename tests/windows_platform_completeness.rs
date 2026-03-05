@@ -96,7 +96,7 @@ fn track_i_signal_surface_contains_windows_subset_mapping() {
         "#[cfg(windows)]\nfn raw_signal_for_kind(kind: SignalKind) -> i32",
         "kind.as_raw_value().expect(\"windows supported signal kind\")",
         "#[cfg(windows)]\nfn signal_kind_from_raw(raw: i32) -> Option<SignalKind>",
-        "raw == libc::SIGBREAK",
+        "raw == signal_hook::consts::SIGBREAK",
         "fn windows_raw_signal_mapping_subset()",
     ] {
         assert!(
