@@ -19,6 +19,7 @@ from typing import Any
 
 JOB_ID_RE = re.compile(r"^  ([A-Za-z0-9_-]+):\s*$", re.MULTILINE)
 STEP_NAME_RE = re.compile(r"^\s*-\s+name:\s*(.+?)\s*$", re.MULTILINE)
+STEP_RCH_RE = re.compile(r'(?m)(?:\brch\b|"\$RCH_BIN"|\$\{RCH_BIN\}|\$RCH_BIN)\s+exec\s+--')
 
 
 class PolicyError(ValueError):
@@ -35,6 +36,8 @@ class LanePolicy:
     required_artifact_names: tuple[str, ...]
     replay_command: str
     require_rch: bool
+    rch_required_step_names: tuple[str, ...]
+    rch_fallback_phrase: str
     failure_taxonomy: tuple[str, ...]
     max_failures: int
     required_artifacts_min: int
@@ -112,6 +115,13 @@ def load_policy(policy_path: Path) -> tuple[dict[str, Any], list[LanePolicy], Pa
     default_artifacts_min = require_int(
         defaults.get("required_artifacts_min", 0), "threshold_defaults.required_artifacts_min"
     )
+    rch_defaults = policy.get("rch_defaults", {})
+    if not isinstance(rch_defaults, dict):
+        raise PolicyError("rch_defaults must be an object")
+    default_rch_fallback_phrase = require_str(
+        rch_defaults.get("fallback_phrase", "falling back to local"),
+        "rch_defaults.fallback_phrase",
+    )
 
     lanes_raw = policy.get("lanes")
     if not isinstance(lanes_raw, list) or not lanes_raw:
@@ -147,6 +157,13 @@ def load_policy(policy_path: Path) -> tuple[dict[str, Any], list[LanePolicy], Pa
                 ),
                 replay_command=require_str(lane_raw.get("replay_command"), f"lanes[{idx}].replay_command"),
                 require_rch=require_bool(lane_raw.get("require_rch", False), f"lanes[{idx}].require_rch"),
+                rch_required_step_names=require_str_list(
+                    lane_raw.get("rch_required_step_names", []), f"lanes[{idx}].rch_required_step_names"
+                ),
+                rch_fallback_phrase=require_str(
+                    lane_raw.get("rch_fallback_phrase", default_rch_fallback_phrase),
+                    f"lanes[{idx}].rch_fallback_phrase",
+                ),
                 failure_taxonomy=require_str_list(
                     lane_raw.get("failure_taxonomy", []), f"lanes[{idx}].failure_taxonomy"
                 ),
@@ -164,10 +181,66 @@ def load_policy(policy_path: Path) -> tuple[dict[str, Any], list[LanePolicy], Pa
     return policy, lanes, summary_path, events_path
 
 
-def collect_workflow_contracts(workflow_text: str) -> tuple[set[str], set[str]]:
+def collect_step_run_blocks(workflow_text: str) -> dict[str, list[str]]:
+    step_runs: dict[str, list[str]] = {}
+    lines = workflow_text.splitlines()
+    index = 0
+    while index < len(lines):
+        line = lines[index]
+        step_match = re.match(r"^(\s*)-\s+name:\s*(.+?)\s*$", line)
+        if not step_match:
+            index += 1
+            continue
+
+        step_indent = len(step_match.group(1))
+        step_name = step_match.group(2).strip()
+        index += 1
+        collected_runs: list[str] = []
+
+        while index < len(lines):
+            next_line = lines[index]
+            next_indent = len(next_line) - len(next_line.lstrip(" "))
+            if next_indent <= step_indent and re.match(r"^\s*-\s+name:\s*", next_line):
+                break
+
+            run_match = re.match(r"^\s*run:\s*(.*)$", next_line)
+            if run_match:
+                suffix = run_match.group(1)
+                run_indent = next_indent
+                if suffix and suffix != "|":
+                    collected_runs.append(suffix.strip())
+                    index += 1
+                    continue
+
+                index += 1
+                run_lines: list[str] = []
+                while index < len(lines):
+                    body_line = lines[index]
+                    body_indent = len(body_line) - len(body_line.lstrip(" "))
+                    if body_line.strip() and body_indent <= run_indent:
+                        break
+                    if body_line.strip():
+                        offset = min(len(body_line), run_indent + 2)
+                        run_lines.append(body_line[offset:])
+                    else:
+                        run_lines.append("")
+                    index += 1
+                collected_runs.append("\n".join(run_lines))
+                continue
+
+            index += 1
+
+        if collected_runs:
+            step_runs.setdefault(step_name, []).extend(collected_runs)
+
+    return step_runs
+
+
+def collect_workflow_contracts(workflow_text: str) -> tuple[set[str], set[str], dict[str, list[str]]]:
     job_ids = {match.group(1).strip() for match in JOB_ID_RE.finditer(workflow_text)}
     step_names = {match.group(1).strip() for match in STEP_NAME_RE.finditer(workflow_text)}
-    return job_ids, step_names
+    step_run_blocks = collect_step_run_blocks(workflow_text)
+    return job_ids, step_names, step_run_blocks
 
 
 def artifact_name_exists(workflow_text: str, artifact_name: str) -> bool:
@@ -179,6 +252,7 @@ def evaluate_lane(
     workflow_text: str,
     job_ids: set[str],
     step_names: set[str],
+    step_run_blocks: dict[str, list[str]],
 ) -> dict[str, Any]:
     missing_job_ids = sorted(job for job in lane.required_job_ids if job not in job_ids)
     missing_steps = sorted(step for step in lane.required_step_names if step not in step_names)
@@ -193,6 +267,26 @@ def evaluate_lane(
     rch_compliant = "rch exec --" in lane.replay_command
     if lane.require_rch and not rch_compliant:
         missing_contracts.append("replay:rch_prefix")
+
+    artifact_contract_count = len(lane.required_artifact_names) - len(missing_artifacts)
+    if artifact_contract_count < lane.required_artifacts_min:
+        missing_contracts.append(
+            f"threshold:required_artifacts_min({artifact_contract_count}<{lane.required_artifacts_min})"
+        )
+
+    rch_noncompliant_steps: list[str] = []
+    rch_missing_fallback_steps: list[str] = []
+    for step_name in lane.rch_required_step_names:
+        if step_name not in step_names:
+            continue
+        step_runs = step_run_blocks.get(step_name, [])
+        if not any(STEP_RCH_RE.search(script) for script in step_runs):
+            rch_noncompliant_steps.append(step_name)
+            missing_contracts.append(f"step_rch:{step_name}")
+        if not any(lane.rch_fallback_phrase in script for script in step_runs):
+            rch_missing_fallback_steps.append(step_name)
+            missing_contracts.append(f"step_fallback:{step_name}")
+
     status = "pass" if not missing_contracts else "fail"
     return {
         "lane_id": lane.lane_id,
@@ -203,10 +297,14 @@ def evaluate_lane(
         "required_step_names": list(lane.required_step_names),
         "required_artifact_names": list(lane.required_artifact_names),
         "require_rch": lane.require_rch,
+        "rch_required_step_names": list(lane.rch_required_step_names),
+        "rch_noncompliant_step_names": rch_noncompliant_steps,
+        "rch_missing_fallback_step_names": rch_missing_fallback_steps,
         "rch_compliant": rch_compliant,
         "missing_job_ids": missing_job_ids,
         "missing_steps": missing_steps,
         "missing_artifacts": missing_artifacts,
+        "artifact_contract_count": artifact_contract_count,
         "missing_contracts": missing_contracts,
         "replay_command": lane.replay_command,
         "failure_taxonomy": list(lane.failure_taxonomy),
@@ -245,6 +343,7 @@ def run_self_tests() -> int:
                 "required_artifact_names": ["ci-summary-report"],
                 "replay_command": "rch exec -- cargo test --lib --all-features",
                 "require_rch": True,
+                "rch_required_step_names": ["Run unit tests"],
                 "failure_taxonomy": ["unit_assertion_failure"],
                 "thresholds": {"max_failures": 0, "required_artifacts_min": 1},
             }
@@ -259,14 +358,21 @@ jobs:
   test:
     steps:
       - name: Run unit tests
+        run: |
+          if [[ -x "$RCH_BIN" ]]; then
+            "$RCH_BIN" exec -- cargo test --lib --all-features
+          else
+            echo "rch unavailable; falling back to local cargo test --lib --all-features"
+            cargo test --lib --all-features
+          fi
   ci-summary-d5:
     steps:
       - name: Upload
         with:
           name: ci-summary-report
 """
-    jobs_pass, steps_pass = collect_workflow_contracts(workflow_pass)
-    lane_pass = evaluate_lane(lanes[0], workflow_pass, jobs_pass, steps_pass)
+    jobs_pass, steps_pass, step_runs_pass = collect_workflow_contracts(workflow_pass)
+    lane_pass = evaluate_lane(lanes[0], workflow_pass, jobs_pass, steps_pass, step_runs_pass)
     if lane_pass["status"] != "pass":
         raise AssertionError("expected pass lane status")
 
@@ -276,8 +382,8 @@ jobs:
     steps:
       - name: Build documentation
 """
-    jobs_fail, steps_fail = collect_workflow_contracts(workflow_fail)
-    lane_fail = evaluate_lane(lanes[0], workflow_fail, jobs_fail, steps_fail)
+    jobs_fail, steps_fail, step_runs_fail = collect_workflow_contracts(workflow_fail)
+    lane_fail = evaluate_lane(lanes[0], workflow_fail, jobs_fail, steps_fail, step_runs_fail)
     if lane_fail["status"] != "fail":
         raise AssertionError("expected fail lane status")
     if "job:test" not in lane_fail["missing_contracts"]:
@@ -296,15 +402,63 @@ jobs:
         required_artifact_names=("ci-summary-report",),
         replay_command="cargo test --lib --all-features",
         require_rch=True,
+        rch_required_step_names=("Run unit tests",),
+        rch_fallback_phrase="falling back to local",
         failure_taxonomy=("unit_assertion_failure",),
         max_failures=0,
         required_artifacts_min=1,
     )
-    lane_non_rch = evaluate_lane(non_rch_lane, workflow_pass, jobs_pass, steps_pass)
+    lane_non_rch = evaluate_lane(non_rch_lane, workflow_pass, jobs_pass, steps_pass, step_runs_pass)
     if lane_non_rch["status"] != "fail":
         raise AssertionError("expected fail lane status when require_rch is true but replay command is non-rch")
     if "replay:rch_prefix" not in lane_non_rch["missing_contracts"]:
         raise AssertionError("expected replay:rch_prefix contract failure")
+
+    workflow_step_fail = """
+jobs:
+  test:
+    steps:
+      - name: Run unit tests
+        run: cargo test --lib --all-features
+"""
+    jobs_step, steps_step, step_runs_step = collect_workflow_contracts(workflow_step_fail)
+    lane_step_fail = evaluate_lane(lanes[0], workflow_step_fail, jobs_step, steps_step, step_runs_step)
+    if lane_step_fail["status"] != "fail":
+        raise AssertionError("expected fail lane status when required step lacks rch/fallback")
+    if "step_rch:Run unit tests" not in lane_step_fail["missing_contracts"]:
+        raise AssertionError("expected step_rch failure for required step")
+    if "step_fallback:Run unit tests" not in lane_step_fail["missing_contracts"]:
+        raise AssertionError("expected step_fallback failure for required step")
+
+    artifact_threshold_lane = LanePolicy(
+        lane_id="artifact-threshold",
+        title="Artifact threshold lane",
+        owner="runtime-core",
+        required_job_ids=("test",),
+        required_step_names=("Run unit tests",),
+        required_artifact_names=(),
+        replay_command="rch exec -- cargo test --lib --all-features",
+        require_rch=True,
+        rch_required_step_names=("Run unit tests",),
+        rch_fallback_phrase="falling back to local",
+        failure_taxonomy=("artifact_contract_failure",),
+        max_failures=0,
+        required_artifacts_min=1,
+    )
+    artifact_threshold_report = evaluate_lane(
+        artifact_threshold_lane,
+        workflow_pass,
+        jobs_pass,
+        steps_pass,
+        step_runs_pass,
+    )
+    if artifact_threshold_report["status"] != "fail":
+        raise AssertionError("expected fail lane status when artifact threshold is unmet")
+    if not any(
+        item.startswith("threshold:required_artifacts_min")
+        for item in artifact_threshold_report["missing_contracts"]
+    ):
+        raise AssertionError("expected required_artifacts_min threshold failure")
 
     print("CI matrix policy self-test passed")
     return 0
@@ -321,9 +475,11 @@ def main() -> int:
     workflow_path = args.workflow or Path(require_str(policy.get("workflow_path"), "workflow_path"))
     workflow_text = workflow_path.read_text(encoding="utf-8")
     workflow_sha256 = sha256_text(workflow_text)
-    job_ids, step_names = collect_workflow_contracts(workflow_text)
+    job_ids, step_names, step_run_blocks = collect_workflow_contracts(workflow_text)
 
-    lane_reports = [evaluate_lane(lane, workflow_text, job_ids, step_names) for lane in lanes]
+    lane_reports = [
+        evaluate_lane(lane, workflow_text, job_ids, step_names, step_run_blocks) for lane in lanes
+    ]
     failing_lane_ids = [lane["lane_id"] for lane in lane_reports if lane["status"] != "pass"]
     overall_status = "pass" if not failing_lane_ids else "fail"
     rch_required_lane_count = sum(1 for lane in lane_reports if lane.get("require_rch") is True)
@@ -332,6 +488,16 @@ def main() -> int:
         for lane in lane_reports
         if lane.get("require_rch") is True and lane.get("rch_compliant") is not True
     ]
+    rch_noncompliant_step_refs = sorted(
+        f"{lane['lane_id']}::{step_name}"
+        for lane in lane_reports
+        for step_name in lane.get("rch_noncompliant_step_names", [])
+    )
+    rch_missing_fallback_step_refs = sorted(
+        f"{lane['lane_id']}::{step_name}"
+        for lane in lane_reports
+        for step_name in lane.get("rch_missing_fallback_step_names", [])
+    )
 
     summary_path = args.summary_output if str(args.summary_output) else default_summary_path
     events_path = args.events_output if str(args.events_output) else default_events_path
@@ -350,6 +516,10 @@ def main() -> int:
         "rch_required_lane_count": rch_required_lane_count,
         "rch_noncompliant_lane_count": len(rch_noncompliant_lane_ids),
         "rch_noncompliant_lane_ids": rch_noncompliant_lane_ids,
+        "rch_noncompliant_step_count": len(rch_noncompliant_step_refs),
+        "rch_noncompliant_step_refs": rch_noncompliant_step_refs,
+        "rch_missing_fallback_step_count": len(rch_missing_fallback_step_refs),
+        "rch_missing_fallback_step_refs": rch_missing_fallback_step_refs,
         "lanes": lane_reports,
     }
 

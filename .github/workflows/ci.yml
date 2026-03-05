@@ -341,10 +341,26 @@ jobs:
           retention-days: 30
 
       - name: Clippy lints
-        run: cargo clippy --all-targets --all-features -- -D warnings
+        run: |
+          set -euo pipefail
+          RCH_BIN="${RCH_BIN:-$HOME/.local/bin/rch}"
+          if [[ -x "$RCH_BIN" ]]; then
+            "$RCH_BIN" exec -- cargo clippy --all-targets --all-features -- -D warnings
+          else
+            echo "rch unavailable; falling back to local cargo clippy --all-targets --all-features -- -D warnings"
+            cargo clippy --all-targets --all-features -- -D warnings
+          fi
 
       - name: Check compilation
-        run: cargo check --all-targets --all-features
+        run: |
+          set -euo pipefail
+          RCH_BIN="${RCH_BIN:-$HOME/.local/bin/rch}"
+          if [[ -x "$RCH_BIN" ]]; then
+            "$RCH_BIN" exec -- cargo check --all-targets --all-features
+          else
+            echo "rch unavailable; falling back to local cargo check --all-targets --all-features"
+            cargo check --all-targets --all-features
+          fi
 
   lean-smoke:
     name: Lean Smoke Gate (PR)
