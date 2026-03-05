@@ -188,7 +188,7 @@ fn build_decode_received(
 }
 
 use asupersync::raptorq::test_log_schema::{
-    UNIT_LOG_SCHEMA_VERSION, UnitDecodeStats, UnitLogEntry,
+    UnitDecodeStats, UnitLogEntry, UNIT_LOG_SCHEMA_VERSION,
 };
 
 fn replay_log_context(replay_ref: &str, scenario_id: &str, seed: u64, outcome: &str) -> String {
@@ -1422,6 +1422,7 @@ fn assert_percentiles_monotonic(block: &serde_json::Value, label: &str) {
 
 /// Validate Track-E p95/p99 artifact schema, mode/op coverage, and percentile ordering.
 #[test]
+#[allow(clippy::too_many_lines)]
 fn e3_track_e_gf256_p95p99_artifact_schema_and_coverage() {
     let artifact_json = include_str!("../artifacts/raptorq_track_e_gf256_p95p99_v1.json");
     let artifact: serde_json::Value =
@@ -1441,6 +1442,11 @@ fn e3_track_e_gf256_p95p99_artifact_schema_and_coverage() {
         artifact["source_artifacts"].as_array().map(Vec::len),
         Some(1),
         "Track-E p95/p99 artifact must cite exactly one source artifact"
+    );
+    assert_eq!(
+        artifact["source_logs"].as_array().map(Vec::len),
+        Some(3),
+        "Track-E p95/p99 artifact must record baseline/auto/rollback log pointers"
     );
     assert_eq!(
         artifact["source_artifacts"][0].as_str(),
@@ -1574,19 +1580,28 @@ fn e3_track_e_gf256_p95p99_artifact_schema_and_coverage() {
             command.contains("cargo bench --bench raptorq_benchmark"),
             "Track-E p95/p99 command must run raptorq_benchmark: {command}"
         );
+        assert!(
+            command.contains("CARGO_TARGET_DIR="),
+            "Track-E p95/p99 command must pin CARGO_TARGET_DIR for reproducibility: {command}"
+        );
+        assert!(
+            command.contains("--sample-size 10"),
+            "Track-E p95/p99 command must keep the v1 sample-size contract: {command}"
+        );
     }
 }
 
 /// Validate high-confidence Track-E artifact linkage, sampling contract, and
 /// mode/op comparability against the base p95/p99 artifact.
 #[test]
+#[allow(clippy::too_many_lines)]
 fn e3_track_e_gf256_p95p99_highconf_contract_and_linkage() {
     let highconf_json = include_str!("../artifacts/raptorq_track_e_gf256_p95p99_highconf_v1.json");
     let highconf: serde_json::Value = serde_json::from_str(highconf_json)
         .expect("Track-E high-confidence p95/p99 artifact must be valid JSON");
     let base_json = include_str!("../artifacts/raptorq_track_e_gf256_p95p99_v1.json");
-    let base: serde_json::Value = serde_json::from_str(base_json)
-        .expect("Track-E base p95/p99 artifact must be valid JSON");
+    let base: serde_json::Value =
+        serde_json::from_str(base_json).expect("Track-E base p95/p99 artifact must be valid JSON");
 
     assert_eq!(
         highconf["schema_version"].as_str(),
@@ -1604,6 +1619,11 @@ fn e3_track_e_gf256_p95p99_highconf_contract_and_linkage() {
         "Track-E high-confidence artifact must cite exactly one source artifact"
     );
     assert_eq!(
+        highconf["source_logs"].as_array().map(Vec::len),
+        Some(3),
+        "Track-E high-confidence artifact must record baseline/auto/rollback log pointers"
+    );
+    assert_eq!(
         highconf["source_artifacts"][0].as_str(),
         Some("artifacts/raptorq_track_e_gf256_p95p99_v1.json"),
         "high-confidence artifact must point to the base p95/p99 artifact"
@@ -1618,7 +1638,9 @@ fn e3_track_e_gf256_p95p99_highconf_contract_and_linkage() {
         "high-confidence artifact must use larger sample_size (>=30)"
     );
     assert_eq!(
-        highconf["methodology"]["scenario_scope"].as_array().map(Vec::len),
+        highconf["methodology"]["scenario_scope"]
+            .as_array()
+            .map(Vec::len),
         Some(1),
         "high-confidence artifact should scope to one closure-critical scenario"
     );
@@ -1671,7 +1693,9 @@ fn e3_track_e_gf256_p95p99_highconf_contract_and_linkage() {
         .as_array()
         .expect("highconf per_mode_operation_percentiles must be an array")
     {
-        let mode = entry["mode"].as_str().expect("highconf op entry missing mode");
+        let mode = entry["mode"]
+            .as_str()
+            .expect("highconf op entry missing mode");
         let operation = entry["operation"]
             .as_str()
             .expect("highconf op entry missing operation");
@@ -1709,6 +1733,10 @@ fn e3_track_e_gf256_p95p99_highconf_contract_and_linkage() {
         assert!(
             command.contains("--sample-size 60"),
             "high-confidence command must preserve sample-size 60 contract: {command}"
+        );
+        assert!(
+            command.contains("CARGO_TARGET_DIR="),
+            "high-confidence command must pin CARGO_TARGET_DIR for reproducibility: {command}"
         );
     }
 

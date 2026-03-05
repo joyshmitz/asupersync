@@ -345,6 +345,8 @@ pub enum DualKernelDecisionReason {
     ForcedSequentialMode,
     /// Policy mode forced fused behavior.
     ForcedFusedMode,
+    /// Profile explicitly disables auto-fused window selection for this path.
+    WindowDisabledByProfile,
     /// Policy window is misconfigured (`min_total > max_total`).
     InvalidWindowConfiguration,
     /// Total lane bytes are below configured minimum.
@@ -366,6 +368,7 @@ impl DualKernelDecisionReason {
         match self {
             Self::ForcedSequentialMode => "forced-sequential-mode",
             Self::ForcedFusedMode => "forced-fused-mode",
+            Self::WindowDisabledByProfile => "window-disabled-by-profile",
             Self::InvalidWindowConfiguration => "invalid-window-configuration",
             Self::TotalBelowWindow => "total-below-window",
             Self::TotalAboveWindow => "total-above-window",
@@ -1150,7 +1153,9 @@ fn window_gate_reason(
     min_total: usize,
     max_total: usize,
 ) -> Option<DualKernelDecisionReason> {
-    if min_total > max_total {
+    if min_total == usize::MAX && max_total == 0 {
+        Some(DualKernelDecisionReason::WindowDisabledByProfile)
+    } else if min_total > max_total {
         Some(DualKernelDecisionReason::InvalidWindowConfiguration)
     } else if total < min_total {
         Some(DualKernelDecisionReason::TotalBelowWindow)
@@ -3453,11 +3458,76 @@ mod tests {
             DualKernelDecisionReason::ForcedFusedMode,
             "{context}"
         );
+    }
+
+    #[test]
+    fn dual_policy_window_reason_classification_and_strings_are_stable() {
+        let seed = 0u64;
+        let replay_ref = "replay:rq-u-gf256-dual-policy-v4";
+        let context = failure_context(
+            "RQ-U-GF256-DUAL-POLICY",
+            seed,
+            "dual_policy_window_reason_classification_and_strings_are_stable",
+            replay_ref,
+        );
+        assert_eq!(
+            window_gate_reason(8192, usize::MAX, 0),
+            Some(DualKernelDecisionReason::WindowDisabledByProfile),
+            "{context}"
+        );
+        assert_eq!(
+            window_gate_reason(8192, 16384, 1024),
+            Some(DualKernelDecisionReason::InvalidWindowConfiguration),
+            "{context}"
+        );
+        assert_eq!(
+            DualKernelDecisionReason::WindowDisabledByProfile.as_str(),
+            "window-disabled-by-profile",
+            "{context}"
+        );
 
         assert_eq!(
             DualKernelDecisionReason::LaneBelowMinFloor.as_str(),
             "lane-below-min-floor",
             "{context}"
+        );
+    }
+
+    #[test]
+    fn disabled_windows_report_explicit_profile_reason() {
+        let metadata = profile_pack_metadata(Gf256ProfilePackId::ScalarConservativeV1);
+        let policy = DualKernelPolicy {
+            profile_pack: metadata.profile_pack,
+            architecture_class: metadata.architecture_class,
+            tuning_corpus_id: metadata.tuning_corpus_id,
+            selected_tuning_candidate_id: metadata.selected_tuning_candidate_id,
+            rejected_tuning_candidate_ids: metadata.rejected_tuning_candidate_ids,
+            fallback_reason: None,
+            rejected_candidates: REJECTED_PROFILE_GENERIC_SCALAR,
+            replay_pointer: metadata.replay_pointer,
+            command_bundle: metadata.command_bundle,
+            mode: DualKernelOverride::Auto,
+            override_mask: DualKernelOverrideMask::empty(),
+            mul_min_total: metadata.mul_min_total,
+            mul_max_total: metadata.mul_max_total,
+            addmul_min_total: metadata.addmul_min_total,
+            addmul_max_total: metadata.addmul_max_total,
+            addmul_min_lane: metadata.addmul_min_lane,
+            max_lane_ratio: metadata.max_lane_ratio,
+        };
+
+        let mul = dual_mul_decision_detail_with_policy(&policy, 4096, 4096);
+        assert_eq!(mul.decision, DualKernelDecision::Sequential);
+        assert_eq!(
+            mul.reason,
+            DualKernelDecisionReason::WindowDisabledByProfile
+        );
+
+        let addmul = dual_addmul_decision_detail_with_policy(&policy, 4096, 4096);
+        assert_eq!(addmul.decision, DualKernelDecision::Sequential);
+        assert_eq!(
+            addmul.reason,
+            DualKernelDecisionReason::WindowDisabledByProfile
         );
     }
 
