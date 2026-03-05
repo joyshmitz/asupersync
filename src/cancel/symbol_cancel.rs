@@ -839,6 +839,9 @@ pub trait CleanupHandler: Send + Sync {
     /// Called to clean up symbols for a cancelled object.
     ///
     /// Returns the number of symbols cleaned up.
+    ///
+    /// Return `Err(...)` if the batch could not be completed. The coordinator
+    /// preserves the pending set for a later retry on the error path.
     #[allow(clippy::result_large_err)]
     fn cleanup(&self, object_id: ObjectId, symbols: Vec<Symbol>) -> crate::error::Result<usize>;
 
@@ -847,6 +850,7 @@ pub trait CleanupHandler: Send + Sync {
 }
 
 /// A set of symbols pending cleanup.
+#[derive(Clone)]
 struct PendingSymbolSet {
     /// The object ID.
     object_id: ObjectId,
@@ -869,8 +873,12 @@ pub struct CleanupResult {
     pub bytes_freed: usize,
     /// Whether cleanup completed within budget.
     pub within_budget: bool,
+    /// Whether cleanup fully completed and no retry state was retained.
+    pub completed: bool,
     /// Handlers that ran.
     pub handlers_run: Vec<String>,
+    /// Errors returned by cleanup handlers.
+    pub handler_errors: Vec<String>,
 }
 
 /// Statistics about pending cleanups.
@@ -954,14 +962,18 @@ impl CleanupCoordinator {
     }
 
     /// Triggers cleanup for a cancelled object.
-    #[allow(unused_assignments)] // polls_used tracking for future multi-handler support
     pub fn cleanup(&self, object_id: ObjectId, budget: Option<Budget>) -> CleanupResult {
         let budget = budget.unwrap_or(self.default_budget);
-        let mut symbols_cleaned = 0;
-        let mut bytes_freed = 0;
-        let mut handlers_run = Vec::new();
-        let mut polls_used: u32 = 0;
-        let mut within_budget = true;
+        let mut result = CleanupResult {
+            object_id,
+            symbols_cleaned: 0,
+            bytes_freed: 0,
+            within_budget: true,
+            completed: true,
+            handlers_run: Vec::new(),
+            handler_errors: Vec::new(),
+        };
+
         // Remove the handler up front so callback execution never happens
         // while holding the handlers lock (avoids re-entrant deadlocks).
         let handler = self.handlers.write().remove(&object_id);
@@ -974,28 +986,47 @@ impl CleanupCoordinator {
         };
 
         if let Some(set) = pending_set {
-            symbols_cleaned = set.symbols.len();
-            bytes_freed = set.total_bytes;
+            let symbol_count = set.symbols.len();
+            let total_bytes = set.total_bytes;
 
-            // Run registered handler
+            // Run registered handler.
             if let Some(handler) = handler {
-                if polls_used < budget.poll_quota {
-                    polls_used += 1;
-                    handlers_run.push(handler.name().to_string());
-                    let _ = handler.cleanup(object_id, set.symbols);
+                if budget.poll_quota == 0 {
+                    // No budget to even attempt the handler; keep the pending state
+                    // and handler for an explicit retry.
+                    self.completed.write().remove(&object_id);
+                    self.handlers.write().insert(object_id, handler);
+                    self.pending.write().insert(object_id, set);
+                    result.within_budget = false;
+                    result.completed = false;
                 } else {
-                    within_budget = false;
+                    let handler_name = handler.name().to_string();
+                    let retry_set = set.clone();
+
+                    result.handlers_run.push(handler_name.clone());
+                    match handler.cleanup(object_id, set.symbols) {
+                        Ok(_) => {
+                            result.symbols_cleaned = symbol_count;
+                            result.bytes_freed = total_bytes;
+                        }
+                        Err(err) => {
+                            // The cleanup attempt failed; retain the pending set and
+                            // handler so the caller can retry deterministically.
+                            self.completed.write().remove(&object_id);
+                            self.handlers.write().insert(object_id, handler);
+                            self.pending.write().insert(object_id, retry_set);
+                            result.completed = false;
+                            result.handler_errors.push(format!("{handler_name}: {err}"));
+                        }
+                    }
                 }
+            } else {
+                result.symbols_cleaned = symbol_count;
+                result.bytes_freed = total_bytes;
             }
         }
 
-        CleanupResult {
-            object_id,
-            symbols_cleaned,
-            bytes_freed,
-            within_budget,
-            handlers_run,
-        }
+        result
     }
 
     /// Returns statistics about pending cleanups.
@@ -1408,6 +1439,160 @@ mod tests {
         let result = coordinator.cleanup(object_id, None);
         assert!(called.load(Ordering::SeqCst));
         assert_eq!(result.handlers_run, vec!["test"]);
+        assert!(result.completed);
+        assert!(result.handler_errors.is_empty());
+    }
+
+    #[test]
+    fn test_cleanup_handler_error_preserves_retry_state() {
+        struct FailingHandler;
+
+        impl CleanupHandler for FailingHandler {
+            fn cleanup(
+                &self,
+                _object_id: ObjectId,
+                _symbols: Vec<Symbol>,
+            ) -> crate::error::Result<usize> {
+                Err(crate::error::Error::new(crate::error::ErrorKind::Internal)
+                    .with_message("cleanup failed"))
+            }
+
+            fn name(&self) -> &'static str {
+                "failing"
+            }
+        }
+
+        let coordinator = CleanupCoordinator::new();
+        let object_id = ObjectId::new_for_test(7);
+        let now = Time::from_millis(100);
+
+        coordinator.register_handler(object_id, FailingHandler);
+        coordinator.register_pending(object_id, Symbol::new_for_test(7, 0, 0, &[1, 2, 3]), now);
+
+        let result = coordinator.cleanup(object_id, None);
+        assert!(
+            !result.completed,
+            "failed handler must not report completion"
+        );
+        assert_eq!(
+            result.symbols_cleaned, 0,
+            "failed cleanup must not report cleaned symbols"
+        );
+        assert_eq!(
+            result.bytes_freed, 0,
+            "failed cleanup must not report freed bytes"
+        );
+        assert_eq!(result.handlers_run, vec!["failing"]);
+        assert_eq!(result.handler_errors.len(), 1);
+        assert!(
+            result.handler_errors[0].contains("cleanup failed"),
+            "{}",
+            result.handler_errors[0]
+        );
+
+        let stats = coordinator.stats();
+        assert_eq!(
+            stats.pending_objects, 1,
+            "failed cleanup must remain retryable"
+        );
+        assert_eq!(stats.pending_symbols, 1);
+        assert_eq!(stats.pending_bytes, 3);
+    }
+
+    #[test]
+    fn test_cleanup_handler_error_reopens_object_for_new_pending_symbols() {
+        struct FailingHandler;
+
+        impl CleanupHandler for FailingHandler {
+            fn cleanup(
+                &self,
+                _object_id: ObjectId,
+                _symbols: Vec<Symbol>,
+            ) -> crate::error::Result<usize> {
+                Err(crate::error::Error::new(crate::error::ErrorKind::Internal)
+                    .with_message("cleanup failed"))
+            }
+
+            fn name(&self) -> &'static str {
+                "failing"
+            }
+        }
+
+        let coordinator = CleanupCoordinator::new();
+        let object_id = ObjectId::new_for_test(8);
+        let now = Time::from_millis(100);
+
+        coordinator.register_handler(object_id, FailingHandler);
+        coordinator.register_pending(object_id, Symbol::new_for_test(8, 0, 0, &[1, 2, 3]), now);
+
+        let result = coordinator.cleanup(object_id, None);
+        assert!(
+            !result.completed,
+            "failed cleanup must leave object retryable"
+        );
+
+        coordinator.register_pending(
+            object_id,
+            Symbol::new_for_test(8, 0, 1, &[4, 5]),
+            Time::from_millis(101),
+        );
+
+        let stats = coordinator.stats();
+        assert_eq!(
+            stats.pending_symbols, 2,
+            "retryable cleanup must continue accepting pending symbols"
+        );
+        assert_eq!(stats.pending_bytes, 5);
+    }
+
+    #[test]
+    fn test_cleanup_budget_exhaustion_reopens_object_for_new_pending_symbols() {
+        struct RecordingHandler;
+
+        impl CleanupHandler for RecordingHandler {
+            fn cleanup(
+                &self,
+                _object_id: ObjectId,
+                _symbols: Vec<Symbol>,
+            ) -> crate::error::Result<usize> {
+                Ok(1)
+            }
+
+            fn name(&self) -> &'static str {
+                "recording"
+            }
+        }
+
+        let coordinator = CleanupCoordinator::new();
+        let object_id = ObjectId::new_for_test(9);
+        let now = Time::from_millis(100);
+
+        coordinator.register_handler(object_id, RecordingHandler);
+        coordinator.register_pending(object_id, Symbol::new_for_test(9, 0, 0, &[1]), now);
+
+        let budget = Budget::new().with_poll_quota(0);
+        let result = coordinator.cleanup(object_id, Some(budget));
+        assert!(
+            !result.completed,
+            "budget-exhausted cleanup must leave object retryable"
+        );
+        assert!(
+            !result.within_budget,
+            "zero-poll budget should report budget exhaustion"
+        );
+
+        coordinator.register_pending(
+            object_id,
+            Symbol::new_for_test(9, 0, 1, &[2, 3]),
+            Time::from_millis(101),
+        );
+
+        let stats = coordinator.stats();
+        assert_eq!(
+            stats.pending_symbols, 2,
+            "budget-exhausted cleanup must continue accepting pending symbols"
+        );
+        assert_eq!(stats.pending_bytes, 3);
     }
 
     #[test]
@@ -1762,11 +1947,14 @@ mod tests {
             symbols_cleaned: 5,
             bytes_freed: 1024,
             within_budget: true,
+            completed: true,
             handlers_run: vec!["h1".to_string()],
+            handler_errors: Vec::new(),
         };
         let dbg = format!("{r:?}");
         assert!(dbg.contains("CleanupResult"), "{dbg}");
         let cloned = r;
         assert_eq!(cloned.symbols_cleaned, 5);
+        assert!(cloned.completed);
     }
 }
