@@ -349,36 +349,26 @@ impl Reactor for EpollReactor {
 
         // Remove from epoll. If the fd was already closed or removed by the kernel,
         // treat it as already deregistered from reactor bookkeeping perspective.
-        match self.poller.delete(borrowed_fd) {
-            Ok(()) => {
-                if let Some(info) = state.tokens.remove(&token) {
-                    state.fds.remove(&info.raw_fd);
-                }
-                drop(state);
-                Ok(())
-            }
+        let result = match self.poller.delete(borrowed_fd) {
+            Ok(()) => Ok(()),
             Err(err) => match err.raw_os_error() {
-                Some(libc::ENOENT) => {
-                    if let Some(info) = state.tokens.remove(&token) {
-                        state.fds.remove(&info.raw_fd);
-                    }
-                    drop(state);
-                    Ok(())
-                }
+                Some(libc::ENOENT) => Ok(()),
                 // Treat EBADF as benign only when the target fd itself is closed.
-                Some(libc::EBADF) if !fd_still_valid => {
-                    if let Some(info) = state.tokens.remove(&token) {
-                        state.fds.remove(&info.raw_fd);
-                    }
-                    drop(state);
-                    Ok(())
-                }
-                _ => {
-                    drop(state);
-                    Err(err)
-                }
+                Some(libc::EBADF) if !fd_still_valid => Ok(()),
+                _ => Err(err),
             },
+        };
+
+        // Always clean up bookkeeping so the FD number can be reused.
+        // If the kernel epoll state is out of sync, leaking the map entry
+        // is worse because it permanently blocks any future registration
+        // of this OS-reused FD number.
+        if let Some(info) = state.tokens.remove(&token) {
+            state.fds.remove(&info.raw_fd);
         }
+        drop(state);
+
+        result
     }
 
     fn poll(&self, events: &mut Events, timeout: Option<Duration>) -> io::Result<usize> {

@@ -455,12 +455,15 @@ impl<'a> PollingGuard<'a> {
 
 impl Drop for PollingGuard<'_> {
     fn drop(&mut self) {
-        if self.clear_poll_flag {
-            self.handle.is_polling.store(false, Ordering::Release);
-        }
+        // Restore events BEFORE clearing is_polling, so that a concurrent
+        // thread cannot race in via the is_polling CAS and observe an empty
+        // events buffer while ours is still held in the guard.
         if let Some(events) = self.events.take() {
             let mut driver = self.handle.inner.lock();
             driver.restore_events_only(events);
+        }
+        if self.clear_poll_flag {
+            self.handle.is_polling.store(false, Ordering::Release);
         }
     }
 }

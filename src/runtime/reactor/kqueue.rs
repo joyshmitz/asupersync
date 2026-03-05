@@ -244,23 +244,19 @@ impl Reactor for KqueueReactor {
         let fd_still_valid = unsafe { libc::fcntl(info.raw_fd, libc::F_GETFD) } != -1;
 
         // Remove from kqueue
-        match self.poller.delete(&borrowed_fd) {
-            Ok(()) => {
-                regs.remove(&token);
-                Ok(())
-            }
+        let result = match self.poller.delete(&borrowed_fd) {
+            Ok(()) => Ok(()),
             Err(err) => match err.raw_os_error() {
-                Some(libc::ENOENT) => {
-                    regs.remove(&token);
-                    Ok(())
-                }
-                Some(libc::EBADF) if !fd_still_valid => {
-                    regs.remove(&token);
-                    Ok(())
-                }
+                Some(libc::ENOENT) => Ok(()),
+                Some(libc::EBADF) if !fd_still_valid => Ok(()),
                 _ => Err(err),
             },
-        }
+        };
+
+        // Always clean up bookkeeping so the FD number can be reused.
+        regs.remove(&token);
+
+        result
     }
 
     fn poll(&self, events: &mut Events, timeout: Option<Duration>) -> io::Result<usize> {

@@ -754,7 +754,6 @@ fn blocking_worker_loop(inner: &BlockingPoolInner) -> bool {
             // Always signal completion so waiters are unblocked, even
             // if the task panicked.
             task.completion.signal_done();
-            continue;
         }
 
         // No work available, check shutdown
@@ -790,13 +789,36 @@ fn blocking_worker_loop(inner: &BlockingPoolInner) -> bool {
                 // We claimed the retirement slot, meaning active_threads was decremented.
                 // Re-check the queue to ensure we didn't miss a concurrent spawn that
                 // observed our pre-retirement active_threads count and decided not to spawn.
-                if !inner.queue.is_empty() {
-                    // A task was enqueued while we were retiring. Undo the retirement.
-                    inner.active_threads.fetch_add(1, Ordering::Relaxed);
-                    continue;
+                if inner.queue.is_empty() {
+                    // Retire this thread; active_threads was already decremented atomically.
+                    return true;
                 }
-                // Retire this thread; active_threads was already decremented atomically.
-                return true;
+
+                // A task was enqueued while we were retiring. Undo the retirement.
+                {
+                    let mut current = inner.active_threads.load(Ordering::Relaxed);
+                    let mut unretired = false;
+                    loop {
+                        if current >= inner.max_threads {
+                            break;
+                        }
+                        match inner.active_threads.compare_exchange_weak(
+                            current,
+                            current + 1,
+                            Ordering::Relaxed,
+                            Ordering::Relaxed,
+                        ) {
+                            Ok(_) => {
+                                unretired = true;
+                                break;
+                            }
+                            Err(next) => current = next,
+                        }
+                    }
+                    if !unretired {
+                        return true;
+                    }
+                }
             }
         } else {
             {

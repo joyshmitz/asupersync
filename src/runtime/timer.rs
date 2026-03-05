@@ -21,7 +21,10 @@ impl Ord for TimerEntry {
             .deadline
             .cmp(&self.deadline)
             // Lower generation (earlier insertion) wins for equal deadlines.
-            .then_with(|| other.generation.cmp(&self.generation))
+            .then_with(|| {
+                let diff = other.generation.wrapping_sub(self.generation).cast_signed();
+                diff.cmp(&0)
+            })
     }
 }
 
