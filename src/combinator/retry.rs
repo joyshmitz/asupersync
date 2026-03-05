@@ -669,9 +669,10 @@ where
                                 Outcome::Err(e) => {
                                     let attempt = self.state.attempt;
                                     // Check predicate
-                                    if self.predicate.should_retry(&e, attempt)
-                                        && self.state.has_attempts_remaining()
-                                    {
+                                    // `attempt` is a plain `u32` counter and must be passed by
+                                    // value. Never dereference it.
+                                    let should_retry = self.predicate.should_retry(&e, attempt);
+                                    if should_retry && self.state.has_attempts_remaining() {
                                         // Retry
                                         self.inner = RetryInner::Idle;
                                         // Loop will handle Idle -> Sleeping/Polling
