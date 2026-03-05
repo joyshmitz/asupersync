@@ -1551,6 +1551,10 @@ impl MySqlConnection {
                 _ => match Self::parse_data_row_or_terminator(&data, &columns, deprecate_eof)? {
                     Some(values) => {
                         if rows.len() >= max_rows {
+                            // The server is still sending row packets that we
+                            // cannot drain synchronously. Mark the connection
+                            // as closed to prevent protocol desync on reuse.
+                            self.inner.closed = true;
                             return Err(MySqlError::Protocol(format!(
                                 "result set exceeds maximum row limit ({max_rows})"
                             )));

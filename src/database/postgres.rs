@@ -2289,6 +2289,10 @@ impl PgConnection {
             return Outcome::Err(PgError::ConnectionClosed);
         }
 
+        if let Err(e) = self.clear_orphaned_transaction().await {
+            return Outcome::Err(e);
+        }
+
         let param_oids: Vec<u32> = params.iter().map(|p| p.type_oid()).collect();
         let parse = match build_parse_msg("", sql, &param_oids) {
             Ok(p) => p,
@@ -2364,6 +2368,10 @@ impl PgConnection {
             return Outcome::Err(PgError::ConnectionClosed);
         }
 
+        if let Err(e) = self.clear_orphaned_transaction().await {
+            return Outcome::Err(e);
+        }
+
         let param_oids: Vec<u32> = params.iter().map(|p| p.type_oid()).collect();
         let parse = match build_parse_msg("", sql, &param_oids) {
             Ok(p) => p,
@@ -2413,6 +2421,10 @@ impl PgConnection {
         }
         if self.inner.closed {
             return Outcome::Err(PgError::ConnectionClosed);
+        }
+
+        if let Err(e) = self.clear_orphaned_transaction().await {
+            return Outcome::Err(e);
         }
 
         let stmt_name = format!("__asupersync_s{}", self.inner.next_stmt_id);
@@ -2505,6 +2517,10 @@ impl PgConnection {
             return Outcome::Err(PgError::ConnectionClosed);
         }
 
+        if let Err(e) = self.clear_orphaned_transaction().await {
+            return Outcome::Err(e);
+        }
+
         let bind = match build_bind_msg("", &stmt.name, params, Format::Text) {
             Ok(b) => b,
             Err(e) => return Outcome::Err(e),
@@ -2544,6 +2560,10 @@ impl PgConnection {
             return Outcome::Err(PgError::ConnectionClosed);
         }
 
+        if let Err(e) = self.clear_orphaned_transaction().await {
+            return Outcome::Err(e);
+        }
+
         let bind = match build_bind_msg("", &stmt.name, params, Format::Text) {
             Ok(b) => b,
             Err(e) => return Outcome::Err(e),
@@ -2574,6 +2594,10 @@ impl PgConnection {
         }
         if self.inner.closed {
             return Outcome::Err(PgError::ConnectionClosed);
+        }
+
+        if let Err(e) = self.clear_orphaned_transaction().await {
+            return Outcome::Err(e);
         }
 
         let close = build_close_msg(b'S', &stmt.name);
