@@ -641,12 +641,10 @@ impl Http1Client {
                     headers,
                 };
 
-                // If no body, drop any already-buffered bytes.
-                let body_buf = if matches!(kind, ClientBodyKind::Empty) {
-                    BytesMut::new()
-                } else {
-                    read_buf
-                };
+                // Preserve any already-buffered bytes even for empty-body
+                // responses. On protocol upgrades (101), these bytes belong to
+                // the upgraded stream.
+                let body_buf = read_buf;
 
                 let body = ClientIncomingBody::new(io, kind, body_buf);
                 return Ok(ClientStreamingResponse { head, body });
@@ -751,12 +749,29 @@ impl<T> ClientIncomingBody<T> {
         }
     }
 
+    /// Consume the body and return the underlying transport plus prefetched bytes.
+    ///
+    /// Prefetched bytes are bytes already read while parsing response headers.
+    /// This is important for protocol upgrades (for example `101 Switching
+    /// Protocols`) where upgraded-protocol bytes can arrive in the same read
+    /// as the terminal HTTP response head.
+    ///
+    /// Callers should only use this once the body has been fully drained.
+    #[must_use]
+    pub fn into_inner_with_buffer(self) -> (T, BytesMut) {
+        (self.io, self.buffer)
+    }
+
     /// Consume the body and return the underlying transport.
+    ///
+    /// This drops any prefetched bytes. Use
+    /// [`into_inner_with_buffer`](Self::into_inner_with_buffer) when callers
+    /// need to preserve bytes that were read ahead.
     ///
     /// Callers should only use this once the body has been fully drained.
     #[must_use]
     pub fn into_inner(self) -> T {
-        self.io
+        self.into_inner_with_buffer().0
     }
 
     fn try_decode_frame(&mut self) -> Result<Option<Frame<BytesCursor>>, HttpError> {
@@ -1255,6 +1270,38 @@ mod tests {
             }
         }
         assert_eq!(collected, b"hello");
+    }
+
+    #[test]
+    fn request_streaming_upgrade_preserves_prefetched_bytes() {
+        let response_bytes =
+            b"HTTP/1.1 101 Switching Protocols\r\nConnection: Upgrade\r\nUpgrade: websocket\r\n\r\n\x81\x00";
+        let io = TestIo::new(response_bytes);
+
+        let req = Request {
+            method: Method::Get,
+            uri: "/ws".to_string(),
+            version: Version::Http11,
+            headers: vec![
+                ("Host".to_string(), "example.com".to_string()),
+                ("Connection".to_string(), "Upgrade".to_string()),
+                ("Upgrade".to_string(), "websocket".to_string()),
+            ],
+            body: Vec::new(),
+            trailers: Vec::new(),
+            peer_addr: None,
+        };
+
+        let resp = block_on(Http1Client::request_streaming(io, req)).expect("streaming resp");
+        assert_eq!(resp.head.status, 101);
+
+        let (mut io, prefetched) = resp.body.into_inner_with_buffer();
+        assert_eq!(prefetched.as_ref(), b"\x81\x00");
+
+        // Bytes were consumed into the prefetched buffer (not left unread in the transport).
+        let mut tail = [0u8; 8];
+        let n = std::io::Read::read(&mut io.read, &mut tail).expect("cursor read");
+        assert_eq!(n, 0);
     }
 
     #[test]
