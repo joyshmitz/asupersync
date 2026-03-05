@@ -315,8 +315,9 @@ where
                             { self.shared.lock().close_handshake.receive_close(&frame)? };
 
                         if let Some(response_frame) = response {
-                            self.send_frame_internal(response_frame).await?;
+                            let send_result = self.send_frame_internal(response_frame).await;
                             self.shared.lock().close_handshake.mark_response_sent();
+                            send_result?;
                         }
 
                         let reason = CloseReason::parse(&frame.payload).ok();
@@ -581,6 +582,7 @@ mod tests {
         read_data: Vec<u8>,
         read_pos: usize,
         written: Vec<u8>,
+        fail_writes: bool,
     }
 
     impl TestIo {
@@ -589,7 +591,13 @@ mod tests {
                 read_data,
                 read_pos: 0,
                 written: Vec::new(),
+                fail_writes: false,
             }
+        }
+
+        fn with_write_failure(mut self) -> Self {
+            self.fail_writes = true;
+            self
         }
     }
 
@@ -637,6 +645,12 @@ mod tests {
             _cx: &mut std::task::Context<'_>,
             buf: &[u8],
         ) -> Poll<io::Result<usize>> {
+            if self.fail_writes {
+                return Poll::Ready(Err(io::Error::new(
+                    io::ErrorKind::BrokenPipe,
+                    "synthetic write failure",
+                )));
+            }
             self.written.extend_from_slice(buf);
             Poll::Ready(Ok(buf.len()))
         }
@@ -986,6 +1000,32 @@ mod tests {
             assert!(
                 matches!(err, WsError::Io(ref e) if e.kind() == io::ErrorKind::NotConnected),
                 "expected NotConnected after close initiation, got {err:?}"
+            );
+        });
+    }
+
+    #[test]
+    fn split_recv_marks_close_response_sent_even_if_send_fails() {
+        future::block_on(async {
+            let read_data = encode_server_frame(Frame::close(Some(1000), None));
+            let ws = WebSocket::from_upgraded(
+                TestIo::new(read_data).with_write_failure(),
+                WebSocketConfig::default(),
+            );
+            let (mut read, _write) = ws.split();
+            let cx = Cx::for_testing();
+
+            let err = read
+                .recv(&cx)
+                .await
+                .expect_err("close response write should fail");
+            assert!(
+                matches!(err, WsError::Io(ref e) if e.kind() == io::ErrorKind::BrokenPipe),
+                "expected synthetic broken-pipe write failure, got {err:?}"
+            );
+            assert!(
+                read.is_closed(),
+                "close handshake must transition to closed even when close response send fails"
             );
         });
     }

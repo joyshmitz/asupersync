@@ -367,8 +367,9 @@ where
                     Opcode::Close => {
                         // Handle close handshake
                         if let Some(response) = self.close_handshake.receive_close(&frame)? {
-                            self.send_frame(response).await?;
+                            let send_result = self.send_frame(response).await;
                             self.close_handshake.mark_response_sent();
+                            send_result?;
                         }
                         let reason = CloseReason::parse(&frame.payload).ok();
                         return Ok(Some(Message::Close(reason)));
@@ -603,23 +604,51 @@ mod tests {
     use std::task::Poll;
 
     struct TestIo {
+        read_data: Vec<u8>,
+        read_pos: usize,
         written: Vec<u8>,
+        fail_writes: bool,
     }
 
     impl TestIo {
         fn new() -> Self {
+            Self::with_read_data(Vec::new())
+        }
+
+        fn with_read_data(read_data: Vec<u8>) -> Self {
             Self {
+                read_data,
+                read_pos: 0,
                 written: Vec::new(),
+                fail_writes: false,
             }
         }
+
+        fn with_write_failure(mut self) -> Self {
+            self.fail_writes = true;
+            self
+        }
+    }
+
+    fn encode_client_frame(frame: Frame) -> Vec<u8> {
+        let mut codec = FrameCodec::client();
+        let mut out = BytesMut::new();
+        codec
+            .encode(frame, &mut out)
+            .expect("frame encoding should succeed");
+        out.to_vec()
     }
 
     impl AsyncRead for TestIo {
         fn poll_read(
-            self: Pin<&mut Self>,
+            mut self: Pin<&mut Self>,
             _cx: &mut std::task::Context<'_>,
-            _buf: &mut ReadBuf<'_>,
+            buf: &mut ReadBuf<'_>,
         ) -> Poll<io::Result<()>> {
+            let remaining = &self.read_data[self.read_pos..];
+            let to_read = remaining.len().min(buf.remaining());
+            buf.put_slice(&remaining[..to_read]);
+            self.read_pos += to_read;
             Poll::Ready(Ok(()))
         }
     }
@@ -630,6 +659,12 @@ mod tests {
             _cx: &mut std::task::Context<'_>,
             buf: &[u8],
         ) -> Poll<io::Result<usize>> {
+            if self.fail_writes {
+                return Poll::Ready(Err(io::Error::new(
+                    io::ErrorKind::BrokenPipe,
+                    "synthetic write failure",
+                )));
+            }
             self.written.extend_from_slice(buf);
             Poll::Ready(Ok(buf.len()))
         }
@@ -842,6 +877,34 @@ mod tests {
             assert!(
                 matches!(err, WsError::Io(ref e) if e.kind() == io::ErrorKind::NotConnected),
                 "expected NotConnected after close initiation, got {err:?}"
+            );
+        });
+    }
+
+    #[test]
+    fn recv_marks_close_response_sent_even_if_send_fails() {
+        future::block_on(async {
+            let accept = AcceptResponse {
+                accept_key: String::new(),
+                protocol: None,
+                extensions: Vec::new(),
+            };
+            let io = TestIo::with_read_data(encode_client_frame(Frame::close(Some(1000), None)))
+                .with_write_failure();
+            let mut ws = ServerWebSocket::from_upgraded(io, WebSocketConfig::default(), accept);
+            let cx = Cx::for_testing();
+
+            let err = ws
+                .recv(&cx)
+                .await
+                .expect_err("close response write should fail");
+            assert!(
+                matches!(err, WsError::Io(ref e) if e.kind() == io::ErrorKind::BrokenPipe),
+                "expected synthetic broken-pipe write failure, got {err:?}"
+            );
+            assert!(
+                ws.is_closed(),
+                "close handshake must transition to closed even when close response send fails"
             );
         });
     }
