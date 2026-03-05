@@ -360,6 +360,15 @@ impl RateLimiter {
     #[must_use]
     #[allow(clippy::cast_precision_loss)]
     pub fn try_acquire(&self, cost: u32, now: Time) -> bool {
+        if self.pending_queue_count.load(Ordering::Relaxed) > 0 {
+            // Preserve FIFO fairness for queued waiters, but do not let stale
+            // timed-out or already-grantable queue state strand the fast path.
+            let _ = self.process_queue(now);
+            if self.pending_queue_count.load(Ordering::Relaxed) > 0 {
+                return false;
+            }
+        }
+
         let mut state = self.state.lock();
         let now_millis = now.as_millis();
 
@@ -1561,6 +1570,52 @@ mod tests {
         // Check - should return Cancelled
         let result = rl.check_entry(entry_id, now);
         assert!(matches!(result, Err(RateLimitError::Cancelled)));
+    }
+
+    #[test]
+    fn try_acquire_clears_timed_out_queue_entries_before_rejecting_fast_path() {
+        let rl = RateLimiter::new(RateLimitPolicy {
+            rate: 1,
+            period: Duration::from_millis(100),
+            burst: 1,
+            wait_strategy: WaitStrategy::BlockWithTimeout(Duration::from_millis(10)),
+            ..Default::default()
+        });
+
+        let now = Time::from_millis(0);
+        assert!(rl.try_acquire(1, now));
+        let _entry_id = rl.enqueue(1, now).expect("second request should enqueue");
+
+        let later = Time::from_millis(200);
+        assert!(
+            rl.try_acquire(1, later),
+            "timed-out queue entries must not permanently block later fast-path acquires"
+        );
+    }
+
+    #[test]
+    fn try_acquire_processes_queue_grants_before_evaluating_fast_path() {
+        let rl = RateLimiter::new(RateLimitPolicy {
+            rate: 1,
+            period: Duration::from_millis(100),
+            burst: 1,
+            wait_strategy: WaitStrategy::Block,
+            ..Default::default()
+        });
+
+        let now = Time::from_millis(0);
+        assert!(rl.try_acquire(1, now));
+        let entry_id = rl.enqueue(1, now).expect("second request should enqueue");
+
+        let later = Time::from_millis(100);
+        assert!(
+            !rl.try_acquire(1, later),
+            "queued waiter must be granted before a new fast-path caller can consume refilled tokens"
+        );
+        assert!(
+            matches!(rl.check_entry(entry_id, later), Ok(true)),
+            "queued waiter should have been granted when try_acquire processed the queue"
+        );
     }
 
     // =========================================================================
