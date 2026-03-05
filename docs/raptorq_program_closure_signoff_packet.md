@@ -12,8 +12,7 @@ This document defines the H2 closure packet for:
 - Packet state: `draft_blocked`
 - Go/no-go: `no_go_pending_dependency_closure`
 - Current blockers:
-1. `asupersync-p8o9m`
-2. `asupersync-2cyx5`
+1. `asupersync-2cyx5`
 
 This packet is intentionally execution-ready but not final until dependency
 closure conditions are satisfied.
@@ -60,8 +59,8 @@ Current state snapshot in the artifact:
 1. Track D (`asupersync-np1co`): `closed`
 2. Track E (`asupersync-2ncba`): `in_progress` (gated via Track G)
 3. Track F (`asupersync-mg1qh`): `closed`
-4. Track G (`asupersync-2cyx5`): `open`
-5. Track H (`asupersync-p8o9m`): `open`
+4. Track G (`asupersync-2cyx5`): `in_progress`
+5. Track H (`asupersync-p8o9m`): `closed`
 
 ## Track-G Handoff Packet Fields
 

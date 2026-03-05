@@ -119,8 +119,8 @@
       "track_code": "G",
       "track_bead_id": "asupersync-2cyx5",
       "required_status": "closed",
-      "current_status": "open",
-      "status_reason": "Track-G is open and currently unassigned after stale-owner reset; governance aggregation still blocks final sign-off.",
+      "current_status": "in_progress",
+      "status_reason": "Track-G is actively owned and in progress; governance aggregation still blocks final sign-off until closure.",
       "closure_dependency_path": "direct",
       "evidence_refs": [
         "artifacts/raptorq_controlled_rollout_policy_v1.json",
@@ -342,7 +342,7 @@
       "gate_id": "TRACK_G",
       "bead_id": "asupersync-2cyx5",
       "required_status": "closed",
-      "current_status": "open",
+      "current_status": "in_progress",
       "verdict": "blocked",
       "evidence_refs": [
         "artifacts/raptorq_expected_loss_decision_contract_v1.json",
@@ -430,7 +430,7 @@
       "severity": "medium",
       "status": "mitigated",
       "description": "Track-H final dossier (`asupersync-346lm`) previously lagged closure, creating narrative drift risk before H1 consolidation.",
-      "mitigation": "H1 is now closed; keep H2 packet fields synchronized with live Beads statuses while Track-G and Track-H remain open.",
+      "mitigation": "H1 is now closed; keep H2 packet fields synchronized with live Beads statuses while Track-G remains in progress and Track-H is closed.",
       "owner_bead_id": "asupersync-346lm"
     },
     {
