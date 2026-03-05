@@ -1237,7 +1237,11 @@ mod tests {
         // Advance 5 seconds: adds 0.5 tokens → 0 whole tokens, fractional = 5000.
         let t1 = Time::from_millis(5_000);
         rl.refill(t1);
-        assert_eq!(rl.available_tokens(), 0, "half-period yields no whole token");
+        assert_eq!(
+            rl.available_tokens(),
+            0,
+            "half-period yields no whole token"
+        );
 
         rl.reset();
 
