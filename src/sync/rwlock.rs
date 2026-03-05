@@ -680,6 +680,15 @@ impl<T> OwnedRwLockReadGuard<T> {
     }
 }
 
+impl<T> Deref for OwnedRwLockReadGuard<T> {
+    type Target = T;
+
+    #[inline]
+    fn deref(&self) -> &Self::Target {
+        unsafe { &*self.lock.data.get() }
+    }
+}
+
 impl<T> Drop for OwnedRwLockReadGuard<T> {
     #[inline]
     fn drop(&mut self) {
@@ -717,6 +726,22 @@ impl<T> OwnedRwLockWriteGuard<T> {
     {
         assert!(!self.lock.is_poisoned(), "rwlock poisoned");
         f(unsafe { &mut *self.lock.data.get() })
+    }
+}
+
+impl<T> Deref for OwnedRwLockWriteGuard<T> {
+    type Target = T;
+
+    #[inline]
+    fn deref(&self) -> &Self::Target {
+        unsafe { &*self.lock.data.get() }
+    }
+}
+
+impl<T> DerefMut for OwnedRwLockWriteGuard<T> {
+    #[inline]
+    fn deref_mut(&mut self) -> &mut Self::Target {
+        unsafe { &mut *self.lock.data.get() }
     }
 }
 

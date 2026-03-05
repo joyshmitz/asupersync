@@ -451,6 +451,10 @@ impl Drop for Notified<'_> {
 }
 
 #[cfg(test)]
+#[path = "notify_bug_test.rs"]
+mod notify_bug_test;
+
+#[cfg(test)]
 mod tests {
     use super::*;
     use crate::test_utils::init_test_logging;

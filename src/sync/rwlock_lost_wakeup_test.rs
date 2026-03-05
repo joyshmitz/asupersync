@@ -1,10 +1,12 @@
+use super::RwLock;
 use crate::cx::Cx;
-use crate::sync::RwLock;
 use crate::types::{Budget, RegionId, TaskId};
 use crate::util::ArenaIndex;
 use std::future::Future;
+use std::pin::Pin;
 use std::sync::Arc;
-use std::task::{Context, Poll, Waker};
+use std::sync::atomic::{AtomicUsize, Ordering};
+use std::task::{Context, Poll, Wake, Waker};
 
 fn test_cx() -> Cx {
     Cx::new(
@@ -14,49 +16,55 @@ fn test_cx() -> Cx {
     )
 }
 
-fn poll_once<T>(future: &mut (impl Future<Output = T> + Unpin)) -> Option<T> {
-    let waker = Waker::noop();
-    let mut cx = Context::from_waker(waker);
-    match std::pin::Pin::new(future).poll(&mut cx) {
-        Poll::Ready(v) => Some(v),
-        Poll::Pending => None,
+struct CountWaker(Arc<AtomicUsize>);
+
+impl Wake for CountWaker {
+    fn wake(self: Arc<Self>) {
+        self.0.fetch_add(1, Ordering::SeqCst);
+    }
+
+    fn wake_by_ref(self: &Arc<Self>) {
+        self.0.fetch_add(1, Ordering::SeqCst);
     }
 }
 
-#[cfg(test)]
-mod tests {
-    use super::*;
+#[test]
+fn dropping_blocked_writer_wakes_queued_reader() {
+    crate::test_utils::init_test_logging();
+    crate::test_phase!("dropping_blocked_writer_wakes_queued_reader");
 
-    #[test]
-    fn test_lost_wakeup() {
-        let lock = Arc::new(RwLock::new(0_u32));
-        let cx = test_cx();
+    let cx = test_cx();
+    let lock = RwLock::new(0_u32);
 
-        // 1. Writer 1 acquires lock
-        let mut w1_fut = lock.write(&cx);
-        let w1_guard = poll_once(&mut w1_fut)
-            .unwrap()
-            .expect("failed to acquire write lock");
+    let wake_count = Arc::new(AtomicUsize::new(0));
+    let waker = Waker::from(Arc::new(CountWaker(wake_count.clone())));
+    let mut task_cx = Context::from_waker(&waker);
 
-        // 2. Reader 1 waits (queued in reader_waiters)
-        let mut r1_fut = lock.read(&cx);
-        assert!(poll_once(&mut r1_fut).is_none());
+    let mut first_reader = lock.read(&cx);
+    let guard = match Pin::new(&mut first_reader).poll(&mut task_cx) {
+        Poll::Ready(Ok(guard)) => guard,
+        Poll::Ready(Err(err)) => panic!("expected first reader to acquire immediately: {err:?}"),
+        Poll::Pending => panic!("expected first reader to acquire immediately"),
+    };
 
-        // 3. Writer 1 releases. writer_waiters == 0, so it drains reader_waiters and wakes r1_fut.
-        drop(w1_guard);
+    let mut waiting_writer = lock.write(&cx);
+    assert!(
+        Pin::new(&mut waiting_writer)
+            .poll(&mut task_cx)
+            .is_pending()
+    );
 
-        // 4. Writer 2 calls write(). Since reader hasn't acquired yet, readers == 0,
-        // but the lock was PRE-GRANTED to the readers by Writer 1's release.
-        let mut w2_fut = lock.write(&cx);
-        // Writer 2 poll: `can_acquire` evaluates to false because readers were pre-granted
-        // the lock (state.readers > 0) or state.writer_active was kept logically correct.
-        // Actually, state.readers was pre-incremented by release_writer!
-        // So Writer 2 WILL NOT ACQUIRE the lock!
-        let w2_res = poll_once(&mut w2_fut);
-        println!("Writer 2 result: {:?}", w2_res.is_some());
-        assert!(
-            w2_res.is_none(),
-            "Writer 2 should queue instead of stealing the lock!"
-        );
-    }
+    let mut queued_reader = lock.read(&cx);
+    assert!(Pin::new(&mut queued_reader).poll(&mut task_cx).is_pending());
+
+    wake_count.store(0, Ordering::SeqCst);
+
+    drop(waiting_writer);
+
+    assert!(
+        wake_count.load(Ordering::SeqCst) > 0,
+        "queued reader should be woken when the blocked writer is dropped"
+    );
+
+    drop(guard);
 }

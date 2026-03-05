@@ -1,44 +1,34 @@
-use crate::sync::Notify;
-use std::pin::Pin;
-use std::sync::Arc;
-use std::task::{Context, Poll, Wake, Waker};
+use super::{WaiterEntry, WaiterSlab};
+use std::task::Waker;
 
-struct NoopWaker;
-
-impl Wake for NoopWaker {
-    fn wake(self: Arc<Self>) {}
-    fn wake_by_ref(self: &Arc<Self>) {}
-}
-
-fn noop_waker() -> Waker {
-    Arc::new(NoopWaker).into()
+fn active_waiter(generation: u64) -> WaiterEntry {
+    WaiterEntry {
+        waker: Some(Waker::noop().clone()),
+        notified: false,
+        generation,
+    }
 }
 
 #[test]
-fn notify_one_and_waiters_duplicate_wakeup_bug() {
-    let notify = Notify::new();
-    let mut fut1 = notify.notified();
-    let mut fut2 = notify.notified();
+fn waiter_slab_reuses_valid_slot_after_tail_shrink_discards_stale_indices() {
+    let mut slab = WaiterSlab::new();
 
-    let waker = noop_waker();
-    let mut cx = Context::from_waker(&waker);
+    let first = slab.insert(active_waiter(0));
+    let middle = slab.insert(active_waiter(0));
+    let tail = slab.insert(active_waiter(0));
+    assert_eq!((first, middle, tail), (0, 1, 2));
+    assert_eq!(slab.active_count(), 3);
 
-    let _ = Pin::new(&mut fut1).poll(&mut cx);
-    let _ = Pin::new(&mut fut2).poll(&mut cx);
+    // Removing the middle and then the tail leaves a stale tail index in the
+    // free-slot list after shrinking. The next insert must discard that stale
+    // index and reuse the still-valid middle slot instead of growing the vec.
+    slab.remove(middle);
+    slab.remove(tail);
+    assert_eq!(slab.entries.len(), 1);
+    assert_eq!(slab.active_count(), 1);
 
-    notify.notify_one();
-    notify.notify_waiters();
-
-    let ready1 = matches!(Pin::new(&mut fut1).poll(&mut cx), Poll::Ready(()));
-    let ready2 = matches!(Pin::new(&mut fut2).poll(&mut cx), Poll::Ready(()));
-    assert!(ready1, "fut1 should be ready");
-    assert!(ready2, "fut2 should be ready");
-
-    let mut fut3 = notify.notified();
-    let ready3 = matches!(Pin::new(&mut fut3).poll(&mut cx), Poll::Ready(()));
-
-    assert!(
-        !ready3,
-        "fut3 should NOT be ready, but it got a duplicated wakeup!"
-    );
+    let reused = slab.insert(active_waiter(1));
+    assert_eq!(reused, 1);
+    assert_eq!(slab.entries.len(), 2);
+    assert_eq!(slab.active_count(), 2);
 }

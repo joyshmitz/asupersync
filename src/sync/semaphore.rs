@@ -402,7 +402,7 @@ impl OwnedSemaphorePermit {
         assert!(count > 0, "cannot acquire 0 permits");
         OwnedAcquireFuture {
             semaphore,
-            cx: cx.clone(),
+            cx: Some(cx.clone()),
             count,
             waiter_id: None,
         }
@@ -466,7 +466,7 @@ impl Drop for OwnedSemaphorePermit {
 /// Future returned by `OwnedSemaphorePermit::acquire`.
 pub struct OwnedAcquireFuture {
     semaphore: Arc<Semaphore>,
-    cx: Cx, // Clone of Cx
+    cx: Option<Cx>,
     count: usize,
     waiter_id: Option<u64>,
 }
@@ -480,7 +480,22 @@ impl OwnedAcquireFuture {
         assert!(count > 0, "cannot acquire 0 permits");
         Self {
             semaphore,
-            cx,
+            cx: Some(cx),
+            count,
+            waiter_id: None,
+        }
+    }
+
+    /// Construct a new acquire future that waits without cancellation support.
+    ///
+    /// This is used by `Service::poll_ready` middleware paths that must still
+    /// register a real semaphore waiter even when no task-local [`Cx`] is
+    /// available.
+    pub(crate) fn new_uncancelable(semaphore: Arc<Semaphore>, count: usize) -> Self {
+        assert!(count > 0, "cannot acquire 0 permits");
+        Self {
+            semaphore,
+            cx: None,
             count,
             waiter_id: None,
         }
@@ -508,7 +523,7 @@ impl Future for OwnedAcquireFuture {
 
     fn poll(self: Pin<&mut Self>, context: &mut Context<'_>) -> Poll<Self::Output> {
         let this = self.get_mut();
-        if this.cx.checkpoint().is_err() {
+        if this.cx.as_ref().is_some_and(|cx| cx.checkpoint().is_err()) {
             if let Some(waiter_id) = this.waiter_id {
                 let next_waker = {
                     let mut state = this.semaphore.state.lock();
