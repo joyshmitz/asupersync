@@ -1032,21 +1032,34 @@ impl Connection {
     pub fn next_frame(&mut self) -> Option<Frame> {
         let mut blocked_data = false;
         let pending_len = self.pending_ops.len();
+        let mut skipped_ops = std::collections::VecDeque::new();
+        let mut newly_queued_ops = std::collections::VecDeque::new();
+        let mut returned_frame = None;
 
         for _ in 0..pending_len {
             let op = self.pending_ops.pop_front()?;
 
             match op {
-                PendingOp::Settings(frame) => return Some(Frame::Settings(frame)),
-                PendingOp::SettingsAck => return Some(Frame::Settings(SettingsFrame::ack())),
-                PendingOp::PingAck(data) => return Some(Frame::Ping(PingFrame::ack(data))),
+                PendingOp::Settings(frame) => {
+                    returned_frame = Some(Frame::Settings(frame));
+                    break;
+                }
+                PendingOp::SettingsAck => {
+                    returned_frame = Some(Frame::Settings(SettingsFrame::ack()));
+                    break;
+                }
+                PendingOp::PingAck(data) => {
+                    returned_frame = Some(Frame::Ping(PingFrame::ack(data)));
+                    break;
+                }
                 PendingOp::WindowUpdate {
                     stream_id,
                     increment,
                 } => {
-                    return Some(Frame::WindowUpdate(WindowUpdateFrame::new(
+                    returned_frame = Some(Frame::WindowUpdate(WindowUpdateFrame::new(
                         stream_id, increment,
                     )));
+                    break;
                 }
                 PendingOp::Headers {
                     stream_id,
@@ -1062,9 +1075,10 @@ impl Connection {
 
                     if encoded.len() <= max_frame_size {
                         // Fits in a single HEADERS frame
-                        return Some(Frame::Headers(HeadersFrame::new(
+                        returned_frame = Some(Frame::Headers(HeadersFrame::new(
                             stream_id, encoded, end_stream, true, // end_headers
                         )));
+                        break;
                     }
 
                     // Need CONTINUATION frames - split the header block
@@ -1072,44 +1086,42 @@ impl Connection {
                     let remaining = encoded.slice(max_frame_size..);
 
                     // Queue CONTINUATION frames for remaining data.
-                    // Push to front in reverse order so they are emitted
-                    // immediately after this HEADERS frame, before any other
-                    // pending ops (RFC 9113 §6.10 requires CONTINUATION to
-                    // follow HEADERS without interleaving other frame types).
-                    let mut chunks = Vec::with_capacity(remaining.len().div_ceil(max_frame_size));
+                    // Push to newly_queued_ops so they are emitted immediately after
+                    // this HEADERS frame, before any other pending ops
+                    // (RFC 9113 §6.10 requires CONTINUATION to follow HEADERS
+                    // without interleaving other frame types).
                     let mut offset = 0;
                     while offset < remaining.len() {
                         let chunk_end = (offset + max_frame_size).min(remaining.len());
                         let chunk = remaining.slice(offset..chunk_end);
                         let is_last = chunk_end == remaining.len();
-                        chunks.push(PendingOp::Continuation {
+                        newly_queued_ops.push_back(PendingOp::Continuation {
                             stream_id,
                             header_block: chunk,
                             end_headers: is_last,
                         });
                         offset = chunk_end;
                     }
-                    for chunk in chunks.into_iter().rev() {
-                        self.pending_ops.push_front(chunk);
-                    }
 
-                    return Some(Frame::Headers(HeadersFrame::new(
+                    returned_frame = Some(Frame::Headers(HeadersFrame::new(
                         stream_id,
                         first_chunk,
                         end_stream,
                         false, // end_headers = false, CONTINUATION follows
                     )));
+                    break;
                 }
                 PendingOp::Continuation {
                     stream_id,
                     header_block,
                     end_headers,
                 } => {
-                    return Some(Frame::Continuation(ContinuationFrame {
+                    returned_frame = Some(Frame::Continuation(ContinuationFrame {
                         stream_id,
                         header_block,
                         end_headers,
                     }));
+                    break;
                 }
                 PendingOp::Data {
                     stream_id,
@@ -1132,7 +1144,7 @@ impl Connection {
 
                     if max_send == 0 && !data.is_empty() {
                         // No send window available; re-queue for later.
-                        self.pending_ops.push_back(PendingOp::Data {
+                        skipped_ops.push_back(PendingOp::Data {
                             stream_id,
                             data,
                             end_stream,
@@ -1151,7 +1163,7 @@ impl Connection {
                     // Re-queue leftover data (end_stream only on the final piece).
                     let actually_end = end_stream && remainder.is_none();
                     if let Some(rest) = remainder {
-                        self.pending_ops.push_front(PendingOp::Data {
+                        skipped_ops.push_back(PendingOp::Data {
                             stream_id,
                             data: rest,
                             end_stream,
@@ -1162,21 +1174,25 @@ impl Connection {
                     let consumed = u32::try_from(to_send.len())
                         .expect("send_len already clamped to u32 range");
                     self.send_window -= consumed.cast_signed();
-                    let Some(stream) = self.streams.get_mut(stream_id) else {
-                        continue;
-                    };
-                    stream.consume_send_window(consumed);
+                    if let Some(stream) = self.streams.get_mut(stream_id) {
+                        stream.consume_send_window(consumed);
+                    }
 
-                    return Some(Frame::Data(DataFrame::new(
+                    returned_frame = Some(Frame::Data(DataFrame::new(
                         stream_id,
                         to_send,
                         actually_end,
                     )));
+                    break;
                 }
                 PendingOp::RstStream {
                     stream_id,
                     error_code,
-                } => return Some(Frame::RstStream(RstStreamFrame::new(stream_id, error_code))),
+                } => {
+                    returned_frame =
+                        Some(Frame::RstStream(RstStreamFrame::new(stream_id, error_code)));
+                    break;
+                }
                 PendingOp::GoAway {
                     last_stream_id,
                     error_code,
@@ -1184,9 +1200,25 @@ impl Connection {
                 } => {
                     let mut frame = GoAwayFrame::new(last_stream_id, error_code);
                     frame.debug_data = debug_data;
-                    return Some(Frame::GoAway(frame));
+                    returned_frame = Some(Frame::GoAway(frame));
+                    break;
                 }
             }
+        }
+
+        // Rebuild self.pending_ops while preserving precise ordering.
+        // 1. newly_queued_ops (e.g. CONTINUATION) must go first so they are emitted next.
+        // 2. skipped_ops (e.g. blocked DATA) go next so they maintain their original relative order.
+        // 3. The remainder of self.pending_ops stays at the back.
+        for op in skipped_ops.into_iter().rev() {
+            self.pending_ops.push_front(op);
+        }
+        for op in newly_queued_ops.into_iter().rev() {
+            self.pending_ops.push_front(op);
+        }
+
+        if returned_frame.is_some() {
+            return returned_frame;
         }
 
         if blocked_data {
