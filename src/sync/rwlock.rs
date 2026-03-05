@@ -306,6 +306,23 @@ impl<T> RwLock<T> {
     }
 
     #[inline]
+    fn should_wake_writer(state: &State) -> bool {
+        if state.writer_queue.is_empty() {
+            return false;
+        }
+        if state.reader_waiters.is_empty() {
+            return true;
+        }
+
+        // Both queues are non-empty. Wake whichever waiter arrived first.
+        // Wrapping arithmetic keeps ordering stable across waiter-id wraparound.
+        match (state.writer_queue.front(), state.reader_waiters.front()) {
+            (Some(writer), Some(reader)) => writer.id.wrapping_sub(reader.id).cast_signed() < 0,
+            _ => false,
+        }
+    }
+
+    #[inline]
     fn release_reader(&self) {
         let waker = {
             let mut state = self.state.lock();
@@ -331,16 +348,7 @@ impl<T> RwLock<T> {
             let mut state = self.state.lock();
             state.writer_active = false;
 
-            let wake_writer = if !state.writer_queue.is_empty() && !state.reader_waiters.is_empty()
-            {
-                // Both are waiting. Wake the oldest to ensure fairness.
-                // We use wrapping arithmetic cast to i64 to handle u64 wrap-around safely.
-                let writer_id = state.writer_queue.front().unwrap().id;
-                let reader_id = state.reader_waiters.front().unwrap().id;
-                writer_id.wrapping_sub(reader_id).cast_signed() < 0
-            } else {
-                !state.writer_queue.is_empty()
-            };
+            let wake_writer = Self::should_wake_writer(&state);
             if wake_writer {
                 let waker = Self::pop_writer_waiter(&mut state);
                 if waker.is_some() {
@@ -495,7 +503,8 @@ impl<'a, T> Future for WriteFuture<'a, '_, T> {
             return Poll::Ready(Ok(RwLockWriteGuard { lock: self.lock }));
         }
 
-        let can_acquire = !state.writer_active && state.readers == 0 && state.writer_waiters == 1;
+        let can_acquire =
+            !state.writer_active && state.readers == 0 && state.writer_queue.is_empty();
 
         if can_acquire {
             state.writer_active = true;
@@ -543,14 +552,7 @@ impl<T> Drop for WriteFuture<'_, '_, T> {
                 state.writer_waiters = state.writer_waiters.saturating_sub(1);
                 state.writer_active = false;
 
-                let wake_writer =
-                    if !state.writer_queue.is_empty() && !state.reader_waiters.is_empty() {
-                        let writer_id = state.writer_queue.front().unwrap().id;
-                        let reader_id = state.reader_waiters.front().unwrap().id;
-                        writer_id.wrapping_sub(reader_id).cast_signed() < 0
-                    } else {
-                        !state.writer_queue.is_empty()
-                    };
+                let wake_writer = RwLock::<T>::should_wake_writer(&state);
 
                 if wake_writer {
                     writer_waker = RwLock::<T>::pop_writer_waiter(&mut state);
@@ -859,7 +861,8 @@ impl<T> Future for OwnedWriteFuture<'_, T> {
             return Poll::Ready(Ok(OwnedRwLockWriteGuard { lock }));
         }
 
-        let can_acquire = !state.writer_active && state.readers == 0 && state.writer_waiters == 1;
+        let can_acquire =
+            !state.writer_active && state.readers == 0 && state.writer_queue.is_empty();
 
         if can_acquire {
             state.writer_active = true;
@@ -907,14 +910,7 @@ impl<T> Drop for OwnedWriteFuture<'_, T> {
                 state.writer_waiters = state.writer_waiters.saturating_sub(1);
                 state.writer_active = false;
 
-                let wake_writer =
-                    if !state.writer_queue.is_empty() && !state.reader_waiters.is_empty() {
-                        let writer_id = state.writer_queue.front().unwrap().id;
-                        let reader_id = state.reader_waiters.front().unwrap().id;
-                        writer_id.wrapping_sub(reader_id).cast_signed() < 0
-                    } else {
-                        !state.writer_queue.is_empty()
-                    };
+                let wake_writer = RwLock::<T>::should_wake_writer(&state);
 
                 if wake_writer {
                     writer_waker = RwLock::<T>::pop_writer_waiter(&mut state);
@@ -1281,6 +1277,132 @@ mod tests {
             final_order == *data
         );
         crate::test_complete!("test_writer_fifo_ordering");
+    }
+
+    #[test]
+    fn release_writer_prefers_older_writer_over_reader() {
+        init_test("release_writer_prefers_older_writer_over_reader");
+        let cx = test_cx();
+        let lock = RwLock::new(0_u32);
+
+        // Hold active writer so both waiters queue.
+        let active_writer = write_blocking(&lock, &cx);
+
+        // Queue writer first (older), then reader.
+        let mut writer_fut = lock.write(&cx);
+        let writer_pending = poll_once(&mut writer_fut).is_none();
+        crate::assert_with_log!(
+            writer_pending,
+            "queued writer is pending",
+            true,
+            writer_pending
+        );
+
+        let mut reader_fut = lock.read(&cx);
+        let reader_pending = poll_once(&mut reader_fut).is_none();
+        crate::assert_with_log!(
+            reader_pending,
+            "queued reader is pending",
+            true,
+            reader_pending
+        );
+
+        // Releasing active writer should wake the older queued writer first.
+        drop(active_writer);
+
+        let writer_result = poll_once(&mut writer_fut);
+        let writer_acquired = matches!(writer_result, Some(Ok(_)));
+        crate::assert_with_log!(
+            writer_acquired,
+            "older writer acquires before reader",
+            true,
+            writer_acquired
+        );
+
+        let reader_still_pending = poll_once(&mut reader_fut).is_none();
+        crate::assert_with_log!(
+            reader_still_pending,
+            "reader remains pending while writer holds lock",
+            true,
+            reader_still_pending
+        );
+
+        if let Some(Ok(writer_guard)) = writer_result {
+            drop(writer_guard);
+        }
+
+        let reader_result = poll_once(&mut reader_fut);
+        let reader_acquired = matches!(reader_result, Some(Ok(_)));
+        crate::assert_with_log!(
+            reader_acquired,
+            "reader acquires after writer releases",
+            true,
+            reader_acquired
+        );
+        crate::test_complete!("release_writer_prefers_older_writer_over_reader");
+    }
+
+    #[test]
+    fn release_writer_prefers_older_reader_over_writer() {
+        init_test("release_writer_prefers_older_reader_over_writer");
+        let cx = test_cx();
+        let lock = RwLock::new(0_u32);
+
+        // Hold active writer so both waiters queue.
+        let active_writer = write_blocking(&lock, &cx);
+
+        // Queue reader first (older), then writer.
+        let mut reader_fut = lock.read(&cx);
+        let reader_pending = poll_once(&mut reader_fut).is_none();
+        crate::assert_with_log!(
+            reader_pending,
+            "queued reader is pending",
+            true,
+            reader_pending
+        );
+
+        let mut writer_fut = lock.write(&cx);
+        let writer_pending = poll_once(&mut writer_fut).is_none();
+        crate::assert_with_log!(
+            writer_pending,
+            "queued writer is pending",
+            true,
+            writer_pending
+        );
+
+        // Releasing active writer should wake the older queued reader first.
+        drop(active_writer);
+
+        let reader_result = poll_once(&mut reader_fut);
+        let reader_acquired = matches!(reader_result, Some(Ok(_)));
+        crate::assert_with_log!(
+            reader_acquired,
+            "older reader acquires before writer",
+            true,
+            reader_acquired
+        );
+
+        let writer_still_pending = poll_once(&mut writer_fut).is_none();
+        crate::assert_with_log!(
+            writer_still_pending,
+            "writer remains pending while reader holds lock",
+            true,
+            writer_still_pending
+        );
+
+        if let Some(Ok(reader_guard)) = reader_result {
+            drop(reader_guard);
+        }
+
+        let writer_result = poll_once(&mut writer_fut);
+        let writer_acquired = matches!(writer_result, Some(Ok(_)));
+        crate::assert_with_log!(
+            writer_acquired,
+            "writer acquires after reader releases",
+            true,
+            writer_acquired
+        );
+        crate::test_complete!("release_writer_prefers_older_reader_over_writer");
     }
 
     #[test]
