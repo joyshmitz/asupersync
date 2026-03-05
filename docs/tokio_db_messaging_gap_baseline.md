@@ -174,9 +174,9 @@ Cross-cutting concerns: connection pooling (`sync/pool.rs`), blocking pool (`run
 
 | Feature | Status | Gap | Severity |
 |---------|--------|-----|----------|
-| Producer (send, flush, acks) | Partial (deterministic ack metadata fallback implemented) | KA-G1 | High |
-| Consumer (subscribe, poll, commit) | Partial (deterministic subscription/offset lifecycle implemented) | KA-G2 | High |
-| Consumer groups | Partial (deterministic assignment model) | KA-G3 | High |
+| Producer (send, flush, acks) | Partial (deterministic ack metadata + close lifecycle implemented) | KA-G1 | High |
+| Consumer (subscribe, poll, commit) | Partial (deterministic subscription/offset lifecycle + assignment validation implemented) | KA-G2 | High |
+| Consumer groups | Partial (deterministic assignment + rebalance lifecycle model) | KA-G3 | High |
 | Transactional producer | Stub | KA-G4 | Medium |
 | Exactly-once semantics | Stub | KA-G5 | Medium |
 | Schema registry integration | Missing | KA-G6 | Low |
@@ -187,7 +187,12 @@ Cross-cutting concerns: connection pooling (`sync/pool.rs`), blocking pool (`run
 
 **Migration Blockers**: KA-G1/G2 are still production blockers for full broker interoperability because feature-complete runtime behavior remains behind `kafka` + system `librdkafka`. Deterministic fallback now provides cancellation-aware producer/consumer lifecycle semantics for non-`kafka` builds and test environments. KA-G8 (pure Rust) would eliminate the system dependency. KA-G10 (auth) blocks production clusters.
 
-**Cancel-Correctness**: Producer send/flush paths and consumer subscribe/poll/commit/seek/close paths all gate through `cx.checkpoint()`. Delivery futures (`DeliveryReceiver`) also enforce checkpointed cancellation while waiting for broker acknowledgements.
+**Cancel-Correctness**: Producer send/flush/close paths and consumer subscribe/rebalance/poll/commit/seek/close paths all gate through `cx.checkpoint()`. Delivery futures (`DeliveryReceiver`) also enforce checkpointed cancellation while waiting for broker acknowledgements.
+
+**T6.8 deterministic parity closure (current scope)**:
+1. Consumer rebalance lifecycle now has explicit assignment/revocation state transitions (`KafkaConsumer::rebalance` + generation/revocation snapshots).
+2. Offset commits now enforce assigned-partition ownership and reject offset-regression commits to avoid silent duplicate replay in fallback mode.
+3. Producer shutdown correctness now has explicit close semantics (`KafkaProducer::close`) that flush then block new operations deterministically.
 
 ---
 

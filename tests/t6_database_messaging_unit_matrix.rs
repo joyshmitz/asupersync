@@ -1126,6 +1126,22 @@ fn kafka_consumer_has_isolation_level() {
     );
 }
 
+#[test]
+fn kafka_consumer_has_rebalance_lifecycle() {
+    assert!(
+        KAFKA_CONSUMER_SRC.contains("pub async fn rebalance"),
+        "consumer must expose explicit rebalance lifecycle API"
+    );
+    assert!(
+        KAFKA_CONSUMER_SRC.contains("RebalanceResult"),
+        "consumer must provide rebalance result metadata"
+    );
+    assert!(
+        KAFKA_CONSUMER_SRC.contains("revoked"),
+        "consumer rebalance flow must track revoked partitions"
+    );
+}
+
 // ════════════════════════════════════════════════════════════════════════════
 // Section 17: Pool Error Ergonomics
 // ════════════════════════════════════════════════════════════════════════════

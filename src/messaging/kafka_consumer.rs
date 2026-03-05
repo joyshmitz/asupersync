@@ -229,6 +229,17 @@ impl TopicPartitionOffset {
     }
 }
 
+/// Result emitted after a consumer group rebalance.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct RebalanceResult {
+    /// Monotonic rebalance generation for this consumer instance.
+    pub generation: u64,
+    /// Current assigned partitions after rebalance.
+    pub assigned: Vec<(String, i32)>,
+    /// Partitions revoked by the rebalance.
+    pub revoked: Vec<(String, i32)>,
+}
+
 /// A record returned from a Kafka consumer poll.
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub struct ConsumerRecord {
@@ -262,6 +273,8 @@ struct ConsumerState {
     assigned_partitions: BTreeSet<(String, i32)>,
     committed_offsets: BTreeMap<(String, i32), i64>,
     positions: BTreeMap<(String, i32), i64>,
+    rebalance_generation: u64,
+    last_revoked_partitions: BTreeSet<(String, i32)>,
 }
 
 impl KafkaConsumer {
@@ -304,8 +317,80 @@ impl KafkaConsumer {
             .collect();
         state.positions.clear();
         state.committed_offsets.clear();
+        state.rebalance_generation = 0;
+        state.last_revoked_partitions.clear();
         drop(state);
         Ok(())
+    }
+
+    /// Apply a deterministic rebalance assignment.
+    ///
+    /// The provided assignments replace current partition ownership. Any
+    /// previously assigned partition not present in `assignments` is revoked.
+    pub async fn rebalance(
+        &self,
+        cx: &Cx,
+        assignments: &[TopicPartitionOffset],
+    ) -> Result<RebalanceResult, KafkaError> {
+        cx.checkpoint().map_err(|_| KafkaError::Cancelled)?;
+        self.ensure_open()?;
+
+        let mut normalized = BTreeMap::new();
+        let subscribed_topics = {
+            let state = self.state.lock();
+            if state.subscribed_topics.is_empty() {
+                return Err(KafkaError::Config(
+                    "consumer has no active topic subscription".to_string(),
+                ));
+            }
+            state.subscribed_topics.clone()
+        };
+
+        for tpo in assignments {
+            if tpo.topic.trim().is_empty() {
+                return Err(KafkaError::Config("topic cannot be empty".to_string()));
+            }
+            if !subscribed_topics.contains(&tpo.topic) {
+                return Err(KafkaError::InvalidTopic(tpo.topic.clone()));
+            }
+            if tpo.offset < 0 {
+                return Err(KafkaError::Config(
+                    "rebalance offsets must be non-negative".to_string(),
+                ));
+            }
+            normalized.insert((tpo.topic.clone(), tpo.partition), tpo.offset);
+        }
+
+        let mut state = self.state.lock();
+        let previous_assignments = state.assigned_partitions.clone();
+        let next_assignments: BTreeSet<(String, i32)> = normalized.keys().cloned().collect();
+        let revoked: Vec<(String, i32)> = previous_assignments
+            .difference(&next_assignments)
+            .cloned()
+            .collect();
+        let assigned: Vec<(String, i32)> = next_assignments.iter().cloned().collect();
+
+        state.assigned_partitions = next_assignments;
+        let retained_assignments = state.assigned_partitions.clone();
+        state
+            .positions
+            .retain(|key, _| retained_assignments.contains(key));
+        state
+            .committed_offsets
+            .retain(|key, _| retained_assignments.contains(key));
+        for (partition, offset) in normalized {
+            state.positions.insert(partition, offset);
+        }
+        state.rebalance_generation = state.rebalance_generation.saturating_add(1);
+        state.last_revoked_partitions = revoked.iter().cloned().collect();
+        let generation = state.rebalance_generation;
+        drop(state);
+
+        Ok(RebalanceResult {
+            generation,
+            assigned,
+            revoked,
+        })
     }
 
     /// Poll for the next record.
@@ -345,17 +430,33 @@ impl KafkaConsumer {
             return Err(KafkaError::Config("offsets cannot be empty".to_string()));
         }
 
-        let subscribed_topics = {
+        let (subscribed_topics, assigned_partitions, committed_offsets) = {
             let state = self.state.lock();
-            state.subscribed_topics.clone()
+            (
+                state.subscribed_topics.clone(),
+                state.assigned_partitions.clone(),
+                state.committed_offsets.clone(),
+            )
         };
         for tpo in offsets {
             if !subscribed_topics.contains(&tpo.topic) {
                 return Err(KafkaError::InvalidTopic(tpo.topic.clone()));
             }
+            if !assigned_partitions.contains(&(tpo.topic.clone(), tpo.partition)) {
+                return Err(KafkaError::Config(
+                    "partition is not assigned to this consumer".to_string(),
+                ));
+            }
             if tpo.offset < 0 {
                 return Err(KafkaError::Config(
                     "offsets must be non-negative".to_string(),
+                ));
+            }
+            if let Some(previous) = committed_offsets.get(&(tpo.topic.clone(), tpo.partition))
+                && tpo.offset < *previous
+            {
+                return Err(KafkaError::Config(
+                    "offset commit regression is not allowed".to_string(),
                 ));
             }
         }
@@ -382,12 +483,22 @@ impl KafkaConsumer {
             ));
         }
 
-        let is_subscribed = {
+        let (is_subscribed, is_assigned) = {
             let state = self.state.lock();
-            state.subscribed_topics.contains(&tpo.topic)
+            (
+                state.subscribed_topics.contains(&tpo.topic),
+                state
+                    .assigned_partitions
+                    .contains(&(tpo.topic.clone(), tpo.partition)),
+            )
         };
         if !is_subscribed {
             return Err(KafkaError::InvalidTopic(tpo.topic.clone()));
+        }
+        if !is_assigned {
+            return Err(KafkaError::Config(
+                "partition is not assigned to this consumer".to_string(),
+            ));
         }
 
         let mut state = self.state.lock();
@@ -409,6 +520,7 @@ impl KafkaConsumer {
             state.assigned_partitions.clear();
             state.committed_offsets.clear();
             state.positions.clear();
+            state.last_revoked_partitions.clear();
             drop(state);
         }
         Ok(())
@@ -437,6 +549,23 @@ impl KafkaConsumer {
         self.state
             .lock()
             .assigned_partitions
+            .iter()
+            .cloned()
+            .collect()
+    }
+
+    /// Monotonic rebalance generation counter.
+    #[must_use]
+    pub fn rebalance_generation(&self) -> u64 {
+        self.state.lock().rebalance_generation
+    }
+
+    /// Snapshot of partitions revoked during the latest rebalance.
+    #[must_use]
+    pub fn last_revoked_partitions(&self) -> Vec<(String, i32)> {
+        self.state
+            .lock()
+            .last_revoked_partitions
             .iter()
             .cloned()
             .collect()
@@ -849,6 +978,83 @@ mod tests {
             assert!(
                 matches!(err, KafkaError::Config(msg) if msg.contains("topic cannot be empty"))
             );
+        });
+    }
+
+    #[test]
+    fn consumer_rebalance_tracks_assignment_and_revocation() {
+        run_test_with_cx(|cx| async move {
+            let consumer = KafkaConsumer::new(ConsumerConfig::default()).unwrap();
+            consumer
+                .subscribe(&cx, &["orders", "payments"])
+                .await
+                .unwrap();
+
+            let result = consumer
+                .rebalance(
+                    &cx,
+                    &[
+                        TopicPartitionOffset::new("orders", 1, 10),
+                        TopicPartitionOffset::new("orders", 2, 0),
+                    ],
+                )
+                .await
+                .unwrap();
+
+            assert_eq!(result.generation, 1);
+            assert_eq!(
+                result.assigned,
+                vec![("orders".to_string(), 1), ("orders".to_string(), 2)]
+            );
+            assert_eq!(
+                result.revoked,
+                vec![("orders".to_string(), 0), ("payments".to_string(), 0)]
+            );
+            assert_eq!(consumer.position("orders", 1), Some(10));
+            assert_eq!(consumer.position("orders", 2), Some(0));
+            assert_eq!(consumer.rebalance_generation(), 1);
+            assert_eq!(
+                consumer.last_revoked_partitions(),
+                vec![("orders".to_string(), 0), ("payments".to_string(), 0)]
+            );
+        });
+    }
+
+    #[test]
+    fn consumer_commit_rejects_unassigned_partitions_and_regression() {
+        run_test_with_cx(|cx| async move {
+            let consumer = KafkaConsumer::new(ConsumerConfig::default()).unwrap();
+            consumer.subscribe(&cx, &["orders"]).await.unwrap();
+
+            let unassigned = consumer
+                .commit_offsets(&cx, &[TopicPartitionOffset::new("orders", 1, 5)])
+                .await
+                .unwrap_err();
+            assert!(matches!(unassigned, KafkaError::Config(msg) if msg.contains("not assigned")));
+
+            consumer
+                .commit_offsets(&cx, &[TopicPartitionOffset::new("orders", 0, 8)])
+                .await
+                .unwrap();
+            let regression = consumer
+                .commit_offsets(&cx, &[TopicPartitionOffset::new("orders", 0, 7)])
+                .await
+                .unwrap_err();
+            assert!(matches!(regression, KafkaError::Config(msg) if msg.contains("regression")));
+        });
+    }
+
+    #[test]
+    fn consumer_seek_rejects_unassigned_partitions() {
+        run_test_with_cx(|cx| async move {
+            let consumer = KafkaConsumer::new(ConsumerConfig::default()).unwrap();
+            consumer.subscribe(&cx, &["orders"]).await.unwrap();
+
+            let err = consumer
+                .seek(&cx, &TopicPartitionOffset::new("orders", 1, 1))
+                .await
+                .unwrap_err();
+            assert!(matches!(err, KafkaError::Config(msg) if msg.contains("not assigned")));
         });
     }
 }

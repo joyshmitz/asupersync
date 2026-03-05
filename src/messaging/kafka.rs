@@ -34,6 +34,7 @@ use std::fmt;
 use std::io;
 #[cfg(not(feature = "kafka"))]
 use std::sync::OnceLock;
+use std::sync::atomic::{AtomicBool, Ordering};
 use std::time::Duration;
 
 #[cfg(feature = "kafka")]
@@ -624,13 +625,17 @@ pub struct RecordMetadata {
 #[derive(Debug)]
 pub struct KafkaProducer {
     config: ProducerConfig,
+    closed: AtomicBool,
 }
 
 impl KafkaProducer {
     /// Create a new Kafka producer.
     pub fn new(config: ProducerConfig) -> Result<Self, KafkaError> {
         config.validate()?;
-        Ok(Self { config })
+        Ok(Self {
+            config,
+            closed: AtomicBool::new(false),
+        })
     }
 
     /// Send a message to a topic.
@@ -654,6 +659,7 @@ impl KafkaProducer {
         partition: Option<i32>,
     ) -> Result<RecordMetadata, KafkaError> {
         cx.checkpoint().map_err(|_| KafkaError::Cancelled)?;
+        self.ensure_open()?;
         validate_topic(topic)?;
 
         // Check message size
@@ -712,6 +718,7 @@ impl KafkaProducer {
         headers: &[(&str, &[u8])],
     ) -> Result<RecordMetadata, KafkaError> {
         cx.checkpoint().map_err(|_| KafkaError::Cancelled)?;
+        self.ensure_open()?;
         validate_topic(topic)?;
 
         if payload.len() > self.config.max_message_size {
@@ -757,7 +764,40 @@ impl KafkaProducer {
     /// Blocks until all messages in the queue are sent or the timeout expires.
     #[allow(unused_variables, clippy::unused_async)]
     pub async fn flush(&self, cx: &Cx, timeout: Duration) -> Result<(), KafkaError> {
+        self.flush_inner(cx, timeout, false).await
+    }
+
+    /// Flush pending messages and close producer for new sends.
+    ///
+    /// This method is idempotent; repeated calls after the first successful
+    /// close return `Ok(())`.
+    pub async fn close(&self, cx: &Cx, timeout: Duration) -> Result<(), KafkaError> {
         cx.checkpoint().map_err(|_| KafkaError::Cancelled)?;
+        if self.closed.load(Ordering::Acquire) {
+            return Ok(());
+        }
+        self.flush_inner(cx, timeout, true).await?;
+        self.closed.store(true, Ordering::Release);
+        Ok(())
+    }
+
+    /// Whether this producer has been closed.
+    #[must_use]
+    pub fn is_closed(&self) -> bool {
+        self.closed.load(Ordering::Acquire)
+    }
+
+    #[allow(unused_variables, clippy::unused_async)]
+    async fn flush_inner(
+        &self,
+        cx: &Cx,
+        timeout: Duration,
+        allow_closed: bool,
+    ) -> Result<(), KafkaError> {
+        cx.checkpoint().map_err(|_| KafkaError::Cancelled)?;
+        if !allow_closed {
+            self.ensure_open()?;
+        }
 
         #[cfg(feature = "kafka")]
         {
@@ -781,6 +821,14 @@ impl KafkaProducer {
         #[cfg(not(feature = "kafka"))]
         {
             let _ = timeout;
+            Ok(())
+        }
+    }
+
+    fn ensure_open(&self) -> Result<(), KafkaError> {
+        if self.closed.load(Ordering::Acquire) {
+            Err(KafkaError::Config("producer is closed".to_string()))
+        } else {
             Ok(())
         }
     }
@@ -1363,6 +1411,34 @@ mod tests {
                 .await
                 .unwrap_err();
             assert!(matches!(err, KafkaError::InvalidTopic(topic) if topic.is_empty()));
+        });
+    }
+
+    #[cfg(not(feature = "kafka"))]
+    #[test]
+    fn producer_close_is_idempotent_and_blocks_new_operations() {
+        run_test_with_cx(|cx| async move {
+            let producer = KafkaProducer::new(ProducerConfig::default()).unwrap();
+            producer
+                .send(&cx, "orders", None, b"before-close", None)
+                .await
+                .unwrap();
+
+            producer.close(&cx, Duration::from_millis(5)).await.unwrap();
+            producer.close(&cx, Duration::from_millis(5)).await.unwrap();
+            assert!(producer.is_closed());
+
+            let send_err = producer
+                .send(&cx, "orders", None, b"after-close", None)
+                .await
+                .unwrap_err();
+            assert!(matches!(send_err, KafkaError::Config(msg) if msg.contains("closed")));
+
+            let flush_err = producer
+                .flush(&cx, Duration::from_millis(1))
+                .await
+                .unwrap_err();
+            assert!(matches!(flush_err, KafkaError::Config(msg) if msg.contains("closed")));
         });
     }
 }
