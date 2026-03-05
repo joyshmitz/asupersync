@@ -307,7 +307,7 @@ impl<M: ConnectionManager> DbPool<M> {
     /// Get current pool statistics.
     #[must_use]
     pub fn stats(&self) -> DbPoolStats {
-        let inner = self.inner.lock().unwrap();
+        let inner = self.inner.lock();
         DbPoolStats {
             idle: inner.idle.len(),
             active: inner.total.saturating_sub(inner.idle.len()),
@@ -326,7 +326,7 @@ impl<M: ConnectionManager> DbPool<M> {
     /// Returns a `PooledConnection` that automatically returns the connection
     /// to the pool when dropped.
     pub fn get(&self) -> Result<PooledConnection<'_, M>, DbPoolError<M::Error>> {
-        let mut inner = self.inner.lock().unwrap();
+        let mut inner = self.inner.lock();
 
         if inner.closed {
             return Err(DbPoolError::Closed);
@@ -382,7 +382,7 @@ impl<M: ConnectionManager> DbPool<M> {
                 }
                 Err(e) => {
                     // Roll back total count on failure.
-                    let mut inner = self.inner.lock().unwrap();
+                    let mut inner = self.inner.lock();
                     inner.total = inner.total.saturating_sub(1);
                     Err(DbPoolError::Connect(e))
                 }
@@ -457,9 +457,10 @@ impl<M: ConnectionManager> DbPool<M> {
 
     /// Return a connection to the pool, preserving its original creation time.
     fn return_connection(&self, conn: M::Connection, created_at: Instant) {
-        let mut inner = self.inner.lock().unwrap();
+        let mut inner = self.inner.lock();
         if inner.closed {
             inner.total = inner.total.saturating_sub(1);
+            self.stats.total_discards.fetch_add(1, Ordering::Relaxed);
             self.manager.disconnect(conn);
             return;
         }
@@ -472,7 +473,7 @@ impl<M: ConnectionManager> DbPool<M> {
 
     /// Discard a connection (don't return to pool).
     fn discard_connection(&self, conn: M::Connection) {
-        let mut inner = self.inner.lock().unwrap();
+        let mut inner = self.inner.lock();
         inner.total = inner.total.saturating_sub(1);
         self.stats.total_discards.fetch_add(1, Ordering::Relaxed);
         self.manager.disconnect(conn);
@@ -482,12 +483,17 @@ impl<M: ConnectionManager> DbPool<M> {
     ///
     /// Existing checked-out connections will be discarded when returned.
     pub fn close(&self) {
-        let mut inner = self.inner.lock().unwrap();
+        let mut inner = self.inner.lock();
         inner.closed = true;
         // Drain idle connections.
         let idle: Vec<_> = inner.idle.drain(..).collect();
         let drained = idle.len();
         inner.total = inner.total.saturating_sub(drained);
+        if drained > 0 {
+            self.stats
+                .total_discards
+                .fetch_add(drained as u64, Ordering::Relaxed);
+        }
         drop(inner);
         for entry in idle {
             self.manager.disconnect(entry.conn);
@@ -497,14 +503,14 @@ impl<M: ConnectionManager> DbPool<M> {
     /// Returns `true` if the pool is closed.
     #[must_use]
     pub fn is_closed(&self) -> bool {
-        self.inner.lock().unwrap().closed
+        self.inner.lock().closed
     }
 
     /// Evict all idle connections that are expired or stale.
     ///
     /// Returns the number of connections evicted.
     pub fn evict_stale(&self) -> usize {
-        let mut inner = self.inner.lock().unwrap();
+        let mut inner = self.inner.lock();
 
         // Drain all idle, keep only the valid ones.
         let mut keep = VecDeque::new();
@@ -536,7 +542,7 @@ impl<M: ConnectionManager> DbPool<M> {
     pub fn warm_up(&self) -> usize {
         let mut created = 0;
         for _ in 0..self.config.min_idle {
-            let mut inner = self.inner.lock().unwrap();
+            let mut inner = self.inner.lock();
             if inner.total >= self.config.max_size || inner.closed {
                 break;
             }
@@ -550,7 +556,7 @@ impl<M: ConnectionManager> DbPool<M> {
                     created += 1;
                 }
                 Err(_) => {
-                    let mut inner = self.inner.lock().unwrap();
+                    let mut inner = self.inner.lock();
                     inner.total = inner.total.saturating_sub(1);
                 }
             }
@@ -561,7 +567,7 @@ impl<M: ConnectionManager> DbPool<M> {
 
 impl<M: ConnectionManager> fmt::Debug for DbPool<M> {
     fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
-        let inner = self.inner.lock().unwrap();
+        let inner = self.inner.lock();
         f.debug_struct("DbPool")
             .field("idle", &inner.idle.len())
             .field("total", &inner.total)
@@ -1043,6 +1049,7 @@ mod tests {
 
         pool.close();
         assert_eq!(pool.stats().idle, 0);
+        assert_eq!(pool.stats().total_discards, 1);
         assert_eq!(pool.manager.disconnects(), 1);
         crate::test_complete!("close_drains_idle");
     }
@@ -1058,6 +1065,7 @@ mod tests {
         // Return after close → disconnected.
         conn.return_to_pool();
         assert_eq!(pool.stats().total, 0);
+        assert_eq!(pool.stats().total_discards, 1);
         assert_eq!(pool.manager.disconnects(), 1);
         crate::test_complete!("close_discards_returned_connections");
     }
