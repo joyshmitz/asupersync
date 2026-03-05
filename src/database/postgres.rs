@@ -2101,24 +2101,7 @@ impl PgConnection {
                     break;
                 }
                 b'E' => {
-                    // ErrorResponse — drain to ReadyForQuery before returning so
-                    // the connection stays synchronized for subsequent operations.
-                    let err = match self.parse_error_response(&data) {
-                        Err(e) => e,
-                        Ok(e) => e,
-                    };
-                    loop {
-                        let Ok((drain_type, drain_data)) = self.read_message().await else {
-                            break;
-                        };
-                        if drain_type == b'Z' {
-                            if !drain_data.is_empty() {
-                                self.inner.transaction_status = drain_data[0];
-                            }
-                            break;
-                        }
-                    }
-                    return Outcome::Err(err);
+                    return Outcome::Err(self.parse_error_and_drain(&data).await);
                 }
                 b'N' => {
                     // NoticeResponse - ignore
@@ -2211,24 +2194,7 @@ impl PgConnection {
                     break;
                 }
                 b'E' => {
-                    // ErrorResponse — drain to ReadyForQuery before returning so
-                    // the connection stays synchronized for subsequent operations.
-                    let err = match self.parse_error_response(&data) {
-                        Err(e) => e,
-                        Ok(e) => e,
-                    };
-                    loop {
-                        let Ok((drain_type, drain_data)) = self.read_message().await else {
-                            break;
-                        };
-                        if drain_type == b'Z' {
-                            if !drain_data.is_empty() {
-                                self.inner.transaction_status = drain_data[0];
-                            }
-                            break;
-                        }
-                    }
-                    return Outcome::Err(err);
+                    return Outcome::Err(self.parse_error_and_drain(&data).await);
                 }
                 b'N' => {
                     // NoticeResponse - ignore
@@ -2507,12 +2473,7 @@ impl PgConnection {
                     break;
                 }
                 b'E' => {
-                    let err = match self.parse_error_response(&data) {
-                        Err(e) => e,
-                        Ok(e) => e,
-                    };
-                    let _ = self.drain_to_ready().await;
-                    return Outcome::Err(err);
+                    return Outcome::Err(self.parse_error_and_drain(&data).await);
                 }
                 b'N' => { /* NoticeResponse */ }
                 _ => { /* ignore */ }
@@ -2643,12 +2604,7 @@ impl PgConnection {
                     break;
                 }
                 b'E' => {
-                    let err = match self.parse_error_response(&data) {
-                        Err(e) => e,
-                        Ok(e) => e,
-                    };
-                    let _ = self.drain_to_ready().await;
-                    return Outcome::Err(err);
+                    return Outcome::Err(self.parse_error_and_drain(&data).await);
                 }
                 b'N' => {}
                 _ => {}
@@ -2672,13 +2628,22 @@ impl PgConnection {
             return Ok(());
         }
 
+        self.inner.needs_rollback = false;
+
         let mut buf = MessageBuffer::new();
         buf.write_cstring("ROLLBACK");
         let msg = buf.build_message(b'Q');
         self.write_all(&msg).await?;
-        self.drain_to_ready().await?;
-        // Only clear after the full ROLLBACK round-trip succeeds.
-        self.inner.needs_rollback = false;
+
+        if let Err(e) = self.drain_to_ready().await {
+            // Drain errors during rollback are suppressed since the rollback
+            // itself is the priority operation and a drain failure at that
+            // point is non-fatal.
+            if let Some(cx) = crate::cx::Cx::current() {
+                cx.trace(&format!("Failed to drain after ROLLBACK: {e}"));
+            }
+        }
+
         Ok(())
     }
 
@@ -2945,6 +2910,21 @@ impl PgConnection {
         })
     }
 
+    /// Parse an ErrorResponse and drain to ReadyForQuery.
+    ///
+    /// Returns the parsed server error when draining succeeds. If draining fails,
+    /// returns a protocol error that includes both the server error details and
+    /// the drain failure so re-synchronization failures are never swallowed.
+    async fn parse_error_and_drain(&mut self, data: &[u8]) -> PgError {
+        let server_err = self.parse_error_response(data).unwrap_or_else(|e| e);
+        match self.drain_to_ready().await {
+            Ok(()) => server_err,
+            Err(drain_err) => PgError::Protocol(format!(
+                "{server_err}; additionally failed to drain to ReadyForQuery: {drain_err}"
+            )),
+        }
+    }
+
     /// Parse a ParameterDescription message into a list of OIDs.
     fn parse_parameter_description(data: &[u8]) -> Result<Vec<u32>, PgError> {
         let mut reader = MessageReader::new(data);
@@ -3013,12 +2993,7 @@ impl PgConnection {
                     break;
                 }
                 b'E' => {
-                    let err = match self.parse_error_response(&data) {
-                        Err(e) => e,
-                        Ok(e) => e,
-                    };
-                    let _ = self.drain_to_ready().await;
-                    return Outcome::Err(err);
+                    return Outcome::Err(self.parse_error_and_drain(&data).await);
                 }
                 b'N' => { /* NoticeResponse */ }
                 _ => {}
@@ -3062,12 +3037,7 @@ impl PgConnection {
                     break;
                 }
                 b'E' => {
-                    let err = match self.parse_error_response(&data) {
-                        Err(e) => e,
-                        Ok(e) => e,
-                    };
-                    let _ = self.drain_to_ready().await;
-                    return Outcome::Err(err);
+                    return Outcome::Err(self.parse_error_and_drain(&data).await);
                 }
                 b'N' => {}
                 _ => {}
@@ -3446,6 +3416,32 @@ mod tests {
                 next_stmt_id: 0,
             },
         }
+    }
+
+    /// Create a PgConnection plus the peer stream so tests can inject backend
+    /// protocol frames that `read_message()` will consume.
+    fn make_test_connection_with_peer() -> (PgConnection, std::net::TcpStream) {
+        let listener = std::net::TcpListener::bind("127.0.0.1:0").expect("bind");
+        let addr = listener.local_addr().expect("local_addr");
+        let std_stream = std::net::TcpStream::connect(addr).expect("connect");
+        let (peer_stream, _) = listener.accept().expect("accept");
+        let stream = crate::net::TcpStream::from_std(std_stream).expect("from_std");
+        (
+            PgConnection {
+                inner: PgConnectionInner {
+                    stream,
+                    read_buf: Vec::new(),
+                    process_id: 0,
+                    secret_key: 0,
+                    parameters: BTreeMap::new(),
+                    transaction_status: b'I',
+                    closed: false,
+                    needs_rollback: false,
+                    next_stmt_id: 0,
+                },
+            },
+            peer_stream,
+        )
     }
 
     #[test]
@@ -4200,6 +4196,52 @@ mod tests {
                 assert!(hint.is_none());
             }
             other => panic!("expected Server error, got: {other}"),
+        }
+    }
+
+    #[test]
+    fn parse_error_and_drain_returns_server_error_when_drain_succeeds() {
+        let (mut conn, mut peer) = make_test_connection_with_peer();
+        std::io::Write::write_all(&mut peer, &[b'Z', 0, 0, 0, 5, b'T']).unwrap();
+
+        let mut data = Vec::new();
+        data.push(b'C');
+        data.extend_from_slice(b"XX000\0");
+        data.push(b'M');
+        data.extend_from_slice(b"boom\0");
+        data.push(0);
+
+        let err = run(conn.parse_error_and_drain(&data));
+        match err {
+            PgError::Server { code, message, .. } => {
+                assert_eq!(code, "XX000");
+                assert_eq!(message, "boom");
+            }
+            other => panic!("expected Server error, got: {other}"),
+        }
+        assert_eq!(conn.inner.transaction_status, b'T');
+    }
+
+    #[test]
+    fn parse_error_and_drain_surfaces_drain_failure_context() {
+        let mut conn = make_test_connection();
+        let mut data = Vec::new();
+        data.push(b'C');
+        data.extend_from_slice(b"XX000\0");
+        data.push(b'M');
+        data.extend_from_slice(b"boom\0");
+        data.push(0);
+
+        let err = run(conn.parse_error_and_drain(&data));
+        match err {
+            PgError::Protocol(msg) => {
+                assert!(msg.contains("boom"), "missing original server error: {msg}");
+                assert!(
+                    msg.contains("failed to drain to ReadyForQuery"),
+                    "missing drain failure context: {msg}"
+                );
+            }
+            other => panic!("expected Protocol error, got: {other}"),
         }
     }
 
