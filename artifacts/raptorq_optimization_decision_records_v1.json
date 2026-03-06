@@ -3,7 +3,7 @@
   "artifact_id": "raptorq_optimization_decision_records_v1",
   "track_bead_id": "asupersync-3ltrv",
   "external_ref": "bd-7toum",
-  "generated_at_utc": "2026-02-22T01:18:57Z",
+  "generated_at_utc": "2026-03-05T21:20:00Z",
   "governance_rules": {
     "required_fields": [
       "decision_id",
@@ -130,7 +130,8 @@
           "2026-02-20 eighth E5 slice started high-confidence p95/p99 corpus generation targeting artifacts/raptorq_track_e_gf256_p95p99_highconf_v1.json (coord thread msg #1487).",
           "2026-02-20 ninth E5 status update captured transient unrelated retry.rs compile-frontier breakage during high-confidence reruns (coord msgs #1493/#1504).",
           "2026-02-20 follow-up compile verification (`rch exec -- cargo check -p asupersync --lib`) exited 0.",
-          "2026-02-20 tenth E5 slice published artifacts/raptorq_track_e_gf256_p95p99_highconf_v1.json with owner sign-off for G3 closure integration (asupersync-36m6p comment #1894; agent-mail asupersync-3ltrv #1542; coord #1543)."
+          "2026-02-20 tenth E5 slice published artifacts/raptorq_track_e_gf256_p95p99_highconf_v1.json with owner sign-off for G3 closure integration (asupersync-36m6p comment #1894; agent-mail asupersync-3ltrv #1542; coord #1543).",
+          "2026-03-05 E5 support slice made the command-surface split explicit: manifest-level comparator/rollback `command_bundle` remains `gf256_primitives`, while probe-only `repro_command` remains `gf256_dual_policy` (agent-mail asupersync-36m6p #4585)."
         ]
       },
       "risk_class": "high",
@@ -212,10 +213,19 @@
           "rch exec -- cargo bench --bench raptorq_benchmark -- gf256_primitives",
           "rch exec -- cargo bench --bench raptorq_benchmark -- gf256_dual_policy"
         ],
+        "command_surface_split": {
+          "manifest_command_bundle": "rch exec -- cargo bench --bench raptorq_benchmark -- gf256_primitives",
+          "probe_repro_command": "rch exec -- cargo bench --bench raptorq_benchmark -- gf256_dual_policy",
+          "notes": [
+            "Comparator/rollback profile-pack validation stays anchored to the broader gf256_primitives surface.",
+            "Dual-policy probe forensics stay anchored to the narrower gf256_dual_policy surface."
+          ]
+        },
         "notes": [
           "Profile-pack and tuning-candidate provenance fields are now emitted in Track-E policy logs.",
           "Manifest snapshot metadata (schema/version/catalog counts/selected candidate details) is now emitted and covered by deterministic tests.",
           "Environment reproducibility metadata (target_arch/target_os/target_env/target_endian/target_pointer_width_bits) is now included in manifest snapshots and emitted in policy logs.",
+          "The manifest-level comparator/rollback `command_bundle` is intentionally distinct from the probe-level `repro_command` surface and is now tracked explicitly in this artifact.",
           "Directional p95/p99 summaries are now attached via artifacts/raptorq_track_e_gf256_p95p99_v1.json.",
           "High-confidence p95/p99 corpus is published at artifacts/raptorq_track_e_gf256_p95p99_highconf_v1.json with owner sign-off for G3 integration.",
           "High-confidence headline (overall proxy p95/p99 time, us): baseline 9.0743/9.0743, auto 9.3392/9.3392, rollback 9.9333/9.9333.",

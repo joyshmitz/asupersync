@@ -1,7 +1,7 @@
 {
   "schema_version": "raptorq-track-e-gf256-p95p99-highconf-v1",
   "artifact_id": "raptorq_track_e_gf256_p95p99_highconf_v1",
-  "generated_at_utc": "2026-02-20T15:19:30Z",
+  "generated_at_utc": "2026-03-05T21:51:17Z",
   "track_bead_id": "asupersync-36m6p",
   "external_ref": "bd-3g5em",
   "source_artifacts": [
@@ -263,8 +263,22 @@
       }
     }
   ],
+  "closure_assessment": {
+    "ready_for_e5_closure": false,
+    "acceptance_criterion_4_status": "not_met",
+    "material_uplift_demonstrated": false,
+    "overall_tail_direction_vs_baseline": "regressed",
+    "operation_tail_pattern_vs_baseline": "mixed",
+    "scope_sufficiency": "insufficient",
+    "summary": "This narrowed high-confidence corpus keeps AC#4 open because auto proxy p95/p99 tails remain above baseline overall while operation tails stay mixed, with three of four auto dual-slice tails above baseline and only addmul_slices2_fused below baseline.",
+    "blocking_requirements": [
+      "Expand the high-confidence capture beyond `RQ-E-GF256-005_n16384_seed4101_k64_sym16384` to a broader SIMD-active multi-scenario corpus.",
+      "Demonstrate materially better auto p95/p99 tails than baseline on the closure-critical scenarios that remain in scope for E5.",
+      "Recover raw-sample percentile capture or equivalent artifact-sync coverage so closure evidence is not limited to conservative interval endpoints."
+    ]
+  },
   "findings": [
-    "For this high-confidence single-scenario corpus, auto mode shows higher latency tails than baseline in both overall proxy p95/p99 and all four dual-slice operation tails.",
+    "For this high-confidence single-scenario corpus, auto mode shows higher latency tails than baseline in overall proxy p95/p99 and in three of four dual-slice operation tails; only addmul_slices2_fused improves versus baseline.",
     "Rollback recovers mul_slices2_fused tail behavior close to baseline but regresses mul_slices2_sequential tails versus both baseline and auto.",
     "Addmul tails in rollback are mixed: fused improves versus baseline/auto, while sequential remains above baseline but below auto."
   ],
