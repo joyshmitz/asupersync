@@ -112,6 +112,9 @@ repro_*.rs
 
 # Profiling artifacts directory (callgrind, cachegrind, etc.)
 artifacts/
+!artifacts/
+artifacts/*
+!artifacts/runtime_workload_corpus_v*.json
 
 # UBS (Ultimate Bug Scanner) output
 ubs_*.txt
