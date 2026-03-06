@@ -43,8 +43,10 @@
 
 use crate::cx::Cx;
 use crate::time::{sleep, wall_now};
-use crate::types::Outcome;
-use std::future::Future;
+use crate::types::{CancelReason, Outcome};
+use std::future::{Future, poll_fn};
+use std::pin::Pin;
+use std::task::Poll;
 use std::time::Duration;
 
 // ─── RetryPolicy ─────────────────────────────────────────────────────────────
@@ -109,6 +111,30 @@ impl Default for RetryPolicy {
 /// Rejects anything that is not `[a-zA-Z0-9_]` to prevent SQL injection.
 fn validate_savepoint_name(name: &str) -> bool {
     !name.is_empty() && name.bytes().all(|b| b.is_ascii_alphanumeric() || b == b'_')
+}
+
+fn cancelled_reason(cx: &Cx) -> CancelReason {
+    cx.cancel_reason().unwrap_or_default()
+}
+
+async fn wait_retry_delay(cx: &Cx, delay: Duration) -> Result<(), CancelReason> {
+    if delay.is_zero() {
+        cx.checkpoint().map_err(|_| cancelled_reason(cx))?;
+        crate::runtime::yield_now().await;
+        return cx.checkpoint().map_err(|_| cancelled_reason(cx));
+    }
+
+    let now = cx
+        .timer_driver()
+        .map_or_else(wall_now, |driver| driver.now());
+    let mut sleeper = sleep(now, delay);
+    poll_fn(|task_cx| {
+        if cx.checkpoint().is_err() {
+            return Poll::Ready(Err(cancelled_reason(cx)));
+        }
+        Pin::new(&mut sleeper).poll(task_cx).map(|()| Ok(()))
+    })
+    .await
 }
 
 // ─── PostgreSQL helpers ──────────────────────────────────────────────────────
@@ -193,10 +219,8 @@ mod pg {
                 Outcome::Err(e) if e.is_serialization_failure() && attempt < policy.max_retries => {
                     attempt += 1;
                     let delay = policy.delay_for(attempt.saturating_sub(1));
-                    if !delay.is_zero() {
-                        sleep(wall_now(), delay).await;
-                    } else {
-                        crate::runtime::yield_now().await;
+                    if let Err(reason) = wait_retry_delay(cx, delay).await {
+                        return Outcome::Cancelled(reason);
                     }
                     continue;
                 }
@@ -414,10 +438,8 @@ mod sqlite {
                 {
                     attempt += 1;
                     let delay = policy.delay_for(attempt.saturating_sub(1));
-                    if !delay.is_zero() {
-                        sleep(wall_now(), delay).await;
-                    } else {
-                        crate::runtime::yield_now().await;
+                    if let Err(reason) = wait_retry_delay(cx, delay).await {
+                        return Outcome::Cancelled(reason);
                     }
                     continue;
                 }
@@ -587,10 +609,8 @@ mod mysql {
                 Outcome::Err(e) if e.is_deadlock() && attempt < policy.max_retries => {
                     attempt += 1;
                     let delay = policy.delay_for(attempt.saturating_sub(1));
-                    if !delay.is_zero() {
-                        sleep(wall_now(), delay).await;
-                    } else {
-                        crate::runtime::yield_now().await;
+                    if let Err(reason) = wait_retry_delay(cx, delay).await {
+                        return Outcome::Cancelled(reason);
                     }
                     continue;
                 }
@@ -689,6 +709,18 @@ pub use mysql::{MySqlSavepoint, with_mysql_transaction, with_mysql_transaction_r
 #[cfg(test)]
 mod tests {
     use super::*;
+    use std::sync::Arc;
+    use std::task::{Context, Poll, Wake, Waker};
+
+    struct NoopWaker;
+
+    impl Wake for NoopWaker {
+        fn wake(self: Arc<Self>) {}
+    }
+
+    fn noop_waker() -> Waker {
+        Waker::from(Arc::new(NoopWaker))
+    }
 
     fn init_test(name: &str) {
         crate::test_utils::init_test_logging();
@@ -791,5 +823,43 @@ mod tests {
         assert_eq!(cloned.max_retries, policy.max_retries);
         assert_eq!(cloned.base_delay, policy.base_delay);
         assert_eq!(cloned.max_delay, policy.max_delay);
+    }
+
+    #[test]
+    fn wait_retry_delay_returns_cancelled_while_sleeping() {
+        init_test("wait_retry_delay_returns_cancelled_while_sleeping");
+        let cx = Cx::for_testing();
+        let waker = noop_waker();
+        let mut task_cx = Context::from_waker(&waker);
+        let expected = CancelReason::user("stop");
+        let mut fut = Box::pin(wait_retry_delay(&cx, Duration::from_secs(60)));
+
+        assert!(matches!(fut.as_mut().poll(&mut task_cx), Poll::Pending));
+        cx.set_cancel_reason(expected.clone());
+
+        match fut.as_mut().poll(&mut task_cx) {
+            Poll::Ready(Err(reason)) => assert_eq!(reason, expected),
+            other => panic!("expected cancelled retry wait, got {other:?}"),
+        }
+        crate::test_complete!("wait_retry_delay_returns_cancelled_while_sleeping");
+    }
+
+    #[test]
+    fn wait_retry_delay_zero_delay_returns_cancelled_after_yield() {
+        init_test("wait_retry_delay_zero_delay_returns_cancelled_after_yield");
+        let cx = Cx::for_testing();
+        let waker = noop_waker();
+        let mut task_cx = Context::from_waker(&waker);
+        let expected = CancelReason::user("stop");
+        let mut fut = Box::pin(wait_retry_delay(&cx, Duration::ZERO));
+
+        assert!(matches!(fut.as_mut().poll(&mut task_cx), Poll::Pending));
+        cx.set_cancel_reason(expected.clone());
+
+        match fut.as_mut().poll(&mut task_cx) {
+            Poll::Ready(Err(reason)) => assert_eq!(reason, expected),
+            other => panic!("expected cancelled zero-delay retry wait, got {other:?}"),
+        }
+        crate::test_complete!("wait_retry_delay_zero_delay_returns_cancelled_after_yield");
     }
 }
