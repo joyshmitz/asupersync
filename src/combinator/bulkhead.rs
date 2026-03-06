@@ -148,8 +148,6 @@ pub struct BulkheadMetrics {
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 enum RejectionReason {
     Timeout,
-    Cancelled,
-    Consumed,
 }
 
 /// Result of a queue entry: None = waiting, Some(Ok(())) = granted, Some(Err(reason)) = rejected.
@@ -339,15 +337,6 @@ impl Bulkhead {
     fn process_queue_inner(&self, queue: &mut VecDeque<QueueEntry>, now: Time) -> Option<u64> {
         let now_millis = now.as_millis();
 
-        // Garbage collect tombstones from the front
-        while let Some(front) = queue.front() {
-            if front.result == Some(Err(RejectionReason::Consumed)) {
-                queue.pop_front();
-            } else {
-                break;
-            }
-        }
-
         // First, timeout expired entries — count timeouts locally and batch-update
         // the metrics lock once, instead of acquiring it per timed-out entry.
         let mut timeout_count = 0u64;
@@ -441,15 +430,6 @@ impl Bulkhead {
 
         let mut queue = self.queue.write();
 
-        // Garbage collect tombstones from the front to free up capacity
-        while let Some(front) = queue.front() {
-            if front.result == Some(Err(RejectionReason::Consumed)) {
-                queue.pop_front();
-            } else {
-                break;
-            }
-        }
-
         // Check queue capacity
         // We check total length (including completed-but-unclaimed entries) to
         // prevent unbounded memory growth if the user abandons request IDs.
@@ -500,33 +480,20 @@ impl Bulkhead {
         let entry_idx = queue.iter().position(|e| e.id == entry_id);
 
         if let Some(idx) = entry_idx {
-            let entry = &mut queue[idx];
-            match entry.result {
+            match queue[idx].result {
                 Some(Ok(())) => {
-                    let weight = entry.weight;
-                    // Mark as consumed
-                    entry.result = Some(Err(RejectionReason::Consumed));
+                    let entry = queue.remove(idx).expect("entry must exist");
                     Ok(Some(BulkheadPermit {
                         bulkhead: self,
-                        weight,
+                        weight: entry.weight,
                     }))
                 }
                 Some(Err(RejectionReason::Timeout)) => {
+                    let entry = queue.remove(idx).expect("entry must exist");
                     let wait_ms = now.as_millis().saturating_sub(entry.enqueued_at_millis);
-                    // Mark as consumed
-                    entry.result = Some(Err(RejectionReason::Consumed));
                     Err(BulkheadError::QueueTimeout {
                         waited: Duration::from_millis(wait_ms),
                     })
-                }
-                Some(Err(RejectionReason::Cancelled)) => {
-                    // Mark as consumed
-                    entry.result = Some(Err(RejectionReason::Consumed));
-                    Err(BulkheadError::Cancelled)
-                }
-                Some(Err(RejectionReason::Consumed)) => {
-                    // Already consumed, likely caller double-polled
-                    Err(BulkheadError::Cancelled)
                 }
                 None => Ok(None),
             }
@@ -540,22 +507,18 @@ impl Bulkhead {
     pub fn cancel_entry(&self, entry_id: u64, now: Time) {
         let mut queue = self.queue.write();
         if let Some(idx) = queue.iter().position(|e| e.id == entry_id) {
-            let entry = &mut queue[idx];
+            let entry = queue.remove(idx).expect("entry must exist");
             let previous_result = entry.result;
-            let weight = entry.weight;
-            let enqueued_at_millis = entry.enqueued_at_millis;
-            
-            entry.result = Some(Err(RejectionReason::Consumed));
             drop(queue);
 
             if matches!(previous_result, Some(Ok(()))) {
                 // Permit was granted but not claimed. Release it.
-                self.release_permit(weight);
+                self.release_permit(entry.weight);
                 self.total_cancelled_atomic.fetch_add(1, Ordering::Relaxed);
                 let _ = self.process_queue(now);
             } else if previous_result.is_none() {
                 // Still waiting. Mark as cancelled.
-                let wait_ms = now.as_millis().saturating_sub(enqueued_at_millis);
+                let wait_ms = now.as_millis().saturating_sub(entry.enqueued_at_millis);
                 self.total_wait_time_ms
                     .fetch_add(wait_ms, Ordering::Relaxed);
                 self.max_queue_wait_ms_atomic
@@ -565,7 +528,7 @@ impl Bulkhead {
                 self.total_cancelled_atomic.fetch_add(1, Ordering::Relaxed);
             }
             // If entry.result was Some(Err(_)), it was already counted (e.g. as Timeout)
-            // and pending_queue_count was decremented. We just tombstoned it.
+            // and pending_queue_count was decremented. Removing it keeps queue capacity honest.
         }
     }
 
@@ -1638,6 +1601,9 @@ mod tests {
         // Internal check to ensure vector is actually cleared
         // We can't access private fields, but we can check if we can fill the queue again
         // If the zombie is still there, we might hit the limit earlier than expected
+        for _ in 0..10 {
+            assert!(bh.enqueue(1, now).is_ok());
+        }
     }
 
     #[test]
@@ -1669,6 +1635,35 @@ mod tests {
         assert_eq!(
             metrics.queue_depth, 0,
             "queue should be empty after cancellation of timed-out entry"
+        );
+
+        for _ in 0..10 {
+            assert!(bh.enqueue(1, now).is_ok());
+        }
+    }
+
+    #[test]
+    fn cancelled_entry_behind_granted_zombie_frees_queue_slot() {
+        let bh = Bulkhead::new(BulkheadPolicy {
+            max_concurrent: 1,
+            max_queue: 2,
+            ..Default::default()
+        });
+
+        let now = Time::from_millis(0);
+
+        let p1 = bh.try_acquire(1).unwrap();
+        let id1 = bh.enqueue(1, now).unwrap();
+        let id2 = bh.enqueue(1, now).unwrap();
+
+        p1.release();
+        assert_eq!(bh.process_queue(now), Some(id1));
+
+        bh.cancel_entry(id2, now);
+
+        assert!(
+            bh.enqueue(1, now).is_ok(),
+            "actively cancelled entry must stop occupying queue capacity behind a granted zombie"
         );
     }
 
@@ -1711,6 +1706,6 @@ mod tests {
         permit.release();
 
         // 7. Queue len now 1. Can enqueue.
-        assert!(bh.enqueue(1, now).is_ok());
+        bh.enqueue(1, now).expect("enqueue should succeed");
     }
 }

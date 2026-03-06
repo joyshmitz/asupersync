@@ -2036,6 +2036,45 @@ fn e5_simd_ablation_artifact_makes_decision_chronology_explicit() {
     );
 }
 
+/// Validate the legacy scalar policy snapshot is explicitly marked as
+/// historical pre-refresh evidence rather than an unlabeled current default.
+#[test]
+fn e5_legacy_scalar_policy_snapshot_is_marked_historical() {
+    let artifact: serde_json::Value = serde_json::from_str(include_str!(
+        "../artifacts/raptorq_track_e_gf256_bench_v1.json"
+    ))
+    .expect("Track-E benchmark artifact must be valid JSON");
+
+    let snapshot = &artifact["policy_snapshot_rq_e_gf256_005"];
+    assert_eq!(
+        snapshot["snapshot_role"].as_str(),
+        Some("historical_pre_refresh_scalar_policy_wiring_reference"),
+        "legacy policy snapshot must spell out its historical pre-refresh role"
+    );
+    assert_eq!(
+        snapshot["status"].as_str(),
+        Some("historical_reference_only"),
+        "legacy policy snapshot must stay tagged as historical-only evidence"
+    );
+    assert_eq!(
+        snapshot["superseded_by_decision_packet"].as_str(),
+        Some("simd_policy_ablation_2026_03_04"),
+        "legacy policy snapshot must point to the canonical replacement packet"
+    );
+    assert_eq!(
+        snapshot["replay_pointer"].as_str(),
+        Some("replay:rq-e-gf256-profile-pack-v1"),
+        "legacy policy snapshot must preserve its original replay pointer"
+    );
+    assert!(
+        snapshot["notes"]
+            .as_str()
+            .expect("legacy policy snapshot must explain its retained purpose")
+            .contains("not as the current default contract"),
+        "legacy policy snapshot notes must explain that it is not canonical"
+    );
+}
+
 /// Validate G3 decision-record artifact schema and high-impact lever coverage.
 #[test]
 #[allow(clippy::too_many_lines)]
@@ -2481,6 +2520,25 @@ fn e5_profile_pack_doc_explains_ablation_decision_chronology() {
         assert!(
             RAPTORQ_BASELINE_PROFILE_MD.contains(required),
             "baseline profile doc must explain ablation chronology token {required}"
+        );
+    }
+}
+
+/// Validate the baseline/profile doc explains that the embedded scalar policy
+/// snapshot is retained only as historical pre-refresh wiring evidence.
+#[test]
+fn e5_profile_pack_doc_marks_legacy_scalar_snapshot_historical() {
+    for required in [
+        "policy_snapshot_rq_e_gf256_005.snapshot_role = historical_pre_refresh_scalar_policy_wiring_reference",
+        "policy_snapshot_rq_e_gf256_005.status = historical_reference_only",
+        "policy_snapshot_rq_e_gf256_005.superseded_by_decision_packet = simd_policy_ablation_2026_03_04",
+        "policy_snapshot_rq_e_gf256_005.replay_pointer = replay:rq-e-gf256-profile-pack-v1",
+        "It is not the current default",
+        "canonical current x86 default contract remains",
+    ] {
+        assert!(
+            RAPTORQ_BASELINE_PROFILE_MD.contains(required),
+            "baseline profile doc must explain legacy scalar snapshot token {required}"
         );
     }
 }

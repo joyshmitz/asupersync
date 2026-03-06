@@ -222,6 +222,18 @@ Observed host/profile snapshot in all three runs:
 
 Track-E/E5 interpretation: this packet validates deterministic profile-pack policy wiring and mode forcing, but does not yet prove SIMD-profile-pack material uplift because the active kernel path was scalar on these runs.
 
+The benchmark artifact now marks the embedded scalar snapshot the same way,
+instead of leaving that role implicit:
+
+- `policy_snapshot_rq_e_gf256_005.snapshot_role = historical_pre_refresh_scalar_policy_wiring_reference`
+- `policy_snapshot_rq_e_gf256_005.status = historical_reference_only`
+- `policy_snapshot_rq_e_gf256_005.superseded_by_decision_packet = simd_policy_ablation_2026_03_04`
+- `policy_snapshot_rq_e_gf256_005.replay_pointer = replay:rq-e-gf256-profile-pack-v1`
+
+That packet is preserved for provenance only. It is not the current default
+contract; the canonical current x86 default contract remains
+`simd_policy_ablation_2026_03_04`.
+
 ### E5 SIMD A/B Ablation (`asupersync-36m6p`, 2026-03-02)
 
 Follow-up same-session SIMD ablations were run via `rch` on `RQ-E-GF256-DUAL-006` (`lane_a=16384`, `lane_b=16384`) to reduce cross-worker noise:

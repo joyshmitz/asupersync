@@ -65,6 +65,9 @@
   "policy_snapshot_rq_e_gf256_005": {
     "scenario_id": "RQ-E-GF256-005",
     "seed": 4101,
+    "snapshot_role": "historical_pre_refresh_scalar_policy_wiring_reference",
+    "status": "historical_reference_only",
+    "superseded_by_decision_packet": "simd_policy_ablation_2026_03_04",
     "kernel": "Scalar",
     "profile_pack": "scalar-conservative-v1",
     "selected_tuning_candidate_id": "scalar-t16-u1-pf0-fused-off-v1",
@@ -75,7 +78,8 @@
     "target_pointer_width_bits": 64,
     "mul_decision": "Sequential",
     "addmul_decision": "Sequential",
-    "replay_pointer": "replay:rq-e-gf256-profile-pack-v1"
+    "replay_pointer": "replay:rq-e-gf256-profile-pack-v1",
+    "notes": "Captured before the later profile-pack schema/policy refresh; retained only as scalar policy-wiring evidence and not as the current default contract."
   },
   "comparators": [
     {

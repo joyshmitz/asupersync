@@ -187,8 +187,6 @@ pub struct RateLimitMetrics {
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 enum RejectionReason {
     Timeout,
-    /// Tombstone for entries that have been fully processed and removed by the caller.
-    Consumed,
 }
 
 /// Result of a queue entry: None = waiting, Some(Ok(())) = granted, Some(Err(reason)) = rejected.
@@ -554,15 +552,6 @@ impl RateLimiter {
 
         let mut queue = self.wait_queue.write();
 
-        // Garbage collect tombstones from the front
-        while let Some(front) = queue.front() {
-            if front.result == Some(Err(RejectionReason::Consumed)) {
-                queue.pop_front();
-            } else {
-                break;
-            }
-        }
-
         // First, timeout expired entries
         let mut timeout_count = 0u32;
         for entry in queue.iter_mut() {
@@ -652,24 +641,17 @@ impl RateLimiter {
         let entry_idx = queue.iter().position(|e| e.id == entry_id);
 
         if let Some(idx) = entry_idx {
-            let entry = &mut queue[idx];
-            match entry.result {
+            match queue[idx].result {
                 Some(Ok(())) => {
-                    // Mark as consumed to avoid O(N) removal
-                    entry.result = Some(Err(RejectionReason::Consumed));
+                    let _entry = queue.remove(idx).expect("entry must exist");
                     Ok(true)
                 }
                 Some(Err(RejectionReason::Timeout)) => {
+                    let entry = queue.remove(idx).expect("entry must exist");
                     let wait_ms = now.as_millis().saturating_sub(entry.enqueued_at_millis);
-                    entry.result = Some(Err(RejectionReason::Consumed));
                     Err(RateLimitError::Timeout {
                         waited: Duration::from_millis(wait_ms),
                     })
-                }
-                Some(Err(RejectionReason::Consumed)) => {
-                    // Already consumed (shouldn't happen if caller only checks once after completion,
-                    // but safe to return Cancelled if they double-poll a finished entry)
-                    Err(RateLimitError::Cancelled)
                 }
                 None => Ok(false),
             }
@@ -687,10 +669,8 @@ impl RateLimiter {
 
         let mut queue = self.wait_queue.write();
         if let Some(idx) = queue.iter().position(|e| e.id == entry_id) {
-            let entry = &mut queue[idx];
+            let entry = queue.remove(idx).expect("entry must exist");
             let previous_result = entry.result;
-            let cost = entry.cost;
-            entry.result = Some(Err(RejectionReason::Consumed));
             drop(queue);
 
             if previous_result == Some(Ok(())) {
@@ -698,7 +678,7 @@ impl RateLimiter {
                 let mut state = self.state.lock();
                 state.tokens = state
                     .tokens
-                    .saturating_add(cost)
+                    .saturating_add(entry.cost)
                     .min(self.policy.burst);
                 // We could decrement total_allowed here, but the operation was technically
                 // allowed from the rate limiter's perspective, just not consumed.
@@ -1590,6 +1570,36 @@ mod tests {
         // Check - should return Cancelled
         let result = rl.check_entry(entry_id, now);
         assert!(matches!(result, Err(RateLimitError::Cancelled)));
+    }
+
+    #[test]
+    fn checked_timeout_behind_granted_zombie_is_removed() {
+        let rl = RateLimiter::new(RateLimitPolicy {
+            rate: 1,
+            period: Duration::from_millis(100),
+            burst: 1,
+            wait_strategy: WaitStrategy::BlockWithTimeout(Duration::from_millis(150)),
+            ..Default::default()
+        });
+
+        let now = Time::from_millis(0);
+        assert!(rl.try_acquire(1, now));
+
+        let id1 = rl.enqueue(1, now).unwrap();
+        let id2 = rl.enqueue(1, now).unwrap();
+
+        let grant_time = Time::from_millis(100);
+        assert_eq!(rl.process_queue(grant_time), Some(id1));
+        assert_eq!(rl.wait_queue.read().len(), 2);
+
+        let timeout_time = Time::from_millis(200);
+        let result = rl.check_entry(id2, timeout_time);
+        assert!(matches!(result, Err(RateLimitError::Timeout { .. })));
+        assert_eq!(
+            rl.wait_queue.read().len(),
+            1,
+            "timed-out entry should be removed once the caller consumes it"
+        );
     }
 
     #[test]

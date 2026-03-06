@@ -35,6 +35,20 @@ if [[ ! -x "${RCH_BIN}" ]]; then
     exit 1
 fi
 
+rch_attempt_went_local() {
+    local attempt_log="$1"
+
+    grep -Eq '^\[RCH\] local \(|falling back to local' "${attempt_log}"
+}
+
+update_run_failure_class() {
+    local candidate="$1"
+
+    if [[ "${candidate}" == "rch_local_fallback" || "${RUN_FAILURE_CLASS}" == "none" ]]; then
+        RUN_FAILURE_CLASS="${candidate}"
+    fi
+}
+
 mkdir -p "${OUTPUT_DIR}" "${ARTIFACT_DIR}" "${RUN1_OUTDIR}" "${RUN2_OUTDIR}"
 
 echo "==================================================================="
@@ -51,6 +65,7 @@ echo ""
 EXIT_CODE=0
 CHECK_FAILURES=0
 CHECKS_PASSED=0
+RUN_FAILURE_CLASS="none"
 
 run_packaging_call() {
     local run_label="$1"
@@ -59,6 +74,7 @@ run_packaging_call() {
     local package_out_dir="$4"
     local rc=0
     local attempt_log=""
+    local last_failure_reason="test_or_pattern_failure"
 
     for ((attempt = 1; attempt <= RCH_RETRY_ATTEMPTS; attempt++)); do
         local -a package_cmd=(
@@ -80,18 +96,31 @@ run_packaging_call() {
             rc=$?
         fi
 
+        if rch_attempt_went_local "${attempt_log}"; then
+            rc=86
+            last_failure_reason="rch_local_fallback"
+            echo "  WARN: ${run_label} attempt ${attempt}/${RCH_RETRY_ATTEMPTS} fell back to local cargo; rejecting attempt"
+        fi
+
         local payload=""
         payload="$(grep -E '"schema_version"[[:space:]]*:[[:space:]]*"doctor-cli-package-v1"' "${attempt_log}" | tail -n1 || true)"
         if [[ -n "${payload}" ]] && printf '%s\n' "${payload}" | jq -e . >/dev/null 2>&1; then
             cp "${attempt_log}" "${run_log}"
             printf '%s\n' "${payload}" > "${run_json}"
             if [[ ${rc} -ne 0 ]]; then
-                echo "  WARN: ${run_label} exited ${rc}; proceeding with captured JSON payload"
+                if [[ "${last_failure_reason}" == "rch_local_fallback" ]]; then
+                    rm -f "${run_json}"
+                else
+                    echo "  WARN: ${run_label} exited ${rc}; proceeding with captured JSON payload"
+                    return 0
+                fi
+            else
+                return 0
             fi
-            return 0
         fi
 
         if [[ ${attempt} -lt ${RCH_RETRY_ATTEMPTS} ]]; then
+            update_run_failure_class "${last_failure_reason}"
             echo "  WARN: ${run_label} attempt ${attempt}/${RCH_RETRY_ATTEMPTS} produced no valid JSON payload (exit=${rc}); retrying"
             sleep 1
         fi
@@ -100,6 +129,7 @@ run_packaging_call() {
     if [[ -n "${attempt_log}" && -f "${attempt_log}" ]]; then
         cp "${attempt_log}" "${run_log}"
     fi
+    update_run_failure_class "${last_failure_reason}"
     echo "  ERROR: ${run_label} failed after ${RCH_RETRY_ATTEMPTS} attempt(s) (see ${run_log})"
     return 1
 }
@@ -180,6 +210,8 @@ FAILURE_CLASS="test_or_pattern_failure"
 if [[ ${EXIT_CODE} -eq 0 && ${CHECK_FAILURES} -eq 0 ]]; then
     SUITE_STATUS="passed"
     FAILURE_CLASS="none"
+elif [[ "${RUN_FAILURE_CLASS}" == "rch_local_fallback" ]]; then
+    FAILURE_CLASS="rch_local_fallback"
 fi
 
 TESTS_PASSED=0

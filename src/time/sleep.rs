@@ -557,8 +557,11 @@ impl Future for Sleep {
                 }
 
                 drop(state);
-                // Intentionally detach threads to avoid blocking the executor
-                drop(finished_handles);
+                // Cleanly reap finished threads instead of detaching them.
+                // Since they are verified finished, join() will not block.
+                for handle in finished_handles {
+                    let _ = handle.join();
+                }
 
                 Poll::Pending
             }

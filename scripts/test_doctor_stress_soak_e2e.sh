@@ -65,6 +65,27 @@ if [[ "${PROFILE_MODE}" != "fast" && "${PROFILE_MODE}" != "soak" ]]; then
     exit 1
 fi
 
+rch_attempt_went_local() {
+    local candidate_file=""
+
+    for candidate_file in "$@"; do
+        if [[ -n "${candidate_file}" && -f "${candidate_file}" ]] \
+            && grep -Eq '^\[RCH\] local \(|falling back to local' "${candidate_file}"; then
+            return 0
+        fi
+    done
+
+    return 1
+}
+
+update_run_failure_class() {
+    local candidate="$1"
+
+    if [[ "${candidate}" == "rch_local_fallback" || "${RUN_FAILURE_CLASS}" == "none" ]]; then
+        RUN_FAILURE_CLASS="${candidate}"
+    fi
+}
+
 ensure_artifact_dirs() {
     mkdir -p "${ARTIFACT_DIR}"
 }
@@ -94,6 +115,7 @@ echo ""
 EXIT_CODE=0
 CHECK_FAILURES=0
 CHECKS_PASSED=0
+RUN_FAILURE_CLASS="none"
 
 run_export_call() {
     local run_label="$1"
@@ -105,6 +127,7 @@ run_export_call() {
     local rc_smoke=0
     local attempt_log=""
     local contract_ready=0
+    local last_failure_reason="test_or_pattern_failure"
 
     if jq -e . "${contract_json}" >/dev/null 2>&1; then
         contract_ready=1
@@ -146,10 +169,21 @@ run_export_call() {
             fi
         fi
 
+        if rch_attempt_went_local "${attempt_log}" "${contract_tmp}"; then
+            rc_contract=86
+            last_failure_reason="rch_local_fallback"
+        fi
+
         if timeout "${RCH_SCAN_TIMEOUT}s" "${RCH_BIN}" exec -- "${smoke_cmd[@]}" >"${smoke_tmp}" 2>>"${attempt_log}"; then
             rc_smoke=0
         else
             rc_smoke=$?
+        fi
+
+        if rch_attempt_went_local "${attempt_log}" "${smoke_tmp}"; then
+            rc_smoke=86
+            last_failure_reason="rch_local_fallback"
+            echo "  WARN: ${run_label} attempt ${attempt}/${RCH_RETRY_ATTEMPTS} fell back to local cargo; rejecting attempt"
         fi
 
         if ! jq -e . "${contract_tmp}" >/dev/null 2>&1; then
@@ -183,6 +217,7 @@ run_export_call() {
         fi
 
         if [[ ${attempt} -lt ${RCH_RETRY_ATTEMPTS} ]]; then
+            update_run_failure_class "${last_failure_reason}"
             echo "  WARN: ${run_label} attempt ${attempt}/${RCH_RETRY_ATTEMPTS} failed (contract_exit=${rc_contract}, smoke_exit=${rc_smoke}); retrying"
             sleep 1
         fi
@@ -191,6 +226,7 @@ run_export_call() {
     if [[ -n "${attempt_log}" && -f "${attempt_log}" ]]; then
         cp "${attempt_log}" "${run_log}"
     fi
+    update_run_failure_class "${last_failure_reason}"
     echo "  ERROR: ${run_label} failed after ${RCH_RETRY_ATTEMPTS} attempt(s) (see ${run_log})"
     return 1
 }
@@ -202,6 +238,7 @@ run_unit_slice() {
     local rc=0
     local running_count=""
     local passed_count=""
+    local last_failure_reason="test_or_pattern_failure"
 
     for ((attempt = 1; attempt <= RCH_RETRY_ATTEMPTS; attempt++)); do
         ensure_artifact_dirs
@@ -216,6 +253,12 @@ run_unit_slice() {
             rc=0
         else
             rc=$?
+        fi
+
+        if rch_attempt_went_local "${attempt_log}"; then
+            rc=86
+            last_failure_reason="rch_local_fallback"
+            echo "  WARN: unit-slice attempt ${attempt}/${RCH_RETRY_ATTEMPTS} fell back to local cargo; rejecting attempt"
         fi
 
         running_count="$(
@@ -249,6 +292,7 @@ run_unit_slice() {
         fi
 
         if [[ ${attempt} -lt ${RCH_RETRY_ATTEMPTS} ]]; then
+            update_run_failure_class "${last_failure_reason}"
             echo "  WARN: unit-slice attempt ${attempt}/${RCH_RETRY_ATTEMPTS} failed (exit=${rc}); retrying"
             sleep 1
         fi
@@ -257,6 +301,7 @@ run_unit_slice() {
     if [[ -n "${attempt_log}" && -f "${attempt_log}" ]]; then
         cp "${attempt_log}" "${run_log}"
     fi
+    update_run_failure_class "${last_failure_reason}"
     echo "  ERROR: unit-slice failed after ${RCH_RETRY_ATTEMPTS} attempt(s) (see ${run_log})"
     return 1
 }
@@ -359,6 +404,8 @@ FAILURE_CLASS="test_or_pattern_failure"
 if [[ ${EXIT_CODE} -eq 0 && ${CHECK_FAILURES} -eq 0 ]]; then
     SUITE_STATUS="passed"
     FAILURE_CLASS="none"
+elif [[ "${RUN_FAILURE_CLASS}" == "rch_local_fallback" ]]; then
+    FAILURE_CLASS="rch_local_fallback"
 fi
 
 TESTS_PASSED=0
