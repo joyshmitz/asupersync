@@ -561,7 +561,7 @@ mod tests {
                 assert!(forced, "force close should succeed");
             });
 
-            signal.wait_for_phase(ShutdownPhase::ForceClosing).await;
+            signal.wait_for_phase(ShutdownPhase::Stopped).await;
             let new_phase = signal.phase();
             crate::assert_with_log!(
                 new_phase == ShutdownPhase::ForceClosing,
@@ -591,7 +591,7 @@ mod tests {
                 signal2.mark_stopped();
             });
 
-            signal.wait_for_phase(ShutdownPhase::ForceClosing).await;
+            signal.wait_for_phase(ShutdownPhase::Stopped).await;
             let new_phase = signal.phase();
             crate::assert_with_log!(
                 new_phase == ShutdownPhase::Stopped,
