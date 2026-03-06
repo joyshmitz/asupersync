@@ -49,6 +49,8 @@ use std::time::Duration;
 /// Errors that can occur when spawning a task.
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub enum SpawnError {
+    /// The runtime backing a weak handle has already been dropped.
+    RuntimeUnavailable,
     /// The target region does not exist.
     RegionNotFound(RegionId),
     /// The target region is closed or draining and cannot accept new tasks.
@@ -76,6 +78,7 @@ pub enum SpawnError {
 impl std::fmt::Display for SpawnError {
     fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
         match self {
+            Self::RuntimeUnavailable => write!(f, "runtime is no longer available"),
             Self::RegionNotFound(id) => write!(f, "region not found: {id:?}"),
             Self::RegionClosed(id) => write!(f, "region closed: {id:?}"),
             Self::LocalSchedulerUnavailable => {

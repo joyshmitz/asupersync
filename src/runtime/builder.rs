@@ -1079,19 +1079,18 @@ impl RuntimeHandle {
         }
     }
 
-    fn inner(&self) -> Arc<RuntimeInner> {
+    fn try_inner(&self) -> Result<Arc<RuntimeInner>, SpawnError> {
         match &self.inner {
-            RuntimeHandleRef::Strong(inner) => Arc::clone(inner),
-            RuntimeHandleRef::Weak(inner) => {
-                inner.upgrade().expect("runtime is no longer available")
-            }
+            RuntimeHandleRef::Strong(inner) => Ok(Arc::clone(inner)),
+            RuntimeHandleRef::Weak(inner) => inner.upgrade().ok_or(SpawnError::RuntimeUnavailable),
         }
     }
 
     /// Spawn a task from outside async context.
     ///
-    /// Panics if the root region rejects admission. Use [`RuntimeHandle::try_spawn`]
-    /// to handle admission errors explicitly.
+    /// Panics if the runtime is no longer available or if the root region
+    /// rejects admission. Use [`RuntimeHandle::try_spawn`] to handle those
+    /// failures explicitly.
     pub fn spawn<F>(&self, future: F) -> JoinHandle<F::Output>
     where
         F: Future + Send + 'static,
@@ -1101,18 +1100,20 @@ impl RuntimeHandle {
             .expect("failed to create runtime task")
     }
 
-    /// Spawn a task from outside async context, returning admission errors.
+    /// Spawn a task from outside async context, returning runtime-availability
+    /// or admission errors instead of panicking.
     pub fn try_spawn<F>(&self, future: F) -> Result<JoinHandle<F::Output>, SpawnError>
     where
         F: Future + Send + 'static,
         F::Output: Send + 'static,
     {
-        self.inner().spawn(future)
+        self.try_inner()?.spawn(future)
     }
 
     /// Spawns a blocking task on the blocking pool.
     ///
-    /// Returns `None` if the blocking pool is not configured.
+    /// Returns `None` if the blocking pool is not configured or if this handle
+    /// is a stale weak handle whose runtime has already been dropped.
     pub fn spawn_blocking<F>(
         &self,
         f: F,
@@ -1120,16 +1121,15 @@ impl RuntimeHandle {
     where
         F: FnOnce() + Send + 'static,
     {
-        self.inner()
-            .blocking_pool
-            .as_ref()
-            .map(|pool| pool.spawn(f))
+        let inner = self.try_inner().ok()?;
+        inner.blocking_pool.as_ref().map(|pool| pool.spawn(f))
     }
 
-    /// Returns a handle to the blocking pool, if configured.
+    /// Returns a handle to the blocking pool, if configured and the runtime is
+    /// still alive.
     #[must_use]
     pub fn blocking_handle(&self) -> Option<crate::runtime::blocking_pool::BlockingPoolHandle> {
-        self.inner().blocking_handle()
+        self.try_inner().ok()?.blocking_handle()
     }
 }
 
@@ -2395,6 +2395,39 @@ worker_threads = 16
 
         // After block_on: restored to None.
         assert!(Runtime::current_handle().is_none());
+    }
+
+    #[test]
+    fn weak_current_handle_try_spawn_returns_runtime_unavailable_after_drop() {
+        init_test_logging();
+        let runtime = RuntimeBuilder::new()
+            .worker_threads(1)
+            .build()
+            .expect("runtime build");
+
+        let weak_handle = runtime.block_on(runtime.handle().spawn(async {
+            Runtime::current_handle().expect("spawned task should see runtime handle")
+        }));
+        assert!(
+            matches!(weak_handle.inner, RuntimeHandleRef::Weak(_)),
+            "worker-thread current_handle should remain weak to avoid runtime cycles"
+        );
+
+        drop(runtime);
+
+        let result = weak_handle.try_spawn(async { 42u8 });
+        assert!(
+            matches!(result, Err(SpawnError::RuntimeUnavailable)),
+            "stale weak handle should return RuntimeUnavailable instead of panicking"
+        );
+        assert!(
+            weak_handle.spawn_blocking(|| {}).is_none(),
+            "stale weak handle should not expose a blocking pool"
+        );
+        assert!(
+            weak_handle.blocking_handle().is_none(),
+            "stale weak handle should not yield a blocking handle"
+        );
     }
 
     #[test]
