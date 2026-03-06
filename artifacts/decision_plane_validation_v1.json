@@ -1,0 +1,198 @@
+{
+  "contract_version": "decision-plane-validation-v1",
+  "bead_id": "asupersync-1508v.2.6",
+  "description": "AA-02.3 decision-plane operations validation: shadow, canary, rollback, evidence-ledger completeness.",
+  "runner_script": "scripts/run_decision_plane_validation_smoke.sh",
+  "runner_bundle_schema_version": "decision-plane-validation-smoke-bundle-v1",
+  "runner_report_schema_version": "decision-plane-validation-smoke-run-report-v1",
+  "promotion_pipeline": ["Shadow", "Canary", "Active"],
+  "hold_semantics": {
+    "blocks_promotion": true,
+    "preserves_prior_mode": true,
+    "release_restores_mode": true
+  },
+  "rollback_target": "Shadow",
+  "rollback_reasons": [
+    "CalibrationRegression",
+    "BudgetOverruns",
+    "ManualRollback",
+    "FallbackTriggered"
+  ],
+  "recovery_command_required_fields": [
+    "controller_id",
+    "controller_name",
+    "rolled_back_from",
+    "rolled_back_to",
+    "reason",
+    "policy_id",
+    "at_snapshot_id",
+    "remediation"
+  ],
+  "evidence_ledger_event_types": [
+    "Registered",
+    "Promoted",
+    "RolledBack",
+    "Held",
+    "Released",
+    "Deregistered",
+    "PromotionRejected",
+    "DecisionRecorded"
+  ],
+  "structured_log_fields_required": [
+    "controller_id",
+    "controller_name",
+    "mode",
+    "previous_mode",
+    "policy_id",
+    "calibration_score",
+    "epochs_in_mode",
+    "budget_overruns",
+    "decision_label",
+    "snapshot_id",
+    "verdict",
+    "rejection_reason",
+    "rollback_reason",
+    "fallback_active",
+    "recovery_command",
+    "ledger_entry_count"
+  ],
+  "validation_scenarios": [
+    {
+      "scenario_id": "AA023-SHADOW-OBSERVE",
+      "description": "Controller starts in Shadow mode, observes snapshots, decisions are recorded but not applied.",
+      "category": "state-transition",
+      "expect_mode": "Shadow",
+      "expect_ledger_events": ["Registered", "DecisionRecorded"]
+    },
+    {
+      "scenario_id": "AA023-PROMOTE-SHADOW-CANARY",
+      "description": "Shadow controller with sufficient calibration and epochs promotes to Canary.",
+      "category": "state-transition",
+      "expect_mode": "Canary",
+      "expect_ledger_events": ["Registered", "Promoted"]
+    },
+    {
+      "scenario_id": "AA023-PROMOTE-CANARY-ACTIVE",
+      "description": "Canary controller with sufficient calibration and epochs promotes to Active.",
+      "category": "state-transition",
+      "expect_mode": "Active",
+      "expect_ledger_events": ["Registered", "Promoted", "Promoted"]
+    },
+    {
+      "scenario_id": "AA023-REJECT-SKIP-SHADOW-ACTIVE",
+      "description": "Direct Shadow-to-Active promotion is rejected as invalid transition.",
+      "category": "bypass-prevention",
+      "expect_mode": "Shadow",
+      "expect_rejection": "InvalidTransition"
+    },
+    {
+      "scenario_id": "AA023-REJECT-LOW-CALIBRATION",
+      "description": "Promotion rejected when calibration score is below policy threshold.",
+      "category": "bypass-prevention",
+      "expect_mode": "Shadow",
+      "expect_rejection": "CalibrationTooLow"
+    },
+    {
+      "scenario_id": "AA023-REJECT-INSUFFICIENT-EPOCHS",
+      "description": "Promotion rejected when controller has not spent enough epochs in current mode.",
+      "category": "bypass-prevention",
+      "expect_mode": "Shadow",
+      "expect_rejection": "InsufficientEpochs"
+    },
+    {
+      "scenario_id": "AA023-HOLD-BLOCKS-PROMOTE",
+      "description": "Controller placed on Hold cannot be promoted until released.",
+      "category": "state-transition",
+      "expect_mode": "Hold",
+      "expect_rejection": "HeldForInvestigation"
+    },
+    {
+      "scenario_id": "AA023-HOLD-RELEASE-RESTORES",
+      "description": "Releasing a held controller restores its prior mode.",
+      "category": "state-transition",
+      "expect_mode": "Canary",
+      "expect_ledger_events": ["Registered", "Promoted", "Held", "Released"]
+    },
+    {
+      "scenario_id": "AA023-ROLLBACK-CALIBRATION",
+      "description": "Calibration regression rolls back Active controller to Shadow with recovery command.",
+      "category": "rollback",
+      "expect_mode": "Shadow",
+      "expect_fallback_active": true,
+      "expect_recovery_command": true
+    },
+    {
+      "scenario_id": "AA023-ROLLBACK-BUDGET",
+      "description": "Budget overruns trigger rollback to Shadow with remediation steps.",
+      "category": "rollback",
+      "expect_mode": "Shadow",
+      "expect_fallback_active": true,
+      "expect_recovery_command": true
+    },
+    {
+      "scenario_id": "AA023-ROLLBACK-MANUAL",
+      "description": "Manual operator rollback returns controller to Shadow.",
+      "category": "rollback",
+      "expect_mode": "Shadow",
+      "expect_fallback_active": true,
+      "expect_recovery_command": true
+    },
+    {
+      "scenario_id": "AA023-ROLLBACK-FALLBACK-TRIGGERED",
+      "description": "Decision-triggered fallback rolls back to Shadow.",
+      "category": "rollback",
+      "expect_mode": "Shadow",
+      "expect_fallback_active": true,
+      "expect_recovery_command": true
+    },
+    {
+      "scenario_id": "AA023-ROLLBACK-SHADOW-NOOP",
+      "description": "Rollback of Shadow controller is a no-op (already most conservative).",
+      "category": "rollback",
+      "expect_mode": "Shadow",
+      "expect_recovery_command": false
+    },
+    {
+      "scenario_id": "AA023-EVIDENCE-COMPLETENESS",
+      "description": "Every state transition produces a ledger entry with policy ID and controller ID.",
+      "category": "evidence-ledger",
+      "expect_all_events_recorded": true
+    },
+    {
+      "scenario_id": "AA023-EVIDENCE-DECISION-BUDGET",
+      "description": "Decision recording tracks budget compliance in the ledger.",
+      "category": "evidence-ledger",
+      "expect_ledger_events": ["Registered", "DecisionRecorded"]
+    },
+    {
+      "scenario_id": "AA023-RECOVERY-REMEDIATION",
+      "description": "Recovery commands include actionable remediation steps for each rollback reason.",
+      "category": "recovery",
+      "expect_recovery_command": true,
+      "expect_remediation_nonempty": true
+    }
+  ],
+  "smoke_scenarios": [
+    {
+      "scenario_id": "AA023-SMOKE-TRANSITIONS",
+      "description": "Validate state transition scenarios via contract tests",
+      "command": "rch exec -- env CARGO_INCREMENTAL=0 CARGO_TARGET_DIR=/tmp/rch-codex-aa023 cargo test --test decision_plane_validation_contract transition -- --nocapture"
+    },
+    {
+      "scenario_id": "AA023-SMOKE-ROLLBACKS",
+      "description": "Validate rollback and recovery command scenarios",
+      "command": "rch exec -- env CARGO_INCREMENTAL=0 CARGO_TARGET_DIR=/tmp/rch-codex-aa023 cargo test --test decision_plane_validation_contract rollback -- --nocapture"
+    },
+    {
+      "scenario_id": "AA023-SMOKE-EVIDENCE",
+      "description": "Validate evidence ledger completeness and bypass prevention",
+      "command": "rch exec -- env CARGO_INCREMENTAL=0 CARGO_TARGET_DIR=/tmp/rch-codex-aa023 cargo test --test decision_plane_validation_contract evidence -- --nocapture"
+    }
+  ],
+  "downstream_beads": [
+    "asupersync-1508v.3.6",
+    "asupersync-1508v.8.6",
+    "asupersync-1508v.10.5",
+    "asupersync-1508v.10.7"
+  ]
+}
