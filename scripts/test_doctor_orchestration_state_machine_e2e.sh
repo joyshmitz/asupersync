@@ -50,6 +50,22 @@ publish_artifacts() {
         && cp -a "${ARTIFACT_DIR}/." "${PUBLISHED_ARTIFACT_DIR}/"
 }
 
+rch_attempt_went_local() {
+    local attempt_log="$1"
+
+    grep -Eq '^\[RCH\] local \(|falling back to local' "${attempt_log}"
+}
+
+update_run_failure_class() {
+    local observed_failure_class="$1"
+
+    if [[ "${RUN_FAILURE_CLASS}" == "rch_local_fallback" || "${observed_failure_class}" == "rch_local_fallback" ]]; then
+        RUN_FAILURE_CLASS="rch_local_fallback"
+    elif [[ -n "${observed_failure_class}" && "${observed_failure_class}" != "none" ]]; then
+        RUN_FAILURE_CLASS="${observed_failure_class}"
+    fi
+}
+
 write_summary() {
     local destination="$1"
     local artifact_path="$2"
@@ -113,6 +129,7 @@ echo ""
 EXIT_CODE=0
 CHECK_FAILURES=0
 CHECKS_PASSED=0
+RUN_FAILURE_CLASS="none"
 
 run_suite_call() {
     local run_label="$1"
@@ -123,6 +140,7 @@ run_suite_call() {
     local attempt_log=""
     local running_count=""
     local passed_count=""
+    local last_failure_reason="test_or_pattern_failure"
 
     for ((attempt = 1; attempt <= RCH_RETRY_ATTEMPTS; attempt++)); do
         ensure_artifact_dirs
@@ -137,6 +155,12 @@ run_suite_call() {
             rc=0
         else
             rc=$?
+        fi
+
+        if rch_attempt_went_local "${attempt_log}"; then
+            rc=86
+            last_failure_reason="rch_local_fallback"
+            echo "  WARN: ${run_label} attempt ${attempt}/${RCH_RETRY_ATTEMPTS} fell back to local cargo; rejecting attempt"
         fi
 
         running_count="$(
@@ -180,6 +204,7 @@ run_suite_call() {
     if [[ -n "${attempt_log}" && -f "${attempt_log}" ]]; then
         cp "${attempt_log}" "${run_log}"
     fi
+    update_run_failure_class "${last_failure_reason}"
     echo "  ERROR: ${run_label} failed after ${RCH_RETRY_ATTEMPTS} attempts (see ${run_log})"
     return 1
 }
@@ -190,8 +215,10 @@ if ! run_suite_call "suite run 1" "${RUN1_LOG}" "${RUN1_JSON}" "run1"; then
 fi
 
 if [[ "${DOCTOR_FULLSTACK_SINGLE_RUN}" == "1" ]]; then
-    cp "${RUN1_LOG}" "${RUN2_LOG}"
-    cp "${RUN1_JSON}" "${RUN2_JSON}"
+    if [[ ${EXIT_CODE} -eq 0 ]]; then
+        cp "${RUN1_LOG}" "${RUN2_LOG}"
+        cp "${RUN1_JSON}" "${RUN2_JSON}"
+    fi
 else
     echo ">>> [2/4] Running orchestration suite (run 2) via rch..."
     if ! run_suite_call "suite run 2" "${RUN2_LOG}" "${RUN2_JSON}" "run2"; then
@@ -235,6 +262,8 @@ FAILURE_CLASS="test_or_pattern_failure"
 if [[ ${EXIT_CODE} -eq 0 && ${CHECK_FAILURES} -eq 0 ]]; then
     SUITE_STATUS="passed"
     FAILURE_CLASS="none"
+elif [[ "${RUN_FAILURE_CLASS}" == "rch_local_fallback" ]]; then
+    FAILURE_CLASS="rch_local_fallback"
 fi
 
 TESTS_PASSED=0

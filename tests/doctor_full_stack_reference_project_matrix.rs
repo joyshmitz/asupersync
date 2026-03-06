@@ -9,7 +9,12 @@
 #![cfg(feature = "cli")]
 
 use std::collections::{BTreeSet, HashSet};
+use std::fs;
 use std::path::{Path, PathBuf};
+use std::process::Command;
+use std::time::{SystemTime, UNIX_EPOCH};
+
+use serde_json::Value;
 
 const DOC_PATH: &str = "docs/doctor_full_stack_reference_projects_contract.md";
 const SCRIPT_PATH: &str = "scripts/test_doctor_full_stack_reference_projects_e2e.sh";
@@ -39,6 +44,34 @@ fn load_script() -> String {
 fn load_orchestration_script() -> String {
     std::fs::read_to_string(repo_root().join(ORCHESTRATION_SCRIPT_PATH))
         .expect("failed to load doctor orchestration state-machine e2e script")
+}
+
+fn unique_test_temp_dir(prefix: &str) -> PathBuf {
+    let nanos = SystemTime::now()
+        .duration_since(UNIX_EPOCH)
+        .expect("system time before unix epoch")
+        .as_nanos();
+    let dir = std::env::temp_dir().join(format!("{prefix}-{}-{nanos}", std::process::id()));
+    fs::create_dir_all(&dir).expect("failed to create unique temp dir");
+    dir
+}
+
+fn single_artifact_dir(staging_root: &Path) -> PathBuf {
+    let artifact_dirs: Vec<PathBuf> = fs::read_dir(staging_root)
+        .expect("failed to read staging root")
+        .map(|entry| entry.expect("failed to read dir entry").path())
+        .filter(|path| path.is_dir())
+        .collect();
+    assert_eq!(
+        artifact_dirs.len(),
+        1,
+        "expected exactly one artifact dir in {}",
+        staging_root.display()
+    );
+    artifact_dirs
+        .into_iter()
+        .next()
+        .expect("artifact dir missing after len check")
 }
 
 fn reference_profile_matrix() -> Vec<ProfileSpec> {
@@ -102,6 +135,39 @@ fn classify_failure(stage_id: &str, exit_code: i32) -> &'static str {
         }
         _ => "unknown_failure",
     }
+}
+
+fn resolved_stage_failure_class(
+    stage_id: &str,
+    exit_code: i32,
+    summary_failure_class: Option<&str>,
+) -> String {
+    if exit_code == 124 {
+        return "timeout".to_string();
+    }
+
+    match summary_failure_class.map(str::trim) {
+        Some(value)
+            if !value.is_empty() && value != "none" && value != "missing" && value != "null" =>
+        {
+            value.to_string()
+        }
+        _ => classify_failure(stage_id, exit_code).to_string(),
+    }
+}
+
+fn resolved_stage_repro_command(
+    stage_repro_command: &str,
+    summary_repro_command: Option<&str>,
+) -> String {
+    match summary_repro_command.map(str::trim) {
+        Some(value) if !value.is_empty() && value != "null" => value.to_string(),
+        _ => stage_repro_command.to_string(),
+    }
+}
+
+fn stage_attempt_passes(exit_code: i32, summary_status: &str, summary_failure_class: &str) -> bool {
+    exit_code == 0 && summary_status == "passed" && summary_failure_class == "none"
 }
 
 fn diagnosis_time_delta_pct(run1_seconds: f64, run2_seconds: f64) -> f64 {
@@ -303,6 +369,27 @@ fn script_summary_includes_rollout_and_adoption_fields() {
 }
 
 #[test]
+fn script_preserves_stage_summary_failure_details() {
+    let script = load_script();
+    let required_tokens = [
+        "resolved_stage_failure_class()",
+        "resolved_stage_repro_command()",
+        "summary_failure_class",
+        "summary_repro_command",
+        "summary reported status=${summary_status} failure_class=${summary_failure_class}; rejecting attempt",
+        "resolved_stage_failure_class \"${stage_id}\" \"${exit_code}\" \"${summary_failure_class}\"",
+        "resolved_stage_repro_command \"${stage_repro_command}\" \"${summary_repro_command}\"",
+        "failed_stages:",
+    ];
+    for token in required_tokens {
+        assert!(
+            script.contains(token),
+            "script must preserve stage summary failure metadata token {token}"
+        );
+    }
+}
+
+#[test]
 fn orchestration_stage_script_uses_staging_before_publish() {
     let script = load_orchestration_script();
     let required_tokens = [
@@ -310,10 +397,13 @@ fn orchestration_stage_script_uses_staging_before_publish() {
         "PUBLISHED_ARTIFACT_DIR=",
         "ensure_artifact_dirs()",
         "publish_artifacts()",
+        "rch_attempt_went_local()",
         "write_summary()",
         "mark_publish_failure()",
         "summary.publish.tmp",
+        "falling back to local",
         "artifact_publish_failure",
+        "rch_local_fallback",
         "cp \"${SUMMARY_FILE}\" \"${PUBLISHED_ARTIFACT_DIR}/summary.json\"",
         "\"${PUBLISHED_ARTIFACT_DIR}/summary.json\"",
         "\"${PUBLISHED_ARTIFACT_DIR}/run1.log\"",
@@ -325,6 +415,75 @@ fn orchestration_stage_script_uses_staging_before_publish() {
             "orchestration stage script missing staging/publish token {token}"
         );
     }
+}
+
+#[test]
+fn orchestration_stage_script_rejects_rch_local_fallback() {
+    let temp_root = unique_test_temp_dir("asupersync-orch-rch-local-fallback");
+    let shim_dir = temp_root.join("shim");
+    let script_tmp = temp_root.join("tmp");
+    fs::create_dir_all(&shim_dir).expect("failed to create shim dir");
+    fs::create_dir_all(&script_tmp).expect("failed to create tmp dir");
+
+    let fake_rch = shim_dir.join("fake-rch");
+    fs::write(
+        &fake_rch,
+        r#"#!/usr/bin/env bash
+set -euo pipefail
+cat <<'ENDLOG'
+[RCH] local (all worker circuits open)
+running 5 tests
+test orchestration_state_machine_alpha ... ok
+test orchestration_state_machine_beta ... ok
+test orchestration_state_machine_gamma ... ok
+test orchestration_state_machine_delta ... ok
+test orchestration_state_machine_epsilon ... ok
+
+test result: ok. 5 passed; 0 failed; 0 ignored; 0 measured; 0 filtered out; finished in 0.00s
+ENDLOG
+"#,
+    )
+    .expect("failed to write fake rch");
+    #[cfg(unix)]
+    {
+        use std::os::unix::fs::PermissionsExt;
+        let perms = fs::Permissions::from_mode(0o755);
+        fs::set_permissions(&fake_rch, perms).expect("failed to chmod fake rch");
+    }
+
+    let output = Command::new("bash")
+        .arg(repo_root().join(ORCHESTRATION_SCRIPT_PATH))
+        .env("TMPDIR", &script_tmp)
+        .env("RCH_BIN", &fake_rch)
+        .env("TEST_SEED", "4242:rch-local-fallback")
+        .env("DOCTOR_FULLSTACK_SINGLE_RUN", "1")
+        .output()
+        .expect("failed to execute orchestration script");
+
+    assert!(
+        !output.status.success(),
+        "script should fail when rch falls back local"
+    );
+    let stdout = String::from_utf8(output.stdout).expect("stdout should be utf8");
+    assert!(
+        stdout.contains("Status:         failed"),
+        "stdout should report failed status, got:\n{stdout}"
+    );
+
+    let artifact_dir = single_artifact_dir(
+        &script_tmp.join("asupersync-e2e-staging/doctor_orchestration_state_machine"),
+    );
+    let summary: Value = serde_json::from_str(
+        &fs::read_to_string(artifact_dir.join("summary.json"))
+            .expect("failed to read orchestration summary"),
+    )
+    .expect("summary should parse as json");
+
+    assert_eq!(summary["status"], "failed");
+    assert_eq!(summary["failure_class"], "rch_local_fallback");
+    assert_eq!(summary["exit_code"], 1);
+    assert_eq!(summary["tests_passed"], 0);
+    assert_eq!(summary["tests_failed"], 1);
 }
 
 #[test]
@@ -417,6 +576,65 @@ fn failure_classification_maps_stage_and_timeout() {
     );
     assert_eq!(classify_failure("unknown-stage", 2), "unknown_failure");
     assert_eq!(classify_failure("any-stage", 124), "timeout");
+}
+
+#[test]
+fn resolved_stage_failure_class_prefers_child_summary_reason() {
+    assert_eq!(
+        resolved_stage_failure_class(
+            "test_doctor_orchestration_state_machine_e2e",
+            1,
+            Some("rch_local_fallback"),
+        ),
+        "rch_local_fallback"
+    );
+    assert_eq!(
+        resolved_stage_failure_class(
+            "test_doctor_orchestration_state_machine_e2e",
+            1,
+            Some("none")
+        ),
+        "orchestration_failure"
+    );
+    assert_eq!(
+        resolved_stage_failure_class(
+            "test_doctor_orchestration_state_machine_e2e",
+            124,
+            Some("missing")
+        ),
+        "timeout"
+    );
+    assert_eq!(
+        resolved_stage_failure_class(
+            "test_doctor_orchestration_state_machine_e2e",
+            124,
+            Some("rch_local_fallback")
+        ),
+        "timeout"
+    );
+}
+
+#[test]
+fn resolved_stage_repro_command_prefers_child_summary_repro() {
+    let stage_repro = "DOCTOR_FULLSTACK_SINGLE_RUN=1 TEST_SEED=4242:medium RCH_BIN=/tmp/fake-rch bash /repo/scripts/test_doctor_orchestration_state_machine_e2e.sh";
+    let summary_repro = "TEST_LOG_LEVEL=info RUST_LOG=asupersync=info TEST_SEED=4242:medium RCH_BIN=/tmp/fake-rch bash /repo/scripts/test_doctor_orchestration_state_machine_e2e.sh";
+
+    assert_eq!(
+        resolved_stage_repro_command(stage_repro, Some(summary_repro)),
+        summary_repro
+    );
+    assert_eq!(
+        resolved_stage_repro_command(stage_repro, Some("")),
+        stage_repro
+    );
+}
+
+#[test]
+fn stage_attempt_requires_passed_summary_and_none_failure_class() {
+    assert!(stage_attempt_passes(0, "passed", "none"));
+    assert!(!stage_attempt_passes(0, "failed", "rch_local_fallback"));
+    assert!(!stage_attempt_passes(0, "passed", "rch_local_fallback"));
+    assert!(!stage_attempt_passes(1, "passed", "none"));
 }
 
 #[test]

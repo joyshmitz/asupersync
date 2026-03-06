@@ -160,6 +160,35 @@ classify_failure() {
     esac
 }
 
+resolved_stage_failure_class() {
+    local stage_id="$1"
+    local exit_code="$2"
+    local summary_failure_class="$3"
+
+    if [[ "${exit_code}" -eq 124 ]]; then
+        printf '%s\n' "timeout"
+        return 0
+    fi
+
+    if [[ -n "${summary_failure_class}" && "${summary_failure_class}" != "none" && "${summary_failure_class}" != "missing" && "${summary_failure_class}" != "null" ]]; then
+        printf '%s\n' "${summary_failure_class}"
+        return 0
+    fi
+
+    classify_failure "${stage_id}" "${exit_code}"
+}
+
+resolved_stage_repro_command() {
+    local stage_repro_command="$1"
+    local summary_repro_command="$2"
+
+    if [[ -n "${summary_repro_command}" && "${summary_repro_command}" != "null" ]]; then
+        printf '%s\n' "${summary_repro_command}"
+    else
+        printf '%s\n' "${stage_repro_command}"
+    fi
+}
+
 derive_profile_seed() {
     local profile_id="$1"
     printf '%s:%s\n' "${BASE_SEED}" "${profile_id}"
@@ -182,6 +211,9 @@ run_stage_script() {
     local exit_code=1
     local summary_path=""
     local summary_status="missing"
+    local summary_failure_class="missing"
+    local summary_repro_command=""
+    local stage_repro_command="DOCTOR_FULLSTACK_SINGLE_RUN=1 TEST_SEED=${profile_seed} RCH_BIN=${RCH_BIN} bash ${PROJECT_ROOT}/${script_rel}"
 
     for ((attempt = 1; attempt <= RUN_RETRIES; attempt++)); do
         : > "${attempt_log}"
@@ -205,11 +237,20 @@ run_stage_script() {
         )"
         if [[ -n "${summary_path}" && -f "${summary_path}" ]]; then
             summary_status="$(jq -r '.status // "missing"' "${summary_path}" 2>/dev/null || echo "missing")"
+            summary_failure_class="$(jq -r '.failure_class // "missing"' "${summary_path}" 2>/dev/null || echo "missing")"
+            summary_repro_command="$(jq -r '.repro_command // empty' "${summary_path}" 2>/dev/null || true)"
         else
             summary_status="missing"
+            summary_failure_class="missing"
+            summary_repro_command=""
         fi
 
-        if [[ "${exit_code}" -eq 0 ]]; then
+        if [[ "${exit_code}" -eq 0 && ( "${summary_status}" != "passed" || "${summary_failure_class}" != "none" ) ]]; then
+            echo "  WARN: ${run_label}/${stage_id} attempt ${attempt}/${RUN_RETRIES} exited 0 but summary reported status=${summary_status} failure_class=${summary_failure_class}; rejecting attempt"
+            exit_code=86
+        fi
+
+        if [[ "${exit_code}" -eq 0 && "${summary_status}" == "passed" && "${summary_failure_class}" == "none" ]]; then
             jq -n \
                 --arg profile_id "${profile_id}" \
                 --arg run_id "${run_label}" \
@@ -220,7 +261,9 @@ run_stage_script() {
                 --arg status "passed" \
                 --arg summary_path "${summary_path}" \
                 --arg summary_status "${summary_status}" \
-                --arg repro_command "PROFILE_MODE=${profile_id} TEST_SEED=${profile_seed} RCH_BIN=${RCH_BIN} bash ${SCRIPT_DIR}/$(basename "$0")" \
+                --arg summary_failure_class "${summary_failure_class}" \
+                --arg summary_repro_command "${summary_repro_command}" \
+                --arg repro_command "$(resolved_stage_repro_command "${stage_repro_command}" "${summary_repro_command}")" \
                 '{
                     profile_id: $profile_id,
                     run_id: $run_id,
@@ -231,6 +274,8 @@ run_stage_script() {
                     status: $status,
                     summary_path: $summary_path,
                     summary_status: $summary_status,
+                    summary_failure_class: $summary_failure_class,
+                    summary_repro_command: $summary_repro_command,
                     failure_class: "none",
                     exit_code: 0,
                     log_file: "",
@@ -246,7 +291,7 @@ run_stage_script() {
     local final_started_ts
     final_started_ts="$(date -u +%Y-%m-%dT%H:%M:%SZ)"
     local failure_class
-    failure_class="$(classify_failure "${stage_id}" "${exit_code}")"
+    failure_class="$(resolved_stage_failure_class "${stage_id}" "${exit_code}" "${summary_failure_class}")"
     jq -n \
         --arg profile_id "${profile_id}" \
         --arg run_id "${run_label}" \
@@ -257,9 +302,11 @@ run_stage_script() {
         --arg status "failed" \
         --arg summary_path "${summary_path}" \
         --arg summary_status "${summary_status}" \
+        --arg summary_failure_class "${summary_failure_class}" \
+        --arg summary_repro_command "${summary_repro_command}" \
         --arg failure_class "${failure_class}" \
         --arg log_file "${stage_log}" \
-        --arg repro_command "PROFILE_MODE=${profile_id} TEST_SEED=${profile_seed} RCH_BIN=${RCH_BIN} bash ${SCRIPT_DIR}/$(basename "$0")" \
+        --arg repro_command "$(resolved_stage_repro_command "${stage_repro_command}" "${summary_repro_command}")" \
         --argjson exit_code "${exit_code}" \
         '{
             profile_id: $profile_id,
@@ -271,6 +318,8 @@ run_stage_script() {
             status: $status,
             summary_path: $summary_path,
             summary_status: $summary_status,
+            summary_failure_class: $summary_failure_class,
+            summary_repro_command: $summary_repro_command,
             failure_class: $failure_class,
             exit_code: $exit_code,
             log_file: $log_file,
@@ -647,6 +696,18 @@ jq -n \
             profile_id,
             failure_classes,
             failed_stage_ids,
+            failed_stages: (
+                (.stages // [])
+                | map(select(.status != "passed") | {
+                    stage_id,
+                    failure_class,
+                    summary_failure_class,
+                    repro_command,
+                    summary_repro_command,
+                    summary_path,
+                    log_file
+                })
+            ),
             repro_command
         })),
         rollout_gate_status: $rollout_gate_status,
