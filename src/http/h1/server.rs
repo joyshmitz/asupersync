@@ -515,12 +515,19 @@ fn should_close_connection(req: &Request, config: &Http1Config, state: &Connecti
 /// Add a `Connection: close` header to the response if not already present.
 fn add_connection_close(resp: &mut Response) {
     let mut replaced = false;
-    for (name, value) in &mut resp.headers {
+    resp.headers.retain_mut(|(name, value)| {
         if name.eq_ignore_ascii_case("connection") {
-            "close".clone_into(value);
-            replaced = true;
+            if replaced {
+                false
+            } else {
+                "close".clone_into(value);
+                replaced = true;
+                true
+            }
+        } else {
+            true
         }
-    }
+    });
     if !replaced {
         resp.headers
             .push(("Connection".to_owned(), "close".to_owned()));
@@ -530,12 +537,19 @@ fn add_connection_close(resp: &mut Response) {
 /// Add a `Connection: keep-alive` header to the response if not already present.
 fn add_connection_keep_alive(resp: &mut Response) {
     let mut replaced = false;
-    for (name, value) in &mut resp.headers {
+    resp.headers.retain_mut(|(name, value)| {
         if name.eq_ignore_ascii_case("connection") {
-            "keep-alive".clone_into(value);
-            replaced = true;
+            if replaced {
+                false
+            } else {
+                "keep-alive".clone_into(value);
+                replaced = true;
+                true
+            }
+        } else {
+            true
         }
-    }
+    });
     if !replaced {
         resp.headers
             .push(("Connection".to_owned(), "keep-alive".to_owned()));
