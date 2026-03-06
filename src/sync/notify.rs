@@ -355,22 +355,32 @@ impl Notified<'_> {
         let gen_changed = current_gen != self.initial_generation;
 
         if let Some(index) = self.waiter_index {
-            if gen_changed {
-                let mut waiters = self.notify.waiters.lock();
-                waiters.remove(index);
-                self.waiter_index = None;
-                drop(waiters);
-                return self.mark_done();
-            }
-
             let mut waiters = self.notify.waiters.lock();
 
-            // Re-check generation under lock to prevent baton-loss races.
-            let current_gen = self.notify.generation.load(Ordering::Acquire);
-            if current_gen != self.initial_generation {
+            // Re-check generation under lock if it wasn't already changed
+            let is_gen_changed = gen_changed || {
+                let new_gen = self.notify.generation.load(Ordering::Acquire);
+                new_gen != self.initial_generation
+            };
+
+            if is_gen_changed {
+                let (was_notified, notified_generation) = if index < waiters.entries.len() {
+                    let entry = &waiters.entries[index];
+                    (entry.notified, entry.generation)
+                } else {
+                    (false, self.initial_generation)
+                };
+
                 waiters.remove(index);
                 self.waiter_index = None;
-                drop(waiters);
+
+                if was_notified && notified_generation == self.initial_generation {
+                    // Woken by notify_one before broadcast. Pass the baton.
+                    self.notify.pass_baton(waiters);
+                } else {
+                    drop(waiters);
+                }
+                
                 return self.mark_done();
             }
 
