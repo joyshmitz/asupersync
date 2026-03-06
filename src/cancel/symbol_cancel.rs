@@ -946,6 +946,7 @@ impl CleanupCoordinator {
         set.symbols.push(symbol);
     }
 
+    #[allow(clippy::significant_drop_tightening)]
     fn restore_retry_state(
         &self,
         object_id: ObjectId,
@@ -953,6 +954,9 @@ impl CleanupCoordinator {
         pending_set: PendingSymbolSet,
     ) {
         self.handlers.write().insert(object_id, handler);
+        // Keep `pending` held while clearing `completed` so reopening retry
+        // state is atomic with respect to register_pending() and cannot drop
+        // symbols in the reopen window.
         let mut pending = self.pending.write();
         pending.insert(object_id, pending_set);
         self.completed.write().remove(&object_id);
