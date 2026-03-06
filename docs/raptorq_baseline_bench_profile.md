@@ -237,12 +237,23 @@ Recorded in `artifacts/raptorq_track_e_gf256_bench_v1.json` under `simd_policy_a
 - Large balanced addmul window candidate (`addmul_total=24576..32768`, `addmul_min_lane=12288`) showed no meaningful `addmul_slices2_auto` uplift (`+0.1438%`, `p=0.82`) and regressed `mul_slices2_auto` (`+2.1554%` median).
 - Mul-only window candidate (`mul_total=32768`) regressed `mul_slices2_auto` (`+0.6484%`, `p=0.02`) on the same scenario.
 
+This 2026-03-02 packet is now explicitly a historical comparator, not the
+current default contract. The artifact marks that machine-checkably via
+`simd_policy_ablation_2026_03_02.decision.supersession.status = superseded`
+and
+`simd_policy_ablation_2026_03_02.decision.supersession.superseded_by = simd_policy_ablation_2026_03_04`.
+
 Updated decision after broader corpus (`simd_policy_ablation_2026_03_04`):
 
 This default-selection result is recorded in
 `artifacts/raptorq_track_e_gf256_bench_v1.json` under
 `simd_policy_ablation_2026_03_04.decision` and is the canonical E5 artifact for
 the current x86 auto-window contract.
+
+The artifact now also pins that role directly:
+`simd_policy_ablation_2026_03_04.decision.decision_role = canonical_current_x86_default_contract`
+and
+`simd_policy_ablation_2026_03_04.decision.supersedes = ["simd_policy_ablation_2026_03_02"]`.
 
 - Keep `mul` auto window disabled by default on x86 (`mul_min_total > mul_max_total`).
 - Move x86 `addmul` auto window to `24576..32768` total bytes with `addmul_min_lane=8192`.

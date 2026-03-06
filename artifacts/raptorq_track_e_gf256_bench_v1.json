@@ -221,6 +221,11 @@
     "decision": {
       "selected_profile_defaults": "retain current x86 defaults",
       "rationale": "Neither tested override produced material, reliable uplift on the primary 16KiB+16KiB dual-lane scenario.",
+      "supersession": {
+        "status": "superseded",
+        "superseded_by": "simd_policy_ablation_2026_03_04",
+        "reason": "This same-session single-scenario retention result remains as historical comparator evidence only; the broader RQ-E-GF256-DUAL-* corpus now owns the current x86 default-selection contract."
+      },
       "defaults_retained": {
         "mul_window": "disabled (mul_min_total > mul_max_total)",
         "addmul_window": "12288..16384 total bytes, addmul_min_lane=2048"
@@ -296,6 +301,10 @@
       }
     ],
     "decision": {
+      "decision_role": "canonical_current_x86_default_contract",
+      "supersedes": [
+        "simd_policy_ablation_2026_03_02"
+      ],
       "selected_profile_defaults": "update x86 addmul auto window",
       "changes": {
         "mul_window": "unchanged: disabled (mul_min_total > mul_max_total)",
@@ -329,6 +338,7 @@
     "All three runs emitted Track-E policy/probe JSON with deterministic manifest/profile metadata fields.",
     "This comparator capture uses short Criterion windows for fast rehearsal and should be treated as directional evidence.",
     "Observed throughput variance indicates a full p95/p99 corpus is still required for final E5 closure.",
+    "The 2026-03-02 same-session RQ-E-GF256-DUAL-006 retention result is preserved as historical comparator evidence only and is explicitly superseded for default selection by simd_policy_ablation_2026_03_04.",
     "2026-03-04 corpus added broad RQ-E-GF256-DUAL-* coverage and selected a new x86 addmul auto window default (24576..32768, min lane 8192)."
   ]
 }

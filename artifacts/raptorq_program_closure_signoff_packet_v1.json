@@ -4,7 +4,7 @@
   "track_bead_id": "asupersync-2f71w",
   "parent_track_bead_id": "asupersync-p8o9m",
   "external_ref": "bd-23cxf",
-  "generated_at_utc": "2026-03-02T19:50:00Z",
+  "generated_at_utc": "2026-03-06T00:35:00Z",
   "packet_state": {
     "status": "draft_blocked",
     "go_no_go_decision": "no_go_pending_dependency_closure",
@@ -368,6 +368,7 @@
       "purpose": "G7 expected-loss contract and replay bundle integrity",
       "replay_commands": [
         "rch exec -- cargo test --test raptorq_perf_invariants g7_expected_loss_contract_schema_and_coverage -- --nocapture",
+        "rch exec -- cargo test --test raptorq_perf_invariants g7_expected_loss_contract_replay_bundle_is_well_formed -- --nocapture",
         "rch exec -- cargo test --test raptorq_perf_invariants g7_expected_loss_contract_docs_are_cross_linked -- --nocapture"
       ]
     },

@@ -110,6 +110,10 @@ Primary replay anchor:
 
 - `rch exec -- cargo test --test raptorq_perf_invariants g7_expected_loss_contract_schema_and_coverage -- --nocapture`
 
+Replay-bundle integrity verifier:
+
+- `rch exec -- cargo test --test raptorq_perf_invariants g7_expected_loss_contract_replay_bundle_is_well_formed -- --nocapture`
+
 ## Closure Readiness Contract
 
 The artifact includes a machine-checkable `closure_readiness` section to avoid
