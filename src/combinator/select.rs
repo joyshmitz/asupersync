@@ -106,13 +106,16 @@ impl<F: Future + Unpin> Future for SelectAll<F> {
     type Output = (F::Output, usize);
 
     fn poll(mut self: Pin<&mut Self>, cx: &mut Context<'_>) -> Poll<Self::Output> {
+        let mut winner: Option<(F::Output, usize)> = None;
         for (i, f) in self.futures.iter_mut().enumerate() {
             if let Poll::Ready(v) = Pin::new(f).poll(cx) {
-                return Poll::Ready((v, i));
+                if winner.is_none() {
+                    winner = Some((v, i));
+                }
             }
         }
 
-        Poll::Pending
+        winner.map_or(Poll::Pending, Poll::Ready)
     }
 }
 
@@ -151,16 +154,45 @@ impl<F: Future + Unpin> Future for SelectAllDrain<F> {
     fn poll(mut self: Pin<&mut Self>, cx: &mut Context<'_>) -> Poll<Self::Output> {
         let futures = self.futures.as_mut().expect("polled after completion");
 
+        // Poll all futures exactly once so we can exclude any simultaneously-ready
+        // non-winners from the returned loser set.
+        let mut winner: Option<(usize, F::Output)> = None;
+        let mut completed_non_winners: Vec<usize> = Vec::new();
         for (i, f) in futures.iter_mut().enumerate() {
             if let Poll::Ready(value) = Pin::new(f).poll(cx) {
-                let mut all = self.futures.take().unwrap();
-                all.swap_remove(i);
-                return Poll::Ready(SelectAllDrainResult {
-                    value,
-                    winner_index: i,
-                    losers: all,
-                });
+                if winner.is_none() {
+                    winner = Some((i, value));
+                } else {
+                    completed_non_winners.push(i);
+                }
             }
+        }
+
+        if let Some((winner_index, value)) = winner {
+            let all = self.futures.take().unwrap();
+            let mut remove_indices = Vec::with_capacity(completed_non_winners.len() + 1);
+            remove_indices.push(winner_index);
+            remove_indices.extend(completed_non_winners);
+            remove_indices.sort_unstable();
+            remove_indices.dedup();
+
+            let losers = all
+                .into_iter()
+                .enumerate()
+                .filter_map(|(index, future)| {
+                    if remove_indices.binary_search(&index).is_ok() {
+                        None
+                    } else {
+                        Some(future)
+                    }
+                })
+                .collect();
+
+            return Poll::Ready(SelectAllDrainResult {
+                value,
+                winner_index,
+                losers,
+            });
         }
 
         Poll::Pending
