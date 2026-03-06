@@ -1983,6 +1983,59 @@ fn e5_simd_ablation_artifact_matches_current_x86_defaults() {
     );
 }
 
+/// Validate the E5 artifact makes the narrow 2026-03-02 same-session result a
+/// historical comparator and pins the 2026-03-04 corpus as the canonical
+/// default-selection contract.
+#[test]
+fn e5_simd_ablation_artifact_makes_decision_chronology_explicit() {
+    let artifact: serde_json::Value = serde_json::from_str(include_str!(
+        "../artifacts/raptorq_track_e_gf256_bench_v1.json"
+    ))
+    .expect("Track-E benchmark artifact must be valid JSON");
+
+    let historical = &artifact["simd_policy_ablation_2026_03_02"]["decision"];
+    assert_eq!(
+        historical["selected_profile_defaults"].as_str(),
+        Some("retain current x86 defaults"),
+        "historical same-session result must keep the retained-defaults outcome"
+    );
+    assert_eq!(
+        historical["supersession"]["status"].as_str(),
+        Some("superseded"),
+        "historical same-session result must be marked superseded"
+    );
+    assert_eq!(
+        historical["supersession"]["superseded_by"].as_str(),
+        Some("simd_policy_ablation_2026_03_04"),
+        "historical same-session result must point to the broader replacement corpus"
+    );
+    assert!(
+        historical["supersession"]["reason"]
+            .as_str()
+            .expect("historical same-session result must explain supersession")
+            .contains("historical comparator evidence only"),
+        "historical same-session result must explain its historical-only role"
+    );
+
+    let canonical = &artifact["simd_policy_ablation_2026_03_04"]["decision"];
+    assert_eq!(
+        canonical["decision_role"].as_str(),
+        Some("canonical_current_x86_default_contract"),
+        "broader 2026-03-04 corpus must be pinned as the canonical x86 default contract"
+    );
+    let supersedes = canonical["supersedes"]
+        .as_array()
+        .expect("canonical 2026-03-04 decision must list superseded packets");
+    assert_eq!(
+        supersedes
+            .iter()
+            .map(serde_json::Value::as_str)
+            .collect::<Vec<_>>(),
+        vec![Some("simd_policy_ablation_2026_03_02")],
+        "canonical 2026-03-04 decision must supersede the narrow 2026-03-02 result"
+    );
+}
+
 /// Validate G3 decision-record artifact schema and high-impact lever coverage.
 #[test]
 #[allow(clippy::too_many_lines)]
@@ -2363,6 +2416,24 @@ fn e5_profile_pack_doc_explains_command_bundle_split() {
     }
 }
 
+/// Validate the baseline/profile doc makes the SIMD ablation decision
+/// chronology explicit instead of relying on date ordering alone.
+#[test]
+fn e5_profile_pack_doc_explains_ablation_decision_chronology() {
+    for required in [
+        "historical comparator",
+        "simd_policy_ablation_2026_03_02.decision.supersession.status = superseded",
+        "simd_policy_ablation_2026_03_02.decision.supersession.superseded_by = simd_policy_ablation_2026_03_04",
+        "simd_policy_ablation_2026_03_04.decision.decision_role = canonical_current_x86_default_contract",
+        "simd_policy_ablation_2026_03_04.decision.supersedes = [\"simd_policy_ablation_2026_03_02\"]",
+    ] {
+        assert!(
+            RAPTORQ_BASELINE_PROFILE_MD.contains(required),
+            "baseline profile doc must explain ablation chronology token {required}"
+        );
+    }
+}
+
 /// Validate G4 controlled-rollout policy schema and lever coverage.
 #[test]
 #[allow(clippy::too_many_lines)]
@@ -2739,6 +2810,27 @@ fn g7_expected_loss_contract_schema_and_coverage() {
         );
     }
 
+    let unit_commands = artifact["validation"]["unit_commands"]
+        .as_array()
+        .expect("validation.unit_commands must be an array")
+        .iter()
+        .map(|value| {
+            value
+                .as_str()
+                .expect("validation unit commands must be strings")
+                .to_string()
+        })
+        .collect::<BTreeSet<_>>();
+    for command in [
+        "rch exec -- cargo test --test raptorq_perf_invariants g7_expected_loss_contract_schema_and_coverage -- --nocapture",
+        "rch exec -- cargo test --test raptorq_perf_invariants g7_expected_loss_contract_replay_bundle_is_well_formed -- --nocapture",
+    ] {
+        assert!(
+            unit_commands.contains(command),
+            "G7 validation.unit_commands must include {command}"
+        );
+    }
+
     let replay_command = artifact["reproducibility"]["replay_command"]
         .as_str()
         .expect("replay command must be present");
@@ -3035,6 +3127,7 @@ fn g7_expected_loss_contract_docs_are_cross_linked() {
         "argmin_expected_loss",
         "deterministic_fallback_trigger",
         "conflicting_evidence",
+        "g7_expected_loss_contract_replay_bundle_is_well_formed",
         "rch exec --",
         "C6",
         "F8",
@@ -3485,6 +3578,38 @@ fn h2_closure_packet_schema_and_lever_coverage() {
                 .expect("replay_commands must be an array")
                 .is_empty(),
             "checklist entries must include replay commands"
+        );
+    }
+
+    let replay_index = artifact["artifact_replay_index"]
+        .as_array()
+        .expect("artifact_replay_index must be an array");
+    let g7_replay_entry = replay_index
+        .iter()
+        .find(|entry| {
+            entry["artifact_path"].as_str()
+                == Some("artifacts/raptorq_expected_loss_decision_contract_v1.json")
+        })
+        .expect("artifact_replay_index must include the canonical G7 contract entry");
+    let g7_replay_commands = g7_replay_entry["replay_commands"]
+        .as_array()
+        .expect("G7 replay index entry must include replay_commands")
+        .iter()
+        .map(|value| {
+            value
+                .as_str()
+                .expect("G7 replay commands must be strings")
+                .to_string()
+        })
+        .collect::<BTreeSet<_>>();
+    for command in [
+        "rch exec -- cargo test --test raptorq_perf_invariants g7_expected_loss_contract_schema_and_coverage -- --nocapture",
+        "rch exec -- cargo test --test raptorq_perf_invariants g7_expected_loss_contract_replay_bundle_is_well_formed -- --nocapture",
+        "rch exec -- cargo test --test raptorq_perf_invariants g7_expected_loss_contract_docs_are_cross_linked -- --nocapture",
+    ] {
+        assert!(
+            g7_replay_commands.contains(command),
+            "H2 G7 replay index must include {command}"
         );
     }
 }
