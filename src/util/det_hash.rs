@@ -207,13 +207,13 @@ mod tests {
 
     #[test]
     fn det_hasher_write_u64_consistent_with_write() {
-        // Verify that write_u64 (default impl) and write produce the same hash
-        // for the same logical value, satisfying the Hasher contract.
+        // Verify that write_u64 and write produce the same hash when fed the
+        // hasher's canonical little-endian byte representation.
         let mut h1 = DetHasher::default();
         h1.write_u64(0xDEAD_BEEF_CAFE_BABE);
 
         let mut h2 = DetHasher::default();
-        h2.write(&0xDEAD_BEEF_CAFE_BABEu64.to_ne_bytes());
+        h2.write(&0xDEAD_BEEF_CAFE_BABEu64.to_le_bytes());
 
         assert_eq!(
             h1.finish(),
