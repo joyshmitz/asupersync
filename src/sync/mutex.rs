@@ -228,7 +228,18 @@ impl<'a, T> Future for LockFuture<'a, '_, T> {
             return Poll::Ready(Err(LockError::Poisoned));
         }
 
-        if !state.locked {
+        // A free lock is not enough to acquire if older waiters are still queued.
+        let queued_ahead = self.waiter_id.map_or_else(
+            || !state.waiters.is_empty(),
+            |waiter_id| {
+                state
+                    .waiters
+                    .front()
+                    .is_some_and(|front| front.id != waiter_id)
+            },
+        );
+
+        if !state.locked && !queued_ahead {
             // Acquire lock
             state.locked = true;
 
@@ -414,7 +425,17 @@ impl<T> OwnedMutexGuard<T> {
                 if this.mutex.is_poisoned() {
                     return Poll::Ready(Err(LockError::Poisoned));
                 }
-                if !state.locked {
+                // A free lock is not enough to acquire if older waiters are still queued.
+                let queued_ahead = this.waiter_id.map_or_else(
+                    || !state.waiters.is_empty(),
+                    |waiter_id| {
+                        state
+                            .waiters
+                            .front()
+                            .is_some_and(|front| front.id != waiter_id)
+                    },
+                );
+                if !state.locked && !queued_ahead {
                     state.locked = true;
 
                     // Remove ourselves from the queue if we were still in it,
@@ -869,7 +890,8 @@ mod tests {
         let waiters = mutex.waiters();
         crate::assert_with_log!(waiters == 2, "2 waiters queued", 2usize, waiters);
 
-        // Release the lock. unlock() pops waiter A and marks it dequeued.
+        // Release the lock. unlock() wakes waiter A but keeps it queued until it
+        // either acquires the lock or drops, preserving baton ownership.
         drop(guard);
 
         // Drop waiter A WITHOUT polling it. LockFuture::drop must detect
@@ -905,7 +927,7 @@ mod tests {
         // Steal the lock before the waiter can poll.
         let steal_guard = mutex.try_lock().expect("steal should succeed");
 
-        // Waiter polls: lock is busy (stolen). It re-registers at the front.
+        // Waiter polls: lock is busy (stolen). It remains queued and pending.
         let pending = poll_once(&mut fut_w).is_none();
         crate::assert_with_log!(pending, "waiter blocked by steal", true, pending);
 
@@ -919,6 +941,58 @@ mod tests {
         crate::assert_with_log!(*guard_w == 0, "waiter acquired after steal", 0u32, *guard_w);
 
         crate::test_complete!("try_lock_steal_does_not_lose_waiter");
+    }
+
+    #[test]
+    fn try_lock_steal_with_two_waiters_preserves_fifo() {
+        init_test("try_lock_steal_with_two_waiters_preserves_fifo");
+        let cx = test_cx();
+        let mutex = Mutex::new(0u32);
+
+        // Hold the lock.
+        let mut fut_hold = mutex.lock(&cx);
+        let guard = poll_once(&mut fut_hold).expect("immediate").expect("lock");
+
+        // Queue waiter A then waiter B.
+        let mut fut_a = mutex.lock(&cx);
+        let _ = poll_once(&mut fut_a);
+        let mut fut_b = mutex.lock(&cx);
+        let _ = poll_once(&mut fut_b);
+
+        // Wake waiter A, then steal before it can poll.
+        drop(guard);
+        let steal_guard = mutex.try_lock().expect("steal should succeed");
+
+        // Both queued waiters must stay pending while the steal holds the lock.
+        let a_pending = poll_once(&mut fut_a).is_none();
+        crate::assert_with_log!(a_pending, "waiter A blocked by steal", true, a_pending);
+        let b_pending = poll_once(&mut fut_b).is_none();
+        crate::assert_with_log!(b_pending, "waiter B still queued behind A", true, b_pending);
+
+        // Release the stolen lock. Even if B polls first, A must still acquire first.
+        drop(steal_guard);
+
+        let b_still_pending = poll_once(&mut fut_b).is_none();
+        crate::assert_with_log!(
+            b_still_pending,
+            "waiter B must not bypass waiter A",
+            true,
+            b_still_pending
+        );
+
+        let guard_a = poll_once(&mut fut_a)
+            .expect("waiter A should acquire after the steal releases")
+            .expect("waiter A should not error");
+        crate::assert_with_log!(*guard_a == 0, "waiter A acquired first", 0u32, *guard_a);
+
+        drop(guard_a);
+
+        let guard_b = poll_once(&mut fut_b)
+            .expect("waiter B should acquire after waiter A releases")
+            .expect("waiter B should not error");
+        crate::assert_with_log!(*guard_b == 0, "waiter B acquired second", 0u32, *guard_b);
+
+        crate::test_complete!("try_lock_steal_with_two_waiters_preserves_fifo");
     }
 
     #[test]
