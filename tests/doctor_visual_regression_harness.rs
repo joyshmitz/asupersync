@@ -197,6 +197,22 @@ fn doc_references_implementation() {
 }
 
 #[test]
+fn doc_reproduction_commands_use_rch() {
+    let doc = load_doc();
+    let required_commands = [
+        "rch exec -- cargo test --test doctor_visual_regression_harness --features cli -- --nocapture",
+        "rch exec -- cargo test --test doctor_analyzer_fixture_harness --features cli -- --nocapture",
+    ];
+
+    for command in &required_commands {
+        assert!(
+            doc.contains(command),
+            "Doc reproduction section must route heavy tests through rch: {command}"
+        );
+    }
+}
+
+#[test]
 fn doc_documents_all_visual_profiles() {
     let doc = load_doc();
     for profile in &VISUAL_PROFILES {
