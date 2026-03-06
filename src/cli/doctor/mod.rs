@@ -18247,7 +18247,7 @@ edition = "2024"
         let report = make_single_member_workspace_report(
             "use asupersync::Cx;\nuse asupersync::Scope;\nuse asupersync::cancel::CancelReason;\nuse asupersync::obligation::Obligation;\n",
         );
-        let mut broken = report.clone();
+        let mut broken = report;
         broken.events.retain(|event| event.phase != "scan_complete");
 
         let analysis = analyze_workspace_invariants(&broken);
@@ -18330,7 +18330,7 @@ members = ["missing_member"]
     #[test]
     fn analyze_workspace_lock_contention_detects_violation_and_hotspots() {
         let report = make_single_member_workspace_report(
-            r#"
+            r"
 struct RuntimeState;
 impl RuntimeState {
     fn bad_order(&self) {
@@ -18344,7 +18344,7 @@ impl RuntimeState {
         // lock_wait_ns and lock_hold_ns are emitted by lock metrics.
     }
 }
-"#,
+",
         );
         let analysis = analyze_workspace_lock_contention(&report);
         assert_eq!(analysis.analyzer_version, LOCK_CONTENTION_ANALYZER_VERSION);
@@ -18403,7 +18403,7 @@ impl RuntimeState {
     #[test]
     fn analyze_workspace_lock_contention_is_deterministic() {
         let report = make_single_member_workspace_report(
-            r#"
+            r"
 impl RuntimeState {
     fn deterministic_lock_path(&self) {
         let _config = self.config.lock();
@@ -18413,7 +18413,7 @@ impl RuntimeState {
         let _obligations = self.obligations.lock();
     }
 }
-"#,
+",
         );
         let first = analyze_workspace_lock_contention(&report);
         let second = analyze_workspace_lock_contention(&report);
