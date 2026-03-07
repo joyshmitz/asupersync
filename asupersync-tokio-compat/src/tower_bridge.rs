@@ -212,10 +212,11 @@ where
 
     fn call(&mut self, request: Request) -> Self::Future {
         let svc = self.inner.clone();
+        // Obtain Cx from thread-local eagerly. If not set, the caller didn't install
+        // it before calling the service — this is a configuration error.
+        let cx_opt = asupersync::Cx::current();
         Box::pin(async move {
-            // Obtain Cx from thread-local. If not set, the caller didn't install
-            // it — this is a configuration error.
-            let cx = asupersync::Cx::current().ok_or(BridgeError::NoCxAvailable)?;
+            let cx = cx_opt.ok_or(BridgeError::NoCxAvailable)?;
             svc.call(&cx, request).await.map_err(BridgeError::Service)
         })
     }
