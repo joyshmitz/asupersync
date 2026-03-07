@@ -32,6 +32,28 @@ Layer contract:
 4. Public exports must be tree-shake safe and must not expose
    `./internal/*` or `./native/*` subpaths.
 
+## Rust Crate Layout and Artifact Provenance
+
+The TypeScript package topology is layered over a separate Rust crate layout.
+
+| Surface | Role | Artifact rule |
+|---------|------|---------------|
+| `asupersync` | Portable runtime core and canonical ABI contract owner | Rust `rlib`; no direct `wasm-bindgen` exports |
+| `asupersync-browser-core` | Browser WASM producer crate | sole `cdylib`/`rlib` bindings crate; wraps the ABI dispatcher in `src/types/wasm_abi.rs` |
+| `packages/browser-core/` | Published JS/WASM package root for `@asupersync/browser-core` | assembled from staged bindgen output plus package metadata |
+| `packages/browser/`, `packages/react/`, `packages/next/` | Higher-level JS/TS packages | consume `@asupersync/browser-core`; no additional Rust producer crate |
+
+Artifact provenance rules:
+
+1. `asupersync-browser-core` is the only crate that emits the concrete browser
+   WASM/JS boundary.
+2. Bindgen output is staged under `pkg/browser-core/<profile>/` and is
+   ephemeral build output, not the committed package source of truth.
+3. `packages/browser-core/` is the package-assembly destination that receives
+   artifacts from `pkg/browser-core/<profile>/`.
+4. The root `asupersync` crate remains the source of truth for ABI symbols,
+   compatibility policy, and dispatcher semantics.
+
 ## Next.js Boundary Strategy and Fallback Contract (WASM-10 / `asupersync-umelq.11.3`)
 
 Source-of-truth runtime mapping lives in `src/types/wasm_abi.rs`:

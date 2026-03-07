@@ -15,7 +15,10 @@ This document defines the concrete compatibility matrix between Asupersync Brows
 
 ## 2. Package Artifacts
 
-Asupersync Browser Edition produces these artifacts per build profile:
+Asupersync Browser Edition produces these artifacts per build profile. The
+concrete Rust producer crate is `asupersync-browser-core`, and bindgen output is
+staged under `pkg/browser-core/<profile>/` before package assembly copies it
+into `packages/browser-core/`.
 
 | Artifact | Format | Purpose |
 |----------|--------|---------|
@@ -23,6 +26,10 @@ Asupersync Browser Edition produces these artifacts per build profile:
 | `asupersync.js` | ES module glue | Bindgen-generated JS bridge |
 | `asupersync.d.ts` | TypeScript declarations | Type surface for consumers |
 | `package.json` | npm package manifest | Dependency/entry metadata |
+
+Stable package filenames are preserved by invoking `wasm-bindgen` with
+`--out-name asupersync`, even though the producer crate is named
+`asupersync-browser-core`.
 
 Entry points in `package.json`:
 
@@ -229,15 +236,15 @@ Server-side runtimes are bridge-only contexts per the Next.js boundary strategy 
 Stage 1: Profile Selection
   ↓ Select wasm-browser-{dev,prod,deterministic,minimal}
 Stage 2: Rust Compilation
-  ↓ cargo build --target wasm32-unknown-unknown --features <profile>
+  ↓ cargo build -p asupersync-browser-core --target wasm32-unknown-unknown --features <profile>
 Stage 3: Bindgen Generation
-  ↓ wasm-bindgen --target web --out-dir pkg/
+  ↓ wasm-bindgen --target web --out-dir pkg/browser-core/<profile>/ --out-name asupersync
 Stage 4: Optimization (prod only)
-  ↓ wasm-opt -Oz pkg/asupersync_bg.wasm -o pkg/asupersync_bg.wasm
+  ↓ wasm-opt -Oz pkg/browser-core/<profile>/asupersync_bg.wasm -o pkg/browser-core/<profile>/asupersync_bg.wasm
 Stage 5: Type Generation
   ↓ TypeScript declarations from wasm-bindgen + manual augmentation
 Stage 6: Package Assembly
-  ↓ Copy artifacts to package directories per topology
+  ↓ Copy artifacts from pkg/browser-core/<profile>/ to packages/browser-core/ and then assemble higher-level packages per topology
 Stage 7: Validation
   ↓ Run compatibility matrix checks
 Stage 8: Publishing

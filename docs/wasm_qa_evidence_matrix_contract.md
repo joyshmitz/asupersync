@@ -11,6 +11,7 @@ This contract defines the required evidence matrix for Browser Edition quality a
 1. Canonical artifact: `artifacts/wasm_qa_evidence_matrix_v1.json`
 2. Comparator-smoke runner: `scripts/run_wasm_qa_evidence_smoke.sh`
 3. Invariant suite: `tests/wasm_qa_evidence_matrix_contract.rs`
+4. Compile-invariant harness: `tests/wasm_cfg_compile_invariants.rs`
 
 ## Evidence Layers
 
@@ -23,6 +24,14 @@ Every `cfg(target_arch = "wasm32")` and `cfg(feature = "wasm-browser-*")` gate m
 | L1-CFG-COMPILE | `cargo check --target wasm32-unknown-unknown` passes with each wasm profile | cargo/rch |
 | L1-CFG-NATIVE | `cargo check --all-targets` still passes (no native regression) | cargo/rch |
 | L1-CFG-LEAK | No native-only import reachable under wasm32 compilation | cargo/clippy |
+
+The leak frontier for this layer is intentionally concrete rather than abstract.
+At minimum, the harness must keep these prior regression surfaces in the blame path:
+
+- `src/config.rs`
+- `src/runtime/reactor/source.rs`
+- `src/net/tcp/socket.rs`
+- `src/trace/file.rs`
 
 ### L2: Exported ABI Handle Safety
 
@@ -129,6 +138,8 @@ Focused invariant test command (routed through `rch`):
 
 ```bash
 rch exec -- env CARGO_INCREMENTAL=0 CARGO_TARGET_DIR=/tmp/rch-codex-wasm-qa cargo test --test wasm_qa_evidence_matrix_contract -- --nocapture
+rch exec -- env CARGO_INCREMENTAL=0 CARGO_TARGET_DIR=/tmp/rch-codex-wasm-cfg cargo test --test wasm_cfg_compile_invariants wasm_profile_matrix_compile_closure_holds -- --ignored --nocapture
+rch exec -- env CARGO_INCREMENTAL=0 CARGO_TARGET_DIR=/tmp/rch-codex-wasm-cfg cargo test --test wasm_cfg_compile_invariants native_all_targets_backstop_holds -- --ignored --nocapture
 ```
 
 ## Cross-References
@@ -137,7 +148,10 @@ rch exec -- env CARGO_INCREMENTAL=0 CARGO_TARGET_DIR=/tmp/rch-codex-wasm-qa carg
 - `src/lib.rs` -- Feature gate declarations
 - `src/net/tcp/mod.rs` -- TCP cfg gating
 - `src/runtime/reactor/mod.rs` -- Reactor cfg gating
+- `src/runtime/reactor/source.rs` -- Reactor source export hotspot
+- `src/trace/file.rs` -- Native file-trace hotspot
 - `Cargo.toml` -- Feature definitions (wasm-browser-*)
 - `artifacts/wasm_qa_evidence_matrix_v1.json`
 - `scripts/run_wasm_qa_evidence_smoke.sh`
 - `tests/wasm_qa_evidence_matrix_contract.rs`
+- `tests/wasm_cfg_compile_invariants.rs`

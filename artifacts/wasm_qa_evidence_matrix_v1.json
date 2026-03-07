@@ -91,6 +91,8 @@
   ],
   "cfg_gated_files": [
     "src/net/tcp/stream.rs",
+    "src/http/h1/listener.rs",
+    "src/http/h1/server.rs",
     "src/net/tcp/listener.rs",
     "src/net/tcp/split.rs",
     "src/net/tcp/socket.rs",
@@ -102,7 +104,8 @@
     "src/cx/cx.rs",
     "src/config.rs",
     "src/lib.rs",
-    "src/http/h1/mod.rs"
+    "src/http/h1/mod.rs",
+    "src/trace/file.rs"
   ],
   "structured_log_fields_required": [
     "evidence_id",
@@ -131,6 +134,16 @@
       "scenario_id": "WASM-QA-SMOKE-EVIDENCE",
       "description": "Verify evidence item IDs are unique and well-formed",
       "command": "rch exec -- env CARGO_INCREMENTAL=0 CARGO_TARGET_DIR=/tmp/rch-codex-wasm-qa cargo test --test wasm_qa_evidence_matrix_contract evidence -- --nocapture"
+    },
+    {
+      "scenario_id": "WASM-QA-SMOKE-CFG-MATRIX",
+      "description": "Run the ignored wasm profile compile-closure harness across the canonical browser matrix",
+      "command": "rch exec -- env CARGO_INCREMENTAL=0 CARGO_TARGET_DIR=/tmp/rch-codex-wasm-cfg cargo test --test wasm_cfg_compile_invariants wasm_profile_matrix_compile_closure_holds -- --ignored --nocapture"
+    },
+    {
+      "scenario_id": "WASM-QA-SMOKE-NATIVE-BACKSTOP",
+      "description": "Run the ignored native all-targets backstop after wasm cfg-gating changes",
+      "command": "rch exec -- env CARGO_INCREMENTAL=0 CARGO_TARGET_DIR=/tmp/rch-codex-wasm-cfg cargo test --test wasm_cfg_compile_invariants native_all_targets_backstop_holds -- --ignored --nocapture"
     }
   ],
   "downstream_beads": [

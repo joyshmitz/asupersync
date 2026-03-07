@@ -7,6 +7,8 @@
     "documentation": "docs/wasm_abi_contract.md",
     "required_doc_markers": [
       "Contract ID: `asupersync-wasm-abi-v1`",
+      "Concrete Artifact Strategy and Crate Layout",
+      "`asupersync-browser-core`",
       "Next.js Hydration-safe Bootstrap Contract",
       "`next.bootstrap_state_machine_contract`",
       "Drift Detection and CI Gate",

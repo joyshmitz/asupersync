@@ -16,6 +16,36 @@ This contract defines the stable JS/TS <-> WASM boundary schema for Asupersync:
 
 Canonical implementation: `src/types/wasm_abi.rs`.
 
+## Concrete Artifact Strategy and Crate Layout
+
+The ABI contract is owned by the root `asupersync` crate, but the concrete
+browser artifact producer is a separate bindings crate.
+
+Decision:
+
+1. `asupersync` remains the canonical portable core crate and ABI-model owner.
+   It stays bindgen-free so native, lab, and browser lanes share one Rust
+   implementation surface for runtime semantics, cancellation, and the
+   dispatcher contract.
+2. A dedicated workspace member named `asupersync-browser-core` is the only
+   crate allowed to produce the browser `cdylib`/`wasm-bindgen` boundary.
+3. `asupersync-browser-core` exports the v1 symbols as thin wrappers over the
+   dispatcher/types defined in `src/types/wasm_abi.rs`; symbol ownership and
+   compatibility policy remain defined in the root crate.
+4. Browser host integration details such as module bootstrap, JS error/value
+   conversion, and browser event-loop wiring live in `asupersync-browser-core`,
+   not in `asupersync`.
+5. Generated bindgen output is staging only and lives under
+   `pkg/browser-core/<profile>/`. That directory is not the long-lived package
+   source of truth.
+6. Published package assembly copies staged artifacts from
+   `pkg/browser-core/<profile>/` into `packages/browser-core/`, after which the
+   higher-level JS packages consume `@asupersync/browser-core`.
+7. `@asupersync/browser`, `@asupersync/react`, and `@asupersync/next` remain
+   JS/TS package layers over `@asupersync/browser-core`; they do not introduce
+   extra Rust `cdylib` producers unless a later ABI decision explicitly amends
+   this contract.
+
 ## Versioning Rules
 
 - Version type: `major.minor` (`WasmAbiVersion`).
