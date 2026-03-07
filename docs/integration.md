@@ -281,6 +281,8 @@ Browser Edition doc map (current canonical locations):
    - `docs/wasm_rationale_index.md`
 9. Pilot triage and roadmap assimilation:
    - `docs/wasm_pilot_feedback_triage_loop.md`
+10. Browser quality evidence matrix contract:
+   - `docs/wasm_evidence_matrix_contract.md`
 
 Doc-drift verification hooks (required for Browser Edition doc changes):
 

@@ -1283,6 +1283,7 @@ Open an issue at https://github.com/Dicklesworthstone/asupersync/issues
 | [`docs/wasm_react_reference_patterns.md`](./docs/wasm_react_reference_patterns.md) | **React Reference Pattern Catalog**: deterministic task-group, retry, bulkhead, and tracing-hook scenarios with replay commands |
 | [`docs/wasm_nextjs_template_cookbook.md`](./docs/wasm_nextjs_template_cookbook.md) | **Next.js Template Cookbook**: deterministic App Router bootstrap/deployment scenarios, failure signatures, and replay commands |
 | [`docs/wasm_flake_governance_and_forensics.md`](./docs/wasm_flake_governance_and_forensics.md) | **WASM Flake Governance + Forensics**: quarantine policy, release-blocking thresholds, and deterministic replay triage workflow |
+| [`docs/wasm_evidence_matrix_contract.md`](./docs/wasm_evidence_matrix_contract.md) | **WASM Evidence Matrix Contract**: required unit/integration/E2E/logging evidence lanes and replay/artifact policy for Browser Edition quality gates |
 | [`docs/doctor_operator_model_contract.md`](./docs/doctor_operator_model_contract.md) | **Doctor Operator Contract**: personas, missions, and decision-loop schema |
 | [`docs/doctor_workspace_scanner_contract.md`](./docs/doctor_workspace_scanner_contract.md) | **Doctor Workspace + Screen Contract**: workspace scan schema and screen-to-engine payload contracts |
 | [`docs/doctor_evidence_ingestion_contract.md`](./docs/doctor_evidence_ingestion_contract.md) | **Doctor Evidence Contract**: deterministic artifact-ingestion schema, provenance, and compatibility policy |
