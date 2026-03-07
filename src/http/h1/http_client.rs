@@ -8,10 +8,12 @@
 //!
 //! ```ignore
 //! let client = HttpClient::new();
-//! let resp = client.get("http://example.com/api").await?;
+//! let cx = Cx::for_testing();
+//! let resp = client.get(&cx, "http://example.com/api").await?;
 //! assert_eq!(resp.status, 200);
 //! ```
 
+use crate::cx::Cx;
 use crate::http::h1::client::{ClientStreamingResponse, Http1Client};
 use crate::http::h1::types::{Method, MultipartForm, Request, Response, Version};
 use crate::http::pool::{Pool, PoolConfig, PoolKey};
@@ -75,6 +77,8 @@ pub enum ClientError {
     InvalidConnectInput(String),
     /// Proxy negotiation failed.
     ProxyError(String),
+    /// The operation was cancelled via the Cx cancellation protocol.
+    Cancelled,
 }
 
 impl std::fmt::Display for ClientError {
@@ -97,6 +101,7 @@ impl std::fmt::Display for ClientError {
             }
             Self::InvalidConnectInput(msg) => write!(f, "invalid CONNECT input: {msg}"),
             Self::ProxyError(msg) => write!(f, "proxy error: {msg}"),
+            Self::Cancelled => write!(f, "operation cancelled"),
         }
     }
 }
@@ -111,8 +116,26 @@ impl std::error::Error for ClientError {
             | Self::ProxyError(_)
             | Self::TlsError(_)
             | Self::InvalidUrl(_)
-            | Self::TooManyRedirects { .. } => None,
+            | Self::TooManyRedirects { .. }
+            | Self::Cancelled => None,
         }
+    }
+}
+
+impl ClientError {
+    /// Returns `true` if this error represents a cancellation.
+    #[must_use]
+    pub fn is_cancelled(&self) -> bool {
+        matches!(self, Self::Cancelled)
+    }
+}
+
+/// Check if the Cx has been cancelled and return `ClientError::Cancelled` if so.
+fn check_cx(cx: &Cx) -> Result<(), ClientError> {
+    if cx.is_cancel_requested() {
+        Err(ClientError::Cancelled)
+    } else {
+        Ok(())
     }
 }
 
@@ -599,105 +622,130 @@ impl HttpClient {
     }
 
     /// Send a GET request to the given URL.
-    pub async fn get(&self, url: &str) -> Result<Response, ClientError> {
-        self.request(Method::Get, url, Vec::new(), Vec::new()).await
+    ///
+    /// The `cx` parameter participates in structured cancellation: if the
+    /// context is cancelled, the in-flight request is abandoned and
+    /// `ClientError::Cancelled` is returned.
+    pub async fn get(&self, cx: &Cx, url: &str) -> Result<Response, ClientError> {
+        self.request(cx, Method::Get, url, Vec::new(), Vec::new())
+            .await
     }
 
     /// Send a POST request to the given URL with a body.
-    pub async fn post(&self, url: &str, body: Vec<u8>) -> Result<Response, ClientError> {
-        self.request(Method::Post, url, Vec::new(), body).await
+    pub async fn post(&self, cx: &Cx, url: &str, body: Vec<u8>) -> Result<Response, ClientError> {
+        self.request(cx, Method::Post, url, Vec::new(), body).await
     }
 
     /// Send a POST multipart form-data request.
     pub async fn post_multipart(
         &self,
+        cx: &Cx,
         url: &str,
         form: &MultipartForm,
     ) -> Result<Response, ClientError> {
-        self.request_multipart(Method::Post, url, Vec::new(), form)
+        self.request_multipart(cx, Method::Post, url, Vec::new(), form)
             .await
     }
 
     /// Send a POST request and stream the response body.
     pub async fn post_streaming(
         &self,
+        cx: &Cx,
         url: &str,
         body: Vec<u8>,
     ) -> Result<ClientStreamingResponse<ClientIo>, ClientError> {
-        self.request_streaming(Method::Post, url, Vec::new(), body)
+        self.request_streaming(cx, Method::Post, url, Vec::new(), body)
             .await
     }
 
     /// Send a POST multipart form-data request and stream the response body.
     pub async fn post_multipart_streaming(
         &self,
+        cx: &Cx,
         url: &str,
         form: &MultipartForm,
     ) -> Result<ClientStreamingResponse<ClientIo>, ClientError> {
-        self.request_multipart_streaming(Method::Post, url, Vec::new(), form)
+        self.request_multipart_streaming(cx, Method::Post, url, Vec::new(), form)
             .await
     }
 
     /// Send a PUT request to the given URL with a body.
-    pub async fn put(&self, url: &str, body: Vec<u8>) -> Result<Response, ClientError> {
-        self.request(Method::Put, url, Vec::new(), body).await
+    pub async fn put(
+        &self,
+        cx: &Cx,
+        url: &str,
+        body: Vec<u8>,
+    ) -> Result<Response, ClientError> {
+        self.request(cx, Method::Put, url, Vec::new(), body).await
     }
 
     /// Send a DELETE request to the given URL.
-    pub async fn delete(&self, url: &str) -> Result<Response, ClientError> {
-        self.request(Method::Delete, url, Vec::new(), Vec::new())
+    pub async fn delete(&self, cx: &Cx, url: &str) -> Result<Response, ClientError> {
+        self.request(cx, Method::Delete, url, Vec::new(), Vec::new())
             .await
     }
 
     /// Send a request with the given method, URL, headers, and body.
+    ///
+    /// The `cx` parameter participates in structured cancellation: the
+    /// cancellation flag is checked before connection establishment, after
+    /// TCP connect, after TLS handshake, and before/after the HTTP
+    /// request/response exchange.  If cancelled, returns
+    /// `ClientError::Cancelled`.
     pub async fn request(
         &self,
+        cx: &Cx,
         method: Method,
         url: &str,
         extra_headers: Vec<(String, String)>,
         body: Vec<u8>,
     ) -> Result<Response, ClientError> {
+        check_cx(cx)?;
         let parsed = ParsedUrl::parse(url)?;
-        self.execute_with_redirects(method, parsed, extra_headers, body, 0)
+        self.execute_with_redirects(cx, method, parsed, extra_headers, body, 0)
             .await
     }
 
     /// Send a request with multipart form-data body.
     pub async fn request_multipart(
         &self,
+        cx: &Cx,
         method: Method,
         url: &str,
         mut extra_headers: Vec<(String, String)>,
         form: &MultipartForm,
     ) -> Result<Response, ClientError> {
         ensure_multipart_content_type(&mut extra_headers, form);
-        self.request(method, url, extra_headers, form.to_body())
+        self.request(cx, method, url, extra_headers, form.to_body())
             .await
     }
 
     /// Send a request and stream the response body.
     pub async fn request_streaming(
         &self,
+        cx: &Cx,
         method: Method,
         url: &str,
         extra_headers: Vec<(String, String)>,
         body: Vec<u8>,
     ) -> Result<ClientStreamingResponse<ClientIo>, ClientError> {
+        check_cx(cx)?;
         let parsed = ParsedUrl::parse(url)?;
-        self.execute_with_redirects_streaming(method, parsed, extra_headers, body, 0)
+        self.execute_with_redirects_streaming(cx, method, parsed, extra_headers, body, 0)
             .await
     }
 
     /// Send a multipart request and stream the response body.
     pub async fn request_multipart_streaming(
         &self,
+        cx: &Cx,
         method: Method,
         url: &str,
         mut extra_headers: Vec<(String, String)>,
         form: &MultipartForm,
     ) -> Result<ClientStreamingResponse<ClientIo>, ClientError> {
         ensure_multipart_content_type(&mut extra_headers, form);
-        self.request_streaming(method, url, extra_headers, form.to_body())
+        self.request_streaming(cx, method, url, extra_headers, form.to_body())
             .await
     }
 
@@ -708,12 +756,14 @@ impl HttpClient {
     /// (e.g. `example.com:443`).
     pub async fn connect_tunnel(
         &self,
+        cx: &Cx,
         proxy_url: &str,
         target_authority: &str,
         extra_headers: Vec<(String, String)>,
     ) -> Result<HttpConnectTunnel<ClientIo>, ClientError> {
+        check_cx(cx)?;
         let proxy = ParsedUrl::parse(proxy_url)?;
-        let io = self.connect_io(&proxy).await?;
+        let io = self.connect_io(cx, &proxy).await?;
         establish_http_connect_tunnel(
             io,
             target_authority,
@@ -724,19 +774,21 @@ impl HttpClient {
     }
 
     /// Execute a request, following redirects as configured.
-    fn execute_with_redirects(
-        &self,
+    fn execute_with_redirects<'a>(
+        &'a self,
+        cx: &'a Cx,
         method: Method,
         parsed: ParsedUrl,
         extra_headers: Vec<(String, String)>,
         body: Vec<u8>,
         redirect_count: u32,
     ) -> std::pin::Pin<
-        Box<dyn std::future::Future<Output = Result<Response, ClientError>> + Send + '_>,
+        Box<dyn std::future::Future<Output = Result<Response, ClientError>> + Send + 'a>,
     > {
         Box::pin(async move {
+            check_cx(cx)?;
             let resp = self
-                .execute_single(&method, &parsed, &extra_headers, &body)
+                .execute_single(cx, &method, &parsed, &extra_headers, &body)
                 .await?;
 
             // Check for redirect
@@ -773,6 +825,7 @@ impl HttpClient {
 
                             return self
                                 .execute_with_redirects(
+                                    cx,
                                     next_method,
                                     next_parsed,
                                     next_headers,
@@ -790,8 +843,9 @@ impl HttpClient {
     }
 
     /// Execute a request (streaming), following redirects as configured.
-    fn execute_with_redirects_streaming(
-        &self,
+    fn execute_with_redirects_streaming<'a>(
+        &'a self,
+        cx: &'a Cx,
         method: Method,
         parsed: ParsedUrl,
         extra_headers: Vec<(String, String)>,
@@ -801,12 +855,13 @@ impl HttpClient {
         Box<
             dyn std::future::Future<Output = Result<ClientStreamingResponse<ClientIo>, ClientError>>
                 + Send
-                + '_,
+                + 'a,
         >,
     > {
         Box::pin(async move {
+            check_cx(cx)?;
             let resp = self
-                .execute_single_streaming(&method, &parsed, &extra_headers, &body)
+                .execute_single_streaming(cx, &method, &parsed, &extra_headers, &body)
                 .await?;
 
             // Check for redirect
@@ -847,6 +902,7 @@ impl HttpClient {
 
                             return self
                                 .execute_with_redirects_streaming(
+                                    cx,
                                     next_method,
                                     next_parsed,
                                     next_headers,
@@ -866,22 +922,27 @@ impl HttpClient {
     /// Execute a single request (no redirect handling).
     async fn execute_single(
         &self,
+        cx: &Cx,
         method: &Method,
         parsed: &ParsedUrl,
         extra_headers: &[(String, String)],
         body: &[u8],
     ) -> Result<Response, ClientError> {
+        check_cx(cx)?;
         if let Some(proxy_url) = self.config.proxy_url.as_deref() {
             return self
-                .execute_single_with_proxy(method, parsed, extra_headers, body, proxy_url)
+                .execute_single_with_proxy(cx, method, parsed, extra_headers, body, proxy_url)
                 .await;
         }
 
         let req = self.build_request(method, parsed, extra_headers, body, None, None);
 
         let key = parsed.pool_key();
-        let acquired = self.acquire_connection(parsed).await?;
+        let acquired = self.acquire_connection(cx, parsed).await?;
         let mut guard = ConnectionGuard::new(self, key.clone(), acquired.pool_id);
+
+        // Check cancellation after connection acquisition.
+        check_cx(cx)?;
 
         match Http1Client::request_with_io(acquired.io, req).await {
             Ok((response, io)) => {
@@ -904,20 +965,25 @@ impl HttpClient {
     /// Execute a single request (streaming; no redirect handling).
     async fn execute_single_streaming(
         &self,
+        cx: &Cx,
         method: &Method,
         parsed: &ParsedUrl,
         extra_headers: &[(String, String)],
         body: &[u8],
     ) -> Result<ClientStreamingResponse<ClientIo>, ClientError> {
+        check_cx(cx)?;
         if let Some(proxy_url) = self.config.proxy_url.as_deref() {
             return self
-                .execute_single_streaming_with_proxy(method, parsed, extra_headers, body, proxy_url)
+                .execute_single_streaming_with_proxy(
+                    cx, method, parsed, extra_headers, body, proxy_url,
+                )
                 .await;
         }
 
         let req = self.build_request(method, parsed, extra_headers, body, None, None);
 
-        let stream = self.connect_io(parsed).await?;
+        let stream = self.connect_io(cx, parsed).await?;
+        check_cx(cx)?;
         let resp = Http1Client::request_streaming(stream, req).await?;
         self.store_response_cookies(&parsed.host, &resp.head.headers);
         Ok(resp)
@@ -925,14 +991,17 @@ impl HttpClient {
 
     async fn execute_single_with_proxy(
         &self,
+        cx: &Cx,
         method: &Method,
         parsed: &ParsedUrl,
         extra_headers: &[(String, String)],
         body: &[u8],
         proxy_url: &str,
     ) -> Result<Response, ClientError> {
+        check_cx(cx)?;
         let proxy = parse_proxy_endpoint(proxy_url)?;
-        let proxy_conn = self.connect_via_proxy(parsed, &proxy).await?;
+        let proxy_conn = self.connect_via_proxy(cx, parsed, &proxy).await?;
+        check_cx(cx)?;
         let request_target = if proxy_conn.use_absolute_form {
             Some(absolute_request_target(parsed))
         } else {
@@ -953,14 +1022,17 @@ impl HttpClient {
 
     async fn execute_single_streaming_with_proxy(
         &self,
+        cx: &Cx,
         method: &Method,
         parsed: &ParsedUrl,
         extra_headers: &[(String, String)],
         body: &[u8],
         proxy_url: &str,
     ) -> Result<ClientStreamingResponse<ClientIo>, ClientError> {
+        check_cx(cx)?;
         let proxy = parse_proxy_endpoint(proxy_url)?;
-        let proxy_conn = self.connect_via_proxy(parsed, &proxy).await?;
+        let proxy_conn = self.connect_via_proxy(cx, parsed, &proxy).await?;
+        check_cx(cx)?;
         let request_target = if proxy_conn.use_absolute_form {
             Some(absolute_request_target(parsed))
         } else {
@@ -981,6 +1053,7 @@ impl HttpClient {
 
     async fn connect_via_proxy(
         &self,
+        cx: &Cx,
         parsed: &ParsedUrl,
         proxy: &ProxyEndpoint,
     ) -> Result<ProxyConnection, ClientError> {
@@ -996,7 +1069,7 @@ impl HttpClient {
                     port: proxy.port,
                     path: "/".to_owned(),
                 };
-                let proxy_io = self.connect_io(&proxy_parsed).await?;
+                let proxy_io = self.connect_io(cx, &proxy_parsed).await?;
 
                 if parsed.scheme == Scheme::Http {
                     return Ok(ProxyConnection {
@@ -1195,11 +1268,15 @@ impl HttpClient {
             .map_err(|e| ClientError::TlsError(e.to_string()))
     }
 
-    async fn connect_io(&self, parsed: &ParsedUrl) -> Result<ClientIo, ClientError> {
+    async fn connect_io(&self, cx: &Cx, parsed: &ParsedUrl) -> Result<ClientIo, ClientError> {
+        check_cx(cx)?;
         let addr = format!("{}:{}", parsed.host, parsed.port);
         let stream = TcpStream::connect(addr)
             .await
             .map_err(ClientError::ConnectError)?;
+
+        // Check cancellation after TCP connect, before TLS.
+        check_cx(cx)?;
 
         match parsed.scheme {
             Scheme::Http => Ok(ClientIo::Plain(stream)),
@@ -1208,6 +1285,8 @@ impl HttpClient {
                 {
                     let domain = parsed.host.trim_start_matches('[').trim_end_matches(']');
                     let tls = self.tls_connect_stream(domain, stream).await?;
+                    // Check cancellation after TLS handshake.
+                    check_cx(cx)?;
                     Ok(ClientIo::Tls(tls))
                 }
                 #[cfg(not(feature = "tls"))]
@@ -1223,6 +1302,7 @@ impl HttpClient {
 
     async fn acquire_connection(
         &self,
+        cx: &Cx,
         parsed: &ParsedUrl,
     ) -> Result<AcquiredConnection, ClientError> {
         struct ConnectGuard<'a> {
@@ -1272,7 +1352,7 @@ impl HttpClient {
             id: fresh_id,
         };
 
-        let io = self.connect_io(parsed).await?;
+        let io = self.connect_io(cx, parsed).await?;
 
         guard.id = None; // defuse the guard upon success
 
@@ -2314,6 +2394,9 @@ mod tests {
         let msg = format!("{err}");
         assert!(msg.contains('5'));
         assert!(msg.contains("10"));
+
+        let err = ClientError::Cancelled;
+        assert!(format!("{err}").contains("cancelled"));
     }
 
     #[test]
@@ -2326,6 +2409,15 @@ mod tests {
         let io_err = io::Error::other("test");
         let err = ClientError::Io(io_err);
         assert!(err.source().is_some());
+
+        let err = ClientError::Cancelled;
+        assert!(err.source().is_none());
+    }
+
+    #[test]
+    fn client_error_is_cancelled() {
+        assert!(ClientError::Cancelled.is_cancelled());
+        assert!(!ClientError::InvalidUrl("x".into()).is_cancelled());
     }
 
     // =========================================================================
@@ -2885,5 +2977,104 @@ mod tests {
             ..response
         };
         assert!(connection_can_be_reused(&chunked, &Method::Get));
+    }
+
+    // =========================================================================
+    // Cancellation via Cx
+    // =========================================================================
+
+    #[test]
+    fn check_cx_returns_cancelled_when_cancelled() {
+        let cx = Cx::for_testing();
+        assert!(check_cx(&cx).is_ok());
+
+        cx.set_cancel_requested(true);
+        let err = check_cx(&cx).unwrap_err();
+        assert!(err.is_cancelled());
+    }
+
+    #[test]
+    fn request_returns_cancelled_when_cx_already_cancelled() {
+        let cx = Cx::for_testing();
+        cx.set_cancel_requested(true);
+
+        let client = HttpClient::new();
+        let result = block_on(client.get(&cx, "http://example.com/test"));
+        assert!(result.is_err());
+        assert!(result.unwrap_err().is_cancelled());
+    }
+
+    #[test]
+    fn post_returns_cancelled_when_cx_already_cancelled() {
+        let cx = Cx::for_testing();
+        cx.set_cancel_requested(true);
+
+        let client = HttpClient::new();
+        let result = block_on(client.post(&cx, "http://example.com/submit", b"data".to_vec()));
+        assert!(result.unwrap_err().is_cancelled());
+    }
+
+    #[test]
+    fn put_returns_cancelled_when_cx_already_cancelled() {
+        let cx = Cx::for_testing();
+        cx.set_cancel_requested(true);
+
+        let client = HttpClient::new();
+        let result = block_on(client.put(&cx, "http://example.com/item", b"data".to_vec()));
+        assert!(result.unwrap_err().is_cancelled());
+    }
+
+    #[test]
+    fn delete_returns_cancelled_when_cx_already_cancelled() {
+        let cx = Cx::for_testing();
+        cx.set_cancel_requested(true);
+
+        let client = HttpClient::new();
+        let result = block_on(client.delete(&cx, "http://example.com/item"));
+        assert!(result.unwrap_err().is_cancelled());
+    }
+
+    #[test]
+    fn request_streaming_returns_cancelled_when_cx_already_cancelled() {
+        let cx = Cx::for_testing();
+        cx.set_cancel_requested(true);
+
+        let client = HttpClient::new();
+        let result = block_on(client.request_streaming(
+            &cx,
+            Method::Get,
+            "http://example.com/stream",
+            Vec::new(),
+            Vec::new(),
+        ));
+        assert!(result.unwrap_err().is_cancelled());
+    }
+
+    #[test]
+    fn connect_tunnel_returns_cancelled_when_cx_already_cancelled() {
+        let cx = Cx::for_testing();
+        cx.set_cancel_requested(true);
+
+        let client = HttpClient::new();
+        let result = block_on(client.connect_tunnel(
+            &cx,
+            "http://proxy.local:3128",
+            "example.com:443",
+            Vec::new(),
+        ));
+        assert!(result.unwrap_err().is_cancelled());
+    }
+
+    #[test]
+    fn request_succeeds_with_non_cancelled_cx() {
+        // Verify that a non-cancelled Cx does not interfere with normal operation.
+        // This test only verifies we get past the cancellation check (URL parsing
+        // will succeed, but the actual connect will fail since there's no server).
+        let cx = Cx::for_testing();
+        let client = HttpClient::new();
+        let result = block_on(client.get(&cx, "http://127.0.0.1:1/nonexistent"));
+        // The request should fail with a connect error (not a cancellation error).
+        assert!(result.is_err());
+        assert!(!result.unwrap_err().is_cancelled());
     }
 }

@@ -12,6 +12,7 @@ use asupersync::net::TcpListener as AsyncTcpListener;
 use asupersync::net::TcpStream;
 use asupersync::time::timeout;
 use asupersync::types::Time;
+use asupersync::Cx;
 use common::*;
 use futures_lite::future::block_on;
 use std::io::{Read, Write};
@@ -184,20 +185,21 @@ fn run_cookie_replay_scenario(cookie_store_enabled: bool) -> (String, String) {
     });
 
     run_test(|| async move {
+        let cx = Cx::for_testing();
         let client = HttpClient::builder()
             .cookie_store(cookie_store_enabled)
             .build();
         let url = format!("http://{addr}/cookie");
 
         let first = client
-            .get(&url)
+            .get(&cx, &url)
             .await
             .expect("first request should succeed");
         assert_eq!(first.status, 200);
         assert_eq!(first.body, b"OK");
 
         let second = client
-            .get(&url)
+            .get(&cx, &url)
             .await
             .expect("second request should succeed");
         assert_eq!(second.status, 200);
@@ -267,9 +269,11 @@ fn http_client_connect_tunnel_end_to_end_roundtrip() {
     });
 
     run_test(|| async move {
+        let cx = Cx::for_testing();
         let client = HttpClient::new();
         let mut tunnel = client
             .connect_tunnel(
+                &cx,
                 &format!("http://{addr}"),
                 "example.com:443",
                 vec![("X-Test-Trace".to_string(), "h4".to_string())],
@@ -396,9 +400,11 @@ fn http_client_redirect_303_converts_post_to_get() {
     });
 
     run_test(|| async move {
+        let cx = Cx::for_testing();
         let client = HttpClient::new();
         let response = client
             .post(
+                &cx,
                 &format!("http://{redirect_addr}/submit"),
                 b"payload".to_vec(),
             )
