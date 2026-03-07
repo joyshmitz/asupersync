@@ -128,11 +128,10 @@ fn layer_ids_are_complete() {
         .iter()
         .map(|l| l["layer_id"].as_str().unwrap().to_string())
         .collect();
-    let expected: BTreeSet<String> =
-        ["L1", "L2", "L3", "L4", "L5", "L6", "L7", "L8"]
-            .into_iter()
-            .map(ToOwned::to_owned)
-            .collect();
+    let expected: BTreeSet<String> = ["L1", "L2", "L3", "L4", "L5", "L6", "L7", "L8"]
+        .into_iter()
+        .map(ToOwned::to_owned)
+        .collect();
     assert_eq!(actual, expected, "evidence layers must be L1-L8");
 }
 
@@ -141,10 +140,7 @@ fn each_layer_has_name_and_evidence_items() {
     let artifact = load_artifact();
     for layer in artifact["evidence_layers"].as_array().unwrap() {
         let lid = layer["layer_id"].as_str().unwrap();
-        assert!(
-            layer.get("name").is_some(),
-            "layer {lid} missing name"
-        );
+        assert!(layer.get("name").is_some(), "layer {lid} missing name");
         let items = layer["evidence_items"]
             .as_array()
             .expect("evidence_items must be array");
@@ -162,10 +158,7 @@ fn evidence_ids_are_globally_unique() {
     for layer in artifact["evidence_layers"].as_array().unwrap() {
         for item in layer["evidence_items"].as_array().unwrap() {
             let eid = item["evidence_id"].as_str().unwrap().to_string();
-            assert!(
-                all_ids.insert(eid.clone()),
-                "duplicate evidence id: {eid}"
-            );
+            assert!(all_ids.insert(eid.clone()), "duplicate evidence id: {eid}");
         }
     }
     // Should have at least 25 evidence items across all layers

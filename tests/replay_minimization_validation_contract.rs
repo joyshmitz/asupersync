@@ -279,15 +279,35 @@ fn downstream_beads_stay_in_aa_track_namespace() {
 
 #[test]
 fn canonicalization_preserves_event_set() {
-    use asupersync::trace::canonicalize::{canonicalize, FoataTrace};
+    use asupersync::trace::canonicalize::{FoataTrace, canonicalize};
     use asupersync::trace::event::TraceEvent;
     use asupersync::types::{RegionId, TaskId, Time};
 
     let events = vec![
-        TraceEvent::spawn(1, Time::ZERO, TaskId::new_for_test(1, 0), RegionId::new_for_test(1, 0)),
-        TraceEvent::spawn(2, Time::ZERO, TaskId::new_for_test(2, 0), RegionId::new_for_test(2, 0)),
-        TraceEvent::complete(3, Time::ZERO, TaskId::new_for_test(1, 0), RegionId::new_for_test(1, 0)),
-        TraceEvent::complete(4, Time::ZERO, TaskId::new_for_test(2, 0), RegionId::new_for_test(2, 0)),
+        TraceEvent::spawn(
+            1,
+            Time::ZERO,
+            TaskId::new_for_test(1, 0),
+            RegionId::new_for_test(1, 0),
+        ),
+        TraceEvent::spawn(
+            2,
+            Time::ZERO,
+            TaskId::new_for_test(2, 0),
+            RegionId::new_for_test(2, 0),
+        ),
+        TraceEvent::complete(
+            3,
+            Time::ZERO,
+            TaskId::new_for_test(1, 0),
+            RegionId::new_for_test(1, 0),
+        ),
+        TraceEvent::complete(
+            4,
+            Time::ZERO,
+            TaskId::new_for_test(2, 0),
+            RegionId::new_for_test(2, 0),
+        ),
     ];
 
     let foata: FoataTrace = canonicalize(&events);
@@ -306,9 +326,24 @@ fn canonicalization_fingerprint_deterministic() {
     use asupersync::types::{RegionId, TaskId, Time};
 
     let events = vec![
-        TraceEvent::spawn(1, Time::ZERO, TaskId::new_for_test(1, 0), RegionId::new_for_test(1, 0)),
-        TraceEvent::spawn(2, Time::ZERO, TaskId::new_for_test(2, 0), RegionId::new_for_test(2, 0)),
-        TraceEvent::complete(3, Time::ZERO, TaskId::new_for_test(1, 0), RegionId::new_for_test(1, 0)),
+        TraceEvent::spawn(
+            1,
+            Time::ZERO,
+            TaskId::new_for_test(1, 0),
+            RegionId::new_for_test(1, 0),
+        ),
+        TraceEvent::spawn(
+            2,
+            Time::ZERO,
+            TaskId::new_for_test(2, 0),
+            RegionId::new_for_test(2, 0),
+        ),
+        TraceEvent::complete(
+            3,
+            Time::ZERO,
+            TaskId::new_for_test(1, 0),
+            RegionId::new_for_test(1, 0),
+        ),
     ];
 
     let fp1 = trace_fingerprint(&events);
@@ -328,17 +363,41 @@ fn normalization_reduces_switch_cost() {
 
     // Interleaved: A, B, A, B => 3 switches
     let events = vec![
-        TraceEvent::spawn(1, Time::ZERO, TaskId::new_for_test(1, 0), RegionId::new_for_test(1, 0)),
-        TraceEvent::spawn(2, Time::ZERO, TaskId::new_for_test(2, 0), RegionId::new_for_test(2, 0)),
-        TraceEvent::complete(3, Time::ZERO, TaskId::new_for_test(1, 0), RegionId::new_for_test(1, 0)),
-        TraceEvent::complete(4, Time::ZERO, TaskId::new_for_test(2, 0), RegionId::new_for_test(2, 0)),
+        TraceEvent::spawn(
+            1,
+            Time::ZERO,
+            TaskId::new_for_test(1, 0),
+            RegionId::new_for_test(1, 0),
+        ),
+        TraceEvent::spawn(
+            2,
+            Time::ZERO,
+            TaskId::new_for_test(2, 0),
+            RegionId::new_for_test(2, 0),
+        ),
+        TraceEvent::complete(
+            3,
+            Time::ZERO,
+            TaskId::new_for_test(1, 0),
+            RegionId::new_for_test(1, 0),
+        ),
+        TraceEvent::complete(
+            4,
+            Time::ZERO,
+            TaskId::new_for_test(2, 0),
+            RegionId::new_for_test(2, 0),
+        ),
     ];
 
     let original_cost = trace_switch_cost(&events);
     let config = GeodesicConfig::default();
     let (normalized, result) = normalize_trace(&events, &config);
 
-    assert_eq!(normalized.len(), events.len(), "normalization must preserve event count");
+    assert_eq!(
+        normalized.len(),
+        events.len(),
+        "normalization must preserve event count"
+    );
     assert!(
         result.switch_count <= original_cost,
         "normalized switch count ({}) must be <= original ({})",
@@ -355,8 +414,18 @@ fn normalization_greedy_fallback_is_valid() {
     use asupersync::types::{RegionId, TaskId, Time};
 
     let events = vec![
-        TraceEvent::spawn(1, Time::ZERO, TaskId::new_for_test(1, 0), RegionId::new_for_test(1, 0)),
-        TraceEvent::spawn(2, Time::ZERO, TaskId::new_for_test(2, 0), RegionId::new_for_test(2, 0)),
+        TraceEvent::spawn(
+            1,
+            Time::ZERO,
+            TaskId::new_for_test(1, 0),
+            RegionId::new_for_test(1, 0),
+        ),
+        TraceEvent::spawn(
+            2,
+            Time::ZERO,
+            TaskId::new_for_test(2, 0),
+            RegionId::new_for_test(2, 0),
+        ),
     ];
 
     let config = GeodesicConfig::greedy_only();
@@ -375,15 +444,22 @@ fn race_detection_independent_events_no_races() {
 
     // Two independent spawns in different regions
     let events = vec![
-        TraceEvent::spawn(1, Time::ZERO, TaskId::new_for_test(1, 0), RegionId::new_for_test(1, 0)),
-        TraceEvent::spawn(2, Time::ZERO, TaskId::new_for_test(2, 0), RegionId::new_for_test(2, 0)),
+        TraceEvent::spawn(
+            1,
+            Time::ZERO,
+            TaskId::new_for_test(1, 0),
+            RegionId::new_for_test(1, 0),
+        ),
+        TraceEvent::spawn(
+            2,
+            Time::ZERO,
+            TaskId::new_for_test(2, 0),
+            RegionId::new_for_test(2, 0),
+        ),
     ];
 
     let analysis = detect_races(&events);
-    assert!(
-        analysis.is_race_free(),
-        "independent events must not race"
-    );
+    assert!(analysis.is_race_free(), "independent events must not race");
 }
 
 #[test]
@@ -412,8 +488,18 @@ fn crashpack_builder_fingerprint_matches_trace() {
     use asupersync::types::{RegionId, TaskId, Time};
 
     let events = vec![
-        TraceEvent::spawn(1, Time::ZERO, TaskId::new_for_test(1, 0), RegionId::new_for_test(1, 0)),
-        TraceEvent::spawn(2, Time::ZERO, TaskId::new_for_test(2, 0), RegionId::new_for_test(2, 0)),
+        TraceEvent::spawn(
+            1,
+            Time::ZERO,
+            TaskId::new_for_test(1, 0),
+            RegionId::new_for_test(1, 0),
+        ),
+        TraceEvent::spawn(
+            2,
+            Time::ZERO,
+            TaskId::new_for_test(2, 0),
+            RegionId::new_for_test(2, 0),
+        ),
     ];
 
     let expected_fp = trace_fingerprint(&events);
@@ -448,9 +534,12 @@ fn crashpack_deterministic_equality() {
     use asupersync::trace::event::TraceEvent;
     use asupersync::types::{RegionId, TaskId, Time};
 
-    let events = vec![
-        TraceEvent::spawn(1, Time::ZERO, TaskId::new_for_test(1, 0), RegionId::new_for_test(1, 0)),
-    ];
+    let events = vec![TraceEvent::spawn(
+        1,
+        Time::ZERO,
+        TaskId::new_for_test(1, 0),
+        RegionId::new_for_test(1, 0),
+    )];
 
     let failure = FailureInfo {
         task: TaskId::new_for_test(1, 0),
@@ -499,14 +588,19 @@ fn crashpack_replay_command_well_formed() {
     .build();
 
     let cmd = pack.replay_command(Some("crashpack.bin"));
-    assert!(!cmd.command_line.is_empty(), "replay command must be non-empty");
+    assert!(
+        !cmd.command_line.is_empty(),
+        "replay command must be non-empty"
+    );
 }
 
 // ── Divergence diagnostics (functional) ──────────────────────────────
 
 #[test]
 fn divergence_report_has_correct_structure() {
-    use asupersync::trace::divergence::{DiagnosticConfig, DivergenceCategory, diagnose_divergence};
+    use asupersync::trace::divergence::{
+        DiagnosticConfig, DivergenceCategory, diagnose_divergence,
+    };
     use asupersync::trace::replay::{CompactTaskId, ReplayEvent, ReplayTrace, TraceMetadata};
     use asupersync::trace::replayer::DivergenceError;
 
@@ -614,10 +708,22 @@ fn divergence_minimal_prefix_correct_length() {
             description: None,
         },
         events: vec![
-            ReplayEvent::TaskScheduled { task: CompactTaskId(1), at_tick: 0 },
-            ReplayEvent::TaskScheduled { task: CompactTaskId(2), at_tick: 1 },
-            ReplayEvent::TaskScheduled { task: CompactTaskId(3), at_tick: 2 },
-            ReplayEvent::TaskScheduled { task: CompactTaskId(4), at_tick: 3 },
+            ReplayEvent::TaskScheduled {
+                task: CompactTaskId(1),
+                at_tick: 0,
+            },
+            ReplayEvent::TaskScheduled {
+                task: CompactTaskId(2),
+                at_tick: 1,
+            },
+            ReplayEvent::TaskScheduled {
+                task: CompactTaskId(3),
+                at_tick: 2,
+            },
+            ReplayEvent::TaskScheduled {
+                task: CompactTaskId(4),
+                at_tick: 3,
+            },
         ],
         cursor: 0,
     };

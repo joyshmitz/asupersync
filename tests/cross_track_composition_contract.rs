@@ -45,7 +45,10 @@ fn doc_references_bead_id() {
     let doc = load_doc();
     let art = load_artifact();
     let bead_id = art["bead_id"].as_str().unwrap();
-    assert!(doc.contains(bead_id), "doc must reference bead_id {bead_id}");
+    assert!(
+        doc.contains(bead_id),
+        "doc must reference bead_id {bead_id}"
+    );
 }
 
 // ── Artifact stability ─────────────────────────────────────────────
@@ -135,10 +138,7 @@ fn matrix_combo_ids_have_cx_prefix() {
         .unwrap();
     for combo in combos {
         let cid = combo["combo_id"].as_str().unwrap();
-        assert!(
-            cid.starts_with("CX-"),
-            "combo '{cid}' must start with CX-"
-        );
+        assert!(cid.starts_with("CX-"), "combo '{cid}' must start with CX-");
     }
 }
 
@@ -360,18 +360,14 @@ fn drills_cover_authority_track() {
 #[test]
 fn structured_log_fields_are_nonempty() {
     let art = load_artifact();
-    let fields = art["structured_log_fields_required"]
-        .as_array()
-        .unwrap();
+    let fields = art["structured_log_fields_required"].as_array().unwrap();
     assert!(fields.len() >= 8, "must have at least 8 log fields");
 }
 
 #[test]
 fn structured_log_fields_are_unique() {
     let art = load_artifact();
-    let fields = art["structured_log_fields_required"]
-        .as_array()
-        .unwrap();
+    let fields = art["structured_log_fields_required"].as_array().unwrap();
     let strs: Vec<&str> = fields.iter().map(|f| f.as_str().unwrap()).collect();
     let mut deduped = strs.clone();
     deduped.sort_unstable();
@@ -382,9 +378,7 @@ fn structured_log_fields_are_unique() {
 #[test]
 fn structured_log_includes_drill_fields() {
     let art = load_artifact();
-    let fields = art["structured_log_fields_required"]
-        .as_array()
-        .unwrap();
+    let fields = art["structured_log_fields_required"].as_array().unwrap();
     let strs: Vec<&str> = fields.iter().map(|f| f.as_str().unwrap()).collect();
     assert!(strs.contains(&"drill_id"), "must include drill_id");
     assert!(strs.contains(&"drill_step"), "must include drill_step");
@@ -394,9 +388,7 @@ fn structured_log_includes_drill_fields() {
 #[test]
 fn structured_log_includes_rerun_command() {
     let art = load_artifact();
-    let fields = art["structured_log_fields_required"]
-        .as_array()
-        .unwrap();
+    let fields = art["structured_log_fields_required"].as_array().unwrap();
     assert!(
         fields
             .iter()
@@ -458,10 +450,7 @@ fn composition_supported_combos_have_at_least_two_tracks() {
     for combo in combos {
         let cid = combo["combo_id"].as_str().unwrap();
         let tracks = combo["tracks"].as_array().unwrap();
-        assert!(
-            tracks.len() >= 2,
-            "{cid}: must reference at least 2 tracks"
-        );
+        assert!(tracks.len() >= 2, "{cid}: must reference at least 2 tracks");
     }
 }
 
@@ -502,9 +491,7 @@ fn composition_experimental_combos_involve_transport() {
     for combo in &experimental {
         let cid = combo["combo_id"].as_str().unwrap();
         let tracks = combo["tracks"].as_array().unwrap();
-        let has_transport = tracks
-            .iter()
-            .any(|t| t.as_str().unwrap() == "AA-08");
+        let has_transport = tracks.iter().any(|t| t.as_str().unwrap() == "AA-08");
         assert!(
             has_transport,
             "{cid}: experimental combos should involve transport (AA-08)"
@@ -581,10 +568,7 @@ fn doc_lists_all_matrix_combinations() {
         .unwrap();
     for combo in combos {
         let cid = combo["combo_id"].as_str().unwrap();
-        assert!(
-            doc.contains(cid),
-            "doc must list combination {cid}"
-        );
+        assert!(doc.contains(cid), "doc must list combination {cid}");
     }
 }
 

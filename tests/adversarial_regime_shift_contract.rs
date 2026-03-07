@@ -47,7 +47,10 @@ fn doc_references_bead_id() {
     let doc = load_doc();
     let art = load_artifact();
     let bead_id = art["bead_id"].as_str().unwrap();
-    assert!(doc.contains(bead_id), "doc must reference bead_id {bead_id}");
+    assert!(
+        doc.contains(bead_id),
+        "doc must reference bead_id {bead_id}"
+    );
 }
 
 // ── Artifact stability ─────────────────────────────────────────────
@@ -100,7 +103,10 @@ fn objectives_have_required_fields() {
     let objs = art["search_objectives"].as_array().unwrap();
     for obj in objs {
         let oid = obj["objective_id"].as_str().unwrap();
-        assert!(obj["description"].is_string(), "{oid}: must have description");
+        assert!(
+            obj["description"].is_string(),
+            "{oid}: must have description"
+        );
         assert!(
             obj["target_invariant"].is_string(),
             "{oid}: must have target_invariant"
@@ -156,7 +162,10 @@ fn mutation_axes_have_required_fields() {
     let axes = art["mutation_model"]["mutation_axes"].as_array().unwrap();
     for axis in axes {
         let aid = axis["axis_id"].as_str().unwrap();
-        assert!(axis["description"].is_string(), "{aid}: must have description");
+        assert!(
+            axis["description"].is_string(),
+            "{aid}: must have description"
+        );
         assert!(axis["range"].is_object(), "{aid}: must have range");
         let modes = axis["step_modes"].as_array().unwrap();
         assert!(!modes.is_empty(), "{aid}: must have step_modes");
@@ -248,7 +257,12 @@ fn corpus_manifest_fields_are_nonempty() {
         .unwrap();
     assert!(!fields.is_empty(), "manifest fields must be nonempty");
     let strs: Vec<&str> = fields.iter().map(|f| f.as_str().unwrap()).collect();
-    for required in &["challenge_id", "objective_id", "replay_command", "rationale"] {
+    for required in &[
+        "challenge_id",
+        "objective_id",
+        "replay_command",
+        "rationale",
+    ] {
         assert!(
             strs.contains(required),
             "manifest must include field '{required}'"
@@ -262,10 +276,7 @@ fn corpus_feedback_targets_are_nonempty() {
     let targets = art["challenge_corpus"]["feedback_targets"]
         .as_array()
         .unwrap();
-    assert!(
-        targets.len() >= 2,
-        "must feed back to at least 2 targets"
-    );
+    assert!(targets.len() >= 2, "must feed back to at least 2 targets");
 }
 
 // ── Structured logging ─────────────────────────────────────────────
@@ -273,9 +284,7 @@ fn corpus_feedback_targets_are_nonempty() {
 #[test]
 fn structured_log_fields_are_nonempty_and_unique() {
     let art = load_artifact();
-    let fields = art["structured_log_fields_required"]
-        .as_array()
-        .unwrap();
+    let fields = art["structured_log_fields_required"].as_array().unwrap();
     assert!(!fields.is_empty(), "log fields must be nonempty");
     let strs: Vec<&str> = fields.iter().map(|f| f.as_str().unwrap()).collect();
     let mut deduped = strs.clone();
@@ -380,10 +389,7 @@ fn corpus_promotion_rejects_non_reproducible() {
     let has_rationale = true;
 
     let promotable = replay_succeeds && is_minimized && has_violation && has_rationale;
-    assert!(
-        !promotable,
-        "non-reproducible case must not be promoted"
-    );
+    assert!(!promotable, "non-reproducible case must not be promoted");
 }
 
 #[test]
@@ -394,10 +400,7 @@ fn corpus_promotion_rejects_no_violation() {
     let has_rationale = true;
 
     let promotable = replay_succeeds && is_minimized && has_violation && has_rationale;
-    assert!(
-        !promotable,
-        "case without violation must not be promoted"
-    );
+    assert!(!promotable, "case without violation must not be promoted");
 }
 
 // ── Functional: minimization ────────────────────────────────────────

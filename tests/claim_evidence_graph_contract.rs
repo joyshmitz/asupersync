@@ -80,10 +80,7 @@ fn artifact_has_runner_script() {
 fn schema_has_node_types() {
     let art = load_artifact();
     let nodes = art["graph_schema"]["node_types"].as_array().unwrap();
-    assert!(
-        nodes.len() >= 5,
-        "must have at least 5 node types"
-    );
+    assert!(nodes.len() >= 5, "must have at least 5 node types");
 }
 
 #[test]
@@ -186,10 +183,7 @@ fn schema_claim_has_category_values() {
 fn schema_has_edge_types() {
     let art = load_artifact();
     let edges = art["graph_schema"]["edge_types"].as_array().unwrap();
-    assert!(
-        edges.len() >= 5,
-        "must have at least 5 edge types"
-    );
+    assert!(edges.len() >= 5, "must have at least 5 edge types");
 }
 
 #[test]
@@ -202,10 +196,7 @@ fn schema_edge_types_have_required_fields() {
             edge["from"].is_string(),
             "{eid}: must have 'from' node type"
         );
-        assert!(
-            edge["to"].is_string(),
-            "{eid}: must have 'to' node type"
-        );
+        assert!(edge["to"].is_string(), "{eid}: must have 'to' node type");
         assert!(
             edge["description"].is_string(),
             "{eid}: must have description"
@@ -286,10 +277,7 @@ fn bundle_validation_rules_are_nonempty() {
     let rules = art["bundle_contract"]["validation_rules"]
         .as_array()
         .unwrap();
-    assert!(
-        !rules.is_empty(),
-        "must have at least one validation rule"
-    );
+    assert!(!rules.is_empty(), "must have at least one validation rule");
 }
 
 #[test]
@@ -333,13 +321,8 @@ fn bundle_validation_rule_ids_are_unique() {
 #[test]
 fn structured_log_fields_are_nonempty_and_unique() {
     let art = load_artifact();
-    let fields = art["structured_log_fields_required"]
-        .as_array()
-        .unwrap();
-    assert!(
-        !fields.is_empty(),
-        "structured log fields must be nonempty"
-    );
+    let fields = art["structured_log_fields_required"].as_array().unwrap();
+    assert!(!fields.is_empty(), "structured log fields must be nonempty");
     let strs: Vec<&str> = fields.iter().map(|f| f.as_str().unwrap()).collect();
     let mut deduped = strs.clone();
     deduped.sort_unstable();
@@ -353,10 +336,7 @@ fn structured_log_fields_are_nonempty_and_unique() {
 fn smoke_scenarios_are_rch_routed() {
     let art = load_artifact();
     let scenarios = art["smoke_scenarios"].as_array().unwrap();
-    assert!(
-        scenarios.len() >= 3,
-        "must have at least 3 smoke scenarios"
-    );
+    assert!(scenarios.len() >= 3, "must have at least 3 smoke scenarios");
     for scenario in scenarios {
         let sid = scenario["scenario_id"].as_str().unwrap();
         let cmd = scenario["command"].as_str().unwrap();
@@ -436,11 +416,15 @@ impl TestGraph {
         let mut errors = Vec::new();
         for (cid, claim) in &self.claims {
             if claim.status == "evidenced" || claim.status == "verified" {
-                let has_support = self.edges.iter().any(|e| {
-                    e.edge_type == "SUPPORTS" && e.to_id == *cid
-                });
+                let has_support = self
+                    .edges
+                    .iter()
+                    .any(|e| e.edge_type == "SUPPORTS" && e.to_id == *cid);
                 if !has_support {
-                    errors.push(format!("V-CLAIM-EVIDENCE: claim {cid} is {status} but has no SUPPORTS edge", status = claim.status));
+                    errors.push(format!(
+                        "V-CLAIM-EVIDENCE: claim {cid} is {status} but has no SUPPORTS edge",
+                        status = claim.status
+                    ));
                 }
             }
         }
@@ -503,7 +487,9 @@ impl TestGraph {
         let mut errors = Vec::new();
         for (rid, rb) in &self.rollbacks {
             if rb.command.is_empty() {
-                errors.push(format!("V-ROLLBACK-COMMAND: rollback {rid} has empty command"));
+                errors.push(format!(
+                    "V-ROLLBACK-COMMAND: rollback {rid} has empty command"
+                ));
             }
         }
         errors
@@ -546,7 +532,11 @@ fn validation_claim_evidence_fails_without_supports_edge() {
         },
     );
     let errors = g.validate_claim_evidence();
-    assert_eq!(errors.len(), 1, "should fail for unsupported verified claim");
+    assert_eq!(
+        errors.len(),
+        1,
+        "should fail for unsupported verified claim"
+    );
     assert!(errors[0].contains("V-CLAIM-EVIDENCE"));
 }
 
@@ -656,7 +646,11 @@ fn validation_policy_coverage_fails_without_mandatory_policy() {
         to_id: "C1".into(),
     });
     let errors = g.validate_policy_coverage();
-    assert_eq!(errors.len(), 1, "advisory policy does not satisfy safety claim");
+    assert_eq!(
+        errors.len(),
+        1,
+        "advisory policy does not satisfy safety claim"
+    );
     assert!(errors[0].contains("V-POLICY-COVERAGE"));
 }
 

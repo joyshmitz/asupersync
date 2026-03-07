@@ -46,7 +46,10 @@ fn doc_references_bead_id() {
     let doc = load_doc();
     let art = load_artifact();
     let bead_id = art["bead_id"].as_str().unwrap();
-    assert!(doc.contains(bead_id), "doc must reference bead_id {bead_id}");
+    assert!(
+        doc.contains(bead_id),
+        "doc must reference bead_id {bead_id}"
+    );
 }
 
 // ── Artifact stability ─────────────────────────────────────────────
@@ -252,9 +255,7 @@ fn readiness_thresholds_are_ordered() {
 #[test]
 fn rerun_template_has_required_fields() {
     let art = load_artifact();
-    let fields = art["rerun_commands"]["template_fields"]
-        .as_array()
-        .unwrap();
+    let fields = art["rerun_commands"]["template_fields"].as_array().unwrap();
     let strs: Vec<&str> = fields.iter().map(|f| f.as_str().unwrap()).collect();
     assert!(strs.contains(&"gate_id"), "must include gate_id");
     assert!(strs.contains(&"test_filter"), "must include test_filter");
@@ -275,9 +276,7 @@ fn rerun_example_is_rch_routed() {
 #[test]
 fn structured_log_fields_are_nonempty_and_unique() {
     let art = load_artifact();
-    let fields = art["structured_log_fields_required"]
-        .as_array()
-        .unwrap();
+    let fields = art["structured_log_fields_required"].as_array().unwrap();
     assert!(!fields.is_empty(), "log fields must be nonempty");
     let strs: Vec<&str> = fields.iter().map(|f| f.as_str().unwrap()).collect();
     let mut deduped = strs.clone();
@@ -320,8 +319,14 @@ fn readiness_go_score_computation() {
     let go_threshold = thresholds["go"].as_f64().unwrap();
 
     // Simulate all dimensions at maximum
-    let score: f64 = dims.iter().map(|d| d["weight"].as_f64().unwrap() * 1.0).sum();
-    assert!(score >= go_threshold, "perfect score {score} must meet GO threshold {go_threshold}");
+    let score: f64 = dims
+        .iter()
+        .map(|d| d["weight"].as_f64().unwrap() * 1.0)
+        .sum();
+    assert!(
+        score >= go_threshold,
+        "perfect score {score} must meet GO threshold {go_threshold}"
+    );
 }
 
 #[test]
@@ -334,7 +339,10 @@ fn readiness_no_go_computation() {
     let conditional_threshold = thresholds["conditional_go"].as_f64().unwrap();
 
     // Simulate all dimensions at 50%
-    let score: f64 = dims.iter().map(|d| d["weight"].as_f64().unwrap() * 0.5).sum();
+    let score: f64 = dims
+        .iter()
+        .map(|d| d["weight"].as_f64().unwrap() * 0.5)
+        .sum();
     assert!(
         score < conditional_threshold,
         "half score {score} must be below CONDITIONAL_GO {conditional_threshold}"
@@ -352,7 +360,10 @@ fn readiness_conditional_go_computation() {
     let conditional_threshold = thresholds["conditional_go"].as_f64().unwrap();
 
     // Simulate dimensions at 80% (should be conditional)
-    let score: f64 = dims.iter().map(|d| d["weight"].as_f64().unwrap() * 0.8).sum();
+    let score: f64 = dims
+        .iter()
+        .map(|d| d["weight"].as_f64().unwrap() * 0.8)
+        .sum();
     assert!(
         score >= conditional_threshold && score < go_threshold,
         "80% score {score} must be CONDITIONAL_GO"
@@ -378,7 +389,10 @@ fn blocking_gate_failure_prevents_graduation() {
         }
     }
 
-    assert!(!all_passed, "a single blocking gate failure must prevent graduation");
+    assert!(
+        !all_passed,
+        "a single blocking gate failure must prevent graduation"
+    );
 }
 
 #[test]

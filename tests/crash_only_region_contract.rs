@@ -48,7 +48,10 @@ fn doc_references_bead_id() {
     let doc = load_doc();
     let art = load_artifact();
     let bead_id = art["bead_id"].as_str().unwrap();
-    assert!(doc.contains(bead_id), "doc must reference bead_id {bead_id}");
+    assert!(
+        doc.contains(bead_id),
+        "doc must reference bead_id {bead_id}"
+    );
 }
 
 // ── Artifact stability ─────────────────────────────────────────────
@@ -160,7 +163,11 @@ fn crashing_transitions_only_to_journaled() {
         .iter()
         .map(|t| t.as_str().unwrap())
         .collect();
-    assert_eq!(targets, vec!["JOURNALED"], "CRASHING must only go to JOURNALED");
+    assert_eq!(
+        targets,
+        vec!["JOURNALED"],
+        "CRASHING must only go to JOURNALED"
+    );
 }
 
 #[test]
@@ -198,9 +205,7 @@ fn recovering_requires_journaled_predecessor() {
 #[test]
 fn state_machine_invariants_are_nonempty() {
     let art = load_artifact();
-    let invariants = art["crash_state_machine"]["invariants"]
-        .as_array()
-        .unwrap();
+    let invariants = art["crash_state_machine"]["invariants"].as_array().unwrap();
     assert!(
         invariants.len() >= 4,
         "must have at least 4 state machine invariants"
@@ -210,9 +215,7 @@ fn state_machine_invariants_are_nonempty() {
 #[test]
 fn state_machine_invariant_ids_are_unique() {
     let art = load_artifact();
-    let invariants = art["crash_state_machine"]["invariants"]
-        .as_array()
-        .unwrap();
+    let invariants = art["crash_state_machine"]["invariants"].as_array().unwrap();
     let ids: Vec<&str> = invariants
         .iter()
         .map(|i| i["invariant_id"].as_str().unwrap())
@@ -290,7 +293,10 @@ fn journal_includes_crash_marker_and_recovery() {
         .iter()
         .map(|e| e["entry_type"].as_str().unwrap())
         .collect();
-    assert!(ids.contains(&"JE-CRASH-MARKER"), "must have JE-CRASH-MARKER");
+    assert!(
+        ids.contains(&"JE-CRASH-MARKER"),
+        "must have JE-CRASH-MARKER"
+    );
     assert!(
         ids.contains(&"JE-RECOVERY-COMPLETE"),
         "must have JE-RECOVERY-COMPLETE"
@@ -301,10 +307,7 @@ fn journal_includes_crash_marker_and_recovery() {
 fn journal_ordering_rules_are_nonempty() {
     let art = load_artifact();
     let rules = art["journal_format"]["ordering_rules"].as_array().unwrap();
-    assert!(
-        rules.len() >= 4,
-        "must have at least 4 ordering rules"
-    );
+    assert!(rules.len() >= 4, "must have at least 4 ordering rules");
 }
 
 #[test]
@@ -475,9 +478,7 @@ fn supervision_stop_leads_to_tombstoned() {
 #[test]
 fn structured_log_fields_are_nonempty_and_unique() {
     let art = load_artifact();
-    let fields = art["structured_log_fields_required"]
-        .as_array()
-        .unwrap();
+    let fields = art["structured_log_fields_required"].as_array().unwrap();
     assert!(!fields.is_empty(), "log fields must be nonempty");
     let strs: Vec<&str> = fields.iter().map(|f| f.as_str().unwrap()).collect();
     let mut deduped = strs.clone();
@@ -618,10 +619,7 @@ fn journal_open_before_spawn_invariant() {
     // JE-REGION-OPEN must come before JE-TASK-SPAWN
     let open_seq = 1u64;
     let spawn_seq = 2u64;
-    assert!(
-        open_seq < spawn_seq,
-        "REGION-OPEN must precede TASK-SPAWN"
-    );
+    assert!(open_seq < spawn_seq, "REGION-OPEN must precede TASK-SPAWN");
 }
 
 #[test]
@@ -648,7 +646,10 @@ fn microreboot_backoff_respects_cap() {
 
     let mut delay = base;
     for _ in 0..max_reboots {
-        assert!(delay <= max, "backoff delay {delay}ms must not exceed cap {max}ms");
+        assert!(
+            delay <= max,
+            "backoff delay {delay}ms must not exceed cap {max}ms"
+        );
         delay = ((delay as f64 * mult) as u64).min(max);
     }
 }
@@ -671,7 +672,10 @@ fn microreboot_consecutive_limit_prevents_infinite_loop() {
         }
     }
 
-    assert!(tombstoned, "must tombstone after exceeding max consecutive microreboots");
+    assert!(
+        tombstoned,
+        "must tombstone after exceeding max consecutive microreboots"
+    );
 }
 
 // ── Functional: cancellation interaction ────────────────────────────
@@ -688,7 +692,10 @@ fn parent_cancel_during_recovery_tombstones() {
         "RUNNING"
     };
 
-    assert_eq!(final_state, "TOMBSTONED", "parent cancel during recovery must tombstone");
+    assert_eq!(
+        final_state, "TOMBSTONED",
+        "parent cancel during recovery must tombstone"
+    );
 }
 
 #[test]
@@ -736,8 +743,14 @@ fn supervision_restart_respects_budget() {
         }
     }
 
-    assert_eq!(final_state, "TOMBSTONED", "must tombstone after exhausting restart budget");
-    assert_eq!(restart_count, max_restarts, "must have used exactly the restart budget");
+    assert_eq!(
+        final_state, "TOMBSTONED",
+        "must tombstone after exhausting restart budget"
+    );
+    assert_eq!(
+        restart_count, max_restarts,
+        "must have used exactly the restart budget"
+    );
 }
 
 #[test]
@@ -745,7 +758,10 @@ fn supervision_escalate_notifies_parent() {
     // Simulate escalate strategy
     let strategy = "Escalate";
     let parent_notified = strategy == "Escalate";
-    assert!(parent_notified, "Escalate strategy must notify parent region");
+    assert!(
+        parent_notified,
+        "Escalate strategy must notify parent region"
+    );
 }
 
 // ── Functional: recovery with ControllerRegistry ────────────────────

@@ -132,14 +132,10 @@ fn prototype_surface_has_expected_ids() {
         .iter()
         .map(|s| s["surface_id"].as_str().unwrap().to_string())
         .collect();
-    let expected: BTreeSet<String> = [
-        "shard-local-dispatch",
-        "wake-coalescing",
-        "adaptive-steal",
-    ]
-    .into_iter()
-    .map(ToOwned::to_owned)
-    .collect();
+    let expected: BTreeSet<String> = ["shard-local-dispatch", "wake-coalescing", "adaptive-steal"]
+        .into_iter()
+        .map(ToOwned::to_owned)
+        .collect();
     assert_eq!(actual, expected, "prototype surfaces must remain stable");
 }
 
@@ -149,7 +145,9 @@ fn prototype_surface_owner_files_exist() {
     let root = repo_root();
     for surface in artifact["prototype_surfaces"].as_array().unwrap() {
         let sid = surface["surface_id"].as_str().unwrap();
-        let owner_file = surface["owner_file"].as_str().expect("owner_file must be string");
+        let owner_file = surface["owner_file"]
+            .as_str()
+            .expect("owner_file must be string");
         assert!(
             root.join(owner_file).exists(),
             "owner file for {sid} must exist: {owner_file}"
@@ -391,5 +389,8 @@ fn functional_steal_task_power_of_two_choices() {
 
     // Steal should find work in q1
     let stolen = steal_task(&stealers, &mut rng);
-    assert!(stolen.is_some(), "steal_task must find work in loaded queue");
+    assert!(
+        stolen.is_some(),
+        "steal_task must find work in loaded queue"
+    );
 }

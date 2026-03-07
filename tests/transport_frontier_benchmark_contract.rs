@@ -35,7 +35,10 @@ fn doc_exists() {
 #[test]
 fn doc_references_bead() {
     let doc = load_doc();
-    assert!(doc.contains("asupersync-1508v.8.4"), "doc must reference bead id");
+    assert!(
+        doc.contains("asupersync-1508v.8.4"),
+        "doc must reference bead id"
+    );
 }
 
 #[test]
@@ -62,7 +65,11 @@ fn doc_has_required_sections() {
     assert!(
         missing.is_empty(),
         "doc missing sections:\n{}",
-        missing.iter().map(|s| format!("  - {s}")).collect::<Vec<_>>().join("\n")
+        missing
+            .iter()
+            .map(|s| format!("  - {s}"))
+            .collect::<Vec<_>>()
+            .join("\n")
     );
 }
 
@@ -141,7 +148,10 @@ fn transport_component_owner_files_exist() {
         let cid = component["component_id"].as_str().unwrap();
         for owner in component["owner_files"].as_array().unwrap() {
             let path = owner.as_str().unwrap();
-            assert!(root.join(path).exists(), "owner file for {cid} must exist: {path}");
+            assert!(
+                root.join(path).exists(),
+                "owner file for {cid} must exist: {path}"
+            );
         }
     }
 }
@@ -212,7 +222,10 @@ fn each_workload_has_required_fields() {
     for workload in artifact["workload_vocabulary"].as_array().unwrap() {
         let wid = workload["workload_id"].as_str().unwrap_or("<missing>");
         for field in ["workload_id", "description", "pattern"] {
-            assert!(workload.get(field).is_some(), "workload {wid} missing field: {field}");
+            assert!(
+                workload.get(field).is_some(),
+                "workload {wid} missing field: {field}"
+            );
         }
     }
 }
@@ -244,8 +257,16 @@ fn each_experiment_has_required_fields() {
     let artifact = load_artifact();
     for experiment in artifact["experiments"].as_array().unwrap() {
         let eid = experiment["experiment_id"].as_str().unwrap_or("<missing>");
-        for field in ["experiment_id", "description", "hypothesis", "key_dimensions"] {
-            assert!(experiment.get(field).is_some(), "experiment {eid} missing field: {field}");
+        for field in [
+            "experiment_id",
+            "description",
+            "hypothesis",
+            "key_dimensions",
+        ] {
+            assert!(
+                experiment.get(field).is_some(),
+                "experiment {eid} missing field: {field}"
+            );
         }
     }
 }
@@ -310,7 +331,10 @@ fn runner_script_exists_and_declares_modes() {
     assert!(script_path.exists());
     let script = std::fs::read_to_string(&script_path).unwrap();
     for token in [
-        "--list", "--scenario", "--dry-run", "--execute",
+        "--list",
+        "--scenario",
+        "--dry-run",
+        "--execute",
         "transport-frontier-benchmark-smoke-bundle-v1",
         "transport-frontier-benchmark-smoke-run-report-v1",
     ] {
@@ -325,7 +349,10 @@ fn downstream_beads_stay_in_aa_track_namespace() {
     let artifact = load_artifact();
     for bead in artifact["downstream_beads"].as_array().unwrap() {
         let bead = bead.as_str().unwrap();
-        assert!(bead.starts_with("asupersync-1508v."), "must be AA namespace: {bead}");
+        assert!(
+            bead.starts_with("asupersync-1508v."),
+            "must be AA namespace: {bead}"
+        );
     }
 }
 

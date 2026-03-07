@@ -151,10 +151,7 @@ fn algorithm_catalog_has_expected_ids() {
     .into_iter()
     .map(ToOwned::to_owned)
     .collect();
-    assert_eq!(
-        actual, expected,
-        "algorithm catalog must remain stable"
-    );
+    assert_eq!(actual, expected, "algorithm catalog must remain stable");
 }
 
 #[test]
@@ -186,7 +183,9 @@ fn algorithm_owner_files_exist() {
     let root = repo_root();
     for algo in artifact["algorithms"].as_array().unwrap() {
         let aid = algo["algorithm_id"].as_str().unwrap();
-        let owner_file = algo["owner_file"].as_str().expect("owner_file must be string");
+        let owner_file = algo["owner_file"]
+            .as_str()
+            .expect("owner_file must be string");
         assert!(
             root.join(owner_file).exists(),
             "owner file for {aid} must exist: {owner_file}"
@@ -354,10 +353,30 @@ fn geodesic_normalization_produces_valid_result() {
     use asupersync::types::{RegionId, TaskId, Time};
 
     let events = vec![
-        TraceEvent::spawn(1, Time::ZERO, TaskId::new_for_test(1, 0), RegionId::new_for_test(1, 0)),
-        TraceEvent::spawn(2, Time::ZERO, TaskId::new_for_test(2, 0), RegionId::new_for_test(2, 0)),
-        TraceEvent::complete(3, Time::ZERO, TaskId::new_for_test(1, 0), RegionId::new_for_test(1, 0)),
-        TraceEvent::complete(4, Time::ZERO, TaskId::new_for_test(2, 0), RegionId::new_for_test(2, 0)),
+        TraceEvent::spawn(
+            1,
+            Time::ZERO,
+            TaskId::new_for_test(1, 0),
+            RegionId::new_for_test(1, 0),
+        ),
+        TraceEvent::spawn(
+            2,
+            Time::ZERO,
+            TaskId::new_for_test(2, 0),
+            RegionId::new_for_test(2, 0),
+        ),
+        TraceEvent::complete(
+            3,
+            Time::ZERO,
+            TaskId::new_for_test(1, 0),
+            RegionId::new_for_test(1, 0),
+        ),
+        TraceEvent::complete(
+            4,
+            Time::ZERO,
+            TaskId::new_for_test(2, 0),
+            RegionId::new_for_test(2, 0),
+        ),
     ];
 
     let config = GeodesicConfig::default();
@@ -376,8 +395,18 @@ fn geodesic_greedy_fallback_works() {
     use asupersync::types::{RegionId, TaskId, Time};
 
     let events = vec![
-        TraceEvent::spawn(1, Time::ZERO, TaskId::new_for_test(1, 0), RegionId::new_for_test(1, 0)),
-        TraceEvent::spawn(2, Time::ZERO, TaskId::new_for_test(2, 0), RegionId::new_for_test(2, 0)),
+        TraceEvent::spawn(
+            1,
+            Time::ZERO,
+            TaskId::new_for_test(1, 0),
+            RegionId::new_for_test(1, 0),
+        ),
+        TraceEvent::spawn(
+            2,
+            Time::ZERO,
+            TaskId::new_for_test(2, 0),
+            RegionId::new_for_test(2, 0),
+        ),
     ];
 
     let config = GeodesicConfig::greedy_only();
@@ -393,14 +422,24 @@ fn geodesic_greedy_fallback_works() {
 
 #[test]
 fn dpor_race_detection_finds_races_in_concurrent_trace() {
-    use asupersync::trace::event::TraceEvent;
     use asupersync::trace::dpor::detect_races;
+    use asupersync::trace::event::TraceEvent;
     use asupersync::types::{RegionId, TaskId, Time};
 
     // Two independent tasks accessing different regions — no races
     let events = vec![
-        TraceEvent::spawn(1, Time::ZERO, TaskId::new_for_test(1, 0), RegionId::new_for_test(1, 0)),
-        TraceEvent::spawn(2, Time::ZERO, TaskId::new_for_test(2, 0), RegionId::new_for_test(2, 0)),
+        TraceEvent::spawn(
+            1,
+            Time::ZERO,
+            TaskId::new_for_test(1, 0),
+            RegionId::new_for_test(1, 0),
+        ),
+        TraceEvent::spawn(
+            2,
+            Time::ZERO,
+            TaskId::new_for_test(2, 0),
+            RegionId::new_for_test(2, 0),
+        ),
     ];
 
     let analysis = detect_races(&events);
@@ -412,13 +451,23 @@ fn dpor_race_detection_finds_races_in_concurrent_trace() {
 
 #[test]
 fn canonical_fingerprint_deterministic() {
-    use asupersync::trace::event::TraceEvent;
     use asupersync::trace::canonicalize::trace_fingerprint;
+    use asupersync::trace::event::TraceEvent;
     use asupersync::types::{RegionId, TaskId, Time};
 
     let events = vec![
-        TraceEvent::spawn(1, Time::ZERO, TaskId::new_for_test(1, 0), RegionId::new_for_test(1, 0)),
-        TraceEvent::spawn(2, Time::ZERO, TaskId::new_for_test(2, 0), RegionId::new_for_test(2, 0)),
+        TraceEvent::spawn(
+            1,
+            Time::ZERO,
+            TaskId::new_for_test(1, 0),
+            RegionId::new_for_test(1, 0),
+        ),
+        TraceEvent::spawn(
+            2,
+            Time::ZERO,
+            TaskId::new_for_test(2, 0),
+            RegionId::new_for_test(2, 0),
+        ),
     ];
 
     let fp1 = trace_fingerprint(&events);
@@ -437,8 +486,12 @@ fn smoke_scenarios_are_rch_routed() {
     assert!(!scenarios.is_empty());
 
     for scenario in scenarios {
-        let sid = scenario["scenario_id"].as_str().expect("scenario_id must be string");
-        let command = scenario["command"].as_str().expect("command must be string");
+        let sid = scenario["scenario_id"]
+            .as_str()
+            .expect("scenario_id must be string");
+        let command = scenario["command"]
+            .as_str()
+            .expect("command must be string");
         assert!(
             command.contains("rch exec --"),
             "scenario {sid} command must use rch: {command}"
@@ -461,7 +514,10 @@ fn runner_script_exists_and_declares_modes() {
         "cost-capped-exploration-smoke-bundle-v1",
         "cost-capped-exploration-smoke-run-report-v1",
     ] {
-        assert!(script.contains(token), "runner script missing token: {token}");
+        assert!(
+            script.contains(token),
+            "runner script missing token: {token}"
+        );
     }
 }
 

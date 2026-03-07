@@ -48,7 +48,10 @@ fn doc_references_bead_id() {
     let doc = load_doc();
     let art = load_artifact();
     let bead_id = art["bead_id"].as_str().unwrap();
-    assert!(doc.contains(bead_id), "doc must reference bead_id {bead_id}");
+    assert!(
+        doc.contains(bead_id),
+        "doc must reference bead_id {bead_id}"
+    );
 }
 
 // ── Artifact stability ─────────────────────────────────────────────
@@ -147,10 +150,7 @@ fn resource_caps_are_nonempty() {
 fn resource_cap_ids_are_unique() {
     let art = load_artifact();
     let caps = art["resource_caps"]["caps"].as_array().unwrap();
-    let ids: Vec<&str> = caps
-        .iter()
-        .map(|c| c["cap_id"].as_str().unwrap())
-        .collect();
+    let ids: Vec<&str> = caps.iter().map(|c| c["cap_id"].as_str().unwrap()).collect();
     let mut deduped = ids.clone();
     deduped.sort_unstable();
     deduped.dedup();
@@ -197,18 +197,14 @@ fn resource_caps_have_enforcement_policy() {
 #[test]
 fn action_surface_is_nonempty() {
     let art = load_artifact();
-    let actions = art["action_surface"]["allowed_actions"]
-        .as_array()
-        .unwrap();
+    let actions = art["action_surface"]["allowed_actions"].as_array().unwrap();
     assert!(actions.len() >= 4, "must have at least 4 allowed actions");
 }
 
 #[test]
 fn action_ids_are_unique() {
     let art = load_artifact();
-    let actions = art["action_surface"]["allowed_actions"]
-        .as_array()
-        .unwrap();
+    let actions = art["action_surface"]["allowed_actions"].as_array().unwrap();
     let ids: Vec<&str> = actions
         .iter()
         .map(|a| a["action_id"].as_str().unwrap())
@@ -222,9 +218,7 @@ fn action_ids_are_unique() {
 #[test]
 fn actions_have_act_prefix() {
     let art = load_artifact();
-    let actions = art["action_surface"]["allowed_actions"]
-        .as_array()
-        .unwrap();
+    let actions = art["action_surface"]["allowed_actions"].as_array().unwrap();
     for action in actions {
         let aid = action["action_id"].as_str().unwrap();
         assert!(
@@ -249,9 +243,7 @@ fn actions_reference_valid_capabilities() {
         .collect();
 
     let art = load_artifact();
-    let actions = art["action_surface"]["allowed_actions"]
-        .as_array()
-        .unwrap();
+    let actions = art["action_surface"]["allowed_actions"].as_array().unwrap();
     for action in actions {
         let aid = action["action_id"].as_str().unwrap();
         let cap = action["required_capability"].as_str().unwrap();
@@ -337,7 +329,11 @@ fn adversarial_scenario_ids_are_unique() {
     let mut deduped = ids.clone();
     deduped.sort_unstable();
     deduped.dedup();
-    assert_eq!(ids.len(), deduped.len(), "adversarial scenario_ids must be unique");
+    assert_eq!(
+        ids.len(),
+        deduped.len(),
+        "adversarial scenario_ids must be unique"
+    );
 }
 
 #[test]
@@ -386,9 +382,7 @@ fn adversarial_scenarios_have_mitigations() {
 #[test]
 fn structured_log_fields_are_nonempty_and_unique() {
     let art = load_artifact();
-    let fields = art["structured_log_fields_required"]
-        .as_array()
-        .unwrap();
+    let fields = art["structured_log_fields_required"].as_array().unwrap();
     assert!(!fields.is_empty(), "log fields must be nonempty");
     let strs: Vec<&str> = fields.iter().map(|f| f.as_str().unwrap()).collect();
     let mut deduped = strs.clone();
@@ -454,9 +448,7 @@ fn sandbox_allows_authorized_action() {
 fn sandbox_admin_can_access_all_actions() {
     // Load actual action surface and capability hierarchy
     let art = load_artifact();
-    let actions = art["action_surface"]["allowed_actions"]
-        .as_array()
-        .unwrap();
+    let actions = art["action_surface"]["allowed_actions"].as_array().unwrap();
 
     let cap_art: Value = {
         let content = std::fs::read_to_string("artifacts/capability_token_model_v1.json").unwrap();

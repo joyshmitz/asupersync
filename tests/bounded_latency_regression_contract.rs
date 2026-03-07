@@ -137,7 +137,9 @@ fn regression_dimensions_cover_fairness_wakeup_leak_tail() {
 
     let has_fairness = ids.iter().any(|id| id.starts_with("FAIRNESS-"));
     let has_wakeup = ids.iter().any(|id| id.starts_with("WAKEUP-"));
-    let has_leak = ids.iter().any(|id| id.contains("LEAK") || id.contains("QUIESCENCE"));
+    let has_leak = ids
+        .iter()
+        .any(|id| id.contains("LEAK") || id.contains("QUIESCENCE"));
     let has_tail = ids.iter().any(|id| id.starts_with("TAIL-"));
 
     assert!(has_fairness, "must have FAIRNESS dimensions");
@@ -223,13 +225,8 @@ fn tail_table_verdict_values_include_pass_and_regressed() {
 #[test]
 fn structured_log_fields_are_nonempty_and_unique() {
     let art = load_artifact();
-    let fields = art["structured_log_fields_required"]
-        .as_array()
-        .unwrap();
-    assert!(
-        !fields.is_empty(),
-        "structured log fields must be nonempty"
-    );
+    let fields = art["structured_log_fields_required"].as_array().unwrap();
+    assert!(!fields.is_empty(), "structured log fields must be nonempty");
     let strs: Vec<&str> = fields.iter().map(|f| f.as_str().unwrap()).collect();
     let mut deduped = strs.clone();
     deduped.sort_unstable();
@@ -243,10 +240,7 @@ fn structured_log_fields_are_nonempty_and_unique() {
 fn smoke_scenarios_are_rch_routed() {
     let art = load_artifact();
     let scenarios = art["smoke_scenarios"].as_array().unwrap();
-    assert!(
-        scenarios.len() >= 3,
-        "must have at least 3 smoke scenarios"
-    );
+    assert!(scenarios.len() >= 3, "must have at least 3 smoke scenarios");
     for scenario in scenarios {
         let sid = scenario["scenario_id"].as_str().unwrap();
         let cmd = scenario["command"].as_str().unwrap();
@@ -283,10 +277,7 @@ fn fairness_ratio_computation() {
     let cancel_service: f64 = 30.0;
     let ready_service: f64 = 70.0;
     let ratio = cancel_service.min(ready_service) / cancel_service.max(ready_service);
-    assert!(
-        ratio >= 0.3,
-        "fairness ratio {ratio:.3} must be >= 0.3"
-    );
+    assert!(ratio >= 0.3, "fairness ratio {ratio:.3} must be >= 0.3");
 }
 
 #[test]
@@ -511,10 +502,7 @@ fn tail_invariant_evaluation_one_fail() {
     ];
 
     let all_pass = results.iter().all(|r| r.pass);
-    assert!(
-        !all_pass,
-        "dimension must fail if any invariant fails"
-    );
+    assert!(!all_pass, "dimension must fail if any invariant fails");
 }
 
 use asupersync::runtime::kernel::{
@@ -544,22 +532,15 @@ fn tail_regression_triggers_controller_rollback() {
     for _ in 0..3 {
         registry.advance_epoch();
     }
-    registry
-        .try_promote(id, ControllerMode::Canary)
-        .unwrap();
+    registry.try_promote(id, ControllerMode::Canary).unwrap();
     for _ in 0..2 {
         registry.advance_epoch();
     }
-    registry
-        .try_promote(id, ControllerMode::Active)
-        .unwrap();
+    registry.try_promote(id, ControllerMode::Active).unwrap();
     assert_eq!(registry.mode(id), Some(ControllerMode::Active));
 
     // Tail regression detected -> rollback
-    let recovery = registry.rollback(
-        id,
-        RollbackReason::CalibrationRegression { score: 0.4 },
-    );
+    let recovery = registry.rollback(id, RollbackReason::CalibrationRegression { score: 0.4 });
     assert!(recovery.is_some(), "rollback must produce recovery command");
     assert_eq!(registry.mode(id), Some(ControllerMode::Shadow));
     assert!(registry.is_fallback_active(id));

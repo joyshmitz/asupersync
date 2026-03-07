@@ -46,7 +46,10 @@ fn doc_references_bead_id() {
     let doc = load_doc();
     let art = load_artifact();
     let bead_id = art["bead_id"].as_str().unwrap();
-    assert!(doc.contains(bead_id), "doc must reference bead_id {bead_id}");
+    assert!(
+        doc.contains(bead_id),
+        "doc must reference bead_id {bead_id}"
+    );
 }
 
 // ── Artifact stability ─────────────────────────────────────────────
@@ -76,10 +79,7 @@ fn artifact_has_runner_script() {
 fn abuse_scenarios_are_nonempty() {
     let art = load_artifact();
     let scenarios = art["abuse_scenarios"].as_array().unwrap();
-    assert!(
-        scenarios.len() >= 6,
-        "must have at least 6 abuse scenarios"
-    );
+    assert!(scenarios.len() >= 6, "must have at least 6 abuse scenarios");
 }
 
 #[test]
@@ -93,7 +93,11 @@ fn abuse_scenario_ids_are_unique() {
     let mut deduped = ids.clone();
     deduped.sort_unstable();
     deduped.dedup();
-    assert_eq!(ids.len(), deduped.len(), "abuse scenario_ids must be unique");
+    assert_eq!(
+        ids.len(),
+        deduped.len(),
+        "abuse scenario_ids must be unique"
+    );
 }
 
 #[test]
@@ -116,7 +120,10 @@ fn abuse_scenarios_all_expect_deny() {
     for scenario in scenarios {
         let sid = scenario["scenario_id"].as_str().unwrap();
         let outcome = scenario["expected_outcome"].as_str().unwrap();
-        assert_eq!(outcome, "deny", "{sid}: all abuse scenarios must expect deny");
+        assert_eq!(
+            outcome, "deny",
+            "{sid}: all abuse scenarios must expect deny"
+        );
     }
 }
 
@@ -150,7 +157,10 @@ fn abuse_scenarios_cover_key_attacks() {
         "AFA-REVOCATION-RACE",
         "AFA-SANDBOX-ESCAPE",
     ] {
-        assert!(ids.contains(required), "must have abuse scenario {required}");
+        assert!(
+            ids.contains(required),
+            "must have abuse scenario {required}"
+        );
     }
 }
 
@@ -183,10 +193,7 @@ fn revocation_drills_have_rd_prefix() {
     let drills = art["revocation_drills"].as_array().unwrap();
     for drill in drills {
         let did = drill["drill_id"].as_str().unwrap();
-        assert!(
-            did.starts_with("RD-"),
-            "drill '{did}' must start with RD-"
-        );
+        assert!(did.starts_with("RD-"), "drill '{did}' must start with RD-");
     }
 }
 
@@ -197,10 +204,7 @@ fn revocation_drills_have_steps() {
     for drill in drills {
         let did = drill["drill_id"].as_str().unwrap();
         let steps = drill["steps"].as_array().unwrap();
-        assert!(
-            steps.len() >= 3,
-            "{did}: must have at least 3 steps"
-        );
+        assert!(steps.len() >= 3, "{did}: must have at least 3 steps");
     }
 }
 
@@ -226,7 +230,10 @@ fn revocation_drills_include_cascade_and_expiry() {
         .iter()
         .map(|d| d["drill_id"].as_str().unwrap())
         .collect();
-    assert!(ids.contains("RD-CASCADE-REVOKE"), "must have RD-CASCADE-REVOKE");
+    assert!(
+        ids.contains("RD-CASCADE-REVOKE"),
+        "must have RD-CASCADE-REVOKE"
+    );
     assert!(ids.contains("RD-EXPIRY-AUTO"), "must have RD-EXPIRY-AUTO");
 }
 
@@ -288,9 +295,7 @@ fn audit_evidence_has_log_fields() {
 #[test]
 fn structured_log_fields_are_nonempty_and_unique() {
     let art = load_artifact();
-    let fields = art["structured_log_fields_required"]
-        .as_array()
-        .unwrap();
+    let fields = art["structured_log_fields_required"].as_array().unwrap();
     assert!(!fields.is_empty(), "log fields must be nonempty");
     let strs: Vec<&str> = fields.iter().map(|f| f.as_str().unwrap()).collect();
     let mut deduped = strs.clone();
@@ -456,12 +461,20 @@ fn drill_expiry_auto_deny() {
     let mut current_epoch: u64 = 50;
 
     // Before expiry: allowed
-    let pre = if current_epoch > token_expiry { "deny" } else { "allow" };
+    let pre = if current_epoch > token_expiry {
+        "deny"
+    } else {
+        "allow"
+    };
     assert_eq!(pre, "allow");
 
     // Advance past expiry
     current_epoch = 101;
-    let post = if current_epoch > token_expiry { "deny" } else { "allow" };
+    let post = if current_epoch > token_expiry {
+        "deny"
+    } else {
+        "allow"
+    };
     assert_eq!(post, "deny");
 }
 

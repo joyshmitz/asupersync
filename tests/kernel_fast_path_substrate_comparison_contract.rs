@@ -219,10 +219,7 @@ fn candidate_catalog_has_expected_ids() {
     .into_iter()
     .map(ToOwned::to_owned)
     .collect();
-    assert_eq!(
-        actual, expected,
-        "candidate catalog must remain stable"
-    );
+    assert_eq!(actual, expected, "candidate catalog must remain stable");
 }
 
 #[test]
@@ -277,7 +274,10 @@ fn evaluation_dimensions_are_nonempty() {
     let dims = artifact["evaluation_dimensions"]
         .as_array()
         .expect("evaluation_dimensions must be array");
-    assert!(dims.len() >= 5, "must have at least 5 evaluation dimensions");
+    assert!(
+        dims.len() >= 5,
+        "must have at least 5 evaluation dimensions"
+    );
 }
 
 #[test]
@@ -396,7 +396,10 @@ fn local_queue_source_files_compile() {
         "src/runtime/scheduler/intrusive.rs",
         "src/runtime/waker.rs",
     ] {
-        assert!(root.join(path).exists(), "scheduler source must exist: {path}");
+        assert!(
+            root.join(path).exists(),
+            "scheduler source must exist: {path}"
+        );
     }
 }
 
@@ -416,11 +419,7 @@ fn waker_state_dedup_works() {
 
     // Drain should produce the task exactly once (dedup)
     let woken = state.drain_woken();
-    assert_eq!(
-        woken.len(),
-        1,
-        "waker dedup must coalesce duplicate wakes"
-    );
+    assert_eq!(woken.len(), 1, "waker dedup must coalesce duplicate wakes");
     assert_eq!(woken[0], tid);
 
     // Second drain should be empty

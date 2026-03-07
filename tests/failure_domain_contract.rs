@@ -46,7 +46,10 @@ fn doc_references_bead_id() {
     let doc = load_doc();
     let art = load_artifact();
     let bead_id = art["bead_id"].as_str().unwrap();
-    assert!(doc.contains(bead_id), "doc must reference bead_id {bead_id}");
+    assert!(
+        doc.contains(bead_id),
+        "doc must reference bead_id {bead_id}"
+    );
 }
 
 // ── Artifact stability ─────────────────────────────────────────────
@@ -173,18 +176,14 @@ fn domain_properties_have_fdp_prefix() {
 #[test]
 fn restart_topologies_are_nonempty() {
     let art = load_artifact();
-    let topos = art["restart_topology"]["topologies"]
-        .as_array()
-        .unwrap();
+    let topos = art["restart_topology"]["topologies"].as_array().unwrap();
     assert!(topos.len() >= 3, "must have at least 3 restart topologies");
 }
 
 #[test]
 fn restart_topology_ids_are_unique() {
     let art = load_artifact();
-    let topos = art["restart_topology"]["topologies"]
-        .as_array()
-        .unwrap();
+    let topos = art["restart_topology"]["topologies"].as_array().unwrap();
     let ids: Vec<&str> = topos
         .iter()
         .map(|t| t["topology_id"].as_str().unwrap())
@@ -198,9 +197,7 @@ fn restart_topology_ids_are_unique() {
 #[test]
 fn restart_topologies_have_rt_prefix() {
     let art = load_artifact();
-    let topos = art["restart_topology"]["topologies"]
-        .as_array()
-        .unwrap();
+    let topos = art["restart_topology"]["topologies"].as_array().unwrap();
     for topo in topos {
         let tid = topo["topology_id"].as_str().unwrap();
         assert!(
@@ -219,9 +216,7 @@ fn restart_topologies_reference_valid_domain_types() {
         .iter()
         .map(|t| t["domain_type_id"].as_str().unwrap())
         .collect();
-    let topos = art["restart_topology"]["topologies"]
-        .as_array()
-        .unwrap();
+    let topos = art["restart_topology"]["topologies"].as_array().unwrap();
     for topo in topos {
         let tid = topo["topology_id"].as_str().unwrap();
         let dt = topo["domain_type"].as_str().unwrap();
@@ -235,9 +230,7 @@ fn restart_topologies_reference_valid_domain_types() {
 #[test]
 fn restart_includes_one_for_one_and_one_for_all() {
     let art = load_artifact();
-    let topos = art["restart_topology"]["topologies"]
-        .as_array()
-        .unwrap();
+    let topos = art["restart_topology"]["topologies"].as_array().unwrap();
     let ids: HashSet<&str> = topos
         .iter()
         .map(|t| t["topology_id"].as_str().unwrap())
@@ -296,18 +289,17 @@ fn hooks_include_pre_and_post_restart() {
 #[test]
 fn recovery_authority_rules_are_nonempty() {
     let art = load_artifact();
-    let rules = art["recovery_authority_rules"]["rules"]
-        .as_array()
-        .unwrap();
-    assert!(rules.len() >= 5, "must have at least 5 recovery authority rules");
+    let rules = art["recovery_authority_rules"]["rules"].as_array().unwrap();
+    assert!(
+        rules.len() >= 5,
+        "must have at least 5 recovery authority rules"
+    );
 }
 
 #[test]
 fn recovery_authority_rule_ids_are_unique() {
     let art = load_artifact();
-    let rules = art["recovery_authority_rules"]["rules"]
-        .as_array()
-        .unwrap();
+    let rules = art["recovery_authority_rules"]["rules"].as_array().unwrap();
     let ids: Vec<&str> = rules
         .iter()
         .map(|r| r["rule_id"].as_str().unwrap())
@@ -321,9 +313,7 @@ fn recovery_authority_rule_ids_are_unique() {
 #[test]
 fn recovery_authority_rules_have_ra_prefix() {
     let art = load_artifact();
-    let rules = art["recovery_authority_rules"]["rules"]
-        .as_array()
-        .unwrap();
+    let rules = art["recovery_authority_rules"]["rules"].as_array().unwrap();
     for rule in rules {
         let rid = rule["rule_id"].as_str().unwrap();
         assert!(
@@ -336,9 +326,7 @@ fn recovery_authority_rules_have_ra_prefix() {
 #[test]
 fn recovery_authority_includes_narrow_and_no_ambient() {
     let art = load_artifact();
-    let rules = art["recovery_authority_rules"]["rules"]
-        .as_array()
-        .unwrap();
+    let rules = art["recovery_authority_rules"]["rules"].as_array().unwrap();
     let ids: HashSet<&str> = rules
         .iter()
         .map(|r| r["rule_id"].as_str().unwrap())
@@ -358,9 +346,7 @@ fn recovery_authority_includes_narrow_and_no_ambient() {
 #[test]
 fn structured_log_fields_are_nonempty_and_unique() {
     let art = load_artifact();
-    let fields = art["structured_log_fields_required"]
-        .as_array()
-        .unwrap();
+    let fields = art["structured_log_fields_required"].as_array().unwrap();
     assert!(!fields.is_empty(), "log fields must be nonempty");
     let strs: Vec<&str> = fields.iter().map(|f| f.as_str().unwrap()).collect();
     let mut deduped = strs.clone();
@@ -396,7 +382,8 @@ fn runner_script_exists_and_declares_modes() {
 #[test]
 fn domain_unique_membership_enforced() {
     // Simulate: regions must belong to exactly one domain
-    let mut domain_membership: std::collections::HashMap<&str, &str> = std::collections::HashMap::new();
+    let mut domain_membership: std::collections::HashMap<&str, &str> =
+        std::collections::HashMap::new();
     domain_membership.insert("region-A", "domain-1");
     domain_membership.insert("region-B", "domain-2");
     domain_membership.insert("region-C", "domain-1");
@@ -428,7 +415,11 @@ fn isolated_domain_does_not_propagate() {
         })
         .collect();
 
-    assert_eq!(affected.len(), 1, "only the failed region should be affected");
+    assert_eq!(
+        affected.len(),
+        1,
+        "only the failed region should be affected"
+    );
     assert_eq!(*affected[0], failed_region);
 }
 
@@ -443,7 +434,11 @@ fn linked_domain_propagates_to_all() {
         .filter(|_| domain_type == "FD-LINKED")
         .count();
 
-    assert_eq!(affected_count, regions.len(), "all regions must be affected in linked domain");
+    assert_eq!(
+        affected_count,
+        regions.len(),
+        "all regions must be affected in linked domain"
+    );
 }
 
 #[test]
@@ -470,8 +465,7 @@ fn escalating_domain_notifies_parent() {
 #[test]
 fn authority_narrow_on_crash_revokes_non_observe() {
     // RA-NARROW-ON-CRASH: only OBSERVE survives
-    let pre_crash_caps: HashSet<&str> =
-        HashSet::from(["CAP-ADMIN", "CAP-DECIDE", "CAP-OBSERVE"]);
+    let pre_crash_caps: HashSet<&str> = HashSet::from(["CAP-ADMIN", "CAP-DECIDE", "CAP-OBSERVE"]);
 
     let post_crash_caps: HashSet<&str> = pre_crash_caps
         .iter()
@@ -496,7 +490,10 @@ fn authority_gradual_restore_after_recovery() {
 
     assert!(current_caps.contains("CAP-OBSERVE"));
     assert!(current_caps.contains("CAP-DECIDE"));
-    assert!(!current_caps.contains("CAP-ADMIN"), "ADMIN should not be restored yet");
+    assert!(
+        !current_caps.contains("CAP-ADMIN"),
+        "ADMIN should not be restored yet"
+    );
 }
 
 #[test]
@@ -514,7 +511,10 @@ fn authority_revoked_on_budget_exhaustion() {
         }
     }
 
-    assert!(caps.is_empty(), "all caps must be revoked after budget exhaustion");
+    assert!(
+        caps.is_empty(),
+        "all caps must be revoked after budget exhaustion"
+    );
 }
 
 // ── Functional: controller registry integration ─────────────────────

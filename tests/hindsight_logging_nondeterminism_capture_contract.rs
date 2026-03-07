@@ -272,7 +272,10 @@ fn nondeterminism_categories_are_complete() {
     .map(ToOwned::to_owned)
     .collect();
 
-    assert_eq!(categories, expected, "nondeterminism categories must be stable");
+    assert_eq!(
+        categories, expected,
+        "nondeterminism categories must be stable"
+    );
 }
 
 #[test]
@@ -290,7 +293,9 @@ fn every_source_has_a_valid_category() {
         .unwrap()
     {
         let sid = source["source_id"].as_str().unwrap();
-        let cat = source["category"].as_str().expect("category must be string");
+        let cat = source["category"]
+            .as_str()
+            .expect("category must be string");
         assert!(
             categories.contains(cat),
             "source {sid} has unknown category: {cat}"
@@ -333,7 +338,9 @@ fn owner_files_exist() {
         .unwrap()
     {
         let sid = source["source_id"].as_str().unwrap();
-        let owner_file = source["owner_file"].as_str().expect("owner_file must be string");
+        let owner_file = source["owner_file"]
+            .as_str()
+            .expect("owner_file must be string");
         assert!(
             root.join(owner_file).exists(),
             "owner file for {sid} must exist: {owner_file}"
@@ -383,9 +390,7 @@ fn excluded_fields_have_derivation_source() {
             !derivation.is_empty(),
             "excluded field {field} must have non-empty derivation_source"
         );
-        let reason = entry["reason"]
-            .as_str()
-            .expect("reason must be string");
+        let reason = entry["reason"].as_str().expect("reason must be string");
         assert!(
             !reason.is_empty(),
             "excluded field {field} must have non-empty reason"
@@ -420,9 +425,7 @@ fn size_budget_is_reasonable() {
 #[test]
 fn all_source_sizes_are_within_budget() {
     let artifact = load_artifact();
-    let max_bytes = artifact["size_budget"]["max_event_bytes"]
-        .as_u64()
-        .unwrap();
+    let max_bytes = artifact["size_budget"]["max_event_bytes"].as_u64().unwrap();
 
     for source in artifact["required_nondeterminism_sources"]
         .as_array()

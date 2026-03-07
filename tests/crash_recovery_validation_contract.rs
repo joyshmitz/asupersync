@@ -47,7 +47,10 @@ fn doc_references_bead_id() {
     let doc = load_doc();
     let art = load_artifact();
     let bead_id = art["bead_id"].as_str().unwrap();
-    assert!(doc.contains(bead_id), "doc must reference bead_id {bead_id}");
+    assert!(
+        doc.contains(bead_id),
+        "doc must reference bead_id {bead_id}"
+    );
 }
 
 // ── Artifact stability ─────────────────────────────────────────────
@@ -127,7 +130,10 @@ fn soak_scenarios_have_invariants() {
 fn fault_injection_points_are_nonempty() {
     let art = load_artifact();
     let points = art["fault_injection_points"].as_array().unwrap();
-    assert!(points.len() >= 4, "must have at least 4 fault injection points");
+    assert!(
+        points.len() >= 4,
+        "must have at least 4 fault injection points"
+    );
 }
 
 #[test]
@@ -200,10 +206,7 @@ fn recovery_metrics_have_rm_prefix() {
     let metrics = art["recovery_metrics"]["metrics"].as_array().unwrap();
     for metric in metrics {
         let mid = metric["metric_id"].as_str().unwrap();
-        assert!(
-            mid.starts_with("RM-"),
-            "metric '{mid}' must start with RM-"
-        );
+        assert!(mid.starts_with("RM-"), "metric '{mid}' must start with RM-");
     }
 }
 
@@ -293,10 +296,7 @@ fn reproducibility_includes_blocks_graduation() {
     let reqs = art["reproducibility_requirements"].as_array().unwrap();
     assert!(
         reqs.iter().any(|r| {
-            r["requirement_id"]
-                .as_str()
-                .unwrap()
-                == "RR-UNREPRODUCIBLE-BLOCKS-GRADUATION"
+            r["requirement_id"].as_str().unwrap() == "RR-UNREPRODUCIBLE-BLOCKS-GRADUATION"
         }),
         "must have RR-UNREPRODUCIBLE-BLOCKS-GRADUATION"
     );
@@ -307,9 +307,7 @@ fn reproducibility_includes_blocks_graduation() {
 #[test]
 fn structured_log_fields_are_nonempty_and_unique() {
     let art = load_artifact();
-    let fields = art["structured_log_fields_required"]
-        .as_array()
-        .unwrap();
+    let fields = art["structured_log_fields_required"].as_array().unwrap();
     assert!(!fields.is_empty(), "log fields must be nonempty");
     let strs: Vec<&str> = fields.iter().map(|f| f.as_str().unwrap()).collect();
     let mut deduped = strs.clone();
@@ -354,7 +352,10 @@ fn soak_repeated_crash_no_leaks() {
         obligation_count -= 5;
     }
 
-    assert_eq!(obligation_count, 0, "no obligation leaks after {crash_count} crashes");
+    assert_eq!(
+        obligation_count, 0,
+        "no obligation leaks after {crash_count} crashes"
+    );
 }
 
 #[test]
@@ -397,7 +398,10 @@ fn soak_partial_recovery_tombstones_on_exhaust() {
         }
     }
 
-    assert!(tombstoned, "must tombstone after exhausting microreboots in nested crash");
+    assert!(
+        tombstoned,
+        "must tombstone after exhausting microreboots in nested crash"
+    );
 }
 
 // ── Functional: fault injection simulation ──────────────────────────
@@ -417,7 +421,10 @@ fn fault_injection_journal_write_retries_or_tombstones() {
         state = "TOMBSTONED";
     }
 
-    assert_eq!(state, "TOMBSTONED", "must tombstone if journal write fails repeatedly");
+    assert_eq!(
+        state, "TOMBSTONED",
+        "must tombstone if journal write fails repeatedly"
+    );
 }
 
 #[test]
@@ -429,7 +436,10 @@ fn fault_injection_parent_cancel_tombstones_child() {
         "RECOVERING"
     };
 
-    assert_eq!(child_state, "TOMBSTONED", "parent cancel must tombstone child");
+    assert_eq!(
+        child_state, "TOMBSTONED",
+        "parent cancel must tombstone child"
+    );
 }
 
 // ── Functional: metrics simulation ──────────────────────────────────
@@ -459,5 +469,8 @@ fn metric_replay_idempotent() {
     let replay_1_state = ("tasks_recovered", 5u32, "obligations_recovered", 3u32);
     let replay_2_state = ("tasks_recovered", 5u32, "obligations_recovered", 3u32);
 
-    assert_eq!(replay_1_state, replay_2_state, "journal replay must be idempotent");
+    assert_eq!(
+        replay_1_state, replay_2_state,
+        "journal replay must be idempotent"
+    );
 }

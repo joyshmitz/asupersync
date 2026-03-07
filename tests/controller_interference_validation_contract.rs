@@ -120,10 +120,7 @@ fn interference_pairs_have_required_fields() {
         let threshold = pair["oscillation_threshold"].as_u64().unwrap();
         assert!(threshold > 0, "{pid}: threshold must be positive");
         let window = pair["window_epochs"].as_u64().unwrap();
-        assert!(
-            window >= threshold,
-            "{pid}: window must be >= threshold"
-        );
+        assert!(window >= threshold, "{pid}: window must be >= threshold");
     }
 }
 
@@ -190,10 +187,7 @@ fn timescale_tiers_have_required_fields() {
             !controllers.is_empty(),
             "{tid}: must have at least one controller"
         );
-        assert!(
-            tier["rationale"].is_string(),
-            "{tid}: must have rationale"
-        );
+        assert!(tier["rationale"].is_string(), "{tid}: must have rationale");
     }
 }
 
@@ -321,10 +315,7 @@ fn sequential_drift_alarm_has_threshold() {
     let max_drift = art["sequential_validity"]["drift_alarm"]["max_drift_events_per_epoch"]
         .as_u64()
         .unwrap();
-    assert!(
-        max_drift > 0,
-        "drift alarm max events must be positive"
-    );
+    assert!(max_drift > 0, "drift alarm max events must be positive");
 }
 
 // ── Structured logging ─────────────────────────────────────────────
@@ -332,13 +323,8 @@ fn sequential_drift_alarm_has_threshold() {
 #[test]
 fn structured_log_fields_are_nonempty_and_unique() {
     let art = load_artifact();
-    let fields = art["structured_log_fields_required"]
-        .as_array()
-        .unwrap();
-    assert!(
-        !fields.is_empty(),
-        "structured log fields must be nonempty"
-    );
+    let fields = art["structured_log_fields_required"].as_array().unwrap();
+    assert!(!fields.is_empty(), "structured log fields must be nonempty");
     let strs: Vec<&str> = fields.iter().map(|f| f.as_str().unwrap()).collect();
     let mut deduped = strs.clone();
     deduped.sort_unstable();
@@ -352,10 +338,7 @@ fn structured_log_fields_are_nonempty_and_unique() {
 fn smoke_scenarios_are_rch_routed() {
     let art = load_artifact();
     let scenarios = art["smoke_scenarios"].as_array().unwrap();
-    assert!(
-        scenarios.len() >= 3,
-        "must have at least 3 smoke scenarios"
-    );
+    assert!(scenarios.len() >= 3, "must have at least 3 smoke scenarios");
     for scenario in scenarios {
         let sid = scenario["scenario_id"].as_str().unwrap();
         let cmd = scenario["command"].as_str().unwrap();
@@ -504,10 +487,7 @@ fn timescale_separation_prevents_simultaneous_decisions() {
     let multipliers = [1_u64, 4, 8];
     let mut simultaneous_count = 0_u64;
     for epoch in 1..=32_u64 {
-        let deciding_count = multipliers
-            .iter()
-            .filter(|&&m| epoch % m == 0)
-            .count();
+        let deciding_count = multipliers.iter().filter(|&&m| epoch % m == 0).count();
         if deciding_count == multipliers.len() {
             simultaneous_count += 1;
         }
@@ -565,16 +545,10 @@ fn fallback_slo_breach_rolls_back_all_active_controllers() {
     let mut registry = ControllerRegistry::new();
 
     let sched = registry
-        .register(make_reg(
-            "sched-gov",
-            &["AA01-SEAM-SCHED-GOVERNOR"],
-        ))
+        .register(make_reg("sched-gov", &["AA01-SEAM-SCHED-GOVERNOR"]))
         .unwrap();
     let admit = registry
-        .register(make_reg(
-            "admit-gate",
-            &["AA01-SEAM-ADMISSION-ROOT-LIMITS"],
-        ))
+        .register(make_reg("admit-gate", &["AA01-SEAM-ADMISSION-ROOT-LIMITS"]))
         .unwrap();
 
     promote_to_active(&mut registry, sched);
@@ -587,10 +561,7 @@ fn fallback_slo_breach_rolls_back_all_active_controllers() {
     let ids = registry.controller_ids();
     for id in &ids {
         if registry.mode(*id) != Some(ControllerMode::Shadow) {
-            registry.rollback(
-                *id,
-                RollbackReason::CalibrationRegression { score: 0.3 },
-            );
+            registry.rollback(*id, RollbackReason::CalibrationRegression { score: 0.3 });
         }
     }
 
@@ -605,16 +576,10 @@ fn fallback_already_shadow_controller_unaffected() {
     let mut registry = ControllerRegistry::new();
 
     let shadow_ctrl = registry
-        .register(make_reg(
-            "shadow-only",
-            &["AA01-SEAM-RETRY-BACKOFF"],
-        ))
+        .register(make_reg("shadow-only", &["AA01-SEAM-RETRY-BACKOFF"]))
         .unwrap();
     let active_ctrl = registry
-        .register(make_reg(
-            "active-ctrl",
-            &["AA01-SEAM-SCHED-GOVERNOR"],
-        ))
+        .register(make_reg("active-ctrl", &["AA01-SEAM-SCHED-GOVERNOR"]))
         .unwrap();
 
     promote_to_active(&mut registry, active_ctrl);
@@ -639,10 +604,7 @@ fn fallback_recovery_requires_fresh_calibration() {
     let mut registry = ControllerRegistry::new();
 
     let ctrl = registry
-        .register(make_reg(
-            "recoverable",
-            &["AA01-SEAM-SCHED-GOVERNOR"],
-        ))
+        .register(make_reg("recoverable", &["AA01-SEAM-SCHED-GOVERNOR"]))
         .unwrap();
 
     promote_to_active(&mut registry, ctrl);
@@ -665,7 +627,10 @@ fn fallback_recovery_requires_fresh_calibration() {
     // Now provide fresh calibration
     registry.update_calibration(ctrl, 0.9);
     let result = registry.try_promote(ctrl, ControllerMode::Canary);
-    assert!(result.is_ok(), "re-promotion with fresh calibration must succeed");
+    assert!(
+        result.is_ok(),
+        "re-promotion with fresh calibration must succeed"
+    );
 }
 
 #[test]
@@ -673,10 +638,7 @@ fn fallback_flag_cleared_after_recovery() {
     let mut registry = ControllerRegistry::new();
 
     let ctrl = registry
-        .register(make_reg(
-            "flag-clear",
-            &["AA01-SEAM-SCHED-GOVERNOR"],
-        ))
+        .register(make_reg("flag-clear", &["AA01-SEAM-SCHED-GOVERNOR"]))
         .unwrap();
 
     promote_to_active(&mut registry, ctrl);
@@ -703,10 +665,7 @@ fn sequential_decisions_applied_in_registration_order() {
     let mut registry = ControllerRegistry::new();
 
     let id_a = registry
-        .register(make_reg(
-            "ctrl-first",
-            &["AA01-SEAM-SCHED-GOVERNOR"],
-        ))
+        .register(make_reg("ctrl-first", &["AA01-SEAM-SCHED-GOVERNOR"]))
         .unwrap();
     let id_b = registry
         .register(make_reg(
@@ -715,10 +674,7 @@ fn sequential_decisions_applied_in_registration_order() {
         ))
         .unwrap();
     let id_c = registry
-        .register(make_reg(
-            "ctrl-third",
-            &["AA01-SEAM-RETRY-BACKOFF"],
-        ))
+        .register(make_reg("ctrl-third", &["AA01-SEAM-RETRY-BACKOFF"]))
         .unwrap();
 
     // Registration order: a < b < c (by ControllerId)
@@ -727,7 +683,11 @@ fn sequential_decisions_applied_in_registration_order() {
 
     // Record decisions in order
     let snap_id = registry.next_snapshot_id();
-    for (id, label) in [(id_a, "decision-a"), (id_b, "decision-b"), (id_c, "decision-c")] {
+    for (id, label) in [
+        (id_a, "decision-a"),
+        (id_b, "decision-b"),
+        (id_c, "decision-c"),
+    ] {
         registry.record_decision(&ControllerDecision {
             controller_id: id,
             snapshot_id: snap_id,
@@ -783,7 +743,10 @@ fn sequential_drift_detection_simulation() {
 
     // Drift detected: B's decision differs pre vs post A
     let drift_detected = decision_pre != decision_post;
-    assert!(drift_detected, "drift must be detected when A's decision changes B's optimal action");
+    assert!(
+        drift_detected,
+        "drift must be detected when A's decision changes B's optimal action"
+    );
 }
 
 #[test]
@@ -834,10 +797,7 @@ fn interference_multi_controller_full_lifecycle() {
         ))
         .unwrap();
     let retry = registry
-        .register(make_reg(
-            "retry-backoff",
-            &["AA01-SEAM-RETRY-BACKOFF"],
-        ))
+        .register(make_reg("retry-backoff", &["AA01-SEAM-RETRY-BACKOFF"]))
         .unwrap();
 
     // All start in Shadow
@@ -890,10 +850,7 @@ fn interference_multi_controller_full_lifecycle() {
     // Simulate SLO breach — roll back all
     for id in &registry.controller_ids() {
         if registry.mode(*id) != Some(ControllerMode::Shadow) {
-            registry.rollback(
-                *id,
-                RollbackReason::CalibrationRegression { score: 0.2 },
-            );
+            registry.rollback(*id, RollbackReason::CalibrationRegression { score: 0.2 });
         }
     }
 
@@ -921,10 +878,7 @@ fn interference_hold_prevents_multi_controller_promotion() {
         .register(make_reg("ctrl-a", &["AA01-SEAM-SCHED-GOVERNOR"]))
         .unwrap();
     let ctrl_b = registry
-        .register(make_reg(
-            "ctrl-b",
-            &["AA01-SEAM-ADMISSION-ROOT-LIMITS"],
-        ))
+        .register(make_reg("ctrl-b", &["AA01-SEAM-ADMISSION-ROOT-LIMITS"]))
         .unwrap();
 
     registry.update_calibration(ctrl_a, 0.95);

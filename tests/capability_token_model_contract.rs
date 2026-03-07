@@ -48,7 +48,10 @@ fn doc_references_bead_id() {
     let doc = load_doc();
     let art = load_artifact();
     let bead_id = art["bead_id"].as_str().unwrap();
-    assert!(doc.contains(bead_id), "doc must reference bead_id {bead_id}");
+    assert!(
+        doc.contains(bead_id),
+        "doc must reference bead_id {bead_id}"
+    );
 }
 
 // ── Artifact stability ─────────────────────────────────────────────
@@ -105,10 +108,7 @@ fn token_capability_types_are_nonempty() {
     let types = art["token_structure"]["capability_types"]
         .as_array()
         .unwrap();
-    assert!(
-        types.len() >= 3,
-        "must have at least 3 capability types"
-    );
+    assert!(types.len() >= 3, "must have at least 3 capability types");
 }
 
 #[test]
@@ -124,7 +124,11 @@ fn token_capability_type_ids_are_unique() {
     let mut deduped = ids.clone();
     deduped.sort_unstable();
     deduped.dedup();
-    assert_eq!(ids.len(), deduped.len(), "capability type_ids must be unique");
+    assert_eq!(
+        ids.len(),
+        deduped.len(),
+        "capability type_ids must be unique"
+    );
 }
 
 #[test]
@@ -171,10 +175,7 @@ fn token_max_attenuation_depth_is_positive() {
 fn attenuation_rules_are_nonempty() {
     let art = load_artifact();
     let rules = art["attenuation_model"]["rules"].as_array().unwrap();
-    assert!(
-        rules.len() >= 3,
-        "must have at least 3 attenuation rules"
-    );
+    assert!(rules.len() >= 3, "must have at least 3 attenuation rules");
 }
 
 #[test]
@@ -234,9 +235,7 @@ fn caveat_ids_are_unique() {
 #[test]
 fn revocation_mechanisms_are_nonempty() {
     let art = load_artifact();
-    let mechs = art["revocation_model"]["mechanisms"]
-        .as_array()
-        .unwrap();
+    let mechs = art["revocation_model"]["mechanisms"].as_array().unwrap();
     assert!(
         mechs.len() >= 2,
         "must have at least 2 revocation mechanisms"
@@ -246,9 +245,7 @@ fn revocation_mechanisms_are_nonempty() {
 #[test]
 fn revocation_includes_cascade() {
     let art = load_artifact();
-    let mechs = art["revocation_model"]["mechanisms"]
-        .as_array()
-        .unwrap();
+    let mechs = art["revocation_model"]["mechanisms"].as_array().unwrap();
     assert!(
         mechs
             .iter()
@@ -299,9 +296,7 @@ fn threat_scenarios_have_mitigations() {
 #[test]
 fn structured_log_fields_are_nonempty_and_unique() {
     let art = load_artifact();
-    let fields = art["structured_log_fields_required"]
-        .as_array()
-        .unwrap();
+    let fields = art["structured_log_fields_required"].as_array().unwrap();
     assert!(!fields.is_empty(), "log fields must be nonempty");
     let strs: Vec<&str> = fields.iter().map(|f| f.as_str().unwrap()).collect();
     let mut deduped = strs.clone();
@@ -516,7 +511,10 @@ fn revocation_does_not_affect_siblings_parent() {
     }
 
     assert!(revoked.contains("child1"));
-    assert!(revoked.contains("grandchild"), "grandchild must be cascaded");
+    assert!(
+        revoked.contains("grandchild"),
+        "grandchild must be cascaded"
+    );
     assert!(!revoked.contains("root"), "parent must not be revoked");
     assert!(!revoked.contains("child2"), "sibling must not be revoked");
 }
