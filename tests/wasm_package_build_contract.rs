@@ -525,7 +525,7 @@ fn policy_required_packages_match_actual_packages() {
 
     // Every required package must have a real package.json
     for pkg_name in &required {
-        let dir_name = pkg_name.split('/').next_back().unwrap();
+        let dir_name = pkg_name.split('/').last().unwrap();
         let pkg_path = repo_root()
             .join("packages")
             .join(dir_name)
@@ -559,7 +559,7 @@ fn no_undiscovered_packages_in_workspace() {
         .unwrap()
         .iter()
         .filter_map(|p| p.as_str())
-        .map(std::string::ToString::to_string)
+        .map(|s| s.to_string())
         .collect();
 
     let packages_dir = repo_root().join("packages");
