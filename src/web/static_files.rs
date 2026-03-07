@@ -319,20 +319,19 @@ fn has_traversal(path: &str) -> bool {
 /// Decodes `%XX` hex pairs into raw bytes, then converts the result to a
 /// UTF-8 string (lossy replacement for invalid sequences).
 fn percent_decode(input: &str) -> String {
-    let mut out = Vec::with_capacity(input.len());
-    let mut bytes = input.bytes();
-    while let Some(b) = bytes.next() {
-        if b == b'%' {
-            let hi = bytes.next().and_then(hex_val);
-            let lo = bytes.next().and_then(hex_val);
-            if let (Some(h), Some(l)) = (hi, lo) {
-                out.push(h << 4 | l);
-            } else {
-                out.push(b'%');
+    let bytes = input.as_bytes();
+    let mut out = Vec::with_capacity(bytes.len());
+    let mut i = 0;
+    while i < bytes.len() {
+        if bytes[i] == b'%' && i + 2 < bytes.len() {
+            if let (Some(hi), Some(lo)) = (hex_val(bytes[i + 1]), hex_val(bytes[i + 2])) {
+                out.push((hi << 4) | lo);
+                i += 3;
+                continue;
             }
-        } else {
-            out.push(b);
         }
+        out.push(bytes[i]);
+        i += 1;
     }
     String::from_utf8(out).unwrap_or_else(|e| String::from_utf8_lossy(e.as_bytes()).into_owned())
 }
@@ -478,8 +477,14 @@ mod tests {
 
     #[test]
     fn percent_decode_incomplete() {
-        // Incomplete percent sequence: "%" is preserved, trailing bytes consumed.
-        assert_eq!(percent_decode("hello%2"), "hello%");
+        assert_eq!(percent_decode("hello%2"), "hello%2");
+    }
+
+    #[test]
+    fn percent_decode_invalid_sequence_preserves_bytes() {
+        assert_eq!(percent_decode("hello%GGworld"), "hello%GGworld");
+        assert_eq!(percent_decode("sub%2/page.html"), "sub%2/page.html");
+        assert_eq!(percent_decode("%"), "%");
     }
 
     // ================================================================
@@ -559,6 +564,16 @@ mod tests {
         let dir = setup_dir();
         let sf = StaticFiles::new(dir.path());
         assert!(sf.resolve_path("/hello%2Etxt").is_some());
+    }
+
+    #[test]
+    fn resolve_invalid_percent_encoding_does_not_alias_other_path() {
+        let dir = setup_dir();
+        let sf = StaticFiles::new(dir.path());
+        assert!(
+            sf.resolve_path("/sub%2/page.html").is_none(),
+            "malformed escapes must be preserved instead of silently dropping bytes"
+        );
     }
 
     // ================================================================

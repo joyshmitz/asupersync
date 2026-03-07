@@ -317,18 +317,18 @@ impl RegionOutcome {
     pub fn into_response(self) -> Response {
         match self {
             Self::Ok(resp) => resp,
-            Self::Error(err) => {
-                let body = format!("Internal Server Error: {err}");
-                Response::new(StatusCode::INTERNAL_SERVER_ERROR, body.into_bytes())
-            }
+            Self::Error(_err) => Response::new(
+                StatusCode::INTERNAL_SERVER_ERROR,
+                b"Internal Server Error".to_vec(),
+            ),
             Self::Cancelled => Response::new(
                 StatusCode::SERVICE_UNAVAILABLE,
                 b"Service Unavailable: request cancelled".to_vec(),
             ),
-            Self::Panicked(msg) => {
-                let body = format!("Internal Server Error: handler panicked: {msg}");
-                Response::new(StatusCode::INTERNAL_SERVER_ERROR, body.into_bytes())
-            }
+            Self::Panicked(_msg) => Response::new(
+                StatusCode::INTERNAL_SERVER_ERROR,
+                b"Internal Server Error".to_vec(),
+            ),
         }
     }
 }
@@ -516,6 +516,7 @@ mod tests {
         assert!(outcome.is_error());
         let resp = outcome.into_response();
         assert_eq!(resp.status, StatusCode::INTERNAL_SERVER_ERROR);
+        assert_eq!(resp.body.as_ref(), b"Internal Server Error");
     }
 
     #[test]
@@ -590,6 +591,14 @@ mod tests {
         let req = test_request("GET", "/");
         let resp = handler.call(&cx, req);
         assert_eq!(resp.status, StatusCode::INTERNAL_SERVER_ERROR);
+        assert_eq!(resp.body.as_ref(), b"Internal Server Error");
+    }
+
+    #[test]
+    fn panicked_response_does_not_leak_panic_message() {
+        let resp = RegionOutcome::Panicked("secret panic details".to_string()).into_response();
+        assert_eq!(resp.status, StatusCode::INTERNAL_SERVER_ERROR);
+        assert_eq!(resp.body.as_ref(), b"Internal Server Error");
     }
 
     #[test]
