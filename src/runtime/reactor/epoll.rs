@@ -42,7 +42,7 @@
 //! use std::net::TcpListener;
 //!
 //! let reactor = EpollReactor::new()?;
-//! let listener = TcpListener::bind("127.0.0.1:0")?;
+//! let mut listener = TcpListener::bind("127.0.0.1:0")?;
 //!
 //! // Register the listener with epoll (edge-triggered mode)
 //! reactor.register(&listener, Token::new(1), Interest::READABLE)?;

@@ -14,8 +14,8 @@
 //! - `poll()` drains pending events in bounded batches
 //! - repeated wake calls are coalesced when configured
 //!
-//! Browser host-source wiring (fetch/WebSocket/stream callbacks) still lands
-//! in follow-on beads, but the reactor no longer hardcodes `poll() -> 0`.
+//! Browser host-source wiring can enqueue readiness via [`BrowserReactor::notify_ready`]
+//! while direct listener registration remains a follow-on integration.
 //!
 //! # Browser Event Model
 //!
@@ -113,18 +113,57 @@ impl BrowserReactor {
         let registrations = self.registrations_mut()?;
         let mut events = Vec::with_capacity(registrations.len());
         for (token, interest) in registrations.iter() {
-            let ready = *interest
-                & (Interest::READABLE
-                    | Interest::WRITABLE
-                    | Interest::ERROR
-                    | Interest::HUP
-                    | Interest::PRIORITY);
+            let ready = *interest & Self::readiness_mask();
             if !ready.is_empty() {
                 events.push(super::Event::new(*token, ready));
             }
         }
         drop(registrations);
         Ok(events)
+    }
+
+    fn readiness_mask() -> Interest {
+        Interest::READABLE
+            | Interest::WRITABLE
+            | Interest::ERROR
+            | Interest::HUP
+            | Interest::PRIORITY
+    }
+
+    /// Enqueue readiness discovered by browser host callbacks.
+    ///
+    /// Host bridges (fetch completion, WebSocket events, stream callbacks)
+    /// should call this to deliver token readiness into the reactor queue.
+    ///
+    /// Returns `Ok(true)` when an event is queued or coalesced, and `Ok(false)`
+    /// when the token is unknown or the readiness does not intersect the
+    /// token's registered interest.
+    pub fn notify_ready(&self, token: Token, ready: Interest) -> io::Result<bool> {
+        let registrations = self.registrations_mut()?;
+        let Some(interest) = registrations.get(&token).copied() else {
+            return Ok(false);
+        };
+        drop(registrations);
+        let effective = ready & interest & Self::readiness_mask();
+
+        if effective.is_empty() {
+            return Ok(false);
+        }
+
+        let mut pending = self.pending_events_mut()?;
+        if self.config.coalesce_wakes
+            && let Some(existing) = pending.iter_mut().find(|event| event.token == token)
+        {
+            existing.ready |= effective;
+            drop(pending);
+            self.wake_pending.store(true, Ordering::Release);
+            return Ok(true);
+        }
+
+        pending.push(super::Event::new(token, effective));
+        drop(pending);
+        self.wake_pending.store(true, Ordering::Release);
+        Ok(true)
     }
 }
 
@@ -162,6 +201,19 @@ impl Reactor for BrowserReactor {
         })?;
         *slot = interest;
         drop(registrations);
+
+        let readiness = interest & Self::readiness_mask();
+        let mut pending = self.pending_events_mut()?;
+        pending.retain_mut(|event| {
+            if event.token != token {
+                return true;
+            }
+            event.ready &= readiness;
+            !event.ready.is_empty()
+        });
+        let still_pending = !pending.is_empty();
+        drop(pending);
+        self.wake_pending.store(still_pending, Ordering::Release);
         Ok(())
     }
 
@@ -213,26 +265,32 @@ impl Reactor for BrowserReactor {
     }
 
     fn wake(&self) -> io::Result<()> {
-        // Coalescing: multiple wake() calls before the next poll produce only
-        // one queued dispatch batch.
-        if self.config.coalesce_wakes
-            && self
-                .wake_pending
-                .swap(true, std::sync::atomic::Ordering::AcqRel)
-        {
-            return Ok(());
-        }
-
-        self.wake_pending.store(true, Ordering::Release);
         let snapshot = self.snapshot_readiness_events()?;
         if snapshot.is_empty() {
-            // No registrations to snapshot — clear wake_pending so future
-            // wake() calls are not incorrectly coalesced away.
-            self.wake_pending.store(false, Ordering::Release);
+            let still_pending = !self.pending_events_mut()?.is_empty();
+            self.wake_pending.store(still_pending, Ordering::Release);
             return Ok(());
         }
 
-        self.pending_events_mut()?.extend(snapshot);
+        let mut pending = self.pending_events_mut()?;
+        if self.config.coalesce_wakes {
+            for event in snapshot {
+                if let Some(existing) = pending
+                    .iter_mut()
+                    .find(|existing| existing.token == event.token)
+                {
+                    existing.ready |= event.ready;
+                } else {
+                    pending.push(event);
+                }
+            }
+        } else {
+            pending.extend(snapshot);
+        }
+
+        let still_pending = !pending.is_empty();
+        drop(pending);
+        self.wake_pending.store(still_pending, Ordering::Release);
         Ok(())
     }
 
@@ -296,7 +354,7 @@ mod tests {
     }
 
     #[test]
-    fn browser_reactor_modify_is_noop() {
+    fn browser_reactor_modify_updates_interest() {
         let reactor = BrowserReactor::default();
         let source = TestFdSource;
         let token = Token::new(1);
@@ -304,6 +362,14 @@ mod tests {
             .register(&source, token, Interest::READABLE)
             .unwrap();
         assert!(reactor.modify(token, Interest::WRITABLE).is_ok());
+
+        reactor.wake().unwrap();
+        let mut events = Events::with_capacity(4);
+        let n = reactor.poll(&mut events, Some(Duration::ZERO)).unwrap();
+        assert_eq!(n, 1);
+        let event = events.iter().next().expect("single event");
+        assert!(!event.is_readable());
+        assert!(event.is_writable());
     }
 
     #[test]
@@ -504,5 +570,144 @@ mod tests {
         let mut events = Events::with_capacity(4);
         let n = reactor.poll(&mut events, Some(Duration::ZERO)).unwrap();
         assert_eq!(n, 1, "wake after empty snapshot must not be coalesced");
+    }
+
+    #[test]
+    fn browser_reactor_notify_ready_ignores_unknown_token() {
+        let reactor = BrowserReactor::default();
+        let queued = reactor
+            .notify_ready(Token::new(42), Interest::READABLE)
+            .unwrap();
+        assert!(!queued);
+    }
+
+    #[test]
+    fn browser_reactor_notify_ready_masks_by_registered_interest() {
+        let reactor = BrowserReactor::default();
+        let source = TestFdSource;
+        let token = Token::new(3);
+
+        reactor
+            .register(&source, token, Interest::READABLE)
+            .unwrap();
+        assert!(!reactor.notify_ready(token, Interest::WRITABLE).unwrap());
+        assert!(reactor.notify_ready(token, Interest::READABLE).unwrap());
+
+        let mut events = Events::with_capacity(4);
+        let n = reactor.poll(&mut events, Some(Duration::ZERO)).unwrap();
+        assert_eq!(n, 1);
+        assert_eq!(events.len(), 1);
+        let event = events.iter().next().expect("single event");
+        assert!(event.is_readable());
+        assert!(!event.is_writable());
+    }
+
+    #[test]
+    fn browser_reactor_modify_scrubs_stale_pending_readiness() {
+        let reactor = BrowserReactor::default();
+        let source = TestFdSource;
+        let token = Token::new(7);
+
+        reactor
+            .register(&source, token, Interest::READABLE | Interest::WRITABLE)
+            .unwrap();
+        assert!(reactor.notify_ready(token, Interest::WRITABLE).unwrap());
+
+        reactor.modify(token, Interest::READABLE).unwrap();
+
+        let mut events = Events::with_capacity(4);
+        let n = reactor.poll(&mut events, Some(Duration::ZERO)).unwrap();
+        assert_eq!(
+            n, 0,
+            "modify should discard queued readiness that no longer matches interest"
+        );
+
+        reactor.wake().unwrap();
+        let n = reactor.poll(&mut events, Some(Duration::ZERO)).unwrap();
+        assert_eq!(n, 1);
+        let event = events.iter().next().expect("single event");
+        assert!(event.is_readable());
+        assert!(!event.is_writable());
+    }
+
+    #[test]
+    fn browser_reactor_notify_ready_coalesces_same_token_when_enabled() {
+        let reactor = BrowserReactor::default();
+        let source = TestFdSource;
+        let token = Token::new(9);
+
+        reactor
+            .register(&source, token, Interest::READABLE | Interest::WRITABLE)
+            .unwrap();
+        assert!(reactor.notify_ready(token, Interest::READABLE).unwrap());
+        assert!(reactor.notify_ready(token, Interest::WRITABLE).unwrap());
+
+        let mut events = Events::with_capacity(4);
+        let n = reactor.poll(&mut events, Some(Duration::ZERO)).unwrap();
+        assert_eq!(n, 1);
+        assert_eq!(events.len(), 1);
+        let event = events.iter().next().expect("single event");
+        assert!(event.is_readable());
+        assert!(event.is_writable());
+    }
+
+    #[test]
+    fn browser_reactor_notify_ready_keeps_distinct_events_when_coalesce_disabled() {
+        let reactor = BrowserReactor::new(BrowserReactorConfig {
+            max_events_per_poll: 64,
+            coalesce_wakes: false,
+        });
+        let source = TestFdSource;
+        let token = Token::new(11);
+
+        reactor
+            .register(&source, token, Interest::READABLE)
+            .unwrap();
+        assert!(reactor.notify_ready(token, Interest::READABLE).unwrap());
+        assert!(reactor.notify_ready(token, Interest::READABLE).unwrap());
+
+        let mut events = Events::with_capacity(4);
+        let n = reactor.poll(&mut events, Some(Duration::ZERO)).unwrap();
+        assert_eq!(n, 2);
+        assert_eq!(events.len(), 2);
+        let mut iter = events.iter();
+        assert!(iter.next().expect("first event").is_readable());
+        assert!(iter.next().expect("second event").is_readable());
+    }
+
+    #[test]
+    fn browser_reactor_notify_ready_does_not_suppress_following_wake_snapshot() {
+        let reactor = BrowserReactor::default();
+        let source = TestFdSource;
+        let readable = Token::new(21);
+        let writable = Token::new(22);
+
+        reactor
+            .register(&source, readable, Interest::READABLE)
+            .unwrap();
+        reactor
+            .register(&source, writable, Interest::WRITABLE)
+            .unwrap();
+
+        assert!(reactor.notify_ready(readable, Interest::READABLE).unwrap());
+        reactor.wake().unwrap();
+
+        let mut events = Events::with_capacity(4);
+        let n = reactor.poll(&mut events, Some(Duration::ZERO)).unwrap();
+        assert_eq!(n, 2);
+
+        let mut saw_readable = false;
+        let mut saw_writable = false;
+        for event in &events {
+            if event.token == readable {
+                saw_readable = event.is_readable();
+            }
+            if event.token == writable {
+                saw_writable = event.is_writable();
+            }
+        }
+
+        assert!(saw_readable);
+        assert!(saw_writable);
     }
 }

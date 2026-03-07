@@ -109,6 +109,7 @@ export type NextRuntimeFallback =
 export type NextServerBridgeEnvironment =
   | "server_component"
   | "node_server";
+export type NextEdgeBridgeEnvironment = "edge_runtime";
 export type NextBridgeOutcome = "ok" | "err" | "cancelled";
 export type NextBridgeValue =
   | string
@@ -166,6 +167,54 @@ export interface NextServerBridgeRuntimeError extends Error {
   bridgeDiagnostics: NextServerBridgeDiagnostics;
 }
 
+export interface NextEdgeBridgeDiagnostics {
+  target: "edge";
+  boundaryMode: "edge";
+  renderEnvironment: NextEdgeBridgeEnvironment;
+  runtimeFallback: "use_edge_bridge";
+  reason: string;
+  reproCommand: string;
+  directRuntimeSupported: false;
+  runtimeSupport: NextRuntimeSupportDiagnostics;
+}
+
+export interface NextEdgeBridgeRequestOptions {
+  requestId?: string;
+  routeSegment?: string;
+}
+
+export interface NextEdgeBridgeRequest<
+  TPayload extends NextBridgeValue = NextBridgeValue,
+> {
+  operation: string;
+  payload: TPayload;
+  routeSegment: string;
+  requestId?: string;
+  boundaryMode: "edge";
+  renderEnvironment: NextEdgeBridgeEnvironment;
+  runtimeFallback: "use_edge_bridge";
+  cancellationMode: "explicit_status";
+}
+
+export interface NextEdgeBridgeResponse<
+  TPayload extends NextBridgeValue = NextBridgeValue,
+> {
+  outcome: NextBridgeOutcome;
+  payload?: TPayload;
+  errorMessage?: string;
+  diagnostics: NextEdgeBridgeDiagnostics;
+}
+
+export interface NextEdgeBridgeAdapterOptions {
+  renderEnvironment?: NextEdgeBridgeEnvironment;
+  routeSegment?: string;
+  reproCommand?: string;
+}
+
+export interface NextEdgeBridgeRuntimeError extends Error {
+  bridgeDiagnostics: NextEdgeBridgeDiagnostics;
+}
+
 export const NEXT_UNSUPPORTED_RUNTIME_CODE =
   "ASUPERSYNC_NEXT_UNSUPPORTED_RUNTIME";
 export const NEXT_BOOTSTRAP_STATE_ERROR_CODE =
@@ -202,6 +251,7 @@ export const NEXT_SERVER_BRIDGE_ENVIRONMENTS = [
   "server_component",
   "node_server",
 ] as const;
+export const NEXT_EDGE_BRIDGE_ENVIRONMENTS = ["edge_runtime"] as const;
 
 type BrowserOutcome<T = unknown> = Outcome<T, AbiFailure>;
 
@@ -222,6 +272,15 @@ function cloneNextRuntimeSupportDiagnostics(
 function cloneNextServerBridgeDiagnostics(
   diagnostics: NextServerBridgeDiagnostics,
 ): NextServerBridgeDiagnostics {
+  return {
+    ...diagnostics,
+    runtimeSupport: cloneNextRuntimeSupportDiagnostics(diagnostics.runtimeSupport),
+  };
+}
+
+function cloneNextEdgeBridgeDiagnostics(
+  diagnostics: NextEdgeBridgeDiagnostics,
+): NextEdgeBridgeDiagnostics {
   return {
     ...diagnostics,
     runtimeSupport: cloneNextRuntimeSupportDiagnostics(diagnostics.runtimeSupport),
@@ -369,8 +428,27 @@ export function createNextServerBridgeDiagnostics(
   };
 }
 
+export function createNextEdgeBridgeDiagnostics(
+  options: NextEdgeBridgeAdapterOptions = {},
+): NextEdgeBridgeDiagnostics {
+  const renderEnvironment = options.renderEnvironment ?? "edge_runtime";
+  const runtimeSupport = detectNextRuntimeSupport("edge");
+  return {
+    target: "edge",
+    boundaryMode: "edge",
+    renderEnvironment,
+    runtimeFallback: "use_edge_bridge",
+    reason: nextRuntimeFallbackReason(renderEnvironment),
+    reproCommand:
+      options.reproCommand ??
+      "rch exec -- cargo test --test wasm_js_exports_coverage_contract -- --nocapture",
+    directRuntimeSupported: false,
+    runtimeSupport,
+  };
+}
+
 export function createNextBridgeLogFields(
-  diagnostics: NextServerBridgeDiagnostics,
+  diagnostics: NextServerBridgeDiagnostics | NextEdgeBridgeDiagnostics,
   overrides: NextBootstrapLogFieldOverrides = {},
 ): Record<string, string> {
   const fields: Record<string, string> = {
@@ -577,6 +655,77 @@ export class NextServerBridgeAdapter {
     const error = createNextUnsupportedRuntimeError(
       this.diagnosticsState.runtimeSupport,
     ) as NextServerBridgeRuntimeError;
+    error.bridgeDiagnostics = this.diagnostics();
+    return error;
+  }
+}
+
+export class NextEdgeBridgeAdapter {
+  private readonly diagnosticsState: NextEdgeBridgeDiagnostics;
+  private readonly routeSegment: string;
+
+  constructor(private readonly options: NextEdgeBridgeAdapterOptions = {}) {
+    this.diagnosticsState = createNextEdgeBridgeDiagnostics(options);
+    this.routeSegment = options.routeSegment ?? "/";
+  }
+
+  diagnostics(): NextEdgeBridgeDiagnostics {
+    return cloneNextEdgeBridgeDiagnostics(this.diagnosticsState);
+  }
+
+  createLogFields(
+    overrides: NextBootstrapLogFieldOverrides = {},
+  ): Record<string, string> {
+    return createNextBridgeLogFields(this.diagnosticsState, overrides);
+  }
+
+  createRequest<TPayload extends NextBridgeValue>(
+    operation: string,
+    payload: TPayload,
+    options: NextEdgeBridgeRequestOptions = {},
+  ): NextEdgeBridgeRequest<TPayload> {
+    return {
+      operation,
+      payload,
+      routeSegment: options.routeSegment ?? this.routeSegment,
+      ...(options.requestId ? { requestId: options.requestId } : {}),
+      boundaryMode: "edge",
+      renderEnvironment: this.diagnosticsState.renderEnvironment,
+      runtimeFallback: "use_edge_bridge",
+      cancellationMode: "explicit_status",
+    };
+  }
+
+  ok<TPayload extends NextBridgeValue>(
+    payload: TPayload,
+  ): NextEdgeBridgeResponse<TPayload> {
+    return {
+      outcome: "ok",
+      payload,
+      diagnostics: this.diagnostics(),
+    };
+  }
+
+  err(errorMessage: string): NextEdgeBridgeResponse {
+    return {
+      outcome: "err",
+      errorMessage,
+      diagnostics: this.diagnostics(),
+    };
+  }
+
+  cancelled(errorMessage = "cancelled"): NextEdgeBridgeResponse {
+    return {
+      outcome: "cancelled",
+      errorMessage,
+      diagnostics: this.diagnostics(),
+    };
+  }
+
+  unsupportedRuntimeError(): NextEdgeBridgeRuntimeError {
+    const error = createNextUnsupportedRuntimeError(
+      this.diagnosticsState.runtimeSupport,
+    ) as NextEdgeBridgeRuntimeError;
     error.bridgeDiagnostics = this.diagnostics();
     return error;
   }
@@ -973,4 +1122,10 @@ export function createNextServerBridgeAdapter(
   options: NextServerBridgeAdapterOptions = {},
 ): NextServerBridgeAdapter {
   return new NextServerBridgeAdapter(options);
+}
+
+export function createNextEdgeBridgeAdapter(
+  options: NextEdgeBridgeAdapterOptions = {},
+): NextEdgeBridgeAdapter {
+  return new NextEdgeBridgeAdapter(options);
 }

@@ -240,7 +240,7 @@ mod iocp_impl {
             use std::net::TcpListener;
 
             let reactor = IocpReactor::new().expect("failed to create iocp reactor");
-            let listener = TcpListener::bind("127.0.0.1:0").expect("bind listener");
+            let mut listener = TcpListener::bind("127.0.0.1:0").expect("bind listener");
 
             reactor
                 .register(&listener, Token::new(1), Interest::READABLE)
@@ -263,7 +263,7 @@ mod iocp_impl {
             use std::net::TcpListener;
 
             let reactor = IocpReactor::new().expect("failed to create iocp reactor");
-            let listener = TcpListener::bind("127.0.0.1:0").expect("bind listener");
+            let mut listener = TcpListener::bind("127.0.0.1:0").expect("bind listener");
             let key = Token::new(44);
             reactor
                 .register(&listener, key, Interest::READABLE)
