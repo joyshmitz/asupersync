@@ -142,10 +142,8 @@ fn backward_transitions_are_invalid() {
 
 #[test]
 fn validate_transition_returns_error_for_invalid() {
-    let result = validate_wasm_boundary_transition(
-        WasmBoundaryState::Closed,
-        WasmBoundaryState::Active,
-    );
+    let result =
+        validate_wasm_boundary_transition(WasmBoundaryState::Closed, WasmBoundaryState::Active);
     assert!(result.is_err());
     let err = result.unwrap_err();
     assert!(matches!(
@@ -182,9 +180,7 @@ fn handle_transition_through_cancellation_path() {
 
     table.transition(&h, WasmBoundaryState::Bound).unwrap();
     table.transition(&h, WasmBoundaryState::Active).unwrap();
-    table
-        .transition(&h, WasmBoundaryState::Cancelling)
-        .unwrap();
+    table.transition(&h, WasmBoundaryState::Cancelling).unwrap();
     assert_eq!(table.get(&h).unwrap().state, WasmBoundaryState::Cancelling);
 
     table.transition(&h, WasmBoundaryState::Closed).unwrap();
@@ -450,8 +446,7 @@ fn outcome_handle_value_round_trips() {
         slot: 42,
         generation: 7,
     };
-    let outcome: Outcome<WasmAbiValue, WasmAbiFailure> =
-        Outcome::Ok(WasmAbiValue::Handle(handle));
+    let outcome: Outcome<WasmAbiValue, WasmAbiFailure> = Outcome::Ok(WasmAbiValue::Handle(handle));
     let envelope = WasmAbiOutcomeEnvelope::from_outcome(outcome);
 
     match envelope {
@@ -561,8 +556,7 @@ fn all_error_codes_have_distinct_serialized_names() {
         .iter()
         .map(|c| serde_json::to_string(c).unwrap())
         .collect();
-    let unique: std::collections::HashSet<&str> =
-        serialized.iter().map(String::as_str).collect();
+    let unique: std::collections::HashSet<&str> = serialized.iter().map(String::as_str).collect();
     assert_eq!(
         serialized.len(),
         unique.len(),

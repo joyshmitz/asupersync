@@ -226,6 +226,9 @@ impl Reactor for BrowserReactor {
         self.wake_pending.store(true, Ordering::Release);
         let snapshot = self.snapshot_readiness_events()?;
         if snapshot.is_empty() {
+            // No registrations to snapshot — clear wake_pending so future
+            // wake() calls are not incorrectly coalesced away.
+            self.wake_pending.store(false, Ordering::Release);
             return Ok(());
         }
 
@@ -321,24 +324,41 @@ mod tests {
     #[test]
     fn browser_reactor_wake_coalesce_flag() {
         let reactor = BrowserReactor::default();
+        let source = TestFdSource;
+        assert!(!reactor
+            .wake_pending
+            .load(std::sync::atomic::Ordering::Acquire));
+
+        // Wake with no registrations should NOT leave wake_pending set
+        // (empty snapshot clears it to avoid coalescing away future wakes).
+        reactor.wake().unwrap();
         assert!(
             !reactor
                 .wake_pending
-                .load(std::sync::atomic::Ordering::Acquire)
+                .load(std::sync::atomic::Ordering::Acquire),
+            "wake with empty registry must clear wake_pending"
         );
+
+        // Wake with a registration should set wake_pending.
+        reactor
+            .register(&source, Token::new(1), Interest::READABLE)
+            .unwrap();
         reactor.wake().unwrap();
         assert!(
             reactor
                 .wake_pending
-                .load(std::sync::atomic::Ordering::Acquire)
+                .load(std::sync::atomic::Ordering::Acquire),
+            "wake with registration must set wake_pending"
         );
-        // Poll clears the flag
+
+        // Poll clears the flag.
         let mut events = Events::with_capacity(4);
         reactor.poll(&mut events, None).unwrap();
         assert!(
             !reactor
                 .wake_pending
-                .load(std::sync::atomic::Ordering::Acquire)
+                .load(std::sync::atomic::Ordering::Acquire),
+            "poll must clear wake_pending"
         );
     }
 
@@ -454,5 +474,33 @@ mod tests {
         let third = reactor.poll(&mut events, Some(Duration::ZERO)).unwrap();
         assert_eq!(third, 0);
         assert!(events.is_empty());
+    }
+
+    #[test]
+    fn browser_reactor_wake_with_empty_snapshot_clears_pending_flag() {
+        // Regression: wake() on an empty registry used to leave wake_pending
+        // as true, causing the next wake() (after a registration is added) to
+        // be incorrectly coalesced away.
+        let reactor = BrowserReactor::default();
+
+        // Wake with no registrations — snapshot is empty.
+        reactor.wake().unwrap();
+        assert!(
+            !reactor
+                .wake_pending
+                .load(std::sync::atomic::Ordering::Acquire),
+            "wake_pending must be cleared when snapshot is empty"
+        );
+
+        // Now register and wake again — must NOT be coalesced.
+        let source = TestFdSource;
+        reactor
+            .register(&source, Token::new(1), Interest::READABLE)
+            .unwrap();
+        reactor.wake().unwrap();
+
+        let mut events = Events::with_capacity(4);
+        let n = reactor.poll(&mut events, Some(Duration::ZERO)).unwrap();
+        assert_eq!(n, 1, "wake after empty snapshot must not be coalesced");
     }
 }
