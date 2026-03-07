@@ -20,6 +20,7 @@ mod imp {
     use std::collections::HashMap;
     use std::io;
     use std::os::fd::{AsRawFd, FromRawFd, OwnedFd, RawFd};
+    use std::sync::atomic::{AtomicBool, Ordering};
     use std::time::Duration;
 
     const DEFAULT_ENTRIES: u32 = 256;
@@ -37,6 +38,7 @@ mod imp {
         ring: Mutex<IoUring>,
         registrations: Mutex<HashMap<Token, RegistrationInfo>>,
         wake_fd: OwnedFd,
+        wake_pending: AtomicBool,
     }
 
     impl std::fmt::Debug for IoUringReactor {
@@ -44,6 +46,7 @@ mod imp {
             f.debug_struct("IoUringReactor")
                 .field("registrations", &self.registrations)
                 .field("wake_fd", &self.wake_fd)
+                .field("wake_pending", &self.wake_pending.load(Ordering::Relaxed))
                 .finish_non_exhaustive()
         }
     }
@@ -67,6 +70,7 @@ mod imp {
                 ring: Mutex::new(ring),
                 registrations: Mutex::new(HashMap::new()),
                 wake_fd,
+                wake_pending: AtomicBool::new(false),
             })
         }
 
@@ -249,6 +253,10 @@ mod imp {
 
             for (user_data, res) in completions {
                 if user_data == WAKE_USER_DATA {
+                    // Clear the coalescing flag before draining so concurrent
+                    // wake() calls during this drain window enqueue a fresh
+                    // wakeup instead of being suppressed forever.
+                    self.wake_pending.store(false, Ordering::Release);
                     self.drain_wake_fd();
                     let mut ring = self.ring.lock();
                     let _ = submit_poll_entry(
@@ -303,6 +311,9 @@ mod imp {
         }
 
         fn wake(&self) -> io::Result<()> {
+            if self.wake_pending.swap(true, Ordering::AcqRel) {
+                return Ok(());
+            }
             let value: u64 = 1;
             let fd = self.wake_fd.as_raw_fd();
             let bytes = value.to_ne_bytes();
@@ -315,6 +326,7 @@ mod imp {
             if err.kind() == io::ErrorKind::WouldBlock {
                 return Ok(());
             }
+            self.wake_pending.store(false, Ordering::Release);
             Err(err)
         }
 
@@ -762,6 +774,56 @@ mod imp {
             assert!(events.is_empty(), "timeout poll should not emit events");
 
             reactor.deregister(key).expect("deregister should succeed");
+        }
+
+        #[test]
+        fn test_wake_coalesces_eventfd_notifications() {
+            let Some(reactor) = new_or_skip() else {
+                return;
+            };
+
+            for _ in 0..32 {
+                reactor.wake().expect("wake should succeed");
+            }
+
+            let mut counter = 0_u64;
+            let n = unsafe {
+                libc::read(
+                    reactor.wake_fd.as_raw_fd(),
+                    (&mut counter as *mut u64).cast::<libc::c_void>(),
+                    std::mem::size_of::<u64>(),
+                )
+            };
+            assert_eq!(
+                n,
+                i32::try_from(std::mem::size_of::<u64>()).expect("u64 size fits in i32") as isize,
+                "eventfd read should return a full counter"
+            );
+            assert_eq!(
+                counter, 1,
+                "multiple wake() calls should collapse into a single pending eventfd tick"
+            );
+
+            let mut events = Events::with_capacity(4);
+            reactor
+                .poll(&mut events, Some(Duration::ZERO))
+                .expect("poll should consume stale wake completion");
+            assert!(events.is_empty(), "wake completions must not surface as readiness");
+
+            reactor.wake().expect("wake after drain should succeed");
+            let n = unsafe {
+                libc::read(
+                    reactor.wake_fd.as_raw_fd(),
+                    (&mut counter as *mut u64).cast::<libc::c_void>(),
+                    std::mem::size_of::<u64>(),
+                )
+            };
+            assert_eq!(
+                n,
+                i32::try_from(std::mem::size_of::<u64>()).expect("u64 size fits in i32") as isize,
+                "eventfd read should still succeed after drain"
+            );
+            assert_eq!(counter, 1, "reactor must remain wakeable after clearing the pending flag");
         }
     }
 }
