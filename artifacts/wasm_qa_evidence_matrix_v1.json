@@ -182,9 +182,21 @@
       "scenario_id": "WASM-QA-SMOKE-NATIVE-BACKSTOP",
       "description": "Run the ignored native all-targets backstop after wasm cfg-gating changes",
       "command": "rch exec -- env CARGO_INCREMENTAL=0 CARGO_TARGET_DIR=/tmp/rch-codex-wasm-cfg cargo test --test wasm_cfg_compile_invariants native_all_targets_backstop_holds -- --ignored --nocapture"
+    },
+    {
+      "scenario_id": "WASM-QA-SMOKE-PACKAGED-BOOTSTRAP",
+      "description": "Run packaged bootstrap/load/reload harness in dry-run mode and verify schema-style WASM E2E bundle emission",
+      "command": "rch exec -- env HARNESS_PROFILE=packaged_bootstrap HARNESS_DRY_RUN=1 RCH_BIN=/bin/true FAULT_MATRIX_MODE=reduced bash scripts/test_wasm_cross_framework_e2e.sh"
+    },
+    {
+      "scenario_id": "WASM-QA-SMOKE-HOST-BRIDGE",
+      "description": "Run host-bridge fetch/streams/websocket/storage harness in dry-run mode and verify schema-style WASM E2E bundle emission",
+      "command": "rch exec -- env HARNESS_PROFILE=host_bridge HARNESS_DRY_RUN=1 RCH_BIN=/bin/true FAULT_MATRIX_MODE=reduced bash scripts/test_wasm_cross_framework_e2e.sh"
     }
   ],
   "downstream_beads": [
+    "asupersync-3qv04.8.4.1",
+    "asupersync-3qv04.8.4.3",
     "asupersync-3qv04.8.4.4",
     "asupersync-3qv04.6"
   ]

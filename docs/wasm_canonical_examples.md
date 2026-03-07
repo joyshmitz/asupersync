@@ -2,6 +2,7 @@
 
 Contract ID: `wasm-canonical-examples-v1`  
 Bead: `asupersync-umelq.16.3`
+Downstream Bead: `asupersync-3qv04.9.3.1`
 
 ## Purpose
 
@@ -29,7 +30,7 @@ Every example in this catalog must preserve:
 
 | Surface | Canonical Scenario IDs | Deterministic Harness | Replay Artifact Pointers |
 | --- | --- | --- | --- |
-| Vanilla JS | `vanilla.behavior_loser_drain_replay`, `vanilla.negative_skipped_loser_detection`, `vanilla.timing_mid_computation_drain` | `tests/e2e/combinator/cancel_correctness/browser_loser_drain.rs` | `artifacts/onboarding/vanilla.behavior_loser_drain_replay.log`, `artifacts/onboarding/vanilla.negative_skipped_loser_detection.log` |
+| Vanilla JS | `vanilla.behavior_loser_drain_replay`, `vanilla.negative_skipped_loser_detection`, `vanilla.timing_mid_computation_drain`, `L6-BUNDLER-VITE` | `tests/e2e/combinator/cancel_correctness/browser_loser_drain.rs`, `scripts/validate_vite_vanilla_consumer.sh` | `artifacts/onboarding/vanilla.behavior_loser_drain_replay.log`, `artifacts/onboarding/vanilla.negative_skipped_loser_detection.log`, `target/e2e-results/vite_vanilla_consumer/<timestamp>/summary.json` |
 | TypeScript | `TS-TYPE-VANILLA`, `TS-TYPE-REACT`, `TS-TYPE-NEXT` | `scripts/check_wasm_typescript_type_model_policy.py` | `artifacts/wasm_typescript_type_model_summary.json`, `artifacts/wasm_typescript_type_model_log.ndjson` |
 | React | `react_ref.task_group_cancel`, `react_ref.retry_after_transient_failure`, `react_ref.bulkhead_isolation`, `react_ref.tracing_hook_transition` | `tests/react_wasm_strictmode_harness.rs` | `artifacts/onboarding/react.behavior_strict_mode_double_invocation.log`, `artifacts/onboarding/react.timing_restart_churn.log` |
 | Next.js | `next_ref.template_deploy`, `next_ref.cache_revalidation_reinit`, `next_ref.hard_navigation_rebootstrap`, `next_ref.cancel_retry_runtime_init` | `tests/nextjs_bootstrap_harness.rs` | `artifacts/onboarding/next.behavior_bootstrap_harness.log`, `artifacts/onboarding/next.timing_navigation_churn.log` |
@@ -48,6 +49,25 @@ At minimum, example execution logs must include:
 
 Framework-specific logs may add extra fields, but these fields are mandatory.
 
+## Maintained Vanilla Browser Example
+
+Maintained vanilla Browser Edition example source:
+
+- `tests/fixtures/vite-vanilla-consumer`
+- validation harness: `scripts/validate_vite_vanilla_consumer.sh`
+
+This fixture is the canonical low-friction browser-only entrypoint for:
+
+- `@asupersync/browser` package import resolution
+- packaged WASM artifact loading through a real Vite consumer build
+- deterministic artifact output under `target/e2e-results/vite_vanilla_consumer/`
+
+Primary deterministic validation command:
+
+```bash
+PATH=/usr/bin:$PATH bash scripts/validate_vite_vanilla_consumer.sh
+```
+
 ## Canonical Repro Commands
 
 Run all example lanes (preferred CI/replay bundle):
@@ -62,6 +82,12 @@ Run framework-scoped lanes:
 python3 scripts/run_browser_onboarding_checks.py --scenario vanilla
 python3 scripts/run_browser_onboarding_checks.py --scenario react
 python3 scripts/run_browser_onboarding_checks.py --scenario next
+```
+
+Run the maintained vanilla Vite fixture directly:
+
+```bash
+PATH=/usr/bin:$PATH bash scripts/validate_vite_vanilla_consumer.sh
 ```
 
 Run focused TypeScript contract checks:

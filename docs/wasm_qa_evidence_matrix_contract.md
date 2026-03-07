@@ -187,6 +187,18 @@ The runner reads `artifacts/wasm_qa_evidence_matrix_v1.json`, supports determini
 3. Structured event logs (`events.ndjson`) with schema `wasm-qa-e2e-log-v1`
 4. Retention metadata following `wasm-qa-artifact-retention-v1`
 
+Packaged bootstrap/load/reload baseline harness (bead `asupersync-3qv04.8.4.1`) is tracked as smoke scenario `WASM-QA-SMOKE-PACKAGED-BOOTSTRAP`, which invokes:
+
+```bash
+rch exec -- env HARNESS_PROFILE=packaged_bootstrap HARNESS_DRY_RUN=1 RCH_BIN=/bin/true FAULT_MATRIX_MODE=reduced bash scripts/test_wasm_cross_framework_e2e.sh
+```
+
+Host-bridge fetch/streams/websocket/storage baseline harness (bead `asupersync-3qv04.8.4.3`) is tracked as smoke scenario `WASM-QA-SMOKE-HOST-BRIDGE`, which invokes:
+
+```bash
+rch exec -- env HARNESS_PROFILE=host_bridge HARNESS_DRY_RUN=1 RCH_BIN=/bin/true FAULT_MATRIX_MODE=reduced bash scripts/test_wasm_cross_framework_e2e.sh
+```
+
 ## Validation
 
 Focused invariant test command (routed through `rch`):
