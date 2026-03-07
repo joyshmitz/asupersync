@@ -9,7 +9,12 @@ use crate::io::cap::{
     BrowserStorageIoCap, StorageBackend, StorageConsistencyPolicy, StorageIoCap, StorageOperation,
     StoragePolicyError, StorageRequest,
 };
+#[cfg(target_arch = "wasm32")]
+use base64::{Engine as _, engine::general_purpose::URL_SAFE_NO_PAD};
 use std::collections::BTreeMap;
+use std::sync::Arc;
+#[cfg(target_arch = "wasm32")]
+use web_sys::Storage;
 
 /// Error returned by browser storage operations.
 #[derive(Debug, Clone, PartialEq, Eq)]
@@ -18,6 +23,15 @@ pub enum BrowserStorageError {
     Policy(StoragePolicyError),
     /// Backend is temporarily unavailable in current execution context.
     BackendUnavailable(StorageBackend),
+    /// Host-backed backend returned an operation error.
+    HostBackend {
+        /// Backend that produced the error.
+        backend: StorageBackend,
+        /// Storage operation that failed.
+        operation: StorageOperation,
+        /// Backend-provided diagnostic message.
+        message: String,
+    },
 }
 
 impl std::fmt::Display for BrowserStorageError {
@@ -27,6 +41,14 @@ impl std::fmt::Display for BrowserStorageError {
             Self::BackendUnavailable(backend) => {
                 write!(f, "storage backend unavailable: {backend:?}")
             }
+            Self::HostBackend {
+                backend,
+                operation,
+                message,
+            } => write!(
+                f,
+                "storage host backend error ({backend:?}, {operation:?}): {message}"
+            ),
         }
     }
 }
@@ -94,6 +116,26 @@ pub enum StorageEventReasonCode {
     QuotaExceeded,
     /// Backend is unavailable in this execution context.
     BackendUnavailable,
+    /// Host backend returned an operation error.
+    HostBackendError,
+}
+
+/// Host-backed browser storage implementation contract.
+///
+/// This allows the storage adapter to route specific backends (for example
+/// `localStorage` in wasm browsers) to concrete host facilities while keeping
+/// policy checks, telemetry, and deterministic behavior in one place.
+pub trait StorageHostBackend: std::fmt::Debug + Send + Sync {
+    /// Writes a value for the given namespace/key.
+    fn set(&self, namespace: &str, key: &str, value: &[u8]) -> Result<(), String>;
+    /// Reads a value for the given namespace/key.
+    fn get(&self, namespace: &str, key: &str) -> Result<Option<Vec<u8>>, String>;
+    /// Deletes a key and returns whether a value existed.
+    fn delete(&self, namespace: &str, key: &str) -> Result<bool, String>;
+    /// Lists keys in a namespace.
+    fn list_keys(&self, namespace: &str) -> Result<Vec<String>, String>;
+    /// Clears a namespace and returns removed entry count.
+    fn clear_namespace(&self, namespace: &str) -> Result<usize, String>;
 }
 
 #[derive(Debug, Clone, PartialEq, Eq, PartialOrd, Ord)]
@@ -115,6 +157,7 @@ pub struct BrowserStorageAdapter {
     cap: BrowserStorageIoCap,
     entries: BTreeMap<StorageKey, Vec<u8>>,
     list_snapshot: BTreeMap<StorageNamespaceKey, Vec<String>>,
+    host_backends: BTreeMap<StorageBackend, Arc<dyn StorageHostBackend>>,
     unavailable_backends: BTreeMap<StorageBackend, bool>,
     used_bytes: usize,
     events: Vec<StorageEvent>,
@@ -128,6 +171,7 @@ impl BrowserStorageAdapter {
             cap,
             entries: BTreeMap::new(),
             list_snapshot: BTreeMap::new(),
+            host_backends: BTreeMap::new(),
             unavailable_backends: BTreeMap::new(),
             used_bytes: 0,
             events: Vec::new(),
@@ -156,6 +200,41 @@ impl BrowserStorageAdapter {
     #[must_use]
     pub fn events(&self) -> &[StorageEvent] {
         &self.events
+    }
+
+    /// Registers a host-backed implementation for a specific storage backend.
+    ///
+    /// When present, storage operations for `backend` are routed through this
+    /// implementation after policy authorization.
+    pub fn register_host_backend(
+        &mut self,
+        backend: StorageBackend,
+        host_backend: Arc<dyn StorageHostBackend>,
+    ) {
+        self.host_backends.insert(backend, host_backend);
+    }
+
+    /// Registers the default wasm `localStorage` host backend.
+    #[cfg(target_arch = "wasm32")]
+    pub fn register_wasm_local_storage_backend(&mut self) {
+        self.register_host_backend(
+            StorageBackend::LocalStorage,
+            Arc::new(LocalStorageHostBackend),
+        );
+    }
+
+    /// Removes any registered host-backed implementation for `backend`.
+    pub fn unregister_host_backend(
+        &mut self,
+        backend: StorageBackend,
+    ) -> Option<Arc<dyn StorageHostBackend>> {
+        self.host_backends.remove(&backend)
+    }
+
+    /// Returns whether a host-backed implementation is registered for `backend`.
+    #[must_use]
+    pub fn has_host_backend(&self, backend: StorageBackend) -> bool {
+        self.host_backends.contains_key(&backend)
     }
 
     /// Configures deterministic availability for a backend.
@@ -240,6 +319,12 @@ impl BrowserStorageAdapter {
             );
         }
 
+        if let Some(host_backend) = self.host_backend(backend) {
+            if let Err(message) = host_backend.set(&namespace, &key, &value) {
+                return self.host_backend_error(&request, message);
+            }
+        }
+
         self.used_bytes = projected_bytes;
         self.entries.insert(storage_key, value);
         Ok(())
@@ -262,6 +347,15 @@ impl BrowserStorageAdapter {
             namespace,
             key,
         };
+        if let Some(host_backend) = self.host_backend(backend) {
+            let value = match host_backend.get(&storage_key.namespace, &storage_key.key) {
+                Ok(value) => value,
+                Err(message) => return self.host_backend_error(&request, message),
+            };
+            self.sync_entry_cache(&storage_key, value.as_ref());
+            return Ok(value);
+        }
+
         Ok(self.entries.get(&storage_key).cloned())
     }
 
@@ -283,6 +377,15 @@ impl BrowserStorageAdapter {
             key: key.clone(),
         };
 
+        if let Some(host_backend) = self.host_backend(backend) {
+            let deleted = match host_backend.delete(&namespace, &key) {
+                Ok(deleted) => deleted,
+                Err(message) => return self.host_backend_error(&request, message),
+            };
+            self.remove_cached_entry(&storage_key);
+            return Ok(deleted);
+        }
+
         let removed = self.entries.remove(&storage_key);
         if let Some(old) = removed {
             self.used_bytes =
@@ -303,6 +406,26 @@ impl BrowserStorageAdapter {
         let namespace = namespace.into();
         let request = StorageRequest::list_keys(backend, namespace.clone());
         self.authorize_and_record(&request)?;
+
+        if let Some(host_backend) = self.host_backend(backend) {
+            if self.cap.consistency_policy() == StorageConsistencyPolicy::ImmediateReadAfterWrite {
+                return self.host_backend_list_keys(&request, &*host_backend, &namespace);
+            }
+
+            let namespace_key = StorageNamespaceKey {
+                backend,
+                namespace: namespace.clone(),
+            };
+            let visible = self
+                .list_snapshot
+                .get(&namespace_key)
+                .cloned()
+                .unwrap_or_default();
+
+            let next = self.host_backend_list_keys(&request, &*host_backend, &namespace)?;
+            self.list_snapshot.insert(namespace_key, next);
+            return Ok(visible);
+        }
 
         if self.cap.consistency_policy() == StorageConsistencyPolicy::ImmediateReadAfterWrite {
             return Ok(self.collect_namespace_keys(backend, &namespace));
@@ -333,6 +456,15 @@ impl BrowserStorageAdapter {
         let namespace = namespace.into();
         let request = StorageRequest::clear_namespace(backend, namespace.clone());
         self.authorize_and_record(&request)?;
+
+        if let Some(host_backend) = self.host_backend(backend) {
+            let removed_count = match host_backend.clear_namespace(&namespace) {
+                Ok(removed_count) => removed_count,
+                Err(message) => return self.host_backend_error(&request, message),
+            };
+            self.remove_cached_namespace(backend, &namespace);
+            return Ok(removed_count);
+        }
 
         let keys_to_remove: Vec<StorageKey> = self
             .entries
@@ -398,6 +530,76 @@ impl BrowserStorageAdapter {
             StorageEventReasonCode::BackendUnavailable,
         );
         Err(BrowserStorageError::BackendUnavailable(request.backend))
+    }
+
+    fn host_backend_error<T>(
+        &mut self,
+        request: &StorageRequest,
+        message: String,
+    ) -> Result<T, BrowserStorageError> {
+        self.record_event(
+            request,
+            StorageEventOutcome::Denied,
+            StorageEventReasonCode::HostBackendError,
+        );
+        Err(BrowserStorageError::HostBackend {
+            backend: request.backend,
+            operation: request.operation,
+            message,
+        })
+    }
+
+    fn host_backend(&self, backend: StorageBackend) -> Option<Arc<dyn StorageHostBackend>> {
+        self.host_backends.get(&backend).cloned()
+    }
+
+    fn host_backend_list_keys(
+        &mut self,
+        request: &StorageRequest,
+        backend: &dyn StorageHostBackend,
+        namespace: &str,
+    ) -> Result<Vec<String>, BrowserStorageError> {
+        let mut keys = match backend.list_keys(namespace) {
+            Ok(keys) => keys,
+            Err(message) => return self.host_backend_error(request, message),
+        };
+        keys.sort();
+        keys.dedup();
+        Ok(keys)
+    }
+
+    fn sync_entry_cache(&mut self, storage_key: &StorageKey, value: Option<&Vec<u8>>) {
+        self.remove_cached_entry(storage_key);
+        if let Some(value) = value {
+            self.used_bytes = self.used_bytes.saturating_add(entry_size(
+                &storage_key.namespace,
+                &storage_key.key,
+                value.len(),
+            ));
+            self.entries.insert(storage_key.clone(), value.clone());
+        }
+    }
+
+    fn remove_cached_entry(&mut self, storage_key: &StorageKey) {
+        if let Some(previous) = self.entries.remove(storage_key) {
+            self.used_bytes = self.used_bytes.saturating_sub(entry_size(
+                &storage_key.namespace,
+                &storage_key.key,
+                previous.len(),
+            ));
+        }
+    }
+
+    fn remove_cached_namespace(&mut self, backend: StorageBackend, namespace: &str) {
+        let keys_to_remove: Vec<StorageKey> = self
+            .entries
+            .keys()
+            .filter(|candidate| candidate.backend == backend && candidate.namespace == namespace)
+            .cloned()
+            .collect();
+        for key in keys_to_remove {
+            self.remove_cached_entry(&key);
+        }
     }
 
     fn collect_namespace_keys(&self, backend: StorageBackend, namespace: &str) -> Vec<String> {
@@ -473,6 +675,126 @@ fn entry_size(namespace: &str, key: &str, value_len: usize) -> usize {
     namespace.len() + key.len() + value_len
 }
 
+/// WASM host backend that persists values in browser `localStorage`.
+#[cfg(target_arch = "wasm32")]
+#[derive(Debug, Default)]
+pub struct LocalStorageHostBackend;
+
+#[cfg(target_arch = "wasm32")]
+impl LocalStorageHostBackend {
+    const KEY_PREFIX: &'static str = "asupersync:storage:v1:";
+
+    fn with_storage<T>(f: impl FnOnce(Storage) -> Result<T, String>) -> Result<T, String> {
+        let window = web_sys::window().ok_or_else(|| "window is unavailable".to_owned())?;
+        let storage = window
+            .local_storage()
+            .map_err(|error| format!("failed to access localStorage: {error:?}"))?
+            .ok_or_else(|| "localStorage is unavailable".to_owned())?;
+        f(storage)
+    }
+
+    fn key_prefix(namespace: &str) -> String {
+        let encoded_namespace = URL_SAFE_NO_PAD.encode(namespace.as_bytes());
+        format!("{}{encoded_namespace}:", Self::KEY_PREFIX)
+    }
+
+    fn encode_storage_key(namespace: &str, key: &str) -> String {
+        let mut prefixed = Self::key_prefix(namespace);
+        prefixed.push_str(&URL_SAFE_NO_PAD.encode(key.as_bytes()));
+        prefixed
+    }
+
+    fn decode_key_segment(encoded: &str) -> Option<String> {
+        URL_SAFE_NO_PAD
+            .decode(encoded)
+            .ok()
+            .and_then(|bytes| String::from_utf8(bytes).ok())
+    }
+
+    fn decode_storage_key(full_key: &str, namespace: &str) -> Option<String> {
+        let prefix = Self::key_prefix(namespace);
+        full_key
+            .strip_prefix(&prefix)
+            .and_then(Self::decode_key_segment)
+    }
+}
+
+#[cfg(target_arch = "wasm32")]
+impl StorageHostBackend for LocalStorageHostBackend {
+    fn set(&self, namespace: &str, key: &str, value: &[u8]) -> Result<(), String> {
+        let storage_key = Self::encode_storage_key(namespace, key);
+        let encoded_value = URL_SAFE_NO_PAD.encode(value);
+        Self::with_storage(|storage| {
+            storage
+                .set_item(&storage_key, &encoded_value)
+                .map_err(|error| format!("localStorage set_item failed: {error:?}"))
+        })
+    }
+
+    fn get(&self, namespace: &str, key: &str) -> Result<Option<Vec<u8>>, String> {
+        let storage_key = Self::encode_storage_key(namespace, key);
+        Self::with_storage(|storage| {
+            let encoded = storage
+                .get_item(&storage_key)
+                .map_err(|error| format!("localStorage get_item failed: {error:?}"))?;
+            encoded
+                .map(|payload| {
+                    URL_SAFE_NO_PAD
+                        .decode(payload.as_bytes())
+                        .map_err(|error| format!("failed to decode localStorage payload: {error}"))
+                })
+                .transpose()
+        })
+    }
+
+    fn delete(&self, namespace: &str, key: &str) -> Result<bool, String> {
+        let storage_key = Self::encode_storage_key(namespace, key);
+        Self::with_storage(|storage| {
+            let existed = storage
+                .get_item(&storage_key)
+                .map_err(|error| format!("localStorage get_item failed: {error:?}"))?
+                .is_some();
+            storage
+                .remove_item(&storage_key)
+                .map_err(|error| format!("localStorage remove_item failed: {error:?}"))?;
+            Ok(existed)
+        })
+    }
+
+    fn list_keys(&self, namespace: &str) -> Result<Vec<String>, String> {
+        Self::with_storage(|storage| {
+            let mut keys = Vec::new();
+            let len = storage
+                .length()
+                .map_err(|error| format!("localStorage length failed: {error:?}"))?;
+            for index in 0..len {
+                let maybe_key = storage
+                    .key(index)
+                    .map_err(|error| format!("localStorage key({index}) failed: {error:?}"))?;
+                if let Some(full_key) = maybe_key {
+                    if let Some(decoded) = Self::decode_storage_key(&full_key, namespace) {
+                        keys.push(decoded);
+                    }
+                }
+            }
+            Ok(keys)
+        })
+    }
+
+    fn clear_namespace(&self, namespace: &str) -> Result<usize, String> {
+        let keys = self.list_keys(namespace)?;
+        for key in &keys {
+            let storage_key = Self::encode_storage_key(namespace, key);
+            Self::with_storage(|storage| {
+                storage
+                    .remove_item(&storage_key)
+                    .map_err(|error| format!("localStorage remove_item failed: {error:?}"))
+            })?;
+        }
+        Ok(keys.len())
+    }
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
@@ -480,6 +802,85 @@ mod tests {
         StorageAuthority, StorageConsistencyPolicy, StorageOperation, StorageQuotaPolicy,
         StorageRedactionPolicy,
     };
+    use std::sync::Mutex;
+
+    #[derive(Debug, Default)]
+    struct MockHostBackend {
+        entries: Mutex<BTreeMap<(String, String), Vec<u8>>>,
+    }
+
+    impl StorageHostBackend for MockHostBackend {
+        fn set(&self, namespace: &str, key: &str, value: &[u8]) -> Result<(), String> {
+            self.entries
+                .lock()
+                .expect("host backend lock poisoned")
+                .insert((namespace.to_owned(), key.to_owned()), value.to_vec());
+            Ok(())
+        }
+
+        fn get(&self, namespace: &str, key: &str) -> Result<Option<Vec<u8>>, String> {
+            Ok(self
+                .entries
+                .lock()
+                .expect("host backend lock poisoned")
+                .get(&(namespace.to_owned(), key.to_owned()))
+                .cloned())
+        }
+
+        fn delete(&self, namespace: &str, key: &str) -> Result<bool, String> {
+            Ok(self
+                .entries
+                .lock()
+                .expect("host backend lock poisoned")
+                .remove(&(namespace.to_owned(), key.to_owned()))
+                .is_some())
+        }
+
+        fn list_keys(&self, namespace: &str) -> Result<Vec<String>, String> {
+            let mut keys: Vec<String> = self
+                .entries
+                .lock()
+                .expect("host backend lock poisoned")
+                .keys()
+                .filter(|(candidate_namespace, _)| candidate_namespace == namespace)
+                .map(|(_, key)| key.clone())
+                .collect();
+            keys.sort();
+            Ok(keys)
+        }
+
+        fn clear_namespace(&self, namespace: &str) -> Result<usize, String> {
+            let mut entries = self.entries.lock().expect("host backend lock poisoned");
+            let initial_len = entries.len();
+            entries.retain(|(candidate_namespace, _), _| candidate_namespace != namespace);
+            Ok(initial_len.saturating_sub(entries.len()))
+        }
+    }
+
+    #[derive(Debug)]
+    struct FailingHostBackend;
+
+    impl StorageHostBackend for FailingHostBackend {
+        fn set(&self, _namespace: &str, _key: &str, _value: &[u8]) -> Result<(), String> {
+            Err("simulated host backend set failure".to_owned())
+        }
+
+        fn get(&self, _namespace: &str, _key: &str) -> Result<Option<Vec<u8>>, String> {
+            Err("simulated host backend get failure".to_owned())
+        }
+
+        fn delete(&self, _namespace: &str, _key: &str) -> Result<bool, String> {
+            Err("simulated host backend delete failure".to_owned())
+        }
+
+        fn list_keys(&self, _namespace: &str) -> Result<Vec<String>, String> {
+            Err("simulated host backend list failure".to_owned())
+        }
+
+        fn clear_namespace(&self, _namespace: &str) -> Result<usize, String> {
+            Err("simulated host backend clear failure".to_owned())
+        }
+    }
 
     fn storage_cap_with_defaults() -> BrowserStorageIoCap {
         BrowserStorageIoCap::new(
@@ -806,5 +1207,68 @@ mod tests {
         assert_eq!(removed, 2);
         assert_eq!(adapter.entry_count(), 0);
         assert_eq!(adapter.used_bytes(), 0);
+    }
+
+    #[test]
+    fn adapter_routes_local_storage_operations_through_registered_host_backend() {
+        let host_backend = Arc::new(MockHostBackend::default());
+        let mut adapter = BrowserStorageAdapter::new(storage_cap_with_defaults());
+        adapter.register_host_backend(StorageBackend::LocalStorage, host_backend.clone());
+
+        adapter
+            .set(
+                StorageBackend::LocalStorage,
+                "prefs:v1",
+                "theme",
+                b"dark".to_vec(),
+            )
+            .expect("host-backed set should succeed");
+        assert_eq!(
+            host_backend
+                .get("prefs:v1", "theme")
+                .expect("host-backed get should succeed"),
+            Some(b"dark".to_vec())
+        );
+
+        let listed = adapter
+            .list_keys(StorageBackend::LocalStorage, "prefs:v1")
+            .expect("host-backed list should succeed");
+        assert_eq!(listed, vec!["theme".to_owned()]);
+
+        let removed = adapter
+            .delete(StorageBackend::LocalStorage, "prefs:v1", "theme")
+            .expect("host-backed delete should succeed");
+        assert!(removed);
+        assert_eq!(
+            host_backend
+                .get("prefs:v1", "theme")
+                .expect("host-backed get should succeed"),
+            None
+        );
+    }
+
+    #[test]
+    fn adapter_records_host_backend_failures_with_deterministic_reason_code() {
+        let mut adapter = BrowserStorageAdapter::new(storage_cap_with_defaults());
+        adapter.register_host_backend(StorageBackend::LocalStorage, Arc::new(FailingHostBackend));
+
+        let result = adapter.set(
+            StorageBackend::LocalStorage,
+            "prefs:v1",
+            "theme",
+            b"light".to_vec(),
+        );
+        assert!(matches!(
+            result,
+            Err(BrowserStorageError::HostBackend {
+                backend: StorageBackend::LocalStorage,
+                operation: StorageOperation::Set,
+                ..
+            })
+        ));
+
+        let event = adapter.events().last().expect("event should exist");
+        assert_eq!(event.outcome, StorageEventOutcome::Denied);
+        assert_eq!(event.reason_code, StorageEventReasonCode::HostBackendError);
     }
 }

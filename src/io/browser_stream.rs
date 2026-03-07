@@ -58,6 +58,21 @@ use std::io;
 use std::pin::Pin;
 use std::task::{Context, Poll};
 
+#[cfg(target_arch = "wasm32")]
+use js_sys::{Reflect, Uint8Array};
+#[cfg(target_arch = "wasm32")]
+use std::future::Future;
+#[cfg(target_arch = "wasm32")]
+use wasm_bindgen::JsCast;
+#[cfg(target_arch = "wasm32")]
+use wasm_bindgen::JsValue;
+#[cfg(target_arch = "wasm32")]
+use wasm_bindgen_futures::JsFuture;
+#[cfg(target_arch = "wasm32")]
+use web_sys::{
+    ReadableStream, ReadableStreamDefaultReader, WritableStream, WritableStreamDefaultWriter,
+};
+
 use crate::io::cap::{IoCap, IoCapabilities, IoStats};
 use crate::io::{AsyncRead, AsyncWrite, ReadBuf};
 
@@ -234,6 +249,378 @@ impl From<BrowserStreamError> for io::Error {
     }
 }
 
+#[cfg(target_arch = "wasm32")]
+fn js_host_io_error(err: &JsValue, op: &str) -> io::Error {
+    let detail = err
+        .as_string()
+        .unwrap_or_else(|| "non-string JavaScript error".to_owned());
+    io::Error::other(format!("{op} failed: {detail}"))
+}
+
+// ============================================================================
+// wasm32 host-backed adapters
+// ============================================================================
+
+#[cfg(target_arch = "wasm32")]
+/// Host-backed reader for WHATWG `ReadableStream` objects.
+pub struct WasmReadableStreamSource {
+    reader: ReadableStreamDefaultReader,
+    pending_read: Option<JsFuture>,
+    staged: Vec<u8>,
+    staged_offset: usize,
+    done: bool,
+}
+
+#[cfg(target_arch = "wasm32")]
+impl fmt::Debug for WasmReadableStreamSource {
+    fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
+        f.debug_struct("WasmReadableStreamSource")
+            .field("pending_read", &self.pending_read.is_some())
+            .field("staged_len", &self.staged.len())
+            .field("staged_offset", &self.staged_offset)
+            .field("done", &self.done)
+            .finish_non_exhaustive()
+    }
+}
+
+#[cfg(target_arch = "wasm32")]
+impl WasmReadableStreamSource {
+    /// Construct from a browser `ReadableStream`.
+    pub fn new(stream: &ReadableStream) -> Result<Self, BrowserStreamError> {
+        let reader = stream
+            .get_reader()
+            .dyn_into::<ReadableStreamDefaultReader>()
+            .map_err(|_| {
+                BrowserStreamError::HostError(
+                    "ReadableStream.getReader() did not return default reader".to_owned(),
+                )
+            })?;
+        Ok(Self {
+            reader,
+            pending_read: None,
+            staged: Vec::new(),
+            staged_offset: 0,
+            done: false,
+        })
+    }
+
+    /// Request cancellation on the underlying browser reader.
+    pub fn cancel_with_reason(&self, reason: &str) {
+        let _ = self.reader.cancel_with_reason(&JsValue::from_str(reason));
+    }
+}
+
+#[cfg(target_arch = "wasm32")]
+impl Drop for WasmReadableStreamSource {
+    fn drop(&mut self) {
+        self.reader.release_lock();
+    }
+}
+
+#[cfg(target_arch = "wasm32")]
+impl AsyncRead for WasmReadableStreamSource {
+    fn poll_read(
+        mut self: Pin<&mut Self>,
+        cx: &mut Context<'_>,
+        buf: &mut ReadBuf<'_>,
+    ) -> Poll<io::Result<()>> {
+        if buf.remaining() == 0 {
+            return Poll::Ready(Ok(()));
+        }
+
+        let available = self.staged.len().saturating_sub(self.staged_offset);
+        if available > 0 {
+            let to_copy = available.min(buf.remaining());
+            let start = self.staged_offset;
+            let end = start + to_copy;
+            buf.put_slice(&self.staged[start..end]);
+            self.staged_offset = end;
+            if self.staged_offset == self.staged.len() {
+                self.staged.clear();
+                self.staged_offset = 0;
+            }
+            return Poll::Ready(Ok(()));
+        }
+
+        if self.done {
+            return Poll::Ready(Ok(()));
+        }
+
+        if self.pending_read.is_none() {
+            self.pending_read = Some(JsFuture::from(self.reader.read()));
+        }
+
+        let pending = self
+            .pending_read
+            .as_mut()
+            .expect("pending_read initialized");
+        match Pin::new(pending).poll(cx) {
+            Poll::Pending => Poll::Pending,
+            Poll::Ready(Err(err)) => {
+                self.pending_read = None;
+                Poll::Ready(Err(js_host_io_error(
+                    &err,
+                    "ReadableStreamDefaultReader.read",
+                )))
+            }
+            Poll::Ready(Ok(result)) => {
+                self.pending_read = None;
+
+                let done = Reflect::get(&result, &JsValue::from_str("done"))
+                    .map_err(|err| js_host_io_error(&err, "ReadableStream read result.done"))?
+                    .as_bool()
+                    .unwrap_or(false);
+                if done {
+                    self.done = true;
+                    return Poll::Ready(Ok(()));
+                }
+
+                let value = Reflect::get(&result, &JsValue::from_str("value"))
+                    .map_err(|err| js_host_io_error(&err, "ReadableStream read result.value"))?;
+                if value.is_null() || value.is_undefined() {
+                    return Poll::Ready(Ok(()));
+                }
+
+                self.staged = Uint8Array::new(&value).to_vec();
+                self.staged_offset = 0;
+                if self.staged.is_empty() {
+                    return Poll::Ready(Ok(()));
+                }
+
+                let to_copy = self.staged.len().min(buf.remaining());
+                buf.put_slice(&self.staged[..to_copy]);
+                self.staged_offset = to_copy;
+                if self.staged_offset == self.staged.len() {
+                    self.staged.clear();
+                    self.staged_offset = 0;
+                }
+                Poll::Ready(Ok(()))
+            }
+        }
+    }
+}
+
+#[cfg(target_arch = "wasm32")]
+/// Host-backed writer for WHATWG `WritableStream` objects.
+pub struct WasmWritableStreamSink {
+    writer: WritableStreamDefaultWriter,
+    pending_ready: Option<JsFuture>,
+    pending_write: Option<(usize, JsFuture)>,
+    pending_close: Option<JsFuture>,
+    closed: bool,
+}
+
+#[cfg(target_arch = "wasm32")]
+impl fmt::Debug for WasmWritableStreamSink {
+    fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
+        f.debug_struct("WasmWritableStreamSink")
+            .field("pending_ready", &self.pending_ready.is_some())
+            .field("pending_write", &self.pending_write.is_some())
+            .field("pending_close", &self.pending_close.is_some())
+            .field("closed", &self.closed)
+            .finish_non_exhaustive()
+    }
+}
+
+#[cfg(target_arch = "wasm32")]
+impl WasmWritableStreamSink {
+    /// Construct from a browser `WritableStream`.
+    pub fn new(stream: &WritableStream) -> Result<Self, BrowserStreamError> {
+        let writer = stream.get_writer().map_err(|err| {
+            BrowserStreamError::HostError(
+                js_host_io_error(&err, "WritableStream.getWriter").to_string(),
+            )
+        })?;
+        Ok(Self {
+            writer,
+            pending_ready: None,
+            pending_write: None,
+            pending_close: None,
+            closed: false,
+        })
+    }
+
+    /// Abort the underlying writer with a reason.
+    pub fn abort_with_reason(&mut self, reason: &str) {
+        let _ = self.writer.abort_with_reason(&JsValue::from_str(reason));
+        self.closed = true;
+    }
+
+    fn poll_ready(&mut self, cx: &mut Context<'_>) -> Poll<io::Result<()>> {
+        if self.pending_ready.is_none() {
+            self.pending_ready = Some(JsFuture::from(self.writer.ready()));
+        }
+        let pending = self
+            .pending_ready
+            .as_mut()
+            .expect("pending_ready initialized");
+        match Pin::new(pending).poll(cx) {
+            Poll::Pending => Poll::Pending,
+            Poll::Ready(Err(err)) => {
+                self.pending_ready = None;
+                Poll::Ready(Err(js_host_io_error(
+                    &err,
+                    "WritableStreamDefaultWriter.ready",
+                )))
+            }
+            Poll::Ready(Ok(_)) => {
+                self.pending_ready = None;
+                Poll::Ready(Ok(()))
+            }
+        }
+    }
+
+    fn poll_inflight_write(&mut self, cx: &mut Context<'_>) -> Poll<io::Result<()>> {
+        let Some((_, pending)) = self.pending_write.as_mut() else {
+            return Poll::Ready(Ok(()));
+        };
+        match Pin::new(pending).poll(cx) {
+            Poll::Pending => Poll::Pending,
+            Poll::Ready(Err(err)) => {
+                self.pending_write = None;
+                Poll::Ready(Err(js_host_io_error(
+                    &err,
+                    "WritableStreamDefaultWriter.write",
+                )))
+            }
+            Poll::Ready(Ok(_)) => {
+                self.pending_write = None;
+                Poll::Ready(Ok(()))
+            }
+        }
+    }
+}
+
+#[cfg(target_arch = "wasm32")]
+impl Drop for WasmWritableStreamSink {
+    fn drop(&mut self) {
+        self.writer.release_lock();
+    }
+}
+
+#[cfg(target_arch = "wasm32")]
+impl AsyncWrite for WasmWritableStreamSink {
+    fn poll_write(
+        mut self: Pin<&mut Self>,
+        cx: &mut Context<'_>,
+        buf: &[u8],
+    ) -> Poll<io::Result<usize>> {
+        if self.closed {
+            return Poll::Ready(Err(io::Error::new(
+                io::ErrorKind::BrokenPipe,
+                "browser writable stream is closed",
+            )));
+        }
+
+        if buf.is_empty() {
+            return Poll::Ready(Ok(0));
+        }
+
+        if let Some((requested, pending)) = self.pending_write.as_mut() {
+            return match Pin::new(pending).poll(cx) {
+                Poll::Pending => Poll::Pending,
+                Poll::Ready(Err(err)) => {
+                    self.pending_write = None;
+                    Poll::Ready(Err(js_host_io_error(
+                        &err,
+                        "WritableStreamDefaultWriter.write",
+                    )))
+                }
+                Poll::Ready(Ok(_)) => {
+                    let written = *requested;
+                    self.pending_write = None;
+                    Poll::Ready(Ok(written))
+                }
+            };
+        }
+
+        match self.poll_ready(cx) {
+            Poll::Pending => return Poll::Pending,
+            Poll::Ready(Err(err)) => return Poll::Ready(Err(err)),
+            Poll::Ready(Ok(())) => {}
+        }
+
+        let chunk = Uint8Array::new_with_length(buf.len() as u32);
+        chunk.copy_from(buf);
+        self.pending_write = Some((
+            buf.len(),
+            JsFuture::from(self.writer.write_with_chunk(&chunk.into())),
+        ));
+
+        match self.pending_write.as_mut() {
+            Some((requested, pending)) => match Pin::new(pending).poll(cx) {
+                Poll::Pending => Poll::Pending,
+                Poll::Ready(Err(err)) => {
+                    self.pending_write = None;
+                    Poll::Ready(Err(js_host_io_error(
+                        &err,
+                        "WritableStreamDefaultWriter.write",
+                    )))
+                }
+                Poll::Ready(Ok(_)) => {
+                    let written = *requested;
+                    self.pending_write = None;
+                    Poll::Ready(Ok(written))
+                }
+            },
+            None => Poll::Ready(Err(io::Error::other(
+                "internal error: missing pending write after scheduling",
+            ))),
+        }
+    }
+
+    fn poll_flush(mut self: Pin<&mut Self>, cx: &mut Context<'_>) -> Poll<io::Result<()>> {
+        match self.poll_inflight_write(cx) {
+            Poll::Pending => return Poll::Pending,
+            Poll::Ready(Err(err)) => return Poll::Ready(Err(err)),
+            Poll::Ready(Ok(())) => {}
+        }
+        self.poll_ready(cx)
+    }
+
+    fn poll_shutdown(mut self: Pin<&mut Self>, cx: &mut Context<'_>) -> Poll<io::Result<()>> {
+        if self.closed {
+            return Poll::Ready(Ok(()));
+        }
+
+        match self.poll_inflight_write(cx) {
+            Poll::Pending => return Poll::Pending,
+            Poll::Ready(Err(err)) => return Poll::Ready(Err(err)),
+            Poll::Ready(Ok(())) => {}
+        }
+
+        match self.poll_ready(cx) {
+            Poll::Pending => return Poll::Pending,
+            Poll::Ready(Err(err)) => return Poll::Ready(Err(err)),
+            Poll::Ready(Ok(())) => {}
+        }
+
+        if self.pending_close.is_none() {
+            self.pending_close = Some(JsFuture::from(self.writer.close()));
+        }
+
+        let pending = self
+            .pending_close
+            .as_mut()
+            .expect("pending_close initialized");
+        match Pin::new(pending).poll(cx) {
+            Poll::Pending => Poll::Pending,
+            Poll::Ready(Err(err)) => {
+                self.pending_close = None;
+                Poll::Ready(Err(js_host_io_error(
+                    &err,
+                    "WritableStreamDefaultWriter.close",
+                )))
+            }
+            Poll::Ready(Ok(_)) => {
+                self.pending_close = None;
+                self.closed = true;
+                Poll::Ready(Ok(()))
+            }
+        }
+    }
+}
+
 // ============================================================================
 // Browser ReadableStream bridge
 // ============================================================================
@@ -335,6 +722,25 @@ impl<R> BrowserReadableStream<R> {
     #[must_use]
     pub fn into_inner(self) -> R {
         self.source
+    }
+}
+
+#[cfg(target_arch = "wasm32")]
+impl BrowserReadableStream<WasmReadableStreamSource> {
+    /// Creates a browser-readable bridge backed by a real WHATWG `ReadableStream`.
+    pub fn from_web_readable_stream(
+        stream: &ReadableStream,
+        config: BrowserStreamConfig,
+    ) -> Result<Self, BrowserStreamError> {
+        let source = WasmReadableStreamSource::new(stream)?;
+        Ok(Self::new(source, config))
+    }
+
+    /// Creates a browser-readable bridge with default stream configuration.
+    pub fn from_web_readable_stream_with_defaults(
+        stream: &ReadableStream,
+    ) -> Result<Self, BrowserStreamError> {
+        Self::from_web_readable_stream(stream, BrowserStreamConfig::default())
     }
 }
 
@@ -554,6 +960,25 @@ impl<W> BrowserWritableStream<W> {
             BackpressureStrategy::HighWaterMark(hwm) => self.buffered >= hwm,
             BackpressureStrategy::Unbuffered => false,
         }
+    }
+}
+
+#[cfg(target_arch = "wasm32")]
+impl BrowserWritableStream<WasmWritableStreamSink> {
+    /// Creates a browser-writable bridge backed by a real WHATWG `WritableStream`.
+    pub fn from_web_writable_stream(
+        stream: &WritableStream,
+        config: BrowserStreamConfig,
+    ) -> Result<Self, BrowserStreamError> {
+        let sink = WasmWritableStreamSink::new(stream)?;
+        Ok(Self::new(sink, config))
+    }
+
+    /// Creates a browser-writable bridge with default stream configuration.
+    pub fn from_web_writable_stream_with_defaults(
+        stream: &WritableStream,
+    ) -> Result<Self, BrowserStreamError> {
+        Self::from_web_writable_stream(stream, BrowserStreamConfig::default())
     }
 }
 
@@ -787,6 +1212,26 @@ impl BrowserStreamIoCap {
     pub fn open_writable<W>(&self, sink: W) -> BrowserWritableStream<W> {
         self.record_open();
         BrowserWritableStream::new(sink, self.config.clone())
+    }
+
+    #[cfg(target_arch = "wasm32")]
+    /// Wraps a WHATWG `ReadableStream` in a host-backed browser stream bridge.
+    pub fn open_web_readable(
+        &self,
+        stream: &ReadableStream,
+    ) -> Result<BrowserReadableStream<WasmReadableStreamSource>, BrowserStreamError> {
+        self.record_open();
+        BrowserReadableStream::from_web_readable_stream(stream, self.config.clone())
+    }
+
+    #[cfg(target_arch = "wasm32")]
+    /// Wraps a WHATWG `WritableStream` in a host-backed browser stream bridge.
+    pub fn open_web_writable(
+        &self,
+        stream: &WritableStream,
+    ) -> Result<BrowserWritableStream<WasmWritableStreamSink>, BrowserStreamError> {
+        self.record_open();
+        BrowserWritableStream::from_web_writable_stream(stream, self.config.clone())
     }
 }
 
@@ -1183,6 +1628,31 @@ mod tests {
         // Flush → buffer cleared
         let _ = Pin::new(&mut stream).poll_flush(&mut cx);
         assert!(!stream.is_backpressured());
+    }
+
+    #[test]
+    fn writable_stream_abort_clears_backpressure_state() {
+        let sink = MemSink::default();
+        let config = BrowserStreamConfig {
+            write_backpressure: BackpressureStrategy::HighWaterMark(4),
+            ..BrowserStreamConfig::default()
+        };
+        let mut stream = BrowserWritableStream::new(sink, config);
+
+        let waker = futures_task_noop_waker();
+        let mut cx = Context::from_waker(&waker);
+
+        let _ = Pin::new(&mut stream).poll_write(&mut cx, b"1234");
+        assert!(stream.is_backpressured());
+
+        stream.abort("route change");
+        assert_eq!(stream.abort_reason(), Some("route change"));
+        assert_eq!(stream.buffered(), 0);
+        assert_eq!(stream.state(), BrowserStreamState::Errored);
+        assert!(!stream.is_backpressured());
+
+        let result = Pin::new(&mut stream).poll_write(&mut cx, b"5");
+        assert!(matches!(result, Poll::Ready(Err(_))));
     }
 
     #[test]

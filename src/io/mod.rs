@@ -79,6 +79,8 @@ pub use browser_stream::{
     BackpressureStrategy, BrowserReadableStream, BrowserStreamConfig, BrowserStreamError,
     BrowserStreamIoCap, BrowserStreamState, BrowserWritableStream, StreamStats,
 };
+#[cfg(target_arch = "wasm32")]
+pub use browser_stream::{WasmReadableStreamSource, WasmWritableStreamSink};
 pub use buf_reader::BufReader;
 pub use buf_writer::BufWriter;
 pub use cap::{

@@ -2293,6 +2293,19 @@ mod tests {
     }
 
     #[test]
+    fn fetch_authority_denies_ungranted_method() {
+        let authority = FetchAuthority::deny_all()
+            .grant_origin("https://api.example.com")
+            .grant_method(FetchMethod::Get)
+            .with_max_header_count(4);
+        let request = FetchRequest::new(FetchMethod::Post, "https://api.example.com/v1/data");
+        assert_eq!(
+            authority.authorize(&request),
+            Err(FetchPolicyError::MethodDenied(FetchMethod::Post))
+        );
+    }
+
+    #[test]
     fn fetch_authority_denies_credentials_when_disallowed() {
         let authority = FetchAuthority::deny_all()
             .grant_origin("https://api.example.com")
@@ -2316,6 +2329,21 @@ mod tests {
         let request = FetchRequest::new(FetchMethod::Get, "https://api.example.com/v1/data")
             .with_credentials();
         assert_eq!(authority.authorize(&request), Ok(()));
+    }
+
+    #[test]
+    fn fetch_authority_enforces_header_budget() {
+        let authority = FetchAuthority::deny_all()
+            .grant_origin("https://api.example.com")
+            .grant_method(FetchMethod::Get)
+            .with_max_header_count(1);
+        let request = FetchRequest::new(FetchMethod::Get, "https://api.example.com/v1/data")
+            .with_header("x-trace-id", "t-1")
+            .with_header("x-request-id", "r-1");
+        assert_eq!(
+            authority.authorize(&request),
+            Err(FetchPolicyError::TooManyHeaders { count: 2, limit: 1 })
+        );
     }
 
     #[test]
@@ -2701,6 +2729,25 @@ mod tests {
         assert_eq!(
             cap.authorize(&denied),
             Err(StoragePolicyError::NamespaceDenied("session:v1".to_owned()))
+        );
+    }
+
+    #[test]
+    fn storage_authority_denies_ungranted_operation() {
+        let cap = BrowserStorageIoCap::new(
+            StorageAuthority::deny_all()
+                .grant_backend(StorageBackend::LocalStorage)
+                .grant_operation(StorageOperation::Get)
+                .grant_namespace("prefs:*"),
+            StorageQuotaPolicy::default(),
+            StorageConsistencyPolicy::ImmediateReadAfterWrite,
+            StorageRedactionPolicy::default(),
+        );
+
+        let request = StorageRequest::set(StorageBackend::LocalStorage, "prefs:v1", "theme", 4);
+        assert_eq!(
+            cap.authorize(&request),
+            Err(StoragePolicyError::OperationDenied(StorageOperation::Set))
         );
     }
 

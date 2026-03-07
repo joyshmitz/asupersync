@@ -705,6 +705,18 @@ mod tests {
     }
 
     #[test]
+    fn handshake_force_close_preserves_supplied_reason() {
+        let mut handshake = CloseHandshake::new();
+        let reason = CloseReason::with_text(CloseCode::GoingAway, "cancelled by region close");
+
+        handshake.force_close(reason.clone());
+
+        assert_eq!(handshake.state(), CloseState::Closed);
+        assert_eq!(handshake.our_reason(), Some(&reason));
+        assert!(handshake.peer_reason().is_none());
+    }
+
+    #[test]
     fn close_config_builder() {
         let config = CloseConfig::new()
             .with_timeout(Duration::from_secs(10))
