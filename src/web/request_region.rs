@@ -253,7 +253,7 @@ impl RequestContext<'_> {
     #[inline]
     #[must_use]
     pub fn header(&self, name: &str) -> Option<&str> {
-        self.request.headers.get(name).map(String::as_str)
+        self.request.header(name)
     }
 }
 
@@ -538,7 +538,7 @@ mod tests {
         let cx = test_cx();
         let mut req = test_request("DELETE", "/users/99");
         req.headers
-            .insert("Authorization".to_string(), "Bearer token".to_string());
+            .insert("authorization".to_string(), "Bearer token".to_string());
         let mut params = std::collections::HashMap::new();
         params.insert("id".to_string(), "99".to_string());
         req.path_params = params;
@@ -551,6 +551,7 @@ mod tests {
             assert_eq!(ctx.path_param("id"), Some("99"));
             assert_eq!(ctx.path_param("missing"), None);
             assert_eq!(ctx.header("Authorization"), Some("Bearer token"));
+            assert_eq!(ctx.header("authorization"), Some("Bearer token"));
             assert_eq!(ctx.header("Missing"), None);
             let _readonly = ctx.cx_readonly();
             let _narrow = ctx.cx_narrow::<cap::CapSet<true, true, false, false, false>>();

@@ -34,7 +34,7 @@ use crate::net::unix::stream::UCred;
 use crate::runtime::io_driver::IoRegistration;
 use crate::runtime::reactor::Interest;
 use nix::errno::Errno;
-use nix::sys::socket::{self, MsgFlags};
+use nix::sys::socket::{self, MsgFlags, SockaddrLike};
 use std::io;
 use std::os::unix::net::{self, SocketAddr};
 use std::path::{Path, PathBuf};
@@ -649,6 +649,10 @@ impl UnixDatagram {
     }
 
     fn socket_addr_from_unix_addr(addr: &socket::UnixAddr) -> io::Result<SocketAddr> {
+        if addr.len() as usize <= std::mem::offset_of!(libc::sockaddr_un, sun_path) {
+            return net::UnixDatagram::unbound()?.local_addr();
+        }
+
         if let Some(path) = addr.path() {
             return SocketAddr::from_pathname(path)
                 .map_err(|e| io::Error::new(io::ErrorKind::InvalidData, e));
@@ -661,10 +665,9 @@ impl UnixDatagram {
                 .map_err(|e| io::Error::new(io::ErrorKind::InvalidData, e));
         }
 
-        // "Unnamed" unix socket address (e.g., socketpair-created endpoints).
-        // std represents this as an empty pathname.
-        SocketAddr::from_pathname(Path::new(""))
-            .map_err(|e| io::Error::new(io::ErrorKind::InvalidData, e))
+        // std does not expose a public constructor for unnamed unix socket
+        // addresses, so synthesize one through a temporary unbound socket.
+        net::UnixDatagram::unbound()?.local_addr()
     }
 
     /// Peeks at incoming data and returns the source address.
@@ -890,6 +893,64 @@ mod tests {
             );
         });
         crate::test_complete!("test_datagram_peek_from");
+    }
+
+    #[test]
+    fn test_peek_from_unbound_sender_reports_unnamed_addr() {
+        init_test("test_datagram_peek_from_unbound_sender_reports_unnamed_addr");
+        futures_lite::future::block_on(async {
+            let dir = tempdir().expect("create temp dir");
+            let server_path = dir.path().join("server.sock");
+
+            let mut server = UnixDatagram::bind(&server_path).expect("bind server failed");
+            let mut client = UnixDatagram::unbound().expect("unbound failed");
+
+            client
+                .send_to(b"peek", &server_path)
+                .await
+                .expect("send_to failed");
+
+            let mut peek_buf = [0u8; 4];
+            let (peeked, peek_addr) = server
+                .peek_from(&mut peek_buf)
+                .await
+                .expect("peek_from failed");
+            crate::assert_with_log!(peeked == 4, "peek bytes", 4, peeked);
+            crate::assert_with_log!(&peek_buf == b"peek", "peek data", b"peek", peek_buf);
+            crate::assert_with_log!(
+                peek_addr.is_unnamed(),
+                "peek addr unnamed",
+                true,
+                peek_addr.is_unnamed()
+            );
+            crate::assert_with_log!(
+                peek_addr.as_pathname().is_none(),
+                "peek addr pathname",
+                "None",
+                format!("{:?}", peek_addr.as_pathname())
+            );
+
+            let mut recv_buf = [0u8; 4];
+            let (received, recv_addr) = server
+                .recv_from(&mut recv_buf)
+                .await
+                .expect("recv_from failed");
+            crate::assert_with_log!(received == 4, "recv bytes", 4, received);
+            crate::assert_with_log!(&recv_buf == b"peek", "recv data", b"peek", recv_buf);
+            crate::assert_with_log!(
+                recv_addr.is_unnamed(),
+                "recv addr unnamed",
+                true,
+                recv_addr.is_unnamed()
+            );
+            crate::assert_with_log!(
+                recv_addr.as_pathname().is_none(),
+                "recv addr pathname",
+                "None",
+                format!("{:?}", recv_addr.as_pathname())
+            );
+        });
+        crate::test_complete!("test_datagram_peek_from_unbound_sender_reports_unnamed_addr");
     }
 
     #[test]

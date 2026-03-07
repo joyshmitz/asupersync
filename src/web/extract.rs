@@ -74,10 +74,27 @@ impl Request {
     }
 
     /// Set a header.
+    ///
+    /// Header names are normalized to lowercase so the lightweight web stack
+    /// can treat them case-insensitively.
     #[must_use]
     pub fn with_header(mut self, name: impl Into<String>, value: impl Into<String>) -> Self {
-        self.headers.insert(name.into(), value.into());
+        self.headers
+            .insert(name.into().to_ascii_lowercase(), value.into());
         self
+    }
+
+    /// Returns a header value using HTTP's case-insensitive matching rules.
+    #[must_use]
+    pub fn header(&self, name: &str) -> Option<&str> {
+        if let Some(value) = self.headers.get(name) {
+            return Some(value.as_str());
+        }
+
+        self.headers
+            .iter()
+            .find(|(key, _)| key.eq_ignore_ascii_case(name))
+            .map(|(_, value)| value.as_str())
     }
 
     /// Set path parameters (used internally by the router).
@@ -805,6 +822,19 @@ mod tests {
 
         let headers = HashMap::<String, String>::from_request_parts(&req).unwrap();
         assert_eq!(headers.get("x-request-id").unwrap(), "abc123");
+    }
+
+    #[test]
+    fn request_header_lookup_is_case_insensitive() {
+        let mut req = Request::new("GET", "/").with_header("X-Trace-Id", "trace-123");
+        req.headers
+            .insert("Authorization".to_string(), "Bearer token".to_string());
+
+        assert_eq!(req.header("x-trace-id"), Some("trace-123"));
+        assert_eq!(req.header("X-TRACE-ID"), Some("trace-123"));
+        assert_eq!(req.header("authorization"), Some("Bearer token"));
+        assert_eq!(req.header("AUTHORIZATION"), Some("Bearer token"));
+        assert_eq!(req.header("missing"), None);
     }
 
     #[test]

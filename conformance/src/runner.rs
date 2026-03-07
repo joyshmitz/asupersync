@@ -1046,7 +1046,7 @@ mod tests {
         }
 
         fn accept(
-            &self,
+            &mut self,
         ) -> Pin<Box<dyn Future<Output = std::io::Result<(Self::Stream, SocketAddr)>> + Send + '_>>
         {
             Box::pin(async { panic!("dummy tcp accept") })

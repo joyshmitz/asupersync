@@ -150,7 +150,8 @@ impl Response {
     /// Add a header to the response.
     #[must_use]
     pub fn header(mut self, name: impl Into<String>, value: impl Into<String>) -> Self {
-        self.headers.insert(name.into(), value.into());
+        self.headers
+            .insert(name.into().to_ascii_lowercase(), value.into());
         self
     }
 }
@@ -226,7 +227,7 @@ impl<T: IntoResponse> IntoResponse for (StatusCode, Vec<(String, String)>, T) {
         let mut resp = self.2.into_response();
         resp.status = self.0;
         for (k, v) in self.1 {
-            resp.headers.insert(k, v);
+            resp.headers.insert(k.to_ascii_lowercase(), v);
         }
         resp
     }

@@ -83,7 +83,8 @@ impl StaticFiles {
     /// Add a custom response header to all served files.
     #[must_use]
     pub fn header(mut self, name: impl Into<String>, value: impl Into<String>) -> Self {
-        self.custom_headers.insert(name.into(), value.into());
+        self.custom_headers
+            .insert(name.into().to_ascii_lowercase(), value.into());
         self
     }
 
@@ -187,7 +188,7 @@ pub struct StaticFilesHandler {
 
 impl Handler for StaticFilesHandler {
     fn call(&self, req: super::extract::Request) -> Response {
-        let if_none_match = req.headers.get("if-none-match").cloned();
+        let if_none_match = req.header("if-none-match").map(str::to_owned);
         let request_path = &req.path;
 
         self.config.resolve_path(request_path).map_or_else(
@@ -675,8 +676,8 @@ mod tests {
         let etag = resp1.headers.get("etag").unwrap().clone();
 
         // Second request with If-None-Match.
-        let mut req2 = super::super::extract::Request::new("GET", "/hello.txt");
-        req2.headers.insert("if-none-match".to_string(), etag);
+        let req2 = super::super::extract::Request::new("GET", "/hello.txt")
+            .with_header("If-None-Match", etag);
         let resp2 = handler.call(req2);
         assert_eq!(resp2.status, StatusCode::NOT_MODIFIED);
     }

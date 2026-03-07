@@ -275,14 +275,11 @@ impl TcpListenerApi for TcpListener {
     fn accept(
         &self,
     ) -> impl std::future::Future<Output = io::Result<(Self::Stream, SocketAddr)>> + Send {
-        // Use poll_fn which is Send since TcpListener is not Send due to Mutex
-        // We need to wrap in an async block that captures self
-        let accept_fn = move || poll_fn(|cx| self.poll_accept(cx));
-        async move { accept_fn().await }
+        std::future::poll_fn(|cx| self.poll_accept(cx))
     }
 
     fn poll_accept(&self, cx: &mut Context<'_>) -> Poll<io::Result<(Self::Stream, SocketAddr)>> {
-        Self::poll_accept(self, cx)
+        self.poll_accept(cx)
     }
 
     fn local_addr(&self) -> io::Result<SocketAddr> {

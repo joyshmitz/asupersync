@@ -501,7 +501,7 @@ pub trait TcpListener: Send {
 
     /// Accept a connection.
     fn accept(
-        &self,
+        &mut self,
     ) -> Pin<Box<dyn Future<Output = io::Result<(Self::Stream, SocketAddr)>> + Send + '_>>;
 }
 

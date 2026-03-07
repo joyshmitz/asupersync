@@ -218,7 +218,7 @@ pub fn io_003_tcp_echo<RT: RuntimeInterface>() -> ConformanceTest<RT> {
         |rt| {
             rt.block_on(async {
                 // Bind listener to any available port
-                let listener = match rt.tcp_listen("127.0.0.1:0").await {
+                let mut listener = match rt.tcp_listen("127.0.0.1:0").await {
                     Ok(l) => l,
                     Err(e) => return TestResult::failed(format!("Failed to bind listener: {e}")),
                 };
@@ -364,7 +364,7 @@ pub fn io_004_tcp_concurrent<RT: RuntimeInterface>() -> ConformanceTest<RT> {
             rt.block_on(async {
                 const NUM_CLIENTS: usize = 10;
 
-                let listener = match rt.tcp_listen("127.0.0.1:0").await {
+                let mut listener = match rt.tcp_listen("127.0.0.1:0").await {
                     Ok(l) => l,
                     Err(e) => return TestResult::failed(format!("Failed to bind listener: {e}")),
                 };
@@ -683,7 +683,7 @@ pub fn io_007_read_timeout<RT: RuntimeInterface>() -> ConformanceTest<RT> {
         },
         |rt| {
             rt.block_on(async {
-                let listener = match rt.tcp_listen("127.0.0.1:0").await {
+                let mut listener = match rt.tcp_listen("127.0.0.1:0").await {
                     Ok(l) => l,
                     Err(e) => return TestResult::failed(format!("Failed to bind listener: {e}")),
                 };

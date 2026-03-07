@@ -241,6 +241,10 @@ fn append_vary_header(resp: &mut Response, token: &str) {
     resp.headers.insert("vary".to_string(), updated);
 }
 
+fn normalize_header_name(name: impl Into<String>) -> String {
+    name.into().to_ascii_lowercase()
+}
+
 // ─── TimeoutMiddleware ──────────────────────────────────────────────────────
 
 /// Middleware that enforces a request deadline.
@@ -700,7 +704,7 @@ impl<H: Handler> RequestIdMiddleware<H> {
     pub fn new(inner: H, header_name: impl Into<String>) -> Self {
         Self {
             inner,
-            header_name: header_name.into(),
+            header_name: normalize_header_name(header_name),
             counter: Arc::new(AtomicU64::new(1)),
         }
     }
@@ -712,7 +716,7 @@ impl<H: Handler> RequestIdMiddleware<H> {
     pub fn shared(inner: H, header_name: impl Into<String>, counter: Arc<AtomicU64>) -> Self {
         Self {
             inner,
-            header_name: header_name.into(),
+            header_name: normalize_header_name(header_name),
             counter,
         }
     }
@@ -769,6 +773,10 @@ impl<H: Handler> RequestTraceMiddleware<H> {
     /// Wrap a handler with request/response tracing.
     #[must_use]
     pub fn new(inner: H, policy: RequestTracePolicy) -> Self {
+        let policy = RequestTracePolicy {
+            duration_header: policy.duration_header.map(normalize_header_name),
+            trace_header: policy.trace_header.map(normalize_header_name),
+        };
         Self { inner, policy }
     }
 
@@ -1112,7 +1120,7 @@ impl<H: Handler> SetResponseHeaderMiddleware<H> {
     ) -> Self {
         Self {
             inner,
-            name: name.into(),
+            name: normalize_header_name(name),
             value: value.into(),
             mode,
         }
@@ -1726,6 +1734,18 @@ mod tests {
         );
     }
 
+    #[test]
+    fn request_id_normalizes_mixed_case_response_header_name() {
+        let mw = RequestIdMiddleware::new(FnHandler::new(ok_handler), "X-Request-Id");
+        let req = Request::new("GET", "/req-id").with_header("x-request-id", "abc-123");
+        let resp = mw.call(req);
+        assert_eq!(
+            resp.headers.get("x-request-id"),
+            Some(&"abc-123".to_string())
+        );
+        assert!(!resp.headers.contains_key("X-Request-Id"));
+    }
+
     // --- AuthMiddleware ---
 
     #[test]
@@ -2225,6 +2245,30 @@ mod tests {
         );
     }
 
+    #[test]
+    fn request_trace_normalizes_mixed_case_policy_headers() {
+        fn header_handler() -> Response {
+            Response::new(StatusCode::OK, b"ok".to_vec()).header("x-trace-id", "inner-trace")
+        }
+
+        let mw = RequestTraceMiddleware::new(
+            FnHandler::new(header_handler),
+            RequestTracePolicy {
+                duration_header: Some("X-Response-Time-Ms".to_string()),
+                trace_header: Some("X-Trace-Id".to_string()),
+            },
+        );
+        let resp = mw.call(make_request().with_header("x-request-id", "outer-trace"));
+
+        assert!(resp.headers.contains_key("x-response-time-ms"));
+        assert!(!resp.headers.contains_key("X-Response-Time-Ms"));
+        assert_eq!(
+            resp.headers.get("x-trace-id"),
+            Some(&"inner-trace".to_string())
+        );
+        assert!(!resp.headers.contains_key("X-Trace-Id"));
+    }
+
     // --- CatchPanicMiddleware ---
 
     #[test]
@@ -2367,6 +2411,23 @@ mod tests {
             resp.headers.get("x-content-type-options"),
             Some(&"nosniff".to_string())
         );
+    }
+
+    #[test]
+    fn set_header_if_missing_normalizes_mixed_case_name() {
+        fn header_handler() -> Response {
+            Response::new(StatusCode::OK, b"ok".to_vec()).header("x-custom", "original")
+        }
+
+        let mw = SetResponseHeaderMiddleware::if_missing(
+            FnHandler::new(header_handler),
+            "X-Custom",
+            "new",
+        );
+        let resp = mw.call(make_request());
+
+        assert_eq!(resp.headers.get("x-custom"), Some(&"original".to_string()));
+        assert!(!resp.headers.contains_key("X-Custom"));
     }
 
     // --- Expanded MiddlewareStack tests ---

@@ -83,9 +83,7 @@ impl FromRequest for WebSocketUpgrade {
 
         // Validate Upgrade header.
         let upgrade = req
-            .headers
-            .get("upgrade")
-            .or_else(|| req.headers.get("Upgrade"))
+            .header("upgrade")
             .ok_or_else(|| ExtractionError::bad_request("missing Upgrade header"))?;
         if !upgrade.eq_ignore_ascii_case("websocket") {
             return Err(ExtractionError::bad_request(format!(
@@ -95,9 +93,7 @@ impl FromRequest for WebSocketUpgrade {
 
         // Validate Connection header contains "Upgrade".
         let connection = req
-            .headers
-            .get("connection")
-            .or_else(|| req.headers.get("Connection"))
+            .header("connection")
             .ok_or_else(|| ExtractionError::bad_request("missing Connection header"))?;
         if !connection.to_ascii_lowercase().contains("upgrade") {
             return Err(ExtractionError::bad_request(format!(
@@ -107,9 +103,7 @@ impl FromRequest for WebSocketUpgrade {
 
         // Validate Sec-WebSocket-Version.
         let version = req
-            .headers
-            .get("sec-websocket-version")
-            .or_else(|| req.headers.get("Sec-WebSocket-Version"))
+            .header("sec-websocket-version")
             .ok_or_else(|| ExtractionError::bad_request("missing Sec-WebSocket-Version header"))?;
         if version != "13" {
             return Err(ExtractionError::bad_request(format!(
@@ -119,9 +113,7 @@ impl FromRequest for WebSocketUpgrade {
 
         // Validate and extract Sec-WebSocket-Key.
         let key = req
-            .headers
-            .get("sec-websocket-key")
-            .or_else(|| req.headers.get("Sec-WebSocket-Key"))
+            .header("sec-websocket-key")
             .ok_or_else(|| ExtractionError::bad_request("missing Sec-WebSocket-Key header"))?;
 
         // Validate key is valid base64 of 16 bytes.
@@ -138,9 +130,7 @@ impl FromRequest for WebSocketUpgrade {
 
         // Parse requested protocols.
         let requested_protocols = req
-            .headers
-            .get("sec-websocket-protocol")
-            .or_else(|| req.headers.get("Sec-WebSocket-Protocol"))
+            .header("sec-websocket-protocol")
             .map(|v| {
                 v.split(',')
                     .map(str::trim)
@@ -152,9 +142,7 @@ impl FromRequest for WebSocketUpgrade {
 
         // Parse requested extensions.
         let requested_extensions = req
-            .headers
-            .get("sec-websocket-extensions")
-            .or_else(|| req.headers.get("Sec-WebSocket-Extensions"))
+            .header("sec-websocket-extensions")
             .map(|v| {
                 v.split(',')
                     .map(str::trim)
@@ -312,6 +300,18 @@ mod tests {
         let req = ws_request();
         let upgrade = WebSocketUpgrade::from_request(req).unwrap();
         // RFC 6455 example: dGhlIHNhbXBsZSBub25jZQ== → s3pPLMBiTxaQ9kYGzzhZRbK+xOo=
+        assert_eq!(upgrade.accept_key(), "s3pPLMBiTxaQ9kYGzzhZRbK+xOo=");
+    }
+
+    #[test]
+    fn valid_upgrade_request_accepts_mixed_case_header_names() {
+        let req = Request::new("GET", "/ws")
+            .with_header("UpGrAdE", "websocket")
+            .with_header("cOnNeCtIoN", "Upgrade")
+            .with_header("SeC-WebSocket-Version", "13")
+            .with_header("sEc-WebSocket-Key", "dGhlIHNhbXBsZSBub25jZQ==");
+
+        let upgrade = WebSocketUpgrade::from_request(req).unwrap();
         assert_eq!(upgrade.accept_key(), "s3pPLMBiTxaQ9kYGzzhZRbK+xOo=");
     }
 

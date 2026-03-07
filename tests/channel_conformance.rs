@@ -326,10 +326,10 @@ impl TcpListener for AsupersyncTcpListener {
         self.0.local_addr()
     }
     fn accept(
-        &self,
+        &mut self,
     ) -> Pin<Box<dyn Future<Output = io::Result<(Self::Stream, SocketAddr)>> + Send + '_>> {
-        let listener = &self.0;
         Box::pin(async move {
+            let listener = &mut self.0;
             let (stream, addr) = listener.accept().await?;
             Ok((AsupersyncTcpStream(stream), addr))
         })
