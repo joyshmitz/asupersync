@@ -548,6 +548,7 @@ impl Worker {
                 guard.completed = true;
             }
         }
+        let _ = guard.completed;
         self.metrics.scheduler_tick(1, poll_start.elapsed());
     }
 

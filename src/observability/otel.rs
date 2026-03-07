@@ -220,7 +220,7 @@ impl CardinalityTracker {
 
     /// Hash labels for tracking.
     fn hash_labels(labels: &[KeyValue]) -> u64 {
-        use std::collections::hash_map::DefaultHasher;
+        use crate::util::DetHasher;
         use std::hash::{Hash, Hasher};
 
         // Treat label sets as order-insensitive. Different construction order of
@@ -233,7 +233,7 @@ impl CardinalityTracker {
             a_key.cmp(b_key).then_with(|| a_val.cmp(b_val))
         });
 
-        let mut hasher = DefaultHasher::new();
+        let mut hasher = DetHasher::default();
         for (key, value) in normalized {
             key.hash(&mut hasher);
             value.hash(&mut hasher);

@@ -247,7 +247,7 @@ impl<T: Clone> SendPermit<'_, T> {
             return 0;
         }
 
-        let _popped = if inner.buffer.len() == inner.capacity {
+        let popped = if inner.buffer.len() == inner.capacity {
             inner.buffer.pop_front()
         } else {
             None
@@ -262,6 +262,7 @@ impl<T: Clone> SendPermit<'_, T> {
         let wakers_to_wake: SmallVec<[Waker; 4]> = inner.wakers.drain_values().collect();
 
         drop(inner);
+        drop(popped);
 
         for waker in wakers_to_wake {
             waker.wake();
@@ -420,11 +421,15 @@ impl<T> Clone for Receiver<T> {
 impl<T> Drop for Receiver<T> {
     fn drop(&mut self) {
         if self.channel.receiver_count.fetch_sub(1, Ordering::AcqRel) == 1 {
-            let mut inner = self.channel.inner.lock();
-            // Re-check under lock in case a sender concurrently called `subscribe`
-            if self.channel.receiver_count.load(Ordering::Acquire) == 0 {
-                inner.buffer.clear();
+            let mut to_drop = None;
+            {
+                let mut inner = self.channel.inner.lock();
+                // Re-check under lock in case a sender concurrently called `subscribe`
+                if self.channel.receiver_count.load(Ordering::Acquire) == 0 {
+                    to_drop = Some(std::mem::take(&mut inner.buffer));
+                }
             }
+            drop(to_drop);
         }
     }
 }

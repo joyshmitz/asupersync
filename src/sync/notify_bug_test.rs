@@ -64,7 +64,7 @@ fn notify_one_then_broadcast_does_not_create_phantom_token() {
 }
 
 #[test]
-fn dropped_notify_one_then_broadcast_waiter_does_not_restore_token() {
+fn dropped_notify_one_then_broadcast_waiter_restores_token() {
     let notify = Arc::new(Notify::new());
     let waker = noop_waker();
     let mut cx = Context::from_waker(&waker);

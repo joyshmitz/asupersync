@@ -313,6 +313,7 @@ impl<'a, T> Future for LockFuture<'a, '_, T> {
             } else {
                 unreachable!("waiter removed from queue without acquiring lock");
             }
+            drop(state);
             return Poll::Pending;
         }
 
@@ -322,8 +323,8 @@ impl<'a, T> Future for LockFuture<'a, '_, T> {
             waker: context.waker().clone(),
             id,
         });
-        self.waiter_id = Some(id);
         drop(state);
+        self.waiter_id = Some(id);
         Poll::Pending
     }
 }
@@ -494,6 +495,7 @@ impl<T> OwnedMutexGuard<T> {
                     } else {
                         unreachable!("waiter removed from queue without acquiring lock");
                     }
+                    drop(state);
                     return Poll::Pending;
                 }
 
@@ -503,8 +505,8 @@ impl<T> OwnedMutexGuard<T> {
                     waker: context.waker().clone(),
                     id,
                 });
-                this.waiter_id = Some(id);
                 drop(state);
+                this.waiter_id = Some(id);
                 Poll::Pending
             }
         }

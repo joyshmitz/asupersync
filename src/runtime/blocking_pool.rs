@@ -664,6 +664,7 @@ fn spawn_thread_on_inner(inner: &Arc<BlockingPoolInner>) {
         }
 
         guard.retired_with_claim = blocking_worker_loop(&inner_clone);
+        let _ = guard.retired_with_claim;
     }) {
         Ok(handle) => {
             let mut handles = inner.thread_handles.lock();

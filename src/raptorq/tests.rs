@@ -492,12 +492,12 @@ mod conformance {
     use crate::raptorq::systematic::SystematicEncoder;
     use crate::raptorq::test_log_schema::UnitLogEntry;
     use crate::types::symbol::ObjectId;
-    use std::collections::hash_map::DefaultHasher;
+    use crate::util::DetHasher;
     use std::hash::{Hash, Hasher};
 
     /// Compute a content hash for verification.
     fn content_hash(data: &[Vec<u8>]) -> u64 {
-        let mut hasher = DefaultHasher::new();
+        let mut hasher = DetHasher::default();
         for chunk in data {
             chunk.hash(&mut hasher);
         }

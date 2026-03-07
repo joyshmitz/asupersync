@@ -441,13 +441,21 @@ impl TimerWheel {
 
     /// Registers a timer that fires at the given deadline.
     ///
-    /// # Panics
-    ///
-    /// Panics if the timer duration exceeds the configured maximum.
-    /// Use [`try_register`][Self::try_register] for a non-panicking version.
-    pub fn register(&mut self, deadline: Time, waker: Waker) -> TimerHandle {
+    /// If the timer duration exceeds the configured maximum, the deadline is
+    /// silently clamped to the maximum allowed duration. The timer will fire
+    /// early, and the caller is expected to check if the true deadline has
+    /// been reached and re-register if necessary.
+    pub fn register(&mut self, mut deadline: Time, waker: Waker) -> TimerHandle {
+        let current = self.current_time();
+        if deadline > current {
+            let duration_ns = deadline.as_nanos().saturating_sub(current.as_nanos());
+            if duration_ns > self.config.max_timer_duration.as_nanos() as u64 {
+                deadline =
+                    current.saturating_add_nanos(self.config.max_timer_duration.as_nanos() as u64);
+            }
+        }
         self.try_register(deadline, waker)
-            .expect("timer duration exceeds maximum")
+            .expect("timer duration was clamped but still exceeded maximum")
     }
 
     /// Attempts to register a timer with validation.

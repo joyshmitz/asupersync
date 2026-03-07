@@ -1529,7 +1529,7 @@ mod tests {
 
     #[test]
     fn codegen_deterministic_across_runs() {
-        use std::collections::hash_map::DefaultHasher;
+        use crate::util::DetHasher;
         use std::hash::{Hash, Hasher};
 
         let protocols = vec![
@@ -1567,9 +1567,9 @@ mod tests {
                 );
 
                 // Hash-based golden check
-                let mut h1 = DefaultHasher::new();
+                let mut h1 = DetHasher::default();
                 p1.source_code.hash(&mut h1);
-                let mut h2 = DefaultHasher::new();
+                let mut h2 = DetHasher::default();
                 p2.source_code.hash(&mut h2);
                 assert_eq!(
                     h1.finish(),

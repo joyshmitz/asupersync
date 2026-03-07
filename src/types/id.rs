@@ -467,7 +467,7 @@ mod tests {
 
     #[test]
     fn region_id_equality_and_hash() {
-        use std::collections::hash_map::DefaultHasher;
+        use crate::util::DetHasher;
         use std::hash::{Hash, Hasher};
 
         let a = RegionId::new_for_test(1, 2);
@@ -477,8 +477,8 @@ mod tests {
         assert_eq!(a, b);
         assert_ne!(a, c);
 
-        let mut ha = DefaultHasher::new();
-        let mut hb = DefaultHasher::new();
+        let mut ha = DetHasher::default();
+        let mut hb = DetHasher::default();
         a.hash(&mut ha);
         b.hash(&mut hb);
         assert_eq!(ha.finish(), hb.finish());
@@ -542,7 +542,7 @@ mod tests {
 
     #[test]
     fn task_id_equality_and_hash() {
-        use std::collections::hash_map::DefaultHasher;
+        use crate::util::DetHasher;
         use std::hash::{Hash, Hasher};
 
         let a = TaskId::new_for_test(3, 1);
@@ -552,8 +552,8 @@ mod tests {
         assert_eq!(a, b);
         assert_ne!(a, c);
 
-        let mut ha = DefaultHasher::new();
-        let mut hb = DefaultHasher::new();
+        let mut ha = DetHasher::default();
+        let mut hb = DetHasher::default();
         a.hash(&mut ha);
         b.hash(&mut hb);
         assert_eq!(ha.finish(), hb.finish());
@@ -614,7 +614,7 @@ mod tests {
 
     #[test]
     fn obligation_id_equality_and_hash() {
-        use std::collections::hash_map::DefaultHasher;
+        use crate::util::DetHasher;
         use std::hash::{Hash, Hasher};
 
         let a = ObligationId::new_for_test(1, 1);
@@ -624,8 +624,8 @@ mod tests {
         assert_eq!(a, b);
         assert_ne!(a, c);
 
-        let mut ha = DefaultHasher::new();
-        let mut hb = DefaultHasher::new();
+        let mut ha = DetHasher::default();
+        let mut hb = DetHasher::default();
         a.hash(&mut ha);
         b.hash(&mut hb);
         assert_eq!(ha.finish(), hb.finish());
@@ -768,15 +768,15 @@ mod tests {
 
     #[test]
     fn time_hash_consistency() {
-        use std::collections::hash_map::DefaultHasher;
+        use crate::util::DetHasher;
         use std::hash::{Hash, Hasher};
 
         let a = Time::from_secs(1);
         let b = Time::from_millis(1000);
         assert_eq!(a, b);
 
-        let mut ha = DefaultHasher::new();
-        let mut hb = DefaultHasher::new();
+        let mut ha = DetHasher::default();
+        let mut hb = DetHasher::default();
         a.hash(&mut ha);
         b.hash(&mut hb);
         assert_eq!(ha.finish(), hb.finish());

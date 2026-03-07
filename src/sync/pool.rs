@@ -1665,6 +1665,7 @@ where
                 };
                 let healthy = self.is_healthy(&resource);
                 guard.completed = true;
+                let _ = guard.completed;
                 healthy
             } else {
                 true

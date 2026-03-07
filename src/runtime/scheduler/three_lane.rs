@@ -3203,6 +3203,7 @@ impl ThreeLaneWorker {
                 guard.completed = true;
             }
         }
+        let _ = guard.completed;
     }
 
     fn schedule_ready_finalizers(&self) -> bool {

@@ -138,6 +138,7 @@ fn response_body_kind(
     headers: &[(String, String)],
     status: u16,
     request_method: &Method,
+    max_body_size_limit: usize,
 ) -> Result<ClientBodyKind, HttpError> {
     // Responses with these status codes have no body.
     let no_body_status = (100..=199).contains(&status) || matches!(status, 204 | 304);
@@ -169,7 +170,7 @@ fn response_body_kind(
             return Ok(ClientBodyKind::Empty);
         }
 
-        let max_body_size = u64::try_from(DEFAULT_MAX_BODY_SIZE).unwrap_or(u64::MAX);
+        let max_body_size = u64::try_from(max_body_size_limit).unwrap_or(u64::MAX);
         if content_length > max_body_size {
             return Err(HttpError::BodyTooLarge);
         }
@@ -640,7 +641,8 @@ impl Http1Client {
                     continue;
                 }
 
-                let kind = response_body_kind(&headers, status, &request_method)?;
+                let kind =
+                    response_body_kind(&headers, status, &request_method, DEFAULT_MAX_BODY_SIZE)?;
 
                 let head = crate::http::h1::stream::ResponseHead {
                     version,
