@@ -1,6 +1,7 @@
 {
   "schema_version": "wasm-typescript-package-policy-v1",
   "description": "Deterministic TypeScript package topology and boundary contract for Browser Edition.",
+  "enforcement_mode": "mandatory",
   "required_packages": [
     "@asupersync/browser-core",
     "@asupersync/browser",

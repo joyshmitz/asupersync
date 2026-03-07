@@ -254,8 +254,8 @@ fn publish_workflow_and_strategy_doc_align_on_npm_artifact_contract() {
         "strategy doc must document rollback reason requirement"
     );
     assert!(
-        strategy.contains("Missing package manifests are treated as an explicit controlled skip"),
-        "strategy doc must document controlled skip behavior for missing package manifests"
+        strategy.contains("Missing package manifests are a hard release-blocking failure"),
+        "strategy doc must enforce mandatory package discovery (no controlled skip)"
     );
 }
 

@@ -179,8 +179,9 @@ Policy wiring expectations:
    - assumptions artifact: `artifacts/npm/npm_release_assumptions.json`
    - publish outcome artifact: `artifacts/npm/publish_outcome.json`
    - rollback outcome artifact (when rollback mode is used): `artifacts/npm/rollback_outcome.json`
-4. Missing package manifests are treated as an explicit controlled skip
-   (artifactized) rather than an implicit silent bypass.
+4. Missing package manifests are a hard release-blocking failure. All four
+   required packages must be discovered and validated before any channel
+   promotion can proceed.
 5. Rollback mode requires both target version and operator reason; the executed
    dist-tag commands must be captured in release artifacts.
 

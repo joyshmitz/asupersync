@@ -399,10 +399,16 @@ fn browser_core_exports_cover_all_published_artifacts() {
         }
     }
 
-    // Every non-README, non-ambient file in "files" should be reachable through exports
+    // Every non-metadata file in "files" should be reachable through exports
+    // (directly or as a transitive dependency of an exported entry)
+    let metadata_files = [
+        "README.md",
+        "asupersync_bg.wasm.d.ts", // TS ambient declaration, not a direct import
+        "asupersync.d.ts",         // wasm-bindgen generated decl, re-exported via index.d.ts
+    ];
     for file in &files {
-        if *file == "README.md" || *file == "asupersync_bg.wasm.d.ts" {
-            continue; // README is metadata; .wasm.d.ts is TS ambient, not a direct import
+        if metadata_files.contains(file) {
+            continue;
         }
         let is_exported = exported_files.iter().any(|e| e == file);
         assert!(
@@ -488,6 +494,106 @@ fn all_packages_share_same_version() {
             "version mismatch: {pkg} has {ver}, expected {first}"
         );
     }
+}
+
+// ── Mandatory Package Discovery (asupersync-3qv04.4.4) ──────────────
+
+#[test]
+fn policy_enforcement_mode_is_mandatory() {
+    let path = repo_root().join(".github/wasm_typescript_package_policy.json");
+    let content =
+        std::fs::read_to_string(&path).unwrap_or_else(|_| panic!("missing {}", path.display()));
+    let v: serde_json::Value = serde_json::from_str(&content).expect("invalid JSON");
+    assert_eq!(
+        v["enforcement_mode"].as_str().unwrap(),
+        "mandatory",
+        "policy enforcement_mode must be 'mandatory' (not skippable)"
+    );
+}
+
+#[test]
+fn policy_required_packages_match_actual_packages() {
+    let path = repo_root().join(".github/wasm_typescript_package_policy.json");
+    let content = std::fs::read_to_string(&path).unwrap();
+    let v: serde_json::Value = serde_json::from_str(&content).unwrap();
+
+    let required: Vec<&str> = v["required_packages"]
+        .as_array()
+        .expect("required_packages must be array")
+        .iter()
+        .filter_map(|p| p.as_str())
+        .collect();
+
+    // Every required package must have a real package.json
+    for pkg_name in &required {
+        let dir_name = pkg_name.split('/').last().unwrap();
+        let pkg_path = repo_root().join("packages").join(dir_name).join("package.json");
+        assert!(
+            pkg_path.exists(),
+            "required package {pkg_name} has no manifest at {}",
+            pkg_path.display()
+        );
+
+        // Verify the name in the manifest matches
+        let content = std::fs::read_to_string(&pkg_path).unwrap();
+        let manifest: serde_json::Value = serde_json::from_str(&content).unwrap();
+        assert_eq!(
+            manifest["name"].as_str().unwrap(),
+            *pkg_name,
+            "manifest name mismatch for {pkg_name}"
+        );
+    }
+}
+
+#[test]
+fn no_undiscovered_packages_in_workspace() {
+    // Every directory in packages/ must be listed in the policy
+    let path = repo_root().join(".github/wasm_typescript_package_policy.json");
+    let content = std::fs::read_to_string(&path).unwrap();
+    let v: serde_json::Value = serde_json::from_str(&content).unwrap();
+
+    let required: std::collections::HashSet<String> = v["required_packages"]
+        .as_array()
+        .unwrap()
+        .iter()
+        .filter_map(|p| p.as_str())
+        .map(|s| s.to_string())
+        .collect();
+
+    let packages_dir = repo_root().join("packages");
+    if packages_dir.exists() {
+        for entry in std::fs::read_dir(&packages_dir).unwrap() {
+            let entry = entry.unwrap();
+            if entry.file_type().unwrap().is_dir() {
+                let dir_name = entry.file_name().to_string_lossy().to_string();
+                let pkg_json = entry.path().join("package.json");
+                if pkg_json.exists() {
+                    let content = std::fs::read_to_string(&pkg_json).unwrap();
+                    let manifest: serde_json::Value = serde_json::from_str(&content).unwrap();
+                    let name = manifest["name"].as_str().unwrap().to_string();
+                    assert!(
+                        required.contains(&name),
+                        "package {name} in packages/{dir_name}/ is not in policy required_packages"
+                    );
+                }
+            }
+        }
+    }
+}
+
+#[test]
+fn strategy_doc_enforces_mandatory_discovery() {
+    let path = repo_root().join("docs/wasm_release_channel_strategy.md");
+    let content =
+        std::fs::read_to_string(&path).unwrap_or_else(|_| panic!("missing {}", path.display()));
+    assert!(
+        content.contains("Missing package manifests are a hard release-blocking failure"),
+        "strategy doc must enforce mandatory package discovery"
+    );
+    assert!(
+        !content.contains("controlled skip"),
+        "strategy doc must not contain 'controlled skip' language"
+    );
 }
 
 // ── Helpers ──────────────────────────────────────────────────────────
