@@ -424,16 +424,29 @@ impl<T> Future for RecvFuture<'_, T> {
         }
 
         // 4. Register waker (skip clone if unchanged and still owned by this waiter)
-        match (&inner.waker, inner.waker_id, this.waiter_id) {
-            (Some(existing), Some(inner_waiter_id), Some(my_waiter_id))
-                if inner_waiter_id == my_waiter_id && existing.will_wake(ctx.waker()) => {}
-            _ => {
+        if let Some(my_id) = this.waiter_id {
+            if inner.waker_id == Some(my_id) {
+                if let Some(existing) = &inner.waker {
+                    if !existing.will_wake(ctx.waker()) {
+                        inner.waker = Some(ctx.waker().clone());
+                    }
+                } else {
+                    inner.waker = Some(ctx.waker().clone());
+                }
+            } else {
+                // Someone else took the waker slot, we need a new ID
                 let waiter_id = inner.next_waiter_id;
                 inner.next_waiter_id = inner.next_waiter_id.wrapping_add(1);
                 inner.waker = Some(ctx.waker().clone());
                 inner.waker_id = Some(waiter_id);
                 this.waiter_id = Some(waiter_id);
             }
+        } else {
+            let waiter_id = inner.next_waiter_id;
+            inner.next_waiter_id = inner.next_waiter_id.wrapping_add(1);
+            inner.waker = Some(ctx.waker().clone());
+            inner.waker_id = Some(waiter_id);
+            this.waiter_id = Some(waiter_id);
         }
         drop(inner);
         Poll::Pending

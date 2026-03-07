@@ -200,13 +200,7 @@ async fn connect_racing(
     let mut futures: Vec<ConnectFuture> = Vec::with_capacity(addrs.len());
 
     for (i, &addr) in addrs.iter().enumerate() {
-        let stagger = if i == 0 {
-            Duration::ZERO
-        } else if i == 1 {
-            config.first_family_delay
-        } else {
-            config.first_family_delay + config.attempt_delay * (i as u32 - 1)
-        };
+        let stagger = compute_stagger_delay(config, i);
 
         let connect_timeout = config.connect_timeout;
 
@@ -223,8 +217,34 @@ async fn connect_racing(
     // Unlike SelectAll (which returns on the first Ready regardless of
     // success/failure), RaceConnections continues polling if an attempt
     // errors, only returning on first Ok or when all attempts exhaust.
-    let overall_deadline = now.saturating_add_nanos(config.overall_timeout.as_nanos() as u64);
+    let overall_deadline =
+        now.saturating_add_nanos(duration_to_nanos_saturating(config.overall_timeout));
     RaceConnections::new(futures, overall_deadline).await
+}
+
+#[inline]
+fn duration_to_nanos_saturating(duration: Duration) -> u64 {
+    u64::try_from(duration.as_nanos()).unwrap_or(u64::MAX)
+}
+
+#[inline]
+fn compute_stagger_delay(config: &HappyEyeballsConfig, index: usize) -> Duration {
+    if index == 0 {
+        return Duration::ZERO;
+    }
+    if index == 1 {
+        return config.first_family_delay;
+    }
+
+    let steps = u32::try_from(index.saturating_sub(1)).unwrap_or(u32::MAX);
+    let tail = config
+        .attempt_delay
+        .checked_mul(steps)
+        .unwrap_or(Duration::MAX);
+    config
+        .first_family_delay
+        .checked_add(tail)
+        .unwrap_or(Duration::MAX)
 }
 
 /// A boxed, pinned, Send future that yields a `TcpStream` or an I/O error.
@@ -621,6 +641,27 @@ mod tests {
         crate::test_complete!("config_clone_debug");
     }
 
+    #[test]
+    fn duration_to_nanos_saturating_clamps_large_values() {
+        init_test("duration_to_nanos_saturating_clamps_large_values");
+        assert_eq!(duration_to_nanos_saturating(Duration::MAX), u64::MAX);
+        crate::test_complete!("duration_to_nanos_saturating_clamps_large_values");
+    }
+
+    #[test]
+    fn compute_stagger_delay_saturates_on_overflow() {
+        init_test("compute_stagger_delay_saturates_on_overflow");
+
+        let config = HappyEyeballsConfig {
+            first_family_delay: Duration::MAX,
+            attempt_delay: Duration::from_secs(1),
+            ..Default::default()
+        };
+
+        assert_eq!(compute_stagger_delay(&config, 2), Duration::MAX);
+        crate::test_complete!("compute_stagger_delay_saturates_on_overflow");
+    }
+
     // =======================================================================
     // connect() edge case tests (no network needed)
     // =======================================================================
@@ -790,13 +831,7 @@ mod tests {
         ];
 
         for (i, expected_delay) in expected.iter().enumerate() {
-            let stagger = if i == 0 {
-                Duration::ZERO
-            } else if i == 1 {
-                config.first_family_delay
-            } else {
-                config.first_family_delay + config.attempt_delay * (i as u32 - 1)
-            };
+            let stagger = compute_stagger_delay(&config, i);
             assert_eq!(
                 stagger, *expected_delay,
                 "addr[{i}] stagger mismatch: got {stagger:?}, expected {expected_delay:?}"

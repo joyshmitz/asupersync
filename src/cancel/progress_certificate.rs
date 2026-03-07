@@ -593,7 +593,7 @@ impl ProgressCertificate {
         #[allow(clippy::cast_precision_loss)]
         let t_f = t as f64;
         let expected_remaining = t_f.mul_add(-mean_credit, initial);
-        let lambda = expected_remaining.max(0.0);
+        let lambda = (-expected_remaining).max(0.0);
 
         // Azuma–Hoeffding: P(Sₜ ≥ lambda) ≤ exp(-2·lambda² / (t·c²))
         let exponent = -2.0 * lambda * lambda / (t_f * step_bound * step_bound);
@@ -645,7 +645,7 @@ impl ProgressCertificate {
         let initial = self.initial_potential.unwrap_or(0.0);
         let t_f = t as f64;
         let expected_remaining = t_f.mul_add(-mean_credit, initial);
-        let lambda = expected_remaining.max(0.0);
+        let lambda = (-expected_remaining).max(0.0);
 
         // Use empirical variance if available, else fall back to worst-case
         // (which makes Freedman equivalent to Azuma).
@@ -1419,14 +1419,14 @@ mod tests {
         let mut cert = ProgressCertificate::new(config);
 
         // Constant decrease of 10 per step from 1000.
-        for i in 0..50 {
+        // To get a tight bound on reaching 0, we must evaluate at a step where E[V_t] < 0.
+        // At step 115, expected potential is 1000 - 114*10 = -140.
+        for i in 0..115 {
             #[allow(clippy::cast_precision_loss)]
             let v = 1000.0 - 10.0 * i as f64;
-            cert.observe(v);
+            cert.observe(v.max(0.0));
         }
 
-        // With c=10 matching actual steps, Azuma bound should be tight:
-        // exp(-2·510²/(49·10²)) = exp(-10.6) ≈ 2.5e-5
         let verdict = cert.verdict();
         assert!(
             verdict.azuma_bound < 0.01,
@@ -1474,7 +1474,7 @@ mod tests {
 
         // Potentials: 100 -> 200 (increase), 200 -> 0 (large credit), 0 -> 10.
         // total_credit = 200 over 3 deltas => mean_credit ≈ 66.7.
-        // expected_remaining = 100 - 3*66.7 < 0, so lambda must clamp to 0.
+        // expected_remaining at t=4 will be < 0.
         cert.observe(100.0);
         cert.observe(200.0);
         cert.observe(0.0);
@@ -1482,18 +1482,8 @@ mod tests {
 
         let verdict = cert.verdict();
         assert!(
-            (verdict.azuma_bound - 1.0).abs() < 1e-12,
-            "azuma should be 1.0 when expected_remaining < 0, got {}",
-            verdict.azuma_bound
-        );
-        assert!(
-            (verdict.freedman_bound - 1.0).abs() < 1e-12,
-            "freedman should be 1.0 when expected_remaining < 0, got {}",
-            verdict.freedman_bound
-        );
-        assert!(
-            verdict.confidence_bound <= 1e-12,
-            "confidence should be near zero when tail bound is 1, got {}",
+            verdict.confidence_bound < 0.5,
+            "confidence should be low when V is still positive despite expected overshoot, got {}",
             verdict.confidence_bound
         );
     }
@@ -2267,17 +2257,14 @@ mod tests {
         };
         let mut cert = ProgressCertificate::new(config);
 
-        for i in 0..20 {
+        for i in 0..25 {
             #[allow(clippy::cast_precision_loss)]
             let v = 200.0 - 10.0 * i as f64;
-            cert.observe(v);
+            cert.observe(v.max(0.0));
         }
 
         let verdict = cert.verdict();
         // With zero variance, Freedman should be much tighter.
-        // The improvement comes from the denominator: Freedman uses
-        // t·σ² + b·λ/3 instead of t·c². When σ² ≈ 0, only the b·λ/3
-        // term remains, which is typically much smaller than t·c².
         if verdict.azuma_bound > 1e-10 {
             let ratio = verdict.freedman_bound / verdict.azuma_bound;
             assert!(
@@ -2297,10 +2284,10 @@ mod tests {
         };
         let mut cert = ProgressCertificate::new(config);
 
-        // Just two observations — Freedman falls back to worst-case variance.
+        // We need E[V_t] < 0 to get a non-trivial bound.
         cert.observe(100.0);
-        cert.observe(80.0);
-        cert.observe(60.0);
+        cert.observe(0.0);
+        cert.observe(0.0);
 
         // With only 2 deltas, both should give similar results.
         let verdict = cert.verdict();
@@ -2320,10 +2307,10 @@ mod tests {
         let mut cert = ProgressCertificate::new(config);
 
         // Create a scenario where Freedman differs from Azuma.
-        for i in 0..15 {
+        for i in 0..20 {
             #[allow(clippy::cast_precision_loss)]
             let v = 150.0 - 10.0 * i as f64;
-            cert.observe(v);
+            cert.observe(v.max(0.0));
         }
 
         let verdict = cert.verdict();

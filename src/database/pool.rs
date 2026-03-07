@@ -861,8 +861,38 @@ impl<M: AsyncConnectionManager> AsyncDbPool<M> {
                 }
 
                 if self.config.validate_on_checkout {
-                    let mut conn = idle.conn;
-                    if !self.manager.is_valid(cx, &mut conn).await {
+                    // Use a guard to ensure we don't leak the slot or connection if the future is dropped during await
+                    struct ValidatingGuard<'a, M: AsyncConnectionManager> {
+                        pool: &'a AsyncDbPool<M>,
+                        conn: Option<M::Connection>,
+                    }
+                    impl<M: AsyncConnectionManager> Drop for ValidatingGuard<'_, M> {
+                        fn drop(&mut self) {
+                            if let Some(conn) = self.conn.take() {
+                                {
+                                    let mut inner = self.pool.inner.lock();
+                                    inner.total = inner.total.saturating_sub(1);
+                                }
+                                self.pool
+                                    .stats
+                                    .total_discards
+                                    .fetch_add(1, Ordering::Relaxed);
+                                self.pool.manager.disconnect(conn);
+                            }
+                        }
+                    }
+
+                    let mut guard = ValidatingGuard {
+                        pool: self,
+                        conn: Some(idle.conn),
+                    };
+
+                    if !self
+                        .manager
+                        .is_valid(cx, guard.conn.as_mut().unwrap())
+                        .await
+                    {
+                        let conn = guard.conn.take().unwrap();
                         {
                             let mut inner = self.inner.lock();
                             inner.total = inner.total.saturating_sub(1);
@@ -874,6 +904,7 @@ impl<M: AsyncConnectionManager> AsyncDbPool<M> {
                         self.manager.disconnect(conn);
                         continue;
                     }
+                    let conn = guard.conn.take().unwrap();
                     return self.finish_async_checkout(conn, idle.created_at);
                 }
 
@@ -889,17 +920,39 @@ impl<M: AsyncConnectionManager> AsyncDbPool<M> {
                 inner.total += 1;
             }
 
+            // Use a guard to ensure we decrement `total` if the future is dropped before `connect` completes
+            struct PendingGuard<'a, M: AsyncConnectionManager> {
+                pool: &'a AsyncDbPool<M>,
+                active: bool,
+            }
+            impl<M: AsyncConnectionManager> Drop for PendingGuard<'_, M> {
+                fn drop(&mut self) {
+                    if self.active {
+                        let mut inner = self.pool.inner.lock();
+                        inner.total = inner.total.saturating_sub(1);
+                    }
+                }
+            }
+
+            let mut guard = PendingGuard {
+                pool: self,
+                active: true,
+            };
+
             match self.manager.connect(cx).await {
                 Outcome::Ok(conn) => {
+                    guard.active = false;
                     self.stats.total_creates.fetch_add(1, Ordering::Relaxed);
                     return self.finish_async_checkout(conn, Instant::now());
                 }
                 Outcome::Err(e) => {
+                    guard.active = false;
                     let mut inner = self.inner.lock();
                     inner.total = inner.total.saturating_sub(1);
                     return Err(DbPoolError::Connect(e));
                 }
                 Outcome::Cancelled(_) | Outcome::Panicked(_) => {
+                    guard.active = false;
                     let mut inner = self.inner.lock();
                     inner.total = inner.total.saturating_sub(1);
                     return Err(DbPoolError::Cancelled);
