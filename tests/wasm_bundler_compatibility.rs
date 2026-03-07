@@ -74,6 +74,37 @@ fn matrix_references_cross_documents() {
     );
 }
 
+#[test]
+fn topology_documents_rust_crate_layout_and_pkg_staging() {
+    let topology = load_topology();
+    for marker in [
+        "Rust Crate Layout and Artifact Provenance",
+        "`asupersync-browser-core`",
+        "`pkg/browser-core/<profile>/`",
+        "`packages/browser-core/`",
+    ] {
+        assert!(
+            topology.contains(marker),
+            "Topology doc missing rust crate/artifact marker: {marker}"
+        );
+    }
+}
+
+#[test]
+fn matrix_documents_browser_core_producer_crate_and_staging_path() {
+    let doc = load_matrix();
+    for marker in [
+        "`asupersync-browser-core`",
+        "`pkg/browser-core/<profile>/`",
+        "`--out-name asupersync`",
+    ] {
+        assert!(
+            doc.contains(marker),
+            "Bundler matrix missing producer/staging marker: {marker}"
+        );
+    }
+}
+
 // ─── Bundler coverage ────────────────────────────────────────────────
 
 #[test]

@@ -77,6 +77,7 @@ fn doc_references_artifact_runner_and_test() {
         "artifacts/wasm_qa_evidence_matrix_v1.json",
         "scripts/run_wasm_qa_evidence_smoke.sh",
         "tests/wasm_qa_evidence_matrix_contract.rs",
+        "tests/wasm_cfg_compile_invariants.rs",
         "src/types/wasm_abi.rs",
     ] {
         assert!(doc.contains(reference), "doc must reference {reference}");
@@ -92,6 +93,20 @@ fn doc_reproduction_command_uses_rch() {
         ),
         "doc must route heavy validation through rch"
     );
+}
+
+#[test]
+fn doc_references_cfg_compile_harness_commands() {
+    let doc = load_doc();
+    for command in [
+        "cargo test --test wasm_cfg_compile_invariants wasm_profile_matrix_compile_closure_holds -- --ignored --nocapture",
+        "cargo test --test wasm_cfg_compile_invariants native_all_targets_backstop_holds -- --ignored --nocapture",
+    ] {
+        assert!(
+            doc.contains(command),
+            "doc must reference compile harness command: {command}"
+        );
+    }
 }
 
 // -- Artifact schema and version stability --
@@ -239,6 +254,28 @@ fn cfg_gated_files_exist() {
     }
 }
 
+#[test]
+fn cfg_gated_files_cover_known_leak_frontier() {
+    let artifact = load_artifact();
+    let files: BTreeSet<&str> = artifact["cfg_gated_files"]
+        .as_array()
+        .expect("cfg_gated_files must be array")
+        .iter()
+        .map(|file| file.as_str().expect("cfg_gated_files entry must be string"))
+        .collect();
+    for expected in [
+        "src/config.rs",
+        "src/runtime/reactor/source.rs",
+        "src/net/tcp/socket.rs",
+        "src/trace/file.rs",
+    ] {
+        assert!(
+            files.contains(expected),
+            "cfg-gated files must include known leak hotspot: {expected}"
+        );
+    }
+}
+
 // -- Structured log fields --
 
 #[test]
@@ -267,6 +304,44 @@ fn smoke_scenarios_are_rch_routed() {
         let sid = scenario["scenario_id"].as_str().unwrap();
         let cmd = scenario["command"].as_str().unwrap();
         assert!(cmd.contains("rch exec --"), "scenario {sid} must use rch");
+    }
+}
+
+#[test]
+fn smoke_scenarios_cover_cfg_compile_execution() {
+    let artifact = load_artifact();
+    let scenarios = artifact["smoke_scenarios"].as_array().expect("array");
+    let ids: BTreeSet<&str> = scenarios
+        .iter()
+        .map(|scenario| {
+            scenario["scenario_id"]
+                .as_str()
+                .expect("scenario_id must be string")
+        })
+        .collect();
+    for expected in ["WASM-QA-SMOKE-CFG-MATRIX", "WASM-QA-SMOKE-NATIVE-BACKSTOP"] {
+        assert!(
+            ids.contains(expected),
+            "smoke scenarios must include {expected}"
+        );
+    }
+
+    for scenario in scenarios {
+        let id = scenario["scenario_id"].as_str().unwrap();
+        if matches!(
+            id,
+            "WASM-QA-SMOKE-CFG-MATRIX" | "WASM-QA-SMOKE-NATIVE-BACKSTOP"
+        ) {
+            let command = scenario["command"].as_str().unwrap();
+            assert!(
+                command.contains("wasm_cfg_compile_invariants"),
+                "scenario {id} must invoke wasm_cfg_compile_invariants"
+            );
+            assert!(
+                command.contains("--ignored"),
+                "scenario {id} must execute ignored compile harness tests"
+            );
+        }
     }
 }
 

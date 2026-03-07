@@ -19,6 +19,15 @@ use asupersync::{
 };
 use std::collections::{BTreeMap, BTreeSet};
 
+fn load_wasm_abi_contract_doc() -> String {
+    std::fs::read_to_string("docs/wasm_abi_contract.md")
+        .expect("failed to load wasm ABI contract doc")
+}
+
+fn load_wasm_abi_policy() -> String {
+    std::fs::read_to_string(".github/wasm_abi_policy.json").expect("failed to load wasm ABI policy")
+}
+
 fn bootstrap_hydration_context(phase: NextjsBootstrapPhase) -> &'static str {
     match phase {
         NextjsBootstrapPhase::ServerRendered => "server_rendered",
@@ -173,6 +182,34 @@ fn wasm_abi_version_and_fingerprint_constants_match_signature_table() {
         wasm_abi_signature_fingerprint(&WASM_ABI_SIGNATURES_V1),
         WASM_ABI_SIGNATURE_FINGERPRINT_V1
     );
+}
+
+#[test]
+fn wasm_abi_contract_documents_artifact_strategy_and_crate_layout() {
+    let doc = load_wasm_abi_contract_doc();
+    let policy = load_wasm_abi_policy();
+
+    for marker in [
+        "Concrete Artifact Strategy and Crate Layout",
+        "`asupersync-browser-core`",
+        "`pkg/browser-core/<profile>/`",
+        "`packages/browser-core/`",
+    ] {
+        assert!(
+            doc.contains(marker),
+            "WASM ABI contract missing required artifact-strategy marker: {marker}"
+        );
+    }
+
+    for marker in [
+        "Concrete Artifact Strategy and Crate Layout",
+        "`asupersync-browser-core`",
+    ] {
+        assert!(
+            policy.contains(marker),
+            "WASM ABI policy missing required marker: {marker}"
+        );
+    }
 }
 
 #[test]
