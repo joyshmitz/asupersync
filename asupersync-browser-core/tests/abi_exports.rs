@@ -5,9 +5,10 @@ use asupersync::types::{
     WasmTaskSpawnRequest,
 };
 use asupersync_browser_core::{
-    abi_fingerprint, abi_version, fetch_request, reset_dispatcher_for_tests, runtime_close,
-    runtime_create, scope_close, scope_enter, task_cancel, task_join, task_spawn, websocket_cancel,
-    websocket_close, websocket_open, websocket_recv, websocket_send,
+    abi_fingerprint, abi_version, dispatcher_diagnostics_for_tests, fetch_request,
+    reset_dispatcher_for_tests, runtime_close, runtime_create, scope_close, scope_enter,
+    task_cancel, task_join, task_spawn, websocket_cancel, websocket_close, websocket_open,
+    websocket_recv, websocket_send,
 };
 
 fn parse_json<T: serde::de::DeserializeOwned>(raw: &str) -> T {
@@ -611,4 +612,255 @@ fn websocket_url_validation_rejects_empty_and_bad_schemes() {
     // Teardown
     scope_close(scope_json, None).expect("scope_close");
     runtime_close(runtime_json, None).expect("runtime_close");
+}
+
+#[test]
+fn runtime_close_drains_open_scope_task_and_fetch_handles() {
+    reset_dispatcher_for_tests();
+
+    let runtime_json = runtime_create(None).expect("runtime_create succeeds");
+    let runtime: WasmHandleRef = parse_json(&runtime_json);
+    let scope_json = scope_enter(
+        to_json(&WasmScopeEnterRequest {
+            parent: runtime,
+            label: Some("auto-drain".to_string()),
+        }),
+        None,
+    )
+    .expect("scope_enter succeeds");
+    let scope: WasmHandleRef = parse_json(&scope_json);
+
+    let task_json = task_spawn(
+        to_json(&WasmTaskSpawnRequest {
+            scope,
+            label: Some("worker".to_string()),
+            cancel_kind: Some("user".to_string()),
+        }),
+        None,
+    )
+    .expect("task_spawn succeeds");
+    let task: WasmHandleRef = parse_json(&task_json);
+
+    let fetch_json = fetch_request(
+        to_json(&WasmFetchRequest {
+            scope,
+            url: "https://example.com/data".to_string(),
+            method: "GET".to_string(),
+            body: None,
+        }),
+        None,
+    )
+    .expect("fetch_request succeeds");
+    let fetch_outcome: WasmAbiOutcomeEnvelope = parse_json(&fetch_json);
+    let fetch = match fetch_outcome {
+        WasmAbiOutcomeEnvelope::Ok {
+            value: WasmAbiValue::Handle(handle),
+        } => handle,
+        other => panic!("expected fetch handle outcome, got {other:?}"),
+    };
+
+    let close_json = runtime_close(runtime_json, None).expect("runtime_close succeeds");
+    let close: WasmAbiOutcomeEnvelope = parse_json(&close_json);
+    assert!(matches!(
+        close,
+        WasmAbiOutcomeEnvelope::Ok {
+            value: WasmAbiValue::Unit
+        }
+    ));
+
+    let stale_scope = scope_close(scope_json, None).expect_err("scope handle should be stale");
+    assert!(stale_scope.contains("stale handle") || stale_scope.contains("released"));
+
+    let stale_task = task_cancel(
+        to_json(&WasmTaskCancelRequest {
+            task,
+            kind: "user".to_string(),
+            message: Some("too late".to_string()),
+        }),
+        None,
+    )
+    .expect_err("task handle should be stale");
+    assert!(stale_task.contains("stale handle") || stale_task.contains("released"));
+
+    let stale_fetch = task_join(
+        to_json(&fetch),
+        to_json(&WasmAbiOutcomeEnvelope::Ok {
+            value: WasmAbiValue::Unit,
+        }),
+        None,
+    )
+    .expect_err("fetch handle should be invalid for task join");
+    assert!(stale_fetch.contains("stale handle") || stale_fetch.contains("released"));
+
+    let diagnostics = dispatcher_diagnostics_for_tests();
+    assert!(
+        diagnostics.is_clean(),
+        "expected clean diagnostics: {diagnostics:?}"
+    );
+}
+
+#[test]
+fn scope_close_drains_nested_task_and_preserves_runtime() {
+    reset_dispatcher_for_tests();
+
+    let runtime_json = runtime_create(None).expect("runtime_create succeeds");
+    let runtime: WasmHandleRef = parse_json(&runtime_json);
+    let outer_scope_json = scope_enter(
+        to_json(&WasmScopeEnterRequest {
+            parent: runtime,
+            label: Some("outer".to_string()),
+        }),
+        None,
+    )
+    .expect("outer scope_enter succeeds");
+    let outer_scope: WasmHandleRef = parse_json(&outer_scope_json);
+    let inner_scope_json = scope_enter(
+        to_json(&WasmScopeEnterRequest {
+            parent: outer_scope,
+            label: Some("inner".to_string()),
+        }),
+        None,
+    )
+    .expect("inner scope_enter succeeds");
+    let inner_scope: WasmHandleRef = parse_json(&inner_scope_json);
+
+    let nested_task_json = task_spawn(
+        to_json(&WasmTaskSpawnRequest {
+            scope: inner_scope,
+            label: Some("nested".to_string()),
+            cancel_kind: None,
+        }),
+        None,
+    )
+    .expect("task_spawn succeeds");
+    let nested_task: WasmHandleRef = parse_json(&nested_task_json);
+
+    let close_json = scope_close(outer_scope_json, None).expect("scope_close succeeds");
+    let close: WasmAbiOutcomeEnvelope = parse_json(&close_json);
+    assert!(matches!(
+        close,
+        WasmAbiOutcomeEnvelope::Ok {
+            value: WasmAbiValue::Unit
+        }
+    ));
+
+    let stale_inner = scope_close(inner_scope_json, None).expect_err("inner scope should be stale");
+    assert!(stale_inner.contains("stale handle") || stale_inner.contains("released"));
+
+    let stale_nested = task_join(
+        nested_task_json,
+        to_json(&WasmAbiOutcomeEnvelope::Ok {
+            value: WasmAbiValue::Unit,
+        }),
+        None,
+    )
+    .expect_err("nested task should be stale");
+    assert!(stale_nested.contains("stale handle") || stale_nested.contains("released"));
+
+    let runtime_close_json = runtime_close(runtime_json, None).expect("runtime_close succeeds");
+    let runtime_close_outcome: WasmAbiOutcomeEnvelope = parse_json(&runtime_close_json);
+    assert!(matches!(
+        runtime_close_outcome,
+        WasmAbiOutcomeEnvelope::Ok {
+            value: WasmAbiValue::Unit
+        }
+    ));
+
+    let diagnostics = dispatcher_diagnostics_for_tests();
+    assert!(
+        diagnostics.is_clean(),
+        "expected clean diagnostics: {diagnostics:?}"
+    );
+    let _ = nested_task;
+}
+
+#[test]
+fn cancelled_task_join_preserves_cancellation_payload_and_invalidates_handle() {
+    reset_dispatcher_for_tests();
+
+    let runtime_json = runtime_create(None).expect("runtime_create succeeds");
+    let runtime: WasmHandleRef = parse_json(&runtime_json);
+    let scope_json = scope_enter(
+        to_json(&WasmScopeEnterRequest {
+            parent: runtime,
+            label: Some("cancelled-join".to_string()),
+        }),
+        None,
+    )
+    .expect("scope_enter succeeds");
+    let scope: WasmHandleRef = parse_json(&scope_json);
+
+    let task_json = task_spawn(
+        to_json(&WasmTaskSpawnRequest {
+            scope,
+            label: Some("worker".to_string()),
+            cancel_kind: Some("timeout".to_string()),
+        }),
+        None,
+    )
+    .expect("task_spawn succeeds");
+    let task: WasmHandleRef = parse_json(&task_json);
+
+    let cancel_json = task_cancel(
+        to_json(&WasmTaskCancelRequest {
+            task,
+            kind: "timeout".to_string(),
+            message: Some("deadline exceeded".to_string()),
+        }),
+        None,
+    )
+    .expect("task_cancel succeeds");
+    let cancel_outcome: WasmAbiOutcomeEnvelope = parse_json(&cancel_json);
+    assert!(matches!(
+        cancel_outcome,
+        WasmAbiOutcomeEnvelope::Ok {
+            value: WasmAbiValue::Unit
+        }
+    ));
+
+    let cancelled = WasmAbiOutcomeEnvelope::Cancelled {
+        cancellation: asupersync::types::WasmAbiCancellation {
+            kind: "timeout".to_string(),
+            phase: "completed".to_string(),
+            origin_region: "browser".to_string(),
+            origin_task: Some("task-1".to_string()),
+            timestamp_nanos: 42,
+            message: Some("deadline exceeded".to_string()),
+            truncated: false,
+        },
+    };
+    let join_json =
+        task_join(task_json.clone(), to_json(&cancelled), None).expect("task_join succeeds");
+    let joined: WasmAbiOutcomeEnvelope = parse_json(&join_json);
+    assert_eq!(joined, cancelled);
+
+    let stale_join = task_join(
+        task_json,
+        to_json(&WasmAbiOutcomeEnvelope::Ok {
+            value: WasmAbiValue::Unit,
+        }),
+        None,
+    )
+    .expect_err("joined task handle should be stale");
+    assert!(stale_join.contains("stale handle") || stale_join.contains("released"));
+
+    let stale_cancel = task_cancel(
+        to_json(&WasmTaskCancelRequest {
+            task,
+            kind: "user".to_string(),
+            message: Some("late cancel".to_string()),
+        }),
+        None,
+    )
+    .expect_err("joined task should not accept another cancel");
+    assert!(stale_cancel.contains("stale handle") || stale_cancel.contains("released"));
+
+    scope_close(scope_json, None).expect("scope_close succeeds");
+    runtime_close(runtime_json, None).expect("runtime_close succeeds");
+
+    let diagnostics = dispatcher_diagnostics_for_tests();
+    assert!(
+        diagnostics.is_clean(),
+        "expected clean diagnostics: {diagnostics:?}"
+    );
 }

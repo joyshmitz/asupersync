@@ -11,9 +11,9 @@ use crate::types::{decode_json_payload, decode_optional_consumer_version, encode
 use asupersync::types::{
     WASM_ABI_MAJOR_VERSION, WASM_ABI_MINOR_VERSION, WASM_ABI_SIGNATURE_FINGERPRINT_V1,
     WasmAbiCancellation, WasmAbiErrorCode, WasmAbiFailure, WasmAbiOutcomeEnvelope,
-    WasmAbiRecoverability, WasmAbiValue, WasmAbiVersion, WasmDispatchError, WasmExportDispatcher,
-    WasmFetchRequest, WasmHandleRef, WasmScopeEnterRequest, WasmTaskCancelRequest,
-    WasmTaskSpawnRequest,
+    WasmAbiRecoverability, WasmAbiValue, WasmAbiVersion, WasmDispatchError,
+    WasmDispatcherDiagnostics, WasmExportDispatcher, WasmFetchRequest, WasmHandleRef,
+    WasmScopeEnterRequest, WasmTaskCancelRequest, WasmTaskSpawnRequest,
 };
 use std::cell::RefCell;
 use std::collections::{HashMap, VecDeque};
@@ -110,6 +110,35 @@ fn with_dispatcher<R>(
         let mut dispatcher = dispatcher.borrow_mut();
         f(&mut dispatcher).map_err(to_error_string)
     })
+}
+
+fn dispatcher_handle_is_live(handle: &WasmHandleRef) -> bool {
+    DISPATCHER.with(|dispatcher| dispatcher.borrow().handles().get(handle).is_ok())
+}
+
+#[cfg(target_arch = "wasm32")]
+fn cleanup_released_fetches() {
+    INFLIGHT_FETCHES.with(|inflight| {
+        inflight
+            .borrow_mut()
+            .retain(|handle, _| dispatcher_handle_is_live(handle));
+    });
+}
+
+#[cfg(not(target_arch = "wasm32"))]
+fn cleanup_released_fetches() {}
+
+fn cleanup_released_websockets() {
+    INFLIGHT_WEBSOCKETS.with(|sockets| {
+        sockets
+            .borrow_mut()
+            .retain(|handle, _| dispatcher_handle_is_live(handle));
+    });
+}
+
+fn cleanup_released_host_state() {
+    cleanup_released_fetches();
+    cleanup_released_websockets();
 }
 
 fn normalize_fetch_method(method: &str) -> Result<String, String> {
@@ -601,6 +630,13 @@ pub fn reset_dispatcher_for_tests() {
     });
 }
 
+/// Host-side diagnostics helper for export-boundary tests.
+#[cfg(not(target_arch = "wasm32"))]
+#[must_use]
+pub fn dispatcher_diagnostics_for_tests() -> WasmDispatcherDiagnostics {
+    DISPATCHER.with(|dispatcher| dispatcher.borrow().diagnostic_snapshot())
+}
+
 fn runtime_create_impl(consumer_version_json: Option<String>) -> Result<String, String> {
     let consumer_version = parse_consumer_version(consumer_version_json)?;
     let handle = with_dispatcher(|dispatcher| dispatcher.runtime_create(consumer_version))?;
@@ -615,6 +651,7 @@ fn runtime_close_impl(
     let consumer_version = parse_consumer_version(consumer_version_json)?;
     let outcome =
         with_dispatcher(|dispatcher| dispatcher.runtime_close(&handle, consumer_version))?;
+    cleanup_released_host_state();
     encode_json(&outcome, "runtime_close.response")
 }
 
@@ -635,6 +672,7 @@ fn scope_close_impl(
     let handle: WasmHandleRef = parse_json(&handle_json, "scope_close.request")?;
     let consumer_version = parse_consumer_version(consumer_version_json)?;
     let outcome = with_dispatcher(|dispatcher| dispatcher.scope_close(&handle, consumer_version))?;
+    cleanup_released_host_state();
     encode_json(&outcome, "scope_close.response")
 }
 

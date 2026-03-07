@@ -786,6 +786,8 @@ pub enum WasmHandleOwnership {
 pub struct WasmHandleEntry {
     /// Handle reference visible to JS.
     pub handle: WasmHandleRef,
+    /// Parent handle that owns this handle's lifetime, if any.
+    pub parent: Option<WasmHandleRef>,
     /// Current boundary lifecycle state.
     pub state: WasmBoundaryState,
     /// Ownership side.
@@ -908,6 +910,15 @@ impl WasmHandleTable {
     /// Returns a `WasmHandleRef` that JS can use as an opaque token.
     /// The handle starts in `Unbound` state with `WasmOwned` ownership.
     pub fn allocate(&mut self, kind: WasmHandleKind) -> WasmHandleRef {
+        self.allocate_with_parent(kind, None)
+    }
+
+    /// Allocates a new handle with an explicit parent owner.
+    pub fn allocate_with_parent(
+        &mut self,
+        kind: WasmHandleKind,
+        parent: Option<WasmHandleRef>,
+    ) -> WasmHandleRef {
         let slot = if let Some(recycled) = self.free_list.pop() {
             recycled
         } else {
@@ -926,6 +937,7 @@ impl WasmHandleTable {
 
         self.slots[slot as usize] = Some(WasmHandleEntry {
             handle,
+            parent,
             state: WasmBoundaryState::Unbound,
             ownership: WasmHandleOwnership::WasmOwned,
             pinned: false,
@@ -933,6 +945,28 @@ impl WasmHandleTable {
         self.live_count += 1;
 
         handle
+    }
+
+    /// Returns owned descendants in deterministic post-order.
+    #[must_use]
+    pub fn descendants_postorder(&self, root: &WasmHandleRef) -> Vec<WasmHandleRef> {
+        fn visit(
+            table: &WasmHandleTable,
+            parent: WasmHandleRef,
+            descendants: &mut Vec<WasmHandleRef>,
+        ) {
+            for entry in table.slots.iter().flatten() {
+                if entry.parent == Some(parent) && entry.ownership != WasmHandleOwnership::Released
+                {
+                    visit(table, entry.handle, descendants);
+                    descendants.push(entry.handle);
+                }
+            }
+        }
+
+        let mut descendants = Vec::new();
+        visit(self, *root, &mut descendants);
+        descendants
     }
 
     /// Looks up an entry by handle, validating generation.
@@ -1516,6 +1550,60 @@ impl WasmExportDispatcher {
         });
     }
 
+    fn drain_and_release_handle(
+        &mut self,
+        handle: &WasmHandleRef,
+    ) -> Result<WasmBoundaryState, WasmDispatchError> {
+        let state_from = self
+            .handles
+            .get(handle)
+            .map_err(WasmDispatchError::Handle)?
+            .state;
+
+        for target in [
+            WasmBoundaryState::Cancelling,
+            WasmBoundaryState::Draining,
+            WasmBoundaryState::Closed,
+        ] {
+            let current = self
+                .handles
+                .get(handle)
+                .map_err(WasmDispatchError::Handle)?
+                .state;
+            if is_valid_wasm_boundary_transition(current, target) {
+                self.handles
+                    .transition(handle, target)
+                    .map_err(WasmDispatchError::Handle)?;
+            }
+        }
+
+        if self
+            .handles
+            .get(handle)
+            .map_err(WasmDispatchError::Handle)?
+            .pinned
+        {
+            self.handles
+                .unpin(handle)
+                .map_err(WasmDispatchError::Handle)?;
+        }
+        self.handles
+            .release(handle)
+            .map_err(WasmDispatchError::Handle)?;
+        Ok(state_from)
+    }
+
+    fn close_handle_tree(
+        &mut self,
+        root: &WasmHandleRef,
+    ) -> Result<WasmBoundaryState, WasmDispatchError> {
+        let descendants = self.handles.descendants_postorder(root);
+        for descendant in descendants {
+            self.drain_and_release_handle(&descendant)?;
+        }
+        self.drain_and_release_handle(root)
+    }
+
     // ----- Symbol implementations -----
 
     /// `RuntimeCreate`: allocates a new runtime handle.
@@ -1566,41 +1654,7 @@ impl WasmExportDispatcher {
                 symbol: WasmAbiSymbol::RuntimeClose,
             });
         }
-        let state_from = entry.state;
-
-        // Drive to Closed via valid transitions
-        let target_states = [
-            WasmBoundaryState::Cancelling,
-            WasmBoundaryState::Draining,
-            WasmBoundaryState::Closed,
-        ];
-        for target in target_states {
-            if is_valid_wasm_boundary_transition(
-                self.handles
-                    .get(handle)
-                    .map_err(WasmDispatchError::Handle)?
-                    .state,
-                target,
-            ) {
-                self.handles
-                    .transition(handle, target)
-                    .map_err(WasmDispatchError::Handle)?;
-            }
-        }
-
-        // Unpin if pinned, then release
-        let entry = self
-            .handles
-            .get(handle)
-            .map_err(WasmDispatchError::Handle)?;
-        if entry.pinned {
-            self.handles
-                .unpin(handle)
-                .map_err(WasmDispatchError::Handle)?;
-        }
-        self.handles
-            .release(handle)
-            .map_err(WasmDispatchError::Handle)?;
+        let state_from = self.close_handle_tree(handle)?;
 
         self.emit_event(
             WasmAbiSymbol::RuntimeClose,
@@ -1635,7 +1689,9 @@ impl WasmExportDispatcher {
             });
         }
 
-        let handle = self.handles.allocate(WasmHandleKind::Region);
+        let handle = self
+            .handles
+            .allocate_with_parent(WasmHandleKind::Region, Some(request.parent));
         self.handles
             .transition(&handle, WasmBoundaryState::Bound)
             .map_err(WasmDispatchError::Handle)?;
@@ -1670,39 +1726,7 @@ impl WasmExportDispatcher {
                 symbol: WasmAbiSymbol::ScopeClose,
             });
         }
-        let state_from = entry.state;
-
-        // Drive to Closed
-        for target in [
-            WasmBoundaryState::Cancelling,
-            WasmBoundaryState::Draining,
-            WasmBoundaryState::Closed,
-        ] {
-            if is_valid_wasm_boundary_transition(
-                self.handles
-                    .get(handle)
-                    .map_err(WasmDispatchError::Handle)?
-                    .state,
-                target,
-            ) {
-                self.handles
-                    .transition(handle, target)
-                    .map_err(WasmDispatchError::Handle)?;
-            }
-        }
-
-        let entry = self
-            .handles
-            .get(handle)
-            .map_err(WasmDispatchError::Handle)?;
-        if entry.pinned {
-            self.handles
-                .unpin(handle)
-                .map_err(WasmDispatchError::Handle)?;
-        }
-        self.handles
-            .release(handle)
-            .map_err(WasmDispatchError::Handle)?;
+        let state_from = self.close_handle_tree(handle)?;
 
         self.emit_event(
             WasmAbiSymbol::ScopeClose,
@@ -1746,7 +1770,9 @@ impl WasmExportDispatcher {
             });
         }
 
-        let handle = self.handles.allocate(WasmHandleKind::Task);
+        let handle = self
+            .handles
+            .allocate_with_parent(WasmHandleKind::Task, Some(request.scope));
         self.handles
             .transition(&handle, WasmBoundaryState::Bound)
             .map_err(WasmDispatchError::Handle)?;
@@ -1900,7 +1926,9 @@ impl WasmExportDispatcher {
             });
         }
 
-        let handle = self.handles.allocate(WasmHandleKind::FetchRequest);
+        let handle = self
+            .handles
+            .allocate_with_parent(WasmHandleKind::FetchRequest, Some(request.scope));
         self.handles
             .transition(&handle, WasmBoundaryState::Bound)
             .map_err(WasmDispatchError::Handle)?;
@@ -4707,6 +4735,93 @@ mod tests {
         let outcome = d.scope_close(&scope, None).unwrap();
         assert!(matches!(outcome, WasmAbiOutcomeEnvelope::Ok { .. }));
         assert_eq!(d.handles().live_count(), 1); // runtime still alive
+
+        d.runtime_close(&rt, None).unwrap();
+        assert_eq!(d.handles().live_count(), 0);
+    }
+
+    #[test]
+    fn dispatcher_runtime_close_releases_descendants() {
+        let mut d = WasmExportDispatcher::new();
+        let rt = d.runtime_create(None).unwrap();
+        let scope = d
+            .scope_enter(
+                &WasmScopeEnterRequest {
+                    parent: rt,
+                    label: Some("runtime-close".to_string()),
+                },
+                None,
+            )
+            .unwrap();
+        let task = d
+            .task_spawn(
+                &WasmTaskSpawnRequest {
+                    scope,
+                    label: Some("worker".to_string()),
+                    cancel_kind: Some("user".to_string()),
+                },
+                None,
+            )
+            .unwrap();
+        let fetch = d
+            .fetch_request(
+                &WasmFetchRequest {
+                    scope,
+                    url: "https://example.com/data".to_string(),
+                    method: "GET".to_string(),
+                    body: None,
+                },
+                None,
+            )
+            .unwrap();
+
+        let outcome = d.runtime_close(&rt, None).unwrap();
+        assert!(matches!(outcome, WasmAbiOutcomeEnvelope::Ok { .. }));
+        assert_eq!(d.handles().live_count(), 0);
+        assert!(d.handles().get(&scope).is_err());
+        assert!(d.handles().get(&task).is_err());
+        assert!(d.handles().get(&fetch).is_err());
+        assert!(d.handles().detect_leaks().is_empty());
+    }
+
+    #[test]
+    fn dispatcher_scope_close_releases_nested_descendants() {
+        let mut d = WasmExportDispatcher::new();
+        let rt = d.runtime_create(None).unwrap();
+        let outer = d
+            .scope_enter(
+                &WasmScopeEnterRequest {
+                    parent: rt,
+                    label: Some("outer".to_string()),
+                },
+                None,
+            )
+            .unwrap();
+        let inner = d
+            .scope_enter(
+                &WasmScopeEnterRequest {
+                    parent: outer,
+                    label: Some("inner".to_string()),
+                },
+                None,
+            )
+            .unwrap();
+        let task = d
+            .task_spawn(
+                &WasmTaskSpawnRequest {
+                    scope: inner,
+                    label: Some("nested".to_string()),
+                    cancel_kind: None,
+                },
+                None,
+            )
+            .unwrap();
+
+        let outcome = d.scope_close(&outer, None).unwrap();
+        assert!(matches!(outcome, WasmAbiOutcomeEnvelope::Ok { .. }));
+        assert!(d.handles().get(&inner).is_err());
+        assert!(d.handles().get(&task).is_err());
+        assert_eq!(d.handles().live_count(), 1);
 
         d.runtime_close(&rt, None).unwrap();
         assert_eq!(d.handles().live_count(), 0);
