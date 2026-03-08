@@ -149,8 +149,18 @@ where
 
         let this = self.get_mut();
         let filled_before = buf.filled().len();
+        let mut steps = 0;
 
         loop {
+            if steps > 32 {
+                cx.waker().wake_by_ref();
+                if buf.filled().len() == filled_before {
+                    return Poll::Pending;
+                }
+                return Poll::Ready(Ok(()));
+            }
+            steps += 1;
+
             if this.offset < this.current.len() {
                 if buf.remaining() == 0 {
                     return Poll::Ready(Ok(()));

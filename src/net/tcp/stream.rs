@@ -423,7 +423,7 @@ impl TcpStream {
 }
 
 #[inline]
-fn fallback_rewake(cx: &Context<'_>) {
+pub(crate) fn fallback_rewake(cx: &Context<'_>) {
     if let Some(timer) = Cx::current().and_then(|c| c.timer_driver()) {
         let deadline = timer.now() + FALLBACK_IO_BACKOFF;
         let _ = timer.register(deadline, cx.waker().clone());

@@ -29,8 +29,15 @@ impl<R: AsyncBufRead + Unpin> Stream for Lines<R> {
 
     fn poll_next(self: Pin<&mut Self>, cx: &mut Context<'_>) -> Poll<Option<Self::Item>> {
         let this = self.get_mut();
+        let mut steps = 0;
 
         loop {
+            if steps > 32 {
+                cx.waker().wake_by_ref();
+                return Poll::Pending;
+            }
+            steps += 1;
+
             // 1. Check if we already have a newline at the end of `this.buf`
             // We know it can only be at the end because of step 4.
             if this.buf.last() == Some(&b'\n') {

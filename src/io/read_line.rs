@@ -185,8 +185,15 @@ where
 
     fn poll(self: Pin<&mut Self>, cx: &mut Context<'_>) -> Poll<Self::Output> {
         let this = self.get_mut();
+        let mut steps = 0;
 
         loop {
+            if steps > 32 {
+                cx.waker().wake_by_ref();
+                return Poll::Pending;
+            }
+            steps += 1;
+
             let available = match Pin::new(&mut *this.reader).poll_fill_buf(cx) {
                 Poll::Pending => return Poll::Pending,
                 Poll::Ready(Err(e)) => return Poll::Ready(Err(e)),

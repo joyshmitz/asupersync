@@ -76,9 +76,9 @@ impl AsyncRead for ReadHalf<'_> {
                 Poll::Ready(Ok(()))
             }
             Err(ref e) if e.kind() == io::ErrorKind::WouldBlock => {
-                // No reactor integration for borrowed split - wake immediately
-                // to retry. For proper async I/O, use owned split.
-                cx.waker().wake_by_ref();
+                // No reactor integration for borrowed split - use fallback_rewake
+                // to avoid 100% CPU busy loops. For proper async I/O, use owned split.
+                crate::net::tcp::stream::fallback_rewake(cx);
                 Poll::Pending
             }
             Err(e) => Poll::Ready(Err(e)),
@@ -136,7 +136,7 @@ impl AsyncWrite for WriteHalf<'_> {
         match inner.write(buf) {
             Ok(n) => Poll::Ready(Ok(n)),
             Err(ref e) if e.kind() == io::ErrorKind::WouldBlock => {
-                cx.waker().wake_by_ref();
+                crate::net::tcp::stream::fallback_rewake(cx);
                 Poll::Pending
             }
             Err(e) => Poll::Ready(Err(e)),
@@ -148,7 +148,7 @@ impl AsyncWrite for WriteHalf<'_> {
         match inner.flush() {
             Ok(()) => Poll::Ready(Ok(())),
             Err(ref e) if e.kind() == io::ErrorKind::WouldBlock => {
-                cx.waker().wake_by_ref();
+                crate::net::tcp::stream::fallback_rewake(cx);
                 Poll::Pending
             }
             Err(e) => Poll::Ready(Err(e)),
@@ -370,13 +370,13 @@ impl TcpStreamInner {
             );
 
             let Some(current) = Cx::current() else {
-                cx.waker().wake_by_ref();
+                crate::net::tcp::stream::fallback_rewake(cx);
                 drop(guard);
                 drop(dropped_reg);
                 return Ok(());
             };
             let Some(driver) = current.io_driver_handle() else {
-                cx.waker().wake_by_ref();
+                crate::net::tcp::stream::fallback_rewake(cx);
                 drop(guard);
                 drop(dropped_reg);
                 return Ok(());
@@ -388,7 +388,7 @@ impl TcpStreamInner {
                     Ok(())
                 }
                 Err(err) if err.kind() == io::ErrorKind::Unsupported => {
-                    cx.waker().wake_by_ref();
+                    crate::net::tcp::stream::fallback_rewake(cx);
                     Ok(())
                 }
                 Err(err) => Err(err),

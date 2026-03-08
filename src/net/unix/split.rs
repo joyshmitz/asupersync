@@ -46,7 +46,7 @@ impl AsyncRead for ReadHalf<'_> {
                 Poll::Ready(Ok(()))
             }
             Err(ref e) if e.kind() == io::ErrorKind::WouldBlock => {
-                cx.waker().wake_by_ref();
+                crate::net::tcp::stream::fallback_rewake(cx);
                 Poll::Pending
             }
             Err(e) => Poll::Ready(Err(e)),
@@ -82,7 +82,7 @@ impl AsyncWrite for WriteHalf<'_> {
         match inner.write(buf) {
             Ok(n) => Poll::Ready(Ok(n)),
             Err(ref e) if e.kind() == io::ErrorKind::WouldBlock => {
-                cx.waker().wake_by_ref();
+                crate::net::tcp::stream::fallback_rewake(cx);
                 Poll::Pending
             }
             Err(e) => Poll::Ready(Err(e)),
@@ -94,7 +94,7 @@ impl AsyncWrite for WriteHalf<'_> {
         match inner.flush() {
             Ok(()) => Poll::Ready(Ok(())),
             Err(ref e) if e.kind() == io::ErrorKind::WouldBlock => {
-                cx.waker().wake_by_ref();
+                crate::net::tcp::stream::fallback_rewake(cx);
                 Poll::Pending
             }
             Err(e) => Poll::Ready(Err(e)),
@@ -267,11 +267,11 @@ impl UnixStreamInner {
         );
 
         let Some(current) = Cx::current() else {
-            cx.waker().wake_by_ref();
+            crate::net::tcp::stream::fallback_rewake(cx);
             return Ok(());
         };
         let Some(driver) = current.io_driver_handle() else {
-            cx.waker().wake_by_ref();
+            crate::net::tcp::stream::fallback_rewake(cx);
             return Ok(());
         };
 
@@ -281,7 +281,7 @@ impl UnixStreamInner {
                 Ok(())
             }
             Err(err) if err.kind() == io::ErrorKind::Unsupported => {
-                cx.waker().wake_by_ref();
+                crate::net::tcp::stream::fallback_rewake(cx);
                 Ok(())
             }
             Err(err) => Err(err),

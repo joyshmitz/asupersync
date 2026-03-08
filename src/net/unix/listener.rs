@@ -252,7 +252,7 @@ impl UnixListener {
                 }
                 Err(err) if err.kind() == io::ErrorKind::NotConnected => {
                     *registration = None;
-                    cx.waker().wake_by_ref();
+                    crate::net::tcp::stream::fallback_rewake(cx);
                     return Ok(());
                 }
                 Err(err) => return Err(err),
@@ -261,12 +261,12 @@ impl UnixListener {
 
         let Some(current) = Cx::current() else {
             drop(registration);
-            cx.waker().wake_by_ref();
+            crate::net::tcp::stream::fallback_rewake(cx);
             return Ok(());
         };
         let Some(driver) = current.io_driver_handle() else {
             drop(registration);
-            cx.waker().wake_by_ref();
+            crate::net::tcp::stream::fallback_rewake(cx);
             return Ok(());
         };
 
@@ -278,7 +278,7 @@ impl UnixListener {
             }
             Err(err) if err.kind() == io::ErrorKind::Unsupported => {
                 drop(registration);
-                cx.waker().wake_by_ref();
+                crate::net::tcp::stream::fallback_rewake(cx);
                 Ok(())
             }
             Err(err) => {

@@ -271,7 +271,7 @@ impl UnixDatagram {
                 }
                 Err(err) if err.kind() == io::ErrorKind::NotConnected => {
                     self.registration = None;
-                    cx.waker().wake_by_ref();
+                    crate::net::tcp::stream::fallback_rewake(cx);
                     return Ok(());
                 }
                 Err(err) => return Err(err),
@@ -279,11 +279,11 @@ impl UnixDatagram {
         }
 
         let Some(current) = Cx::current() else {
-            cx.waker().wake_by_ref();
+            crate::net::tcp::stream::fallback_rewake(cx);
             return Ok(());
         };
         let Some(driver) = current.io_driver_handle() else {
-            cx.waker().wake_by_ref();
+            crate::net::tcp::stream::fallback_rewake(cx);
             return Ok(());
         };
 
@@ -293,7 +293,7 @@ impl UnixDatagram {
                 Ok(())
             }
             Err(err) if err.kind() == io::ErrorKind::Unsupported => {
-                cx.waker().wake_by_ref();
+                crate::net::tcp::stream::fallback_rewake(cx);
                 Ok(())
             }
             Err(err) => Err(err),
