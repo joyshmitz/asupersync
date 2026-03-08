@@ -73,6 +73,51 @@ fn internal_dependency_set(manifest: &serde_json::Value) -> BTreeSet<String> {
         .unwrap_or_default()
 }
 
+const POLICY_REQUIRED_SUPPLY_CHAIN_ARTIFACTS: &[&str] = &[
+    "docs/wasm_browser_sbom_v1.json",
+    "docs/wasm_browser_provenance_attestation_v1.json",
+    "packages/browser-core/package.json",
+    "packages/browser-core/asupersync_bg.wasm",
+    "packages/browser/package.json",
+    "packages/react/package.json",
+    "packages/next/package.json",
+];
+
+const BROWSER_CORE_SHIPPED_OUTPUTS: &[&str] = &[
+    "packages/browser-core/package.json",
+    "packages/browser-core/index.js",
+    "packages/browser-core/index.d.ts",
+    "packages/browser-core/asupersync.js",
+    "packages/browser-core/asupersync.d.ts",
+    "packages/browser-core/types.d.ts",
+    "packages/browser-core/asupersync_bg.wasm",
+    "packages/browser-core/asupersync_bg.wasm.d.ts",
+    "packages/browser-core/abi-metadata.json",
+    "packages/browser-core/debug-metadata.json",
+];
+
+const BROWSER_PACKAGE_MANIFESTS: &[&str] = &[
+    "packages/browser/package.json",
+    "packages/react/package.json",
+    "packages/next/package.json",
+];
+
+fn assert_tracked_paths_match_live_digests(
+    observed: &BTreeMap<PathBuf, String>,
+    expected_paths: &[&str],
+    label: &str,
+) {
+    for expected in expected_paths {
+        let path = PathBuf::from(expected);
+        assert_eq!(
+            observed.get(&path),
+            Some(&sha256_hex(&path)),
+            "{label} must track live bytes for {}",
+            path.display()
+        );
+    }
+}
+
 #[test]
 fn security_release_policy_declares_supply_chain_artifact_gate() {
     let policy = load_json(Path::new(".github/security_release_policy.json"));
@@ -91,18 +136,12 @@ fn security_release_policy_declares_supply_chain_artifact_gate() {
     let required = gate["required_artifacts"]
         .as_array()
         .expect("required_artifacts must be an array");
-    assert!(
-        required
-            .iter()
-            .any(|entry| entry == "docs/wasm_browser_sbom_v1.json"),
-        "required_artifacts must include SBOM artifact"
-    );
-    assert!(
-        required
-            .iter()
-            .any(|entry| entry == "docs/wasm_browser_provenance_attestation_v1.json"),
-        "required_artifacts must include provenance artifact"
-    );
+    for expected in POLICY_REQUIRED_SUPPLY_CHAIN_ARTIFACTS {
+        assert!(
+            required.iter().any(|entry| entry == expected),
+            "required_artifacts must include {expected}"
+        );
+    }
     assert_eq!(
         gate["integrity_manifest"],
         "docs/wasm_browser_artifact_integrity_manifest_v1.json"
@@ -118,15 +157,15 @@ fn artifact_integrity_manifest_matches_committed_artifacts() {
         manifest["schema_version"],
         "asupersync-wasm-artifact-integrity-v1"
     );
-    assert_eq!(manifest["bead"], "asupersync-umelq.14.3");
+    assert_eq!(manifest["bead"], "asupersync-3qv04.7.2");
     assert_eq!(manifest["hash_algorithm"], "sha256");
 
     let entries = manifest["entries"]
         .as_array()
         .expect("manifest entries must be an array");
     assert!(
-        entries.len() >= 2,
-        "manifest should include at least two entries"
+        entries.len() >= 2 + BROWSER_CORE_SHIPPED_OUTPUTS.len() + BROWSER_PACKAGE_MANIFESTS.len(),
+        "manifest should include bundle files plus shipped Browser Edition outputs"
     );
 
     let mut seen: BTreeMap<PathBuf, String> = BTreeMap::new();
@@ -156,15 +195,152 @@ fn artifact_integrity_manifest_matches_committed_artifacts() {
         );
     }
 
-    assert!(
-        seen.contains_key(&PathBuf::from("docs/wasm_browser_sbom_v1.json")),
-        "manifest must include SBOM artifact"
+    for expected in [
+        "docs/wasm_browser_sbom_v1.json",
+        "docs/wasm_browser_provenance_attestation_v1.json",
+    ] {
+        assert!(
+            seen.contains_key(&PathBuf::from(expected)),
+            "manifest must include bundle artifact {expected}"
+        );
+    }
+    for expected in BROWSER_CORE_SHIPPED_OUTPUTS {
+        assert!(
+            seen.contains_key(&PathBuf::from(expected)),
+            "manifest must include browser-core shipped output {expected}"
+        );
+    }
+    for expected in BROWSER_PACKAGE_MANIFESTS {
+        assert!(
+            seen.contains_key(&PathBuf::from(expected)),
+            "manifest must include package manifest {expected}"
+        );
+    }
+}
+
+#[test]
+fn sbom_and_provenance_docs_and_artifact_copies_align() {
+    let docs_sbom = load_json(Path::new("docs/wasm_browser_sbom_v1.json"));
+    let artifact_sbom = load_json(Path::new("artifacts/wasm_browser_sbom_v1.json"));
+    let docs_provenance = load_json(Path::new(
+        "docs/wasm_browser_provenance_attestation_v1.json",
+    ));
+    let artifact_provenance = load_json(Path::new(
+        "artifacts/wasm_browser_provenance_attestation_v1.json",
+    ));
+
+    assert_eq!(
+        docs_sbom, artifact_sbom,
+        "docs and artifacts SBOM copies must stay aligned"
     );
-    assert!(
-        seen.contains_key(&PathBuf::from(
-            "docs/wasm_browser_provenance_attestation_v1.json"
-        )),
-        "manifest must include provenance artifact"
+    assert_eq!(
+        docs_provenance, artifact_provenance,
+        "docs and artifacts provenance copies must stay aligned"
+    );
+
+    assert_eq!(docs_sbom["bead"], "asupersync-3qv04.7.2");
+    assert_eq!(docs_provenance["bead"], "asupersync-3qv04.7.2");
+}
+
+#[test]
+fn sbom_tracks_live_browser_release_outputs() {
+    let docs_sbom = load_json(Path::new("docs/wasm_browser_sbom_v1.json"));
+
+    let shipped_outputs = docs_sbom["shipped_outputs"]
+        .as_array()
+        .expect("shipped_outputs must be an array");
+    let mut sbom_paths = BTreeMap::new();
+    for entry in shipped_outputs {
+        let path = PathBuf::from(
+            entry["path"]
+                .as_str()
+                .expect("shipped output path must be string"),
+        );
+        let sha256 = entry["sha256"]
+            .as_str()
+            .expect("shipped output sha256 must be string")
+            .to_string();
+        sbom_paths.insert(path, sha256);
+    }
+
+    assert_tracked_paths_match_live_digests(
+        &sbom_paths,
+        BROWSER_CORE_SHIPPED_OUTPUTS,
+        "SBOM browser-core shipped outputs",
+    );
+    assert_tracked_paths_match_live_digests(
+        &sbom_paths,
+        BROWSER_PACKAGE_MANIFESTS,
+        "SBOM package manifests",
+    );
+
+    let npm_packages = docs_sbom["npm_packages"]
+        .as_array()
+        .expect("npm_packages must be an array");
+    let mut manifest_paths = BTreeMap::new();
+    for entry in npm_packages {
+        let name = entry["name"]
+            .as_str()
+            .expect("npm package name must be string")
+            .to_string();
+        let manifest_path = entry["manifest_path"]
+            .as_str()
+            .expect("manifest_path must be string")
+            .to_string();
+        let version = entry["version"].as_str().expect("version must be string");
+        assert_eq!(
+            version,
+            env!("CARGO_PKG_VERSION"),
+            "npm package version must track crate version for {name}"
+        );
+        manifest_paths.insert(name, manifest_path);
+    }
+
+    for (name, manifest) in [
+        (
+            "@asupersync/browser-core",
+            "packages/browser-core/package.json",
+        ),
+        ("@asupersync/browser", "packages/browser/package.json"),
+        ("@asupersync/react", "packages/react/package.json"),
+        ("@asupersync/next", "packages/next/package.json"),
+    ] {
+        assert_eq!(
+            manifest_paths.get(name).map(String::as_str),
+            Some(manifest),
+            "SBOM must point {name} at {manifest}"
+        );
+    }
+}
+
+#[test]
+fn provenance_tracks_live_browser_release_outputs() {
+    let docs_provenance = load_json(Path::new(
+        "docs/wasm_browser_provenance_attestation_v1.json",
+    ));
+
+    let subject = docs_provenance["subject"]
+        .as_array()
+        .expect("subject must be an array");
+    let mut provenance_paths = BTreeMap::new();
+    for entry in subject {
+        let path = PathBuf::from(entry["name"].as_str().expect("subject name must be string"));
+        let sha256 = entry["digest"]["sha256"]
+            .as_str()
+            .expect("subject digest sha256 must be string")
+            .to_string();
+        provenance_paths.insert(path, sha256);
+    }
+
+    assert_tracked_paths_match_live_digests(
+        &provenance_paths,
+        BROWSER_CORE_SHIPPED_OUTPUTS,
+        "provenance browser-core shipped outputs",
+    );
+    assert_tracked_paths_match_live_digests(
+        &provenance_paths,
+        BROWSER_PACKAGE_MANIFESTS,
+        "provenance package manifests",
     );
 }
 
@@ -179,6 +355,11 @@ fn dependency_audit_docs_reference_supply_chain_bundle_and_repro_commands() {
         "docs/wasm_browser_sbom_v1.json",
         "docs/wasm_browser_provenance_attestation_v1.json",
         "docs/wasm_browser_artifact_integrity_manifest_v1.json",
+        "packages/browser-core/asupersync_bg.wasm",
+        "packages/browser-core/package.json",
+        "packages/browser/package.json",
+        "packages/react/package.json",
+        "packages/next/package.json",
         "python3 scripts/check_security_release_gate.py \\\n  --policy .github/security_release_policy.json \\\n  --check-deps \\\n  --dep-policy .github/wasm_dependency_policy.json",
     ] {
         assert!(

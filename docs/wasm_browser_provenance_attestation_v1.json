@@ -1,9 +1,9 @@
 {
   "schema_version": "asupersync-wasm-provenance-v1",
-  "bead": "asupersync-umelq.14.3",
+  "bead": "asupersync-3qv04.7.2",
   "predicate_type": "https://slsa.dev/provenance/v1",
   "builder": {
-    "id": "rch-remote-build-fleet"
+    "id": "browser-release-surface-contract"
   },
   "invocation": {
     "config_source": {
@@ -13,23 +13,132 @@
       }
     },
     "command_provenance": [
-      "rch exec -- cargo check --all-targets",
-      "rch exec -- cargo clippy --all-targets -- -D warnings",
-      "rch exec -- cargo fmt --check"
+      "bash scripts/build_browser_core_artifacts.sh prod",
+      "bash scripts/validate_package_build.sh",
+      "bash scripts/validate_npm_pack_smoke.sh"
     ]
   },
   "subject": [
     {
-      "name": "docs/wasm_browser_sbom_v1.json",
+      "name": "packages/browser-core/package.json",
+      "package": "@asupersync/browser-core",
+      "kind": "manifest",
       "digest": {
-        "sha256": "a15a8dc73288d1d17a00a0efa14a9414c0ffd3f1eedfd17cde8543ea54179a57"
+        "sha256": "f6b4e099b43cf6b7243eaad1130f09cc5f2699ae029a65a55baf9193aa6f2a73"
+      }
+    },
+    {
+      "name": "packages/browser-core/index.js",
+      "package": "@asupersync/browser-core",
+      "kind": "package-file",
+      "digest": {
+        "sha256": "740a8968ea973a27ffa367c04f83be46d7aca4daba8737c1d5e275dd00b87bb3"
+      }
+    },
+    {
+      "name": "packages/browser-core/index.d.ts",
+      "package": "@asupersync/browser-core",
+      "kind": "package-file",
+      "digest": {
+        "sha256": "c2279fa93aa660ea5a9ab8176ee1823c8225c900dba59a8faa43a808969a340c"
+      }
+    },
+    {
+      "name": "packages/browser-core/asupersync.js",
+      "package": "@asupersync/browser-core",
+      "kind": "package-file",
+      "digest": {
+        "sha256": "2ca16fe7ad1350976dbd1f2bd72c8b15bf361a43bed1b1d81bb6f85c55ac98a4"
+      }
+    },
+    {
+      "name": "packages/browser-core/asupersync.d.ts",
+      "package": "@asupersync/browser-core",
+      "kind": "package-file",
+      "digest": {
+        "sha256": "cb47f89ca34b5d0f1421009a95ecb8972536fe4a57e102a0822cb9f6f391d50b"
+      }
+    },
+    {
+      "name": "packages/browser-core/types.d.ts",
+      "package": "@asupersync/browser-core",
+      "kind": "package-file",
+      "digest": {
+        "sha256": "4e1e172a1eb86594af4f2818bbe30a53badc9a87f924752390ecbd61cf861678"
+      }
+    },
+    {
+      "name": "packages/browser-core/asupersync_bg.wasm",
+      "package": "@asupersync/browser-core",
+      "kind": "wasm",
+      "digest": {
+        "sha256": "d4e7690dcf2c87ebf09d512ccdeb10114c80e05e14d70626e26fae7b480eb443"
+      }
+    },
+    {
+      "name": "packages/browser-core/asupersync_bg.wasm.d.ts",
+      "package": "@asupersync/browser-core",
+      "kind": "package-file",
+      "digest": {
+        "sha256": "04e1d000b3d26951e240f8f2902b72f1dd718e692ca1eefbef38027539bc2de5"
+      }
+    },
+    {
+      "name": "packages/browser-core/abi-metadata.json",
+      "package": "@asupersync/browser-core",
+      "kind": "metadata",
+      "digest": {
+        "sha256": "bcded5f10c7139e0da6ce24990a85efae071b353697b85314cfaad44c1ac790b"
+      }
+    },
+    {
+      "name": "packages/browser-core/debug-metadata.json",
+      "package": "@asupersync/browser-core",
+      "kind": "metadata",
+      "digest": {
+        "sha256": "a01ddbc4fbe173778e55d366f3d4e0bed22f2b0abaefceaa8337aa6aeca5f784"
+      }
+    },
+    {
+      "name": "packages/browser/package.json",
+      "package": "@asupersync/browser",
+      "kind": "manifest",
+      "digest": {
+        "sha256": "24231053f456c34b2d29d1d2cc9c8fc4f93bd6bd736ee0fd6eba6c14d5532bdc"
+      }
+    },
+    {
+      "name": "packages/react/package.json",
+      "package": "@asupersync/react",
+      "kind": "manifest",
+      "digest": {
+        "sha256": "9c66ebc9cdd9f2e70ada930a30df184cf00e76b380ff412b2425cf945cd72a1c"
+      }
+    },
+    {
+      "name": "packages/next/package.json",
+      "package": "@asupersync/next",
+      "kind": "manifest",
+      "digest": {
+        "sha256": "e1c3a01b2c3abf94b30c8cf6ea3a044888695d5dcff676021e138aab859deafe"
       }
     }
   ],
   "materials": [
     "Cargo.toml",
     "Cargo.lock",
+    "package.json",
+    "pnpm-workspace.yaml",
+    "asupersync-browser-core/Cargo.toml",
+    "scripts/build_browser_core_artifacts.sh",
+    "scripts/validate_package_build.sh",
+    "scripts/validate_npm_pack_smoke.sh",
     ".github/security_release_policy.json",
-    ".github/wasm_dependency_policy.json"
+    ".github/wasm_dependency_policy.json",
+    ".github/wasm_typescript_package_policy.json",
+    "packages/browser-core/package.json",
+    "packages/browser/package.json",
+    "packages/react/package.json",
+    "packages/next/package.json"
   ]
 }

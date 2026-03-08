@@ -71,10 +71,18 @@ Supply-chain artifact bundle (release-blocking via `SEC-BLOCK-07`):
 - `docs/wasm_browser_sbom_v1.json`
 - `docs/wasm_browser_provenance_attestation_v1.json`
 - `docs/wasm_browser_artifact_integrity_manifest_v1.json`
+- required shipped-output surfaces named by the bundle:
+  - `packages/browser-core/package.json`
+  - `packages/browser-core/asupersync_bg.wasm`
+  - `packages/browser/package.json`
+  - `packages/react/package.json`
+  - `packages/next/package.json`
 
 Integrity rule:
 
 - every required bundle artifact must appear in the integrity manifest,
+- the manifest must also enumerate the committed browser-core JS/TS/metadata
+  package files alongside the shipped WASM binary,
 - each manifest SHA-256 digest must match committed bytes exactly,
 - mismatches or missing artifacts are release-blocking failures.
 

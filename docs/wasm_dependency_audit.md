@@ -60,6 +60,16 @@ Transition-level provenance is release-gate critical:
   - `docs/wasm_browser_sbom_v1.json`
   - `docs/wasm_browser_provenance_attestation_v1.json`
   - `docs/wasm_browser_artifact_integrity_manifest_v1.json`
+  - release-bound Browser Edition outputs attested by the bundle:
+    - `packages/browser-core/package.json`
+    - `packages/browser-core/asupersync.js`
+    - `packages/browser-core/asupersync.d.ts`
+    - `packages/browser-core/asupersync_bg.wasm`
+    - `packages/browser-core/abi-metadata.json`
+    - `packages/browser-core/debug-metadata.json`
+    - `packages/browser/package.json`
+    - `packages/react/package.json`
+    - `packages/next/package.json`
 
 ### Local Reproduction
 
@@ -89,7 +99,10 @@ transition records cannot silently bypass release checks.
 
 Release-gate supply-chain integrity validation additionally enforces SBOM +
 provenance artifact presence and SHA-256 manifest matching via:
-`docs/wasm_browser_artifact_integrity_manifest_v1.json`.
+`docs/wasm_browser_artifact_integrity_manifest_v1.json`. That manifest now
+attests the shipped browser-core JS/WASM/metadata bundle plus the package
+manifests for `@asupersync/browser`, `@asupersync/react`, and
+`@asupersync/next`, rather than only hashing the contract JSON files.
 
 ## Adversarial Policy Assertions
 

@@ -117,6 +117,75 @@ fn artifact_versions_are_stable() {
     );
 }
 
+#[test]
+fn runner_bundle_required_fields_are_stable() {
+    let artifact = load_artifact();
+    let actual: BTreeSet<String> = artifact["runner_bundle_required_fields"]
+        .as_array()
+        .expect("runner_bundle_required_fields must be array")
+        .iter()
+        .map(|field| field.as_str().expect("field must be string").to_string())
+        .collect();
+    let expected: BTreeSet<String> = [
+        "schema",
+        "scenario_id",
+        "description",
+        "workload_id",
+        "validation_surface",
+        "focus_dimension_ids",
+        "run_id",
+        "mode",
+        "command",
+        "timestamp",
+        "artifact_path",
+        "runner_script",
+        "bundle_manifest_path",
+        "planned_run_log_path",
+        "planned_run_report_path",
+        "rch_routed",
+    ]
+    .into_iter()
+    .map(ToOwned::to_owned)
+    .collect();
+    assert_eq!(actual, expected, "bundle schema fields must remain stable");
+}
+
+#[test]
+fn runner_report_required_fields_are_stable() {
+    let artifact = load_artifact();
+    let actual: BTreeSet<String> = artifact["runner_report_required_fields"]
+        .as_array()
+        .expect("runner_report_required_fields must be array")
+        .iter()
+        .map(|field| field.as_str().expect("field must be string").to_string())
+        .collect();
+    let expected: BTreeSet<String> = [
+        "schema",
+        "scenario_id",
+        "description",
+        "workload_id",
+        "validation_surface",
+        "focus_dimension_ids",
+        "run_id",
+        "mode",
+        "command",
+        "artifact_path",
+        "runner_script",
+        "bundle_manifest_path",
+        "run_log_path",
+        "run_report_path",
+        "output_dir",
+        "rch_routed",
+        "started_at",
+        "finished_at",
+        "exit_code",
+    ]
+    .into_iter()
+    .map(ToOwned::to_owned)
+    .collect();
+    assert_eq!(actual, expected, "report schema fields must remain stable");
+}
+
 // ── Transport component inventory ────────────────────────────────────
 
 #[test]
@@ -315,11 +384,15 @@ fn structured_log_contract_mentions_transport_decision_metadata() {
     let doc = load_doc();
     for field in [
         "benchmark_correlation_id",
+        "path_count",
         "experimental_gate_id",
         "path_policy_id",
         "effective_path_policy_id",
         "requested_path_count",
         "selected_path_count",
+        "fallback_path_count",
+        "selected_path_ids",
+        "fallback_path_ids",
         "fallback_policy_id",
         "path_downgrade_reason",
         "downgrade_reason",
@@ -345,11 +418,15 @@ fn structured_log_fields_include_transport_decision_metadata() {
 
     for field in [
         "benchmark_correlation_id",
+        "path_count",
         "experimental_gate_id",
         "path_policy_id",
         "effective_path_policy_id",
         "requested_path_count",
         "selected_path_count",
+        "fallback_path_count",
+        "selected_path_ids",
+        "fallback_path_ids",
         "fallback_policy_id",
         "path_downgrade_reason",
         "downgrade_reason",
@@ -390,11 +467,15 @@ fn transport_experiment_decision_emits_contract_metadata_fields() {
     for field in [
         "workload_id",
         "benchmark_correlation_id",
+        "path_count",
         "experimental_gate_id",
         "path_policy_id",
         "effective_path_policy_id",
         "requested_path_count",
         "selected_path_count",
+        "fallback_path_count",
+        "selected_path_ids",
+        "fallback_path_ids",
         "fallback_policy_id",
         "path_downgrade_reason",
         "downgrade_reason",
@@ -414,6 +495,15 @@ fn transport_experiment_decision_emits_contract_metadata_fields() {
     assert_eq!(
         fields.get("benchmark_correlation_id").map(String::as_str),
         Some("aa08-contract-smoke-001")
+    );
+    assert_eq!(fields.get("path_count").map(String::as_str), Some("1"));
+    assert_eq!(
+        fields.get("selected_path_ids").map(String::as_str),
+        Some("7")
+    );
+    assert_eq!(
+        fields.get("fallback_path_count").map(String::as_str),
+        Some("0")
     );
     assert_eq!(
         fields.get("experimental_gate_id").map(String::as_str),
@@ -444,6 +534,53 @@ fn smoke_scenarios_are_rch_routed() {
 }
 
 #[test]
+fn smoke_scenarios_include_validation_metadata() {
+    let artifact = load_artifact();
+    for scenario in artifact["smoke_scenarios"].as_array().expect("array") {
+        let sid = scenario["scenario_id"].as_str().unwrap_or("<missing>");
+        for field in [
+            "scenario_id",
+            "description",
+            "workload_id",
+            "validation_surface",
+            "focus_dimension_ids",
+            "command",
+        ] {
+            assert!(
+                scenario.get(field).is_some(),
+                "scenario {sid} missing field: {field}"
+            );
+        }
+        assert!(
+            scenario["focus_dimension_ids"].is_array(),
+            "scenario {sid} focus_dimension_ids must be an array"
+        );
+    }
+}
+
+#[test]
+fn smoke_scenarios_cover_handoff_overload_and_visibility_slices() {
+    let artifact = load_artifact();
+    let actual: BTreeSet<String> = artifact["smoke_scenarios"]
+        .as_array()
+        .expect("array")
+        .iter()
+        .map(|scenario| scenario["scenario_id"].as_str().unwrap().to_string())
+        .collect();
+
+    for required in [
+        "AA08-SMOKE-HANDOFF-FALLBACK",
+        "AA08-SMOKE-OVERLOAD-SIGNAL",
+        "AA08-SMOKE-OPERATOR-VISIBILITY",
+    ] {
+        assert!(
+            actual.contains(required),
+            "missing smoke scenario {required}"
+        );
+    }
+}
+
+#[test]
 fn runner_script_exists_and_declares_modes() {
     let root = repo_root();
     let script_path = root.join(RUNNER_SCRIPT_PATH);
@@ -456,9 +593,110 @@ fn runner_script_exists_and_declares_modes() {
         "--execute",
         "transport-frontier-benchmark-smoke-bundle-v1",
         "transport-frontier-benchmark-smoke-run-report-v1",
+        "AA08_RUN_ID",
+        "AA08_TIMESTAMP",
+        "AA08_OUTPUT_ROOT",
     ] {
         assert!(script.contains(token), "runner missing token: {token}");
     }
+}
+
+#[test]
+fn runner_dry_run_emits_replay_metadata_bundle() {
+    let root = repo_root();
+    let output_root = tempfile::tempdir().expect("tempdir");
+    let script_path = root.join(RUNNER_SCRIPT_PATH);
+
+    let status = std::process::Command::new("bash")
+        .arg(&script_path)
+        .arg("--scenario")
+        .arg("AA08-SMOKE-HANDOFF-FALLBACK")
+        .arg("--dry-run")
+        .current_dir(&root)
+        .env("AA08_RUN_ID", "run_fixed")
+        .env("AA08_TIMESTAMP", "2026-03-08T00:00:00Z")
+        .env("AA08_OUTPUT_ROOT", output_root.path())
+        .status()
+        .expect("run dry-run script");
+    assert!(status.success(), "dry-run script should succeed");
+
+    let bundle_path = output_root
+        .path()
+        .join("run_fixed")
+        .join("AA08-SMOKE-HANDOFF-FALLBACK")
+        .join("bundle_manifest.json");
+    assert!(bundle_path.exists(), "bundle manifest must be created");
+
+    let raw = std::fs::read_to_string(&bundle_path).expect("read bundle manifest");
+    let bundle: Value = serde_json::from_str(&raw).expect("parse bundle manifest");
+
+    assert_eq!(
+        bundle["schema"].as_str(),
+        Some("transport-frontier-benchmark-smoke-bundle-v1")
+    );
+    assert_eq!(
+        bundle["scenario_id"].as_str(),
+        Some("AA08-SMOKE-HANDOFF-FALLBACK")
+    );
+    assert_eq!(bundle["workload_id"].as_str(), Some("TW-HANDOFF"));
+    assert_eq!(
+        bundle["validation_surface"].as_str(),
+        Some(
+            "src/transport/aggregator.rs::tests::test_path_set_primary_only_exposes_conservative_fallback"
+        )
+    );
+    assert_eq!(
+        bundle["runner_script"].as_str(),
+        Some("scripts/run_transport_frontier_benchmark_smoke.sh")
+    );
+    assert_eq!(bundle["run_id"].as_str(), Some("run_fixed"));
+    assert_eq!(bundle["timestamp"].as_str(), Some("2026-03-08T00:00:00Z"));
+    assert_eq!(bundle["rch_routed"].as_bool(), Some(true));
+    assert_eq!(
+        bundle["bundle_manifest_path"].as_str(),
+        bundle_path.to_str(),
+        "bundle path should be recorded verbatim"
+    );
+}
+
+#[test]
+fn symbol_dispatcher_overload_rejected_deterministically() {
+    use asupersync::security::authenticated::AuthenticatedSymbol;
+    use asupersync::security::tag::AuthenticationTag;
+    use asupersync::transport::{
+        DispatchConfig, DispatchError, Endpoint, EndpointId, RouteKey, RoutingEntry, RoutingTable,
+        SymbolDispatcher, SymbolRouter,
+    };
+    use asupersync::types::{Symbol, SymbolId, SymbolKind, Time};
+    use std::sync::Arc;
+
+    let table = Arc::new(RoutingTable::new());
+    let endpoint = table.register_endpoint(Endpoint::new(EndpointId(1), "node-1:8080"));
+    table.add_route(
+        RouteKey::Default,
+        RoutingEntry::new(vec![endpoint], Time::ZERO),
+    );
+
+    let router = Arc::new(SymbolRouter::new(table));
+    let dispatcher = SymbolDispatcher::new(
+        router,
+        DispatchConfig {
+            max_concurrent: 0,
+            ..DispatchConfig::default()
+        },
+    );
+
+    let symbol = AuthenticatedSymbol::new_verified(
+        Symbol::new(SymbolId::new_for_test(1, 0, 1), vec![1], SymbolKind::Source),
+        AuthenticationTag::zero(),
+    );
+    let cx = asupersync::Cx::for_testing();
+    let result = futures_lite::future::block_on(dispatcher.dispatch(&cx, symbol));
+
+    assert!(
+        matches!(result, Err(DispatchError::Overloaded)),
+        "dispatcher should reject immediately when max_concurrent=0: {result:?}"
+    );
 }
 
 // ── Downstream beads ─────────────────────────────────────────────────

@@ -82,7 +82,12 @@
       "description": "Rust/npm release surfaces must publish deterministic SBOM + provenance artifacts, and a SHA-256 integrity manifest must match the committed artifact bytes.",
       "required_artifacts": [
         "docs/wasm_browser_sbom_v1.json",
-        "docs/wasm_browser_provenance_attestation_v1.json"
+        "docs/wasm_browser_provenance_attestation_v1.json",
+        "packages/browser-core/package.json",
+        "packages/browser-core/asupersync_bg.wasm",
+        "packages/browser/package.json",
+        "packages/react/package.json",
+        "packages/next/package.json"
       ],
       "integrity_manifest": "docs/wasm_browser_artifact_integrity_manifest_v1.json",
       "blocks_release": true

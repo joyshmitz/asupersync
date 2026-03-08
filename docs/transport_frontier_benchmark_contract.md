@@ -2,6 +2,8 @@
 
 Bead: `asupersync-1508v.8.4`
 
+Validation-prep extension: `asupersync-1508v.8.7`
+
 ## Purpose
 
 This contract defines the feasibility harness, workload vocabulary, and benchmark schema for transport-frontier experiments. Every transport experiment (multipath, coded transport, receiver-driven RPC) must share deterministic workloads, comparable metrics, and structured benchmark logs before prototype work begins.
@@ -118,6 +120,9 @@ Benchmark logs MUST include:
 - `effective_path_policy_id`: Effective path-selection policy after conservative fallback
 - `requested_path_count`: Requested path count for bounded policies, if any
 - `selected_path_count`: Number of paths actually selected by the policy
+- `fallback_path_count`: Number of conservative fallback paths retained for replay/debug analysis
+- `selected_path_ids`: Stable comma-separated selected path IDs in decision order
+- `fallback_path_ids`: Stable comma-separated fallback path IDs in decision order
 - `fallback_policy_id`: Conservative fallback policy when the requested policy cannot be honored exactly
 - `path_downgrade_reason`: Stable downgrade code emitted by the low-level path selector
 - `downgrade_reason`: Stable downgrade code such as `no-primary-path` or `requested-paths-unavailable`
@@ -139,6 +144,34 @@ The runner reads `artifacts/transport_frontier_benchmark_v1.json`, supports dete
 
 1. Per-scenario manifests with schema `transport-frontier-benchmark-smoke-bundle-v1`
 2. Aggregate run report with schema `transport-frontier-benchmark-smoke-run-report-v1`
+
+Deterministic runner controls:
+
+- `AA08_RUN_ID`: override the generated run identifier for deterministic dry-run/contract tests
+- `AA08_TIMESTAMP`: override the manifest timestamp for deterministic dry-run/contract tests
+- `AA08_FINISHED_AT`: override the execute-mode completion timestamp when exact report content matters
+- `AA08_OUTPUT_ROOT`: redirect artifacts away from the default `target/transport-frontier-benchmark-smoke`
+
+Required bundle fields:
+
+- `schema`, `scenario_id`, `description`, `workload_id`, `validation_surface`
+- `focus_dimension_ids`, `run_id`, `mode`, `command`, `timestamp`
+- `artifact_path`, `runner_script`, `bundle_manifest_path`
+- `planned_run_log_path`, `planned_run_report_path`, `rch_routed`
+
+Required report fields:
+
+- `schema`, `scenario_id`, `description`, `workload_id`, `validation_surface`
+- `focus_dimension_ids`, `run_id`, `mode`, `command`
+- `artifact_path`, `runner_script`, `bundle_manifest_path`
+- `run_log_path`, `run_report_path`, `output_dir`, `rch_routed`
+- `started_at`, `finished_at`, `exit_code`
+
+Validation-prep smoke slices now include:
+
+- handoff/fallback metadata coverage
+- overload rejection visibility
+- deterministic operator-visibility bundle generation
 
 ## Validation
 

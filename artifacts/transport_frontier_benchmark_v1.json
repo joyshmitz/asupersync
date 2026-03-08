@@ -4,6 +4,45 @@
   "runner_bundle_schema_version": "transport-frontier-benchmark-smoke-bundle-v1",
   "runner_report_schema_version": "transport-frontier-benchmark-smoke-run-report-v1",
   "runner_script": "scripts/run_transport_frontier_benchmark_smoke.sh",
+  "runner_bundle_required_fields": [
+    "schema",
+    "scenario_id",
+    "description",
+    "workload_id",
+    "validation_surface",
+    "focus_dimension_ids",
+    "run_id",
+    "mode",
+    "command",
+    "timestamp",
+    "artifact_path",
+    "runner_script",
+    "bundle_manifest_path",
+    "planned_run_log_path",
+    "planned_run_report_path",
+    "rch_routed"
+  ],
+  "runner_report_required_fields": [
+    "schema",
+    "scenario_id",
+    "description",
+    "workload_id",
+    "validation_surface",
+    "focus_dimension_ids",
+    "run_id",
+    "mode",
+    "command",
+    "artifact_path",
+    "runner_script",
+    "bundle_manifest_path",
+    "run_log_path",
+    "run_report_path",
+    "output_dir",
+    "rch_routed",
+    "started_at",
+    "finished_at",
+    "exit_code"
+  ],
   "transport_components": [
     {
       "component_id": "symbol-sink-stream",
@@ -119,7 +158,10 @@
     "path_policy_id",
     "effective_path_policy_id",
     "requested_path_count",
+    "fallback_path_count",
     "selected_path_count",
+    "selected_path_ids",
+    "fallback_path_ids",
     "fallback_policy_id",
     "path_downgrade_reason",
     "downgrade_reason",
@@ -140,22 +182,58 @@
     {
       "scenario_id": "AA08-SMOKE-WORKLOAD-VOCAB",
       "description": "Verify workload vocabulary completeness and fields",
+      "workload_id": "TW-MULTIPATH",
+      "validation_surface": "tests/transport_frontier_benchmark_contract.rs::workload_vocabulary_has_expected_ids",
+      "focus_dimension_ids": ["operator-visibility"],
       "command": "rch exec -- env CARGO_INCREMENTAL=0 CARGO_TARGET_DIR=/tmp/rch-codex-aa081 cargo test --test transport_frontier_benchmark_contract workload -- --nocapture"
     },
     {
       "scenario_id": "AA08-SMOKE-BENCHMARK-DIMS",
       "description": "Verify benchmark dimension catalog and metrics",
+      "workload_id": "TW-MULTIPATH",
+      "validation_surface": "tests/transport_frontier_benchmark_contract.rs::benchmark_dimensions_have_expected_ids",
+      "focus_dimension_ids": ["operator-visibility"],
       "command": "rch exec -- env CARGO_INCREMENTAL=0 CARGO_TARGET_DIR=/tmp/rch-codex-aa081 cargo test --test transport_frontier_benchmark_contract dimension -- --nocapture"
     },
     {
       "scenario_id": "AA08-SMOKE-EXPERIMENTS",
       "description": "Verify experiment catalog and hypothesis fields",
+      "workload_id": "TW-MULTIPATH",
+      "validation_surface": "tests/transport_frontier_benchmark_contract.rs::experiment_catalog_has_expected_ids",
+      "focus_dimension_ids": ["operator-visibility"],
       "command": "rch exec -- env CARGO_INCREMENTAL=0 CARGO_TARGET_DIR=/tmp/rch-codex-aa081 cargo test --test transport_frontier_benchmark_contract experiment -- --nocapture"
     },
     {
       "scenario_id": "AA08-SMOKE-SIM-NETWORK",
       "description": "Verify SimNetwork deterministic simulation works",
+      "workload_id": "TW-FAIRNESS",
+      "validation_surface": "tests/transport_frontier_benchmark_contract.rs::sim_network_fully_connected_creates_paths",
+      "focus_dimension_ids": ["fairness", "operator-visibility"],
       "command": "rch exec -- env CARGO_INCREMENTAL=0 CARGO_TARGET_DIR=/tmp/rch-codex-aa081 cargo test --test transport_frontier_benchmark_contract sim_network -- --nocapture"
+    },
+    {
+      "scenario_id": "AA08-SMOKE-HANDOFF-FALLBACK",
+      "description": "Verify deterministic fallback metadata for a primary-path handoff/failover slice",
+      "workload_id": "TW-HANDOFF",
+      "validation_surface": "src/transport/aggregator.rs::tests::test_path_set_primary_only_exposes_conservative_fallback",
+      "focus_dimension_ids": ["failure-handling", "operator-visibility"],
+      "command": "rch exec -- env CARGO_INCREMENTAL=0 CARGO_TARGET_DIR=/tmp/rch-codex-aa081 cargo test test_path_set_primary_only_exposes_conservative_fallback -- --nocapture"
+    },
+    {
+      "scenario_id": "AA08-SMOKE-OVERLOAD-SIGNAL",
+      "description": "Verify dispatcher overload is surfaced deterministically without hidden retries",
+      "workload_id": "TW-OVERLOAD",
+      "validation_surface": "tests/transport_frontier_benchmark_contract.rs::symbol_dispatcher_overload_rejected_deterministically",
+      "focus_dimension_ids": ["failure-handling", "operator-visibility"],
+      "command": "rch exec -- env CARGO_INCREMENTAL=0 CARGO_TARGET_DIR=/tmp/rch-codex-aa081 cargo test --test transport_frontier_benchmark_contract symbol_dispatcher_overload_rejected_deterministically -- --nocapture"
+    },
+    {
+      "scenario_id": "AA08-SMOKE-OPERATOR-VISIBILITY",
+      "description": "Verify dry-run bundles expose replay metadata and artifact pointers deterministically",
+      "workload_id": "TW-MULTIPATH",
+      "validation_surface": "tests/transport_frontier_benchmark_contract.rs::runner_dry_run_emits_replay_metadata_bundle",
+      "focus_dimension_ids": ["operator-visibility"],
+      "command": "rch exec -- env CARGO_INCREMENTAL=0 CARGO_TARGET_DIR=/tmp/rch-codex-aa081 cargo test --test transport_frontier_benchmark_contract runner_dry_run_emits_replay_metadata_bundle -- --nocapture"
     }
   ],
   "downstream_beads": [
