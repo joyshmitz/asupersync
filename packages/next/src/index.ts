@@ -110,7 +110,7 @@ export type NextServerBridgeEnvironment =
   | "server_component"
   | "node_server";
 export type NextEdgeBridgeEnvironment = "edge_runtime";
-export type NextBridgeOutcome = "ok" | "err" | "cancelled";
+export type NextBridgeOutcome = "ok" | "err" | "cancelled" | "panicked";
 export type NextBridgeValue =
   | string
   | number
@@ -219,6 +219,10 @@ export const NEXT_UNSUPPORTED_RUNTIME_CODE =
   "ASUPERSYNC_NEXT_UNSUPPORTED_RUNTIME";
 export const NEXT_BOOTSTRAP_STATE_ERROR_CODE =
   "ASUPERSYNC_NEXT_BOOTSTRAP_STATE_ERROR";
+export const NEXT_SERVER_BRIDGE_RESPONSE_ERROR_CODE =
+  "ASUPERSYNC_NEXT_SERVER_BRIDGE_RESPONSE";
+export const NEXT_EDGE_BRIDGE_RESPONSE_ERROR_CODE =
+  "ASUPERSYNC_NEXT_EDGE_BRIDGE_RESPONSE";
 export const NEXT_BOOTSTRAP_PHASES = [
   "server_rendered",
   "hydrating",
@@ -468,6 +472,142 @@ export function createNextBridgeLogFields(
   return fields;
 }
 
+export interface NextServerBridgeResponseError extends Error {
+  code: typeof NEXT_SERVER_BRIDGE_RESPONSE_ERROR_CODE;
+  bridgeDiagnostics: NextServerBridgeDiagnostics;
+  response: NextServerBridgeResponse;
+}
+
+export interface NextEdgeBridgeResponseError extends Error {
+  code: typeof NEXT_EDGE_BRIDGE_RESPONSE_ERROR_CODE;
+  bridgeDiagnostics: NextEdgeBridgeDiagnostics;
+  response: NextEdgeBridgeResponse;
+}
+
+export function createNextServerBridgeResponseFromOutcome<
+  TPayload extends NextBridgeValue,
+>(
+  outcome: BrowserOutcome<TPayload>,
+  options: NextServerBridgeAdapterOptions = {},
+): NextServerBridgeResponse<TPayload> {
+  const diagnostics = createNextServerBridgeDiagnostics(options);
+  switch (outcome.outcome) {
+    case "ok":
+      return {
+        outcome: "ok",
+        payload: outcome.value,
+        diagnostics,
+      };
+    case "err":
+      return {
+        outcome: "err",
+        errorMessage: formatOutcomeFailure(outcome),
+        diagnostics,
+      };
+    case "cancelled":
+      return {
+        outcome: "cancelled",
+        errorMessage: formatOutcomeFailure(outcome),
+        diagnostics,
+      };
+    case "panicked":
+      return {
+        outcome: "panicked",
+        errorMessage: formatOutcomeFailure(outcome),
+        diagnostics,
+      };
+  }
+}
+
+export function createNextEdgeBridgeResponseFromOutcome<
+  TPayload extends NextBridgeValue,
+>(
+  outcome: BrowserOutcome<TPayload>,
+  options: NextEdgeBridgeAdapterOptions = {},
+): NextEdgeBridgeResponse<TPayload> {
+  const diagnostics = createNextEdgeBridgeDiagnostics(options);
+  switch (outcome.outcome) {
+    case "ok":
+      return {
+        outcome: "ok",
+        payload: outcome.value,
+        diagnostics,
+      };
+    case "err":
+      return {
+        outcome: "err",
+        errorMessage: formatOutcomeFailure(outcome),
+        diagnostics,
+      };
+    case "cancelled":
+      return {
+        outcome: "cancelled",
+        errorMessage: formatOutcomeFailure(outcome),
+        diagnostics,
+      };
+    case "panicked":
+      return {
+        outcome: "panicked",
+        errorMessage: formatOutcomeFailure(outcome),
+        diagnostics,
+      };
+  }
+}
+
+function createNextServerBridgeResponseError(
+  response: NextServerBridgeResponse,
+): NextServerBridgeResponseError {
+  const message =
+    response.errorMessage ?? "bridge response did not include a payload";
+  const error = new Error(
+    `${response.diagnostics.renderEnvironment}: ${response.outcome}: ${message}`,
+  ) as NextServerBridgeResponseError;
+  error.code = NEXT_SERVER_BRIDGE_RESPONSE_ERROR_CODE;
+  error.bridgeDiagnostics = cloneNextServerBridgeDiagnostics(
+    response.diagnostics,
+  );
+  error.response = {
+    ...response,
+    diagnostics: cloneNextServerBridgeDiagnostics(response.diagnostics),
+  };
+  return error;
+}
+
+function createNextEdgeBridgeResponseError(
+  response: NextEdgeBridgeResponse,
+): NextEdgeBridgeResponseError {
+  const message =
+    response.errorMessage ?? "bridge response did not include a payload";
+  const error = new Error(
+    `${response.diagnostics.renderEnvironment}: ${response.outcome}: ${message}`,
+  ) as NextEdgeBridgeResponseError;
+  error.code = NEXT_EDGE_BRIDGE_RESPONSE_ERROR_CODE;
+  error.bridgeDiagnostics = cloneNextEdgeBridgeDiagnostics(response.diagnostics);
+  error.response = {
+    ...response,
+    diagnostics: cloneNextEdgeBridgeDiagnostics(response.diagnostics),
+  };
+  return error;
+}
+
+export function unwrapNextServerBridgeResponse<
+  TPayload extends NextBridgeValue,
+>(response: NextServerBridgeResponse<TPayload>): TPayload {
+  if (response.outcome === "ok" && response.payload !== undefined) {
+    return response.payload;
+  }
+  throw createNextServerBridgeResponseError(response);
+}
+
+export function unwrapNextEdgeBridgeResponse<TPayload extends NextBridgeValue>(
+  response: NextEdgeBridgeResponse<TPayload>,
+): TPayload {
+  if (response.outcome === "ok" && response.payload !== undefined) {
+    return response.payload;
+  }
+  throw createNextEdgeBridgeResponseError(response);
+}
+
 export interface NextBootstrapStateError extends Error {
   code: typeof NEXT_BOOTSTRAP_STATE_ERROR_CODE;
   action: string;
@@ -651,6 +791,18 @@ export class NextServerBridgeAdapter {
     };
   }
 
+  fromOutcome<TPayload extends NextBridgeValue>(
+    outcome: BrowserOutcome<TPayload>,
+  ): NextServerBridgeResponse<TPayload> {
+    return createNextServerBridgeResponseFromOutcome(outcome, this.options);
+  }
+
+  unwrapResponse<TPayload extends NextBridgeValue>(
+    response: NextServerBridgeResponse<TPayload>,
+  ): TPayload {
+    return unwrapNextServerBridgeResponse(response);
+  }
+
   unsupportedRuntimeError(): NextServerBridgeRuntimeError {
     const error = createNextUnsupportedRuntimeError(
       this.diagnosticsState.runtimeSupport,
@@ -720,6 +872,18 @@ export class NextEdgeBridgeAdapter {
       errorMessage,
       diagnostics: this.diagnostics(),
     };
+  }
+
+  fromOutcome<TPayload extends NextBridgeValue>(
+    outcome: BrowserOutcome<TPayload>,
+  ): NextEdgeBridgeResponse<TPayload> {
+    return createNextEdgeBridgeResponseFromOutcome(outcome, this.options);
+  }
+
+  unwrapResponse<TPayload extends NextBridgeValue>(
+    response: NextEdgeBridgeResponse<TPayload>,
+  ): TPayload {
+    return unwrapNextEdgeBridgeResponse(response);
   }
 
   unsupportedRuntimeError(): NextEdgeBridgeRuntimeError {

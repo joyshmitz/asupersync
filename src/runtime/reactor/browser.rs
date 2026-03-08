@@ -143,12 +143,53 @@ impl BrowserReactor {
         let Some(interest) = registrations.get(&token).copied() else {
             return Ok(false);
         };
-        drop(registrations);
         let effective = ready & interest & Self::readiness_mask();
 
         if effective.is_empty() {
             return Ok(false);
         }
+
+        // Keep registration lookup and queue insertion atomic under the same
+        // lock order used by modify()/deregister() so host callbacks cannot
+        // enqueue stale readiness after a concurrent interest change/remove.
+        let mut pending = self.pending_events_mut()?;
+        if self.config.coalesce_wakes
+            && let Some(existing) = pending.iter_mut().find(|event| event.token == token)
+        {
+            existing.ready |= effective;
+            drop(pending);
+            drop(registrations);
+            self.wake_pending.store(true, Ordering::Release);
+            return Ok(true);
+        }
+
+        pending.push(super::Event::new(token, effective));
+        drop(pending);
+        drop(registrations);
+        self.wake_pending.store(true, Ordering::Release);
+        Ok(true)
+    }
+
+    #[cfg(test)]
+    fn notify_ready_with_barriers(
+        &self,
+        token: Token,
+        ready: Interest,
+        after_interest: &std::sync::Barrier,
+        continue_after_interest: &std::sync::Barrier,
+    ) -> io::Result<bool> {
+        let registrations = self.registrations_mut()?;
+        let Some(interest) = registrations.get(&token).copied() else {
+            return Ok(false);
+        };
+        let effective = ready & interest & Self::readiness_mask();
+
+        if effective.is_empty() {
+            return Ok(false);
+        }
+
+        after_interest.wait();
+        continue_after_interest.wait();
 
         let mut pending = self.pending_events_mut()?;
         if self.config.coalesce_wakes
@@ -156,12 +197,14 @@ impl BrowserReactor {
         {
             existing.ready |= effective;
             drop(pending);
+            drop(registrations);
             self.wake_pending.store(true, Ordering::Release);
             return Ok(true);
         }
 
         pending.push(super::Event::new(token, effective));
         drop(pending);
+        drop(registrations);
         self.wake_pending.store(true, Ordering::Release);
         Ok(true)
     }
@@ -304,6 +347,7 @@ impl Reactor for BrowserReactor {
 #[cfg(all(test, unix))]
 mod tests {
     use super::*;
+    use std::sync::{Arc, Barrier};
 
     /// Fake source for testing (browser reactor ignores the source entirely).
     struct TestFdSource;
@@ -631,6 +675,25 @@ mod tests {
     }
 
     #[test]
+    fn browser_reactor_deregister_scrubs_pending_host_readiness() {
+        let reactor = BrowserReactor::default();
+        let source = TestFdSource;
+        let token = Token::new(8);
+
+        reactor
+            .register(&source, token, Interest::READABLE)
+            .unwrap();
+        assert!(reactor.notify_ready(token, Interest::READABLE).unwrap());
+
+        reactor.deregister(token).unwrap();
+
+        let mut events = Events::with_capacity(4);
+        let n = reactor.poll(&mut events, Some(Duration::ZERO)).unwrap();
+        assert_eq!(n, 0);
+        assert!(events.is_empty());
+    }
+
+    #[test]
     fn browser_reactor_notify_ready_coalesces_same_token_when_enabled() {
         let reactor = BrowserReactor::default();
         let source = TestFdSource;
@@ -709,5 +772,51 @@ mod tests {
 
         assert!(saw_readable);
         assert!(saw_writable);
+    }
+
+    #[test]
+    fn browser_reactor_deregister_clears_event_from_racing_notify_ready() {
+        let reactor = Arc::new(BrowserReactor::default());
+        let source = TestFdSource;
+        let token = Token::new(31);
+        reactor
+            .register(&source, token, Interest::READABLE)
+            .unwrap();
+
+        let after_interest = Arc::new(Barrier::new(2));
+        let continue_after_interest = Arc::new(Barrier::new(2));
+
+        let notify_reactor = Arc::clone(&reactor);
+        let notify_after_interest = Arc::clone(&after_interest);
+        let notify_continue = Arc::clone(&continue_after_interest);
+        let notify = std::thread::spawn(move || {
+            notify_reactor
+                .notify_ready_with_barriers(
+                    token,
+                    Interest::READABLE,
+                    &notify_after_interest,
+                    &notify_continue,
+                )
+                .expect("notify_ready should succeed")
+        });
+
+        after_interest.wait();
+
+        let deregister_reactor = Arc::clone(&reactor);
+        let deregister = std::thread::spawn(move || {
+            deregister_reactor
+                .deregister(token)
+                .expect("deregister should succeed");
+        });
+
+        continue_after_interest.wait();
+
+        assert!(notify.join().unwrap());
+        deregister.join().unwrap();
+
+        let mut events = Events::with_capacity(4);
+        let n = reactor.poll(&mut events, Some(Duration::ZERO)).unwrap();
+        assert_eq!(n, 0, "deregister must remove the queued event");
+        assert!(events.is_empty());
     }
 }
