@@ -163,6 +163,8 @@ pub struct FaultSender<T: Clone> {
     config: FaultChannelConfig,
     rng: Mutex<ChaosRng>,
     reorder_buffer: Mutex<Vec<T>>,
+    /// Deterministic evidence event sequence for replayable fault logs.
+    evidence_seq: AtomicU64,
     /// Atomic stats counters — avoids locking on every send.
     stat_messages_sent: AtomicU64,
     stat_messages_reordered: AtomicU64,
@@ -195,6 +197,7 @@ impl<T: Clone> FaultSender<T> {
             config,
             rng: Mutex::new(rng),
             reorder_buffer: Mutex::new(Vec::with_capacity(buf_cap)),
+            evidence_seq: AtomicU64::new(0),
             stat_messages_sent: AtomicU64::new(0),
             stat_messages_reordered: AtomicU64::new(0),
             stat_messages_duplicated: AtomicU64::new(0),
@@ -255,7 +258,6 @@ impl<T: Clone> FaultSender<T> {
         // Send duplicate if triggered.
         if let Some(dup) = duplicate {
             self.record_duplication();
-            emit_fault_evidence(&*self.evidence_sink, "duplication", "channel_send");
             // Best-effort: ignore errors (channel may be full/closed).
             let _ = self.inner.send(cx, dup).await;
         }
@@ -292,6 +294,7 @@ impl<T: Clone> FaultSender<T> {
 
         emit_fault_evidence(
             &*self.evidence_sink,
+            self.next_evidence_ts(),
             "reorder_flush",
             &format!("buffer_size_{}", messages.len()),
         );
@@ -354,14 +357,31 @@ impl<T: Clone> FaultSender<T> {
         self.stat_messages_sent.fetch_add(1, Ordering::Relaxed);
     }
 
+    fn next_evidence_ts(&self) -> u64 {
+        self.evidence_seq
+            .fetch_add(1, Ordering::Relaxed)
+            .saturating_add(1)
+    }
+
     fn record_reorder(&self) {
         self.stat_messages_reordered.fetch_add(1, Ordering::Relaxed);
-        emit_fault_evidence(&*self.evidence_sink, "reorder_buffer", "channel_send");
+        emit_fault_evidence(
+            &*self.evidence_sink,
+            self.next_evidence_ts(),
+            "reorder_buffer",
+            "channel_send",
+        );
     }
 
     fn record_duplication(&self) {
         self.stat_messages_duplicated
             .fetch_add(1, Ordering::Relaxed);
+        emit_fault_evidence(
+            &*self.evidence_sink,
+            self.next_evidence_ts(),
+            "duplication",
+            "channel_send",
+        );
     }
 }
 
@@ -370,14 +390,10 @@ impl<T: Clone> FaultSender<T> {
 // ---------------------------------------------------------------------------
 
 /// Emit an evidence entry for a channel fault injection event.
-fn emit_fault_evidence(sink: &dyn EvidenceSink, fault_type: &str, context: &str) {
-    let now_ms = std::time::SystemTime::now()
-        .duration_since(std::time::UNIX_EPOCH)
-        .map_or(0, |d| d.as_millis() as u64);
-
+fn emit_fault_evidence(sink: &dyn EvidenceSink, ts_unix_ms: u64, fault_type: &str, context: &str) {
     let action = format!("inject_{fault_type}");
     let entry = EvidenceLedger {
-        ts_unix_ms: now_ms,
+        ts_unix_ms,
         component: "channel_fault".to_string(),
         expected_loss_by_action: std::collections::BTreeMap::from([(action.clone(), 0.0)]),
         action,
@@ -836,6 +852,22 @@ mod tests {
             assert!(entry.action.starts_with("inject_"));
             assert!(entry.is_valid(), "invalid evidence: {entry:?}");
         }
+    }
+
+    #[test]
+    fn evidence_timestamps_follow_deterministic_event_sequence() {
+        let collector = Arc::new(CollectorSink::new());
+        let sink: Arc<dyn EvidenceSink> = collector.clone();
+        let config = FaultChannelConfig::new(42).with_reorder(1.0, 2);
+        let (fault_tx, _rx) = fault_channel::<u32>(16, config, sink);
+        let cx = test_cx();
+
+        block_on(fault_tx.send(&cx, 1)).expect("send");
+        block_on(fault_tx.send(&cx, 2)).expect("send");
+
+        let entries = collector.entries();
+        let timestamps: Vec<u64> = entries.iter().map(|entry| entry.ts_unix_ms).collect();
+        assert_eq!(timestamps, vec![1, 2, 3]);
     }
 
     // =========================================================================

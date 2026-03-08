@@ -317,7 +317,13 @@ impl SkewClock {
                     .is_ok()
             {
                 self.stats.record_jump();
-                emit_skew_evidence(&self.evidence_sink, "clock_jump", base_nanos, jump_offset);
+                emit_skew_evidence(
+                    &self.evidence_sink,
+                    Time::from_nanos(base_nanos).as_millis(),
+                    "clock_jump",
+                    base_nanos,
+                    jump_offset,
+                );
             }
             if self.jump_fired.load(Ordering::Relaxed) > 0 {
                 total_skew = total_skew.saturating_add(jump_offset);
@@ -390,13 +396,15 @@ pub fn skew_clock(
 // ---------------------------------------------------------------------------
 
 #[allow(clippy::cast_precision_loss)]
-fn emit_skew_evidence(sink: &Arc<dyn EvidenceSink>, action: &str, base_ns: u64, offset_ns: i64) {
-    let now_ms = std::time::SystemTime::now()
-        .duration_since(std::time::UNIX_EPOCH)
-        .map_or(0, |d| d.as_millis() as u64);
-
+fn emit_skew_evidence(
+    sink: &Arc<dyn EvidenceSink>,
+    ts_unix_ms: u64,
+    action: &str,
+    base_ns: u64,
+    offset_ns: i64,
+) {
     let entry = EvidenceLedger {
-        ts_unix_ms: now_ms,
+        ts_unix_ms,
         component: "clock_skew_injector".to_string(),
         action: format!("inject_{action}"),
         posterior: vec![1.0],
@@ -466,6 +474,22 @@ mod tests {
         assert_eq!(stats.reads, 1);
         assert_eq!(stats.skewed_reads, 1);
         assert_eq!(stats.max_abs_skew_ns, 50_000_000);
+    }
+
+    #[test]
+    fn jump_evidence_uses_base_clock_timestamp() {
+        let base = make_base_clock();
+        let (collector, sink) = make_sink();
+        let config = ClockSkewConfig::new(42).with_jump(1_000_000_000, 50_000_000);
+        let skewed = SkewClock::new(base.clone() as Arc<dyn TimeSource>, config, sink);
+
+        base.advance(1_000_000_000);
+        let _ = skewed.now();
+
+        let entries = collector.entries();
+        assert_eq!(entries.len(), 1);
+        assert_eq!(entries[0].action, "inject_clock_jump");
+        assert_eq!(entries[0].ts_unix_ms, 1_000);
     }
 
     #[test]

@@ -123,6 +123,8 @@ pub struct PartitionController {
     behavior: PartitionBehavior,
     /// Number of active partitions, for lock-free fast-path in is_partitioned.
     partition_count: AtomicUsize,
+    /// Deterministic evidence event sequence for replayable partition logs.
+    evidence_seq: AtomicU64,
     /// Diagnostic counters (relaxed atomics, no mutex needed).
     partitions_created: AtomicU64,
     partitions_healed: AtomicU64,
@@ -140,6 +142,7 @@ impl PartitionController {
             partitions: Mutex::new(HashSet::new()),
             behavior,
             partition_count: AtomicUsize::new(0),
+            evidence_seq: AtomicU64::new(0),
             partitions_created: AtomicU64::new(0),
             partitions_healed: AtomicU64::new(0),
             messages_dropped: AtomicU64::new(0),
@@ -165,7 +168,13 @@ impl PartitionController {
 
         if created {
             self.partitions_created.fetch_add(1, Ordering::Relaxed);
-            emit_partition_evidence(&self.evidence_sink, "create", src, dst);
+            emit_partition_evidence(
+                &self.evidence_sink,
+                self.next_evidence_ts(),
+                "create",
+                src,
+                dst,
+            );
         }
     }
 
@@ -191,7 +200,13 @@ impl PartitionController {
 
         if healed {
             self.partitions_healed.fetch_add(1, Ordering::Relaxed);
-            emit_partition_evidence(&self.evidence_sink, "heal", src, dst);
+            emit_partition_evidence(
+                &self.evidence_sink,
+                self.next_evidence_ts(),
+                "heal",
+                src,
+                dst,
+            );
         }
     }
 
@@ -216,6 +231,7 @@ impl PartitionController {
         for (src, dst) in healed_edges {
             emit_partition_evidence(
                 &self.evidence_sink,
+                self.next_evidence_ts(),
                 "heal",
                 ActorId::new(src),
                 ActorId::new(dst),
@@ -261,6 +277,13 @@ impl PartitionController {
     #[inline]
     fn record_drop(&self) {
         self.messages_dropped.fetch_add(1, Ordering::Relaxed);
+    }
+
+    #[inline]
+    fn next_evidence_ts(&self) -> u64 {
+        self.evidence_seq
+            .fetch_add(1, Ordering::Relaxed)
+            .saturating_add(1)
     }
 }
 
@@ -323,6 +346,7 @@ impl<T> PartitionSender<T> {
                     self.controller.record_drop();
                     emit_partition_evidence(
                         &self.controller.evidence_sink,
+                        self.controller.next_evidence_ts(),
                         "message_dropped",
                         self.src,
                         self.dst,
@@ -332,6 +356,7 @@ impl<T> PartitionSender<T> {
                 PartitionBehavior::Error => {
                     emit_partition_evidence(
                         &self.controller.evidence_sink,
+                        self.controller.next_evidence_ts(),
                         "message_rejected",
                         self.src,
                         self.dst,
@@ -396,16 +421,18 @@ pub fn partition_channel<T>(
 // Evidence emission
 // ---------------------------------------------------------------------------
 
-fn emit_partition_evidence(sink: &Arc<dyn EvidenceSink>, action: &str, src: ActorId, dst: ActorId) {
-    let now_ms = std::time::SystemTime::now()
-        .duration_since(std::time::UNIX_EPOCH)
-        .map_or(0, |d| d.as_millis() as u64);
-
+fn emit_partition_evidence(
+    sink: &Arc<dyn EvidenceSink>,
+    ts_unix_ms: u64,
+    action: &str,
+    src: ActorId,
+    dst: ActorId,
+) {
     let action_str = format!("partition_{action}");
 
     #[allow(clippy::cast_precision_loss)]
     let entry = EvidenceLedger {
-        ts_unix_ms: now_ms,
+        ts_unix_ms,
         component: "channel_partition".to_string(),
         action: action_str.clone(),
         posterior: vec![1.0],
@@ -730,6 +757,26 @@ mod tests {
             assert_eq!(entry.component, "channel_partition");
             assert!(entry.is_valid());
         }
+    }
+
+    #[test]
+    fn evidence_timestamps_follow_deterministic_event_sequence() {
+        let (ctrl, collector) = make_controller(PartitionBehavior::Drop);
+        let a = ActorId::new(1);
+        let b = ActorId::new(2);
+        let (ptx, _rx) = partition_channel::<u32>(16, ctrl.clone(), a, b);
+        let cx = test_cx();
+
+        ctrl.partition(a, b);
+        block_on(ptx.send(&cx, 1)).expect("send");
+        ctrl.heal(a, b);
+
+        let timestamps: Vec<u64> = collector
+            .entries()
+            .iter()
+            .map(|entry| entry.ts_unix_ms)
+            .collect();
+        assert_eq!(timestamps, vec![1, 2, 3]);
     }
 
     #[test]

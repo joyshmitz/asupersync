@@ -214,6 +214,8 @@ pub struct CrashController {
     state: Mutex<CrashState>,
     stats: CrashStats,
     evidence_sink: Arc<dyn EvidenceSink>,
+    /// Deterministic evidence event sequence for replayable crash logs.
+    evidence_seq: AtomicU64,
     /// Lock-free snapshot of `CrashState::crashed`.
     crashed: AtomicBool,
     /// Lock-free snapshot of `CrashState::exhausted`.
@@ -256,6 +258,7 @@ impl CrashController {
             }),
             stats: CrashStats::new(),
             evidence_sink,
+            evidence_seq: AtomicU64::new(0),
             crashed: AtomicBool::new(false),
             exhausted: AtomicBool::new(false),
             restart_mode: config.restart_mode,
@@ -272,7 +275,12 @@ impl CrashController {
         self.crashed.store(true, Ordering::Release);
         state.crash_count += 1;
         self.stats.crashes.fetch_add(1, Ordering::Relaxed);
-        emit_crash_evidence(&self.evidence_sink, "crash", state.crash_count);
+        emit_crash_evidence(
+            &self.evidence_sink,
+            self.next_evidence_ts(),
+            "crash",
+            state.crash_count,
+        );
         true
     }
 
@@ -294,6 +302,7 @@ impl CrashController {
                 self.exhausted.store(true, Ordering::Release);
                 emit_crash_evidence(
                     &self.evidence_sink,
+                    self.next_evidence_ts(),
                     "restart_exhausted",
                     state.restart_count,
                 );
@@ -305,7 +314,12 @@ impl CrashController {
         self.crashed.store(false, Ordering::Release);
         state.restart_count += 1;
         self.stats.restarts.fetch_add(1, Ordering::Relaxed);
-        emit_crash_evidence(&self.evidence_sink, "restart", state.restart_count);
+        emit_crash_evidence(
+            &self.evidence_sink,
+            self.next_evidence_ts(),
+            "restart",
+            state.restart_count,
+        );
         true
     }
 
@@ -331,6 +345,12 @@ impl CrashController {
     #[must_use]
     pub fn stats(&self) -> &CrashStats {
         &self.stats
+    }
+
+    fn next_evidence_ts(&self) -> u64 {
+        self.evidence_seq
+            .fetch_add(1, Ordering::Relaxed)
+            .saturating_add(1)
     }
 }
 
@@ -401,7 +421,12 @@ impl<T> CrashSender<T> {
                 .stats
                 .sends_rejected
                 .fetch_add(1, Ordering::Relaxed);
-            emit_crash_evidence(&self.evidence_sink, "send_rejected_crashed", 0);
+            emit_crash_evidence(
+                &self.evidence_sink,
+                self.controller.next_evidence_ts(),
+                "send_rejected_crashed",
+                0,
+            );
             return Err(SendError::Disconnected(value));
         }
 
@@ -414,7 +439,12 @@ impl<T> CrashSender<T> {
                     .stats
                     .sends_rejected
                     .fetch_add(1, Ordering::Relaxed);
-                emit_crash_evidence(&self.evidence_sink, "crash_after_sends", 0);
+                emit_crash_evidence(
+                    &self.evidence_sink,
+                    self.controller.next_evidence_ts(),
+                    "crash_after_sends",
+                    0,
+                );
                 return Err(SendError::Disconnected(value));
             }
         }
@@ -431,7 +461,12 @@ impl<T> CrashSender<T> {
                     .stats
                     .sends_rejected
                     .fetch_add(1, Ordering::Relaxed);
-                emit_crash_evidence(&self.evidence_sink, "crash_probabilistic", 0);
+                emit_crash_evidence(
+                    &self.evidence_sink,
+                    self.controller.next_evidence_ts(),
+                    "crash_probabilistic",
+                    0,
+                );
                 return Err(SendError::Disconnected(value));
             }
         }
@@ -497,14 +532,10 @@ pub fn crash_channel<T>(
 // Evidence emission
 // ---------------------------------------------------------------------------
 
-fn emit_crash_evidence(sink: &Arc<dyn EvidenceSink>, action: &str, count: u32) {
-    let now_ms = std::time::SystemTime::now()
-        .duration_since(std::time::UNIX_EPOCH)
-        .map_or(0, |d| d.as_millis() as u64);
-
+fn emit_crash_evidence(sink: &Arc<dyn EvidenceSink>, ts_unix_ms: u64, action: &str, count: u32) {
     let action_str = format!("inject_{action}");
     let entry = EvidenceLedger {
-        ts_unix_ms: now_ms,
+        ts_unix_ms,
         component: "channel_crash".to_string(),
         expected_loss_by_action: std::collections::BTreeMap::from([(action_str.clone(), 0.0)]),
         action: action_str,
@@ -759,6 +790,24 @@ mod tests {
             actions.iter().any(|a| a.contains("crash")),
             "Expected crash evidence, got: {actions:?}"
         );
+    }
+
+    #[test]
+    fn evidence_timestamps_follow_deterministic_event_sequence() {
+        let config = CrashConfig::new(42).with_crash_after_sends(1);
+        let (tx, _rx, ctrl, collector) = make_crash_channel(config);
+        let cx = test_cx();
+
+        block_on(tx.send(&cx, 0)).unwrap();
+        assert!(block_on(tx.send(&cx, 1)).is_err());
+        assert!(ctrl.restart());
+
+        let timestamps: Vec<u64> = collector
+            .entries()
+            .iter()
+            .map(|entry| entry.ts_unix_ms)
+            .collect();
+        assert_eq!(timestamps, vec![1, 2, 3]);
     }
 
     // --- Cold vs warm restart ---
