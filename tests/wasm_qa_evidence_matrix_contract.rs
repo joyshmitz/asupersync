@@ -427,6 +427,7 @@ fn smoke_scenarios_cover_cfg_compile_execution() {
         "WASM-QA-SMOKE-CFG-MATRIX",
         "WASM-QA-SMOKE-NATIVE-BACKSTOP",
         "WASM-QA-SMOKE-PACKAGED-BOOTSTRAP",
+        "WASM-QA-SMOKE-PACKAGED-CANCELLATION",
         "WASM-QA-SMOKE-HOST-BRIDGE",
         "WASM-QA-SMOKE-CROSS-BROWSER",
     ] {
@@ -474,6 +475,31 @@ fn packaged_bootstrap_smoke_scenario_routes_through_harness_profile() {
         assert!(
             command.contains(token),
             "packaged bootstrap smoke scenario missing token: {token}"
+        );
+    }
+}
+
+#[test]
+fn packaged_cancellation_smoke_scenario_routes_through_direct_runner() {
+    let artifact = load_artifact();
+    let scenarios = artifact["smoke_scenarios"].as_array().expect("array");
+    let scenario = scenarios
+        .iter()
+        .find(|entry| entry["scenario_id"] == "WASM-QA-SMOKE-PACKAGED-CANCELLATION")
+        .expect("missing packaged cancellation smoke scenario");
+    let command = scenario["command"]
+        .as_str()
+        .expect("packaged cancellation command must be string");
+    for token in [
+        "scripts/build_browser_core_artifacts.sh prod",
+        "WASM_PACKAGED_CANCELLATION_DRY_RUN=1",
+        "WASM_PERF_PROFILE=core-min",
+        "RCH_BIN=/bin/true",
+        "scripts/test_wasm_packaged_cancellation_e2e.sh",
+    ] {
+        assert!(
+            command.contains(token),
+            "packaged cancellation smoke scenario missing token: {token}"
         );
     }
 }

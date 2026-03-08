@@ -1,8 +1,10 @@
 # Browser Troubleshooting Compendium and Diagnostics Cookbook (WASM-15)
 
 Contract ID: `wasm-browser-troubleshooting-cookbook-v1`  
-Bead: `asupersync-umelq.16.4`  
-Depends on: `asupersync-umelq.16.2`, `asupersync-umelq.18.8`
+Legacy bead lineage: `asupersync-umelq.16.4`  
+Current bead: `asupersync-3qv04.9.4`  
+Parent track: `asupersync-3qv04.9`  
+Adjacent QA/failure-triage bead: `asupersync-3qv04.8.6`
 
 ## Purpose
 
@@ -17,6 +19,8 @@ Each recipe includes:
 3. deterministic command bundle,
 4. expected evidence artifacts,
 5. escalation pointer if the gate remains red.
+
+All cargo-heavy commands stay on `rch exec -- ...`.
 
 ## Fast Triage Ladder
 
@@ -41,17 +45,36 @@ rch exec -- cargo test --test e2e_log_quality_schema -- --nocapture \
 
 If all four pass, move to targeted recipes below.
 
+## Artifact Map
+
+Use this table first when you know a command failed but do not know where the
+evidence landed.
+
+| Workflow | Canonical command | Primary artifacts |
+|---|---|---|
+| Onboarding smoke and framework readiness | `python3 scripts/run_browser_onboarding_checks.py --scenario all` | `artifacts/onboarding/{vanilla,react,next}.ndjson`, `artifacts/onboarding/{vanilla,react,next}.summary.json` |
+| WASM dependency/profile audit | `python3 scripts/check_wasm_dependency_policy.py --policy .github/wasm_dependency_policy.json` | `artifacts/wasm_dependency_audit_summary.json`, `artifacts/wasm_dependency_audit_log.ndjson` |
+| WASM flake governance | `python3 scripts/check_wasm_flake_governance.py --policy .github/wasm_flake_governance_policy.json` | `artifacts/wasm_flake_governance_report.json`, `artifacts/wasm_flake_governance_events.ndjson` |
+| E2E orchestration matrix | `bash ./scripts/run_all_e2e.sh --verify-matrix` | `target/e2e-results/orchestrator_<timestamp>/report.json`, `artifact_manifest.json`, `artifact_manifest.ndjson`, `replay_verification.json`, `artifact_lifecycle_policy.json` |
+| Packaged bootstrap/load/reload harness | `bash ./scripts/test_wasm_packaged_bootstrap_e2e.sh` | `target/e2e-results/wasm_packaged_bootstrap/e2e-runs/<scenario>/<run>/summary.json`, `run-metadata.json`, `log.jsonl`, `steps.ndjson`, `perf-summary.json`, `artifacts/wasm_packaged_bootstrap_perf_summary.json` |
+| React packaged-consumer validation | `bash ./scripts/validate_react_consumer.sh` | `target/e2e-results/react_consumer/<timestamp>/consumer_build.log`, `target/e2e-results/react_consumer/<timestamp>/summary.json` |
+| Package shape / `npm pack` smoke | `bash ./scripts/validate_npm_pack_smoke.sh` | terminal validation output plus package artifact presence under `packages/browser-core/` |
+| Browser-core artifact staging | `PATH=/usr/bin:$PATH corepack pnpm run build` | `packages/browser-core/asupersync.js`, `packages/browser-core/asupersync.d.ts`, `packages/browser-core/asupersync_bg.wasm`, `packages/browser-core/abi-metadata.json`, `packages/browser-core/debug-metadata.json` |
+
 ## Recipe Matrix
 
 | Symptom | Likely Cause | Run | Expected Evidence |
 |---|---|---|---|
-| wasm32 compile fails with forbidden-surface errors | Invalid profile/feature mix (`tls`, `sqlite`, `postgres`, `mysql`, `kafka`, etc.) | `rch exec -- cargo check --target wasm32-unknown-unknown --no-default-features --features wasm-browser-dev` | compile output references wasm guardrails and forbidden feature set; no silent fallback |
-| `ASUPERSYNC_*_UNSUPPORTED_RUNTIME` thrown during init/bootstrap | direct runtime attempted in Node, SSR, Next server/edge, or another environment outside the shipped browser support boundary | `rch exec -- cargo test --test wasm_js_exports_coverage_contract -- --nocapture` | contract test output proves package-specific unsupported-runtime codes, support reasons, and guidance strings |
-| `run_all_e2e --verify-matrix` fails on redaction policy | Invalid `ARTIFACT_REDACTION_MODE` (`none` under CI) or bad retention value | `CI=1 ARTIFACT_REDACTION_MODE=none bash ./scripts/run_all_e2e.sh --verify-matrix` | failure includes policy text and schema reason; manifest/log paths are still emitted |
-| log-quality gate failure | Missing required summary fields or low score under threshold | `rch exec -- cargo test --test e2e_log_quality_schema -- --nocapture` | `e2e_log_quality_schema` tests identify missing/invalid contract tokens with deterministic assertions |
-| bundler compatibility lane red | Bundler contract drift, docs/workflow mismatch, or profile closure gap | `rch exec -- cargo test --test wasm_bundler_compatibility -- --nocapture` | pass/fail tied to matrix contract; CI summary artifact path: `artifacts/wasm_bundler_compatibility_summary.json` |
-| replay/forensics lane red | Flake governance drift or missing quarantine/forensics metadata | `python3 scripts/check_wasm_flake_governance.py --policy .github/wasm_flake_governance_policy.json` | report + events files: `artifacts/wasm_flake_governance_report.json`, `artifacts/wasm_flake_governance_events.ndjson` |
-| obligation/quiescence failures in browser lifecycle tests | Cancel/drain sequencing regression or missing lifecycle cleanup path | `rch exec -- cargo test --test obligation_wasm_parity wasm_full_browser_lifecycle_simulation -- --nocapture` | deterministic failure points to lifecycle phase and obligation invariant breach |
+| wasm32 compile fails with forbidden-surface errors | Invalid profile/feature mix (`cli`, `tls`, `sqlite`, `postgres`, `mysql`, `kafka`, etc.) or native-only leakage into the browser closure | `rch exec -- cargo check --target wasm32-unknown-unknown --no-default-features --features wasm-browser-dev` | compile output references wasm guardrails in `src/lib.rs`; supporting audit artifacts: `artifacts/wasm_dependency_audit_summary.json`, `artifacts/wasm_dependency_audit_log.ndjson` |
+| `ASUPERSYNC_*_UNSUPPORTED_RUNTIME` thrown during init/bootstrap | direct runtime attempted in Node, SSR, Next server/edge, or another environment outside the shipped browser support boundary | `rch exec -- cargo test --test wasm_js_exports_coverage_contract -- --nocapture` | contract test output proves package-specific unsupported-runtime codes, support reasons, and guidance strings; use `docs/integration.md` support matrix to choose the correct bridge-only fallback |
+| packaged consumer validation says required Browser Edition artifacts are missing | `packages/browser-core/` wasm artifacts or higher-level package `dist/` outputs were not built/staged before running consumer validation | `PATH=/usr/bin:$PATH corepack pnpm run build && bash ./scripts/validate_react_consumer.sh` | built artifacts appear under `packages/browser-core/`; consumer evidence appears at `target/e2e-results/react_consumer/<timestamp>/consumer_build.log` and `summary.json` |
+| `npm pack --dry-run` or package-shape validation fails | manifest/export-map/files-array drift, missing staged browser-core artifacts, or resolver policy drift | `bash ./scripts/validate_npm_pack_smoke.sh` | terminal output names the failing manifest field or missing artifact; warnings reference `packages/browser-core/*` and tell you whether `build:wasm` must run first |
+| `run_all_e2e --verify-matrix` fails on redaction/retention/lifecycle policy | invalid `ARTIFACT_REDACTION_MODE`, retention settings, or suite matrix drift | `bash ./scripts/run_all_e2e.sh --verify-matrix` | orchestrator report bundle under `target/e2e-results/orchestrator_<timestamp>/`; inspect `report.json`, `artifact_manifest.json`, `replay_verification.json`, and `artifact_lifecycle_policy.json` |
+| log-quality gate failure | missing required summary fields, low score under threshold, or doc/workflow drift against the schema contract | `rch exec -- cargo test --test e2e_log_quality_schema -- --nocapture` | `e2e_log_quality_schema` pinpoints missing/invalid contract tokens; pair it with the latest orchestrator `report.json` when the failure originated from an E2E run |
+| bundler compatibility lane red | bundler matrix drift, docs/workflow mismatch, or package staging gap | `rch exec -- cargo test --test wasm_bundler_compatibility -- --nocapture` | pass/fail tied to matrix contract; artifact pointers include `artifacts/wasm_bundler_compatibility_summary.json` and `artifacts/wasm_bundler_compatibility_test.log` |
+| replay/forensics lane red | flake governance drift, missing quarantine/forensics metadata, or stale incident playbook linkage | `python3 scripts/check_wasm_flake_governance.py --policy .github/wasm_flake_governance_policy.json` | report + events files: `artifacts/wasm_flake_governance_report.json`, `artifacts/wasm_flake_governance_events.ndjson`; cross-check `artifacts/wasm_flake_quarantine_manifest.json` when flakes are quarantined |
+| packaged bootstrap/load/reload harness fails | browser-core artifact mismatch, bootstrap state-machine drift, reload/remount regression, or shutdown leak | `bash ./scripts/test_wasm_packaged_bootstrap_e2e.sh` | packaged bootstrap bundle under `target/e2e-results/wasm_packaged_bootstrap/e2e-runs/<scenario>/<run>/`; inspect `summary.json`, `run-metadata.json`, `log.jsonl`, `steps.ndjson`, and `perf-summary.json` |
+| obligation/quiescence failures in browser lifecycle tests | cancel/drain sequencing regression or missing lifecycle cleanup path | `rch exec -- cargo test --test obligation_wasm_parity wasm_full_browser_lifecycle_simulation -- --nocapture` | deterministic failure points to lifecycle phase and obligation invariant breach; if reproduced through onboarding, also inspect `artifacts/onboarding/react.obligation_lifecycle.log` |
 
 ## Deep-Dive Playbooks
 
@@ -72,43 +95,12 @@ rch exec -- cargo check --target wasm32-unknown-unknown \
 
 Evidence to capture:
 
-- policy output with offending dependency path,
-- wasm32 check logs for each profile,
-- exact feature flags used in failing command.
+- `artifacts/wasm_dependency_audit_summary.json`
+- `artifacts/wasm_dependency_audit_log.ndjson`
+- wasm32 check logs for each profile
+- exact feature flags used in the failing command
 
-### B. Replay and Incident Forensics
-
-Use when behavior is flaky across runs or incident triage lacks reproducible logs.
-
-```bash
-bash ./scripts/run_all_e2e.sh --suite wasm-incident-forensics \
-  | tee artifacts/troubleshooting/incident_forensics.log
-
-python3 scripts/check_wasm_flake_governance.py \
-  --policy .github/wasm_flake_governance_policy.json
-```
-
-Evidence to capture:
-
-- replay command from suite output,
-- quarantine/governance report artifacts,
-- trace pointer and scenario id from emitted summary.
-
-### C. Log Contract Violations
-
-Use when diagnostics are present but not machine-parseable or policy-compliant.
-
-```bash
-rch exec -- cargo test --test e2e_log_quality_schema -- --nocapture
-```
-
-Evidence to capture:
-
-- exact failing test names,
-- missing contract token/field from assertion output,
-- updated doc/workflow references if contract drift is intentional.
-
-### D. Unsupported Runtime and Compatibility Boundary Failures
+### B. Unsupported Runtime and Compatibility Boundary Failures
 
 Use when `@asupersync/browser`, `@asupersync/react`, or `@asupersync/next`
 throws an unsupported-runtime error during bootstrap.
@@ -142,19 +134,119 @@ Expected operator action:
   direct-runtime lanes unless the support matrix and package guards are promoted
   together
 
+### C. Package Artifact and Consumer Build Failures
+
+Use when package validators complain about missing wasm outputs, missing `dist/`
+trees, or broken local consumer installs.
+
+```bash
+PATH=/usr/bin:$PATH corepack pnpm run build
+bash ./scripts/validate_react_consumer.sh
+bash ./scripts/validate_npm_pack_smoke.sh
+```
+
+Evidence to capture:
+
+- built browser-core artifacts under `packages/browser-core/`
+- `target/e2e-results/react_consumer/<timestamp>/consumer_build.log`
+- `target/e2e-results/react_consumer/<timestamp>/summary.json`
+- terminal output from `scripts/validate_npm_pack_smoke.sh` naming the exact
+  missing field, export-map entry, or artifact
+
+### D. Onboarding Runner Drift
+
+Use when the documented first-success flows fail or when you want the fastest
+symptom-to-artifact sweep across vanilla, React, and Next lanes.
+
+```bash
+python3 scripts/run_browser_onboarding_checks.py --scenario all
+```
+
+Evidence to capture:
+
+- `artifacts/onboarding/vanilla.ndjson`
+- `artifacts/onboarding/react.ndjson`
+- `artifacts/onboarding/next.ndjson`
+- `artifacts/onboarding/vanilla.summary.json`
+- `artifacts/onboarding/react.summary.json`
+- `artifacts/onboarding/next.summary.json`
+
+Each summary includes ordered correlation IDs and the failing step IDs; use
+those before opening individual harness logs.
+
+### E. Replay, Matrix, and Incident Forensics
+
+Use when behavior is flaky across runs or incident triage lacks reproducible
+logs.
+
+```bash
+bash ./scripts/run_all_e2e.sh --verify-matrix
+bash ./scripts/run_all_e2e.sh --suite wasm-incident-forensics
+python3 scripts/check_wasm_flake_governance.py \
+  --policy .github/wasm_flake_governance_policy.json
+```
+
+Evidence to capture:
+
+- latest `target/e2e-results/orchestrator_<timestamp>/report.json`
+- latest `target/e2e-results/orchestrator_<timestamp>/artifact_manifest.json`
+- latest `target/e2e-results/orchestrator_<timestamp>/replay_verification.json`
+- `artifacts/wasm_flake_governance_report.json`
+- `artifacts/wasm_flake_governance_events.ndjson`
+- replay command, trace pointer, and scenario ID from the emitted suite summary
+
+### F. Log Contract Violations
+
+Use when diagnostics are present but not machine-parseable or policy-compliant.
+
+```bash
+rch exec -- cargo test --test e2e_log_quality_schema -- --nocapture
+```
+
+Evidence to capture:
+
+- exact failing test names
+- missing contract token/field from assertion output
+- the newest relevant `report.json` or onboarding `*.summary.json`
+- updated doc/workflow references if contract drift is intentional
+
+### G. Lifecycle, Quiescence, and Packaged Bootstrap Failures
+
+Use when a browser lifecycle or shutdown path leaks work, skips loser drain, or
+fails to reach quiescence.
+
+```bash
+rch exec -- cargo test --test obligation_wasm_parity \
+  wasm_full_browser_lifecycle_simulation -- --nocapture
+
+bash ./scripts/test_wasm_packaged_bootstrap_e2e.sh
+```
+
+Evidence to capture:
+
+- failing lifecycle phase from the Rust test output
+- latest packaged bootstrap `summary.json`
+- latest packaged bootstrap `steps.ndjson`
+- latest packaged bootstrap `perf-summary.json`
+- any exported `artifacts/wasm_packaged_bootstrap_perf_summary.json`
+
 ## Escalation Rules
 
 Escalate immediately if any condition holds:
 
-1. a failure is non-reproducible under fixed command/seed,
+1. a failure is non-reproducible under a fixed command/seed,
 2. evidence artifacts are missing or non-parseable,
-3. a workaround requires disabling redaction or quality gates.
+3. a workaround requires disabling redaction or quality gates,
+4. a package/runtime support claim conflicts with `docs/integration.md`.
 
 Escalation route:
 
-1. Post findings in Agent Mail with thread id matching active bead.
-2. Include command, exact failure, and artifact pointers.
-3. Keep mitigation proposals explicit (no hidden policy bypasses).
+1. Post findings in Agent Mail with thread id matching the active bead.
+2. Include the exact command, failure text, and artifact pointers.
+3. Keep mitigation proposals explicit; no hidden policy bypasses.
+4. If the issue spans packaging plus runtime semantics, attach both the package
+   evidence (`packages/browser-core/*`, consumer logs) and the runtime evidence
+   (`artifacts/onboarding/*`, `target/e2e-results/*`).
 
 ## Cross-References
 

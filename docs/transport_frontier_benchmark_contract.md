@@ -111,12 +111,18 @@ Benchmark logs MUST include:
 
 - `experiment_id`: Which transport experiment
 - `workload_id`: Workload from the vocabulary
+- `benchmark_correlation_id`: Stable correlation ID linking the decision to a replayable benchmark run
 - `path_count`: Number of active paths
+- `experimental_gate_id`: Explicit preview gate state for the transport decision
 - `path_policy_id`: Requested transport path-selection policy
+- `effective_path_policy_id`: Effective path-selection policy after conservative fallback
 - `requested_path_count`: Requested path count for bounded policies, if any
 - `selected_path_count`: Number of paths actually selected by the policy
 - `fallback_policy_id`: Conservative fallback policy when the requested policy cannot be honored exactly
+- `path_downgrade_reason`: Stable downgrade code emitted by the low-level path selector
 - `downgrade_reason`: Stable downgrade code such as `no-primary-path` or `requested-paths-unavailable`
+- `coding_policy_id`: Requested coded-transport policy
+- `effective_coding_policy_id`: Effective coded-transport policy after conservative fallback
 - `loss_rate_pct`: Configured loss rate
 - `throughput_msgs_sec`: Messages per second
 - `p50_us`, `p95_us`, `p99_us`, `p999_us`: Latency percentiles in microseconds

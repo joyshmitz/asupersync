@@ -189,6 +189,11 @@
       "command": "rch exec -- env HARNESS_PROFILE=packaged_bootstrap HARNESS_DRY_RUN=1 RCH_BIN=/bin/true FAULT_MATRIX_MODE=reduced bash scripts/test_wasm_cross_framework_e2e.sh"
     },
     {
+      "scenario_id": "WASM-QA-SMOKE-PACKAGED-CANCELLATION",
+      "description": "Run packaged cancellation/quiescence harness in dry-run mode and verify schema-style WASM E2E bundle emission",
+      "command": "rch exec -- bash -lc 'set -euo pipefail; bash scripts/build_browser_core_artifacts.sh prod; env WASM_PACKAGED_CANCELLATION_DRY_RUN=1 WASM_PERF_PROFILE=core-min RCH_BIN=/bin/true bash scripts/test_wasm_packaged_cancellation_e2e.sh'"
+    },
+    {
       "scenario_id": "WASM-QA-SMOKE-HOST-BRIDGE",
       "description": "Run host-bridge fetch/streams/websocket/storage harness in dry-run mode and verify schema-style WASM E2E bundle emission",
       "command": "rch exec -- env HARNESS_PROFILE=host_bridge HARNESS_DRY_RUN=1 RCH_BIN=/bin/true FAULT_MATRIX_MODE=reduced bash scripts/test_wasm_cross_framework_e2e.sh"
@@ -201,6 +206,7 @@
   ],
   "downstream_beads": [
     "asupersync-3qv04.8.4.1",
+    "asupersync-3qv04.6.6",
     "asupersync-3qv04.8.4.3",
     "asupersync-3qv04.8.4.4",
     "asupersync-3qv04.8.5",

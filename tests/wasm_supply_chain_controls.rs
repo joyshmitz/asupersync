@@ -229,11 +229,18 @@ fn publish_workflow_and_strategy_doc_align_on_npm_artifact_contract() {
         .expect("failed to read wasm release strategy");
 
     for expected in [
+        ".github/wasm_typescript_package_policy.json",
         "artifacts/npm/package_json_paths.txt",
         "artifacts/npm/npm_release_assumptions.json",
+        "artifacts/npm/package_release_validation.json",
+        "artifacts/npm/package_pack_dry_run_summary.json",
         "artifacts/npm/publish_outcome.json",
         "artifacts/npm/rollback_outcome.json",
         "packages/*/package.json",
+        "corepack pnpm run build",
+        "bash scripts/validate_package_build.sh",
+        "bash scripts/validate_npm_pack_smoke.sh",
+        "npm pack --json --dry-run",
     ] {
         assert!(
             workflow.contains(expected),
@@ -256,6 +263,15 @@ fn publish_workflow_and_strategy_doc_align_on_npm_artifact_contract() {
     assert!(
         strategy.contains("Missing package manifests are a hard release-blocking failure"),
         "strategy doc must enforce mandatory package discovery (no controlled skip)"
+    );
+    assert!(
+        strategy.contains("Missing package manifests or missing built package outputs are hard"),
+        "strategy doc must enforce built output validation before publish"
+    );
+    assert!(
+        !workflow
+            .contains("No npm package manifests found under packages/*; skipping npm publish."),
+        "publish workflow must not silently skip npm publish when required packages are missing"
     );
 }
 

@@ -118,7 +118,7 @@ fn build_artifact_script_emits_and_syncs_abi_metadata() {
         "\"abi_signature_fingerprint_v1\":",
         "major=\"$(rg -No 'WASM_ABI_MAJOR_VERSION",
         "minor=\"$(rg -No 'WASM_ABI_MINOR_VERSION",
-        "fingerprint=\"$(rg -No 'WASM_ABI_SIGNATURE_FINGERPRINT_V1",
+        "fingerprint=\"$(rg -No 'WASM_ABI_SIGNATURE_FINGERPRINT_V1[^=]*= ([0-9_]+);' \"${ABI_FILE}\" -r '$1' -m1 | tr -d '_')\"",
         "cp \"${STAGING_DIR}/${artifact}\" \"${PACKAGE_DIR}/${artifact}\"",
     ] {
         assert!(

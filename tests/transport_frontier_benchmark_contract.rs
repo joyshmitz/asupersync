@@ -314,11 +314,17 @@ fn structured_log_fields_are_unique_and_nonempty() {
 fn structured_log_contract_mentions_transport_decision_metadata() {
     let doc = load_doc();
     for field in [
+        "benchmark_correlation_id",
+        "experimental_gate_id",
         "path_policy_id",
+        "effective_path_policy_id",
         "requested_path_count",
         "selected_path_count",
         "fallback_policy_id",
+        "path_downgrade_reason",
         "downgrade_reason",
+        "coding_policy_id",
+        "effective_coding_policy_id",
     ] {
         assert!(
             doc.contains(field),
@@ -338,17 +344,89 @@ fn structured_log_fields_include_transport_decision_metadata() {
         .collect();
 
     for field in [
+        "benchmark_correlation_id",
+        "experimental_gate_id",
         "path_policy_id",
+        "effective_path_policy_id",
         "requested_path_count",
         "selected_path_count",
         "fallback_policy_id",
+        "path_downgrade_reason",
         "downgrade_reason",
+        "coding_policy_id",
+        "effective_coding_policy_id",
     ] {
         assert!(
             fields.contains(field),
             "structured log field must exist: {field}"
         );
     }
+}
+
+#[test]
+fn transport_experiment_decision_emits_contract_metadata_fields() {
+    use asupersync::transport::{
+        AggregatorConfig, ExperimentalTransportGate, MultipathAggregator, PathCharacteristics,
+        PathSelectionPolicy, TransportCodingPolicy, TransportExperimentContext, TransportPath,
+    };
+
+    let aggregator = MultipathAggregator::new(AggregatorConfig {
+        path_policy: PathSelectionPolicy::BestQuality { count: 2 },
+        experiment_gate: ExperimentalTransportGate::MultipathPreview,
+        coding_policy: TransportCodingPolicy::RaptorQFecPreview,
+        ..AggregatorConfig::default()
+    });
+    aggregator.paths().register(
+        TransportPath::new(asupersync::transport::PathId(7), "wan-a", "10.0.0.1:9000")
+            .with_characteristics(PathCharacteristics::high_quality()),
+    );
+
+    let decision = aggregator.experimental_transport_decision(TransportExperimentContext::new(
+        "TW-MULTIPATH",
+        "aa08-contract-smoke-001",
+    ));
+    let fields = decision.log_fields();
+
+    for field in [
+        "workload_id",
+        "benchmark_correlation_id",
+        "experimental_gate_id",
+        "path_policy_id",
+        "effective_path_policy_id",
+        "requested_path_count",
+        "selected_path_count",
+        "fallback_policy_id",
+        "path_downgrade_reason",
+        "downgrade_reason",
+        "coding_policy_id",
+        "effective_coding_policy_id",
+    ] {
+        assert!(
+            fields.contains_key(field),
+            "transport decision log field must exist: {field}"
+        );
+    }
+
+    assert_eq!(
+        fields.get("workload_id").map(String::as_str),
+        Some("TW-MULTIPATH")
+    );
+    assert_eq!(
+        fields.get("benchmark_correlation_id").map(String::as_str),
+        Some("aa08-contract-smoke-001")
+    );
+    assert_eq!(
+        fields.get("experimental_gate_id").map(String::as_str),
+        Some("multipath-preview")
+    );
+    assert_eq!(
+        fields.get("coding_policy_id").map(String::as_str),
+        Some("raptorq-fec-preview")
+    );
+    assert_eq!(
+        fields.get("effective_coding_policy_id").map(String::as_str),
+        Some("disabled")
+    );
 }
 
 // ── Smoke runner and scenarios ───────────────────────────────────────

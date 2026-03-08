@@ -268,6 +268,7 @@ fn e2e_runner_scripts_emit_required_summary_contract_fields() {
         "scripts/test_cancel_attribution.sh",
         "scripts/test_scheduler_wakeup_e2e.sh",
         "scripts/test_wasm_packaged_bootstrap_e2e.sh",
+        "scripts/test_wasm_packaged_cancellation_e2e.sh",
         "scripts/test_wasm_cross_framework_e2e.sh",
         "scripts/test_wasm_incident_forensics_e2e.sh",
         "scripts/test_doctor_remediation_verification_e2e.sh",
@@ -365,6 +366,31 @@ fn wasm_packaged_bootstrap_runner_emits_required_bundle_contract_tokens() {
         assert!(
             content.contains(token),
             "wasm packaged bootstrap runner missing contract token: {token}"
+        );
+    }
+}
+
+#[test]
+fn wasm_packaged_cancellation_runner_emits_required_bundle_contract_tokens() {
+    let content = fs::read_to_string("scripts/test_wasm_packaged_cancellation_e2e.sh")
+        .expect("read wasm packaged cancellation e2e runner script");
+
+    for token in [
+        "e2e-wasm-packaged-cancellation-quiescence",
+        "E2E-SUITE-WASM-PACKAGED-CANCELLATION",
+        "run-metadata.json",
+        "log.jsonl",
+        "steps.ndjson",
+        "wasm-e2e-run-metadata-v1",
+        "\"schema_version\": \"e2e-suite-summary-v3\"",
+        "cancelled_bootstrap_retry_recovery",
+        "render_restart_loser_drain",
+        "nested_cancel_cascade_quiescence",
+        "shutdown_obligation_cleanup",
+    ] {
+        assert!(
+            content.contains(token),
+            "wasm packaged cancellation runner missing contract token: {token}"
         );
     }
 }

@@ -177,11 +177,16 @@ Policy wiring expectations:
    - package discovery glob: `packages/*/package.json`
    - discovered package path list: `artifacts/npm/package_json_paths.txt`
    - assumptions artifact: `artifacts/npm/npm_release_assumptions.json`
+   - package validation artifact: `artifacts/npm/package_release_validation.json`
+   - pack dry-run evidence artifact: `artifacts/npm/package_pack_dry_run_summary.json`
    - publish outcome artifact: `artifacts/npm/publish_outcome.json`
    - rollback outcome artifact (when rollback mode is used): `artifacts/npm/rollback_outcome.json`
-4. Missing package manifests are a hard release-blocking failure. All four
-   required packages must be discovered and validated before any channel
-   promotion can proceed.
+4. Missing package manifests are a hard release-blocking failure. Missing package manifests or missing built package outputs are hard release-blocking failures. The exact required package set from
+   `.github/wasm_typescript_package_policy.json` must be discovered, built via
+   `corepack pnpm run build`, validated with
+   `bash scripts/validate_package_build.sh`, and pack-smoke checked with
+   `bash scripts/validate_npm_pack_smoke.sh`, and evidenced with
+   `npm pack --json --dry-run` before any npm publish can proceed.
 5. Rollback mode requires both target version and operator reason; the executed
    dist-tag commands must be captured in release artifacts.
 

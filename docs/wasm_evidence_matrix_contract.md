@@ -88,6 +88,9 @@ rch exec -- cargo check --target wasm32-unknown-unknown --no-default-features --
 rch exec -- cargo check --target wasm32-unknown-unknown --no-default-features --features wasm-browser-deterministic
 
 # Browser E2E and matrix gates
+bash ./scripts/run_all_e2e.sh --suite wasm-packaged-bootstrap
+bash ./scripts/run_all_e2e.sh --suite wasm-packaged-cancellation
+bash ./scripts/run_all_e2e.sh --suite wasm-cross-framework
 bash ./scripts/run_all_e2e.sh --suite wasm-incident-forensics
 python3 ./scripts/check_wasm_flake_governance.py --policy .github/wasm_flake_governance_policy.json
 ```

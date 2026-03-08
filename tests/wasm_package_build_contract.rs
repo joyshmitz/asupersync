@@ -258,6 +258,23 @@ fn build_browser_core_artifacts_script_exists() {
 }
 
 #[test]
+fn browser_core_release_profile_keeps_wasm_opt_bulk_memory_aware() {
+    let path = repo_root()
+        .join("asupersync-browser-core")
+        .join("Cargo.toml");
+    let content = std::fs::read_to_string(&path).unwrap();
+    for marker in [
+        "[package.metadata.wasm-pack.profile.release]",
+        "wasm-opt = [\"-Oz\", \"--enable-bulk-memory\"",
+    ] {
+        assert!(
+            content.contains(marker),
+            "browser-core Cargo.toml missing release wasm-pack marker: {marker}"
+        );
+    }
+}
+
+#[test]
 fn clean_script_exists() {
     let path = repo_root().join("scripts/clean_packages.sh");
     assert!(path.exists(), "clean_packages.sh must exist");
