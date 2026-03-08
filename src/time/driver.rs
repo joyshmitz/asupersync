@@ -461,7 +461,12 @@ impl<T: TimeSource> TimerDriver<T> {
     /// Returns the next deadline that will fire, if any.
     #[must_use]
     pub fn next_deadline(&self) -> Option<Time> {
-        self.wheel.lock().next_deadline()
+        let now = self.clock.now();
+        self.wheel.lock().next_deadline().map(
+            |deadline| {
+                if deadline < now { now } else { deadline }
+            },
+        )
     }
 
     /// Processes all expired timers, calling their wakers.
@@ -1180,6 +1185,26 @@ mod tests {
     }
 
     #[test]
+    fn timer_driver_next_deadline_clamps_overdue_timer_to_now() {
+        init_test("timer_driver_next_deadline_clamps_overdue_timer_to_now");
+        let clock = Arc::new(VirtualClock::new());
+        let driver = TimerDriver::with_clock(clock.clone());
+
+        driver.register(Time::from_secs(3), futures_waker());
+        clock.set(Time::from_secs(10));
+
+        let actual = driver.next_deadline();
+        let expected = Some(Time::from_secs(10));
+        crate::assert_with_log!(
+            actual == expected,
+            "overdue timer is reported as immediately due",
+            expected,
+            actual
+        );
+        crate::test_complete!("timer_driver_next_deadline_clamps_overdue_timer_to_now");
+    }
+
+    #[test]
     fn timer_driver_process_expired() {
         init_test("timer_driver_process_expired");
         let clock = Arc::new(VirtualClock::new());
@@ -1537,6 +1562,25 @@ mod tests {
             next
         );
         crate::test_complete!("timer_driver_handle_next_deadline");
+    }
+
+    #[test]
+    fn timer_driver_handle_next_deadline_clamps_overdue_timer_to_now() {
+        init_test("timer_driver_handle_next_deadline_clamps_overdue_timer_to_now");
+        let clock = Arc::new(VirtualClock::new());
+        let handle = TimerDriverHandle::with_virtual_clock(clock.clone());
+
+        let _ = handle.register(Time::from_secs(4), futures_waker());
+        clock.set(Time::from_secs(9));
+
+        let next = handle.next_deadline();
+        crate::assert_with_log!(
+            next == Some(Time::from_secs(9)),
+            "handle reports overdue timer as immediately due",
+            Some(Time::from_secs(9)),
+            next
+        );
+        crate::test_complete!("timer_driver_handle_next_deadline_clamps_overdue_timer_to_now");
     }
 
     #[test]

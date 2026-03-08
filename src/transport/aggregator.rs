@@ -454,6 +454,9 @@ pub struct PathSelectionDecision {
     /// Policy that was requested by the caller.
     pub policy: PathSelectionPolicy,
 
+    /// Number of usable paths considered when the decision was made.
+    pub available_path_count: usize,
+
     /// Paths selected under the requested policy without applying any fallback.
     pub selected: SmallVec<[Arc<TransportPath>; 4]>,
 
@@ -473,6 +476,7 @@ impl PathSelectionDecision {
     pub fn new(policy: PathSelectionPolicy) -> Self {
         Self {
             policy,
+            available_path_count: 0,
             selected: SmallVec::new(),
             fallback: SmallVec::new(),
             fallback_policy: None,
@@ -490,6 +494,12 @@ impl PathSelectionDecision {
     #[must_use]
     pub const fn requested_path_count(&self) -> Option<usize> {
         self.policy.requested_path_count()
+    }
+
+    /// Number of usable paths considered when the decision was made.
+    #[must_use]
+    pub const fn available_path_count(&self) -> usize {
+        self.available_path_count
     }
 
     /// Number of paths selected under the requested policy.
@@ -559,6 +569,13 @@ pub struct TransportExperimentDecision {
 }
 
 impl TransportExperimentDecision {
+    fn format_path_ids(ids: &[PathId]) -> String {
+        ids.iter()
+            .map(|id| id.0.to_string())
+            .collect::<Vec<_>>()
+            .join(",")
+    }
+
     /// Stable identifier for the preview gate.
     #[must_use]
     pub const fn gate_id(&self) -> &'static str {
@@ -606,6 +623,9 @@ impl TransportExperimentDecision {
     #[must_use]
     pub fn log_fields(&self) -> BTreeMap<String, String> {
         let mut fields = BTreeMap::new();
+        let selected_ids = self.path_decision.selected_ids();
+        let fallback_ids = self.path_decision.fallback_ids();
+
         fields.insert("workload_id".to_owned(), self.context.workload_id.clone());
         fields.insert(
             "benchmark_correlation_id".to_owned(),
@@ -626,8 +646,24 @@ impl TransportExperimentDecision {
                 .map_or_else(|| "all".to_owned(), |count| count.to_string()),
         );
         fields.insert(
+            "path_count".to_owned(),
+            self.path_decision.available_path_count().to_string(),
+        );
+        fields.insert(
             "selected_path_count".to_owned(),
             self.path_decision.selected_path_count().to_string(),
+        );
+        fields.insert(
+            "fallback_path_count".to_owned(),
+            self.path_decision.fallback_path_count().to_string(),
+        );
+        fields.insert(
+            "selected_path_ids".to_owned(),
+            Self::format_path_ids(selected_ids.as_slice()),
+        );
+        fields.insert(
+            "fallback_path_ids".to_owned(),
+            Self::format_path_ids(fallback_ids.as_slice()),
         );
         fields.insert(
             "fallback_policy_id".to_owned(),
@@ -784,6 +820,7 @@ impl PathSet {
     ) -> PathSelectionDecision {
         let usable = self.usable_paths_sorted();
         let mut decision = PathSelectionDecision::new(policy);
+        decision.available_path_count = usable.len();
 
         match policy {
             PathSelectionPolicy::UseAll => {
@@ -2203,6 +2240,24 @@ mod tests {
             log_fields.get("workload_id").map(String::as_str)
         );
         crate::assert_with_log!(
+            log_fields.get("path_count").map(String::as_str) == Some("1"),
+            "usable path count logged",
+            Some("1"),
+            log_fields.get("path_count").map(String::as_str)
+        );
+        crate::assert_with_log!(
+            log_fields.get("selected_path_ids").map(String::as_str) == Some("7"),
+            "selected path ids logged",
+            Some("7"),
+            log_fields.get("selected_path_ids").map(String::as_str)
+        );
+        crate::assert_with_log!(
+            log_fields.get("fallback_path_count").map(String::as_str) == Some("0"),
+            "fallback path count logged",
+            Some("0"),
+            log_fields.get("fallback_path_count").map(String::as_str)
+        );
+        crate::assert_with_log!(
             log_fields
                 .get("benchmark_correlation_id")
                 .map(String::as_str)
@@ -2224,6 +2279,70 @@ mod tests {
         crate::test_complete!(
             "test_experimental_transport_decision_coding_preview_stays_fail_closed"
         );
+    }
+
+    #[test]
+    fn test_experimental_transport_decision_logs_fallback_inventory() {
+        init_test("test_experimental_transport_decision_logs_fallback_inventory");
+
+        let aggregator = MultipathAggregator::new(AggregatorConfig {
+            path_policy: PathSelectionPolicy::PrimaryOnly,
+            experiment_gate: ExperimentalTransportGate::MultipathPreview,
+            ..AggregatorConfig::default()
+        });
+
+        aggregator
+            .paths()
+            .register(test_path(3).with_characteristics(PathCharacteristics::backup()));
+        aggregator
+            .paths()
+            .register(test_path(1).with_characteristics(PathCharacteristics {
+                latency_ms: 15,
+                bandwidth_bps: 4_000_000,
+                loss_rate: 0.02,
+                jitter_ms: 3,
+                is_primary: false,
+                priority: 20,
+            }));
+
+        let decision = aggregator.experimental_transport_decision(TransportExperimentContext::new(
+            "TW-HANDOFF",
+            "aa08-fallback-001",
+        ));
+        let log_fields = decision.log_fields();
+
+        crate::assert_with_log!(
+            log_fields.get("path_count").map(String::as_str) == Some("2"),
+            "available path inventory logged",
+            Some("2"),
+            log_fields.get("path_count").map(String::as_str)
+        );
+        crate::assert_with_log!(
+            log_fields.get("selected_path_ids").map(String::as_str) == Some(""),
+            "selected path ids stay empty when no primary path is usable",
+            Some(""),
+            log_fields.get("selected_path_ids").map(String::as_str)
+        );
+        crate::assert_with_log!(
+            log_fields.get("fallback_path_count").map(String::as_str) == Some("1"),
+            "fallback path count logged",
+            Some("1"),
+            log_fields.get("fallback_path_count").map(String::as_str)
+        );
+        crate::assert_with_log!(
+            log_fields.get("fallback_path_ids").map(String::as_str) == Some("1"),
+            "fallback path ids logged",
+            Some("1"),
+            log_fields.get("fallback_path_ids").map(String::as_str)
+        );
+        crate::assert_with_log!(
+            log_fields.get("path_downgrade_reason").map(String::as_str) == Some("no-primary-path"),
+            "path downgrade reason logged",
+            Some("no-primary-path"),
+            log_fields.get("path_downgrade_reason").map(String::as_str)
+        );
+
+        crate::test_complete!("test_experimental_transport_decision_logs_fallback_inventory");
     }
 
     #[test]

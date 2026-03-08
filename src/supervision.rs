@@ -6395,8 +6395,8 @@ mod tests {
                         );
                     }
                 }
-                other @ SupervisorSpawnError::RegionCreate(_) => {
-                    unreachable!("expected ChildStartFailed, got {other:?}");
+                SupervisorSpawnError::RegionCreate(_) => {
+                    unreachable!("expected ChildStartFailed, got RegionCreate");
                 }
             }
         }
@@ -6443,8 +6443,8 @@ mod tests {
                     .expect("started task should remain tracked");
                 (region, started_task)
             }
-            other @ SupervisorSpawnError::RegionCreate(_) => {
-                panic!("expected ChildStartFailed, got {other:?}")
+            SupervisorSpawnError::RegionCreate(_) => {
+                panic!("expected ChildStartFailed, got RegionCreate")
             }
         };
 

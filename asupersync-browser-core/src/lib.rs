@@ -8,17 +8,17 @@ pub mod types;
 
 use crate::error::dispatch_error_json;
 use crate::types::{decode_json_payload, decode_optional_consumer_version, encode_json_payload};
+#[cfg(not(target_arch = "wasm32"))]
+use asupersync::types::WasmDispatcherDiagnostics;
 use asupersync::types::{
     WASM_ABI_MAJOR_VERSION, WASM_ABI_MINOR_VERSION, WASM_ABI_SIGNATURE_FINGERPRINT_V1,
     WasmAbiCancellation, WasmAbiErrorCode, WasmAbiFailure, WasmAbiOutcomeEnvelope,
-    WasmAbiRecoverability, WasmAbiValue, WasmAbiVersion, WasmDispatchError,
-    WasmExportDispatcher, WasmFetchRequest, WasmHandleRef, WasmScopeEnterRequest,
-    WasmTaskCancelRequest, WasmTaskSpawnRequest,
+    WasmAbiRecoverability, WasmAbiValue, WasmAbiVersion, WasmDispatchError, WasmExportDispatcher,
+    WasmFetchRequest, WasmHandleRef, WasmScopeEnterRequest, WasmTaskCancelRequest,
+    WasmTaskSpawnRequest,
 };
 use std::cell::RefCell;
 use std::collections::{HashMap, VecDeque};
-#[cfg(not(target_arch = "wasm32"))]
-use asupersync::types::WasmDispatcherDiagnostics;
 #[cfg(target_arch = "wasm32")]
 use std::rc::Rc;
 #[cfg(target_arch = "wasm32")]
@@ -128,7 +128,7 @@ fn cleanup_released_fetches() {
 }
 
 #[cfg(not(target_arch = "wasm32"))]
-fn cleanup_released_fetches() {}
+const fn cleanup_released_fetches() {}
 
 fn cleanup_released_websockets() {
     INFLIGHT_WEBSOCKETS.with(|sockets| {
@@ -337,7 +337,7 @@ async fn run_browser_fetch(
         );
     };
 
-    let mut init = RequestInit::new();
+    let init = RequestInit::new();
     init.set_method(&request.method);
     init.set_signal(Some(&signal));
     if let Some(body) = request.body {

@@ -112,10 +112,10 @@ impl BrowserReactor {
     fn snapshot_readiness_events(&self) -> io::Result<Vec<super::Event>> {
         let registrations = self.registrations_mut()?;
         let mut events = Vec::with_capacity(registrations.len());
-        for (token, interest) in registrations.iter() {
-            let ready = *interest & Self::readiness_mask();
+        for (&token, &interest) in &*registrations {
+            let ready = interest & Self::readiness_mask();
             if !ready.is_empty() {
-                events.push(super::Event::new(*token, ready));
+                events.push(super::Event::new(token, ready));
             }
         }
         drop(registrations);

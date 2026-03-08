@@ -885,7 +885,8 @@ impl Encoder<Response> for Http1Codec {
         if !chunked {
             if let Some(cl) = cl {
                 let declared: usize = cl.trim().parse().map_err(|_| HttpError::BadContentLength)?;
-                if declared != resp.body.len() {
+                // Allow empty bodies with non-zero Content-Length for HEAD responses.
+                if declared != resp.body.len() && !resp.body.is_empty() {
                     return Err(HttpError::BadContentLength);
                 }
             }
@@ -1237,6 +1238,16 @@ mod tests {
         let s = String::from_utf8(bytes).unwrap();
         assert!(s.contains("Content-Type: application/json\r\n"));
         assert_eq!(s.matches("Content-Length").count(), 1);
+    }
+
+    #[test]
+    fn encode_head_response_with_content_length() {
+        let mut codec = Http1Codec::new();
+        let resp = Response::new(200, "OK", Vec::new()).with_header("Content-Length", "1024");
+        let bytes = encode_one(&mut codec, resp);
+        let s = String::from_utf8(bytes).unwrap();
+        assert!(s.contains("Content-Length: 1024\r\n"));
+        assert!(s.ends_with("\r\n\r\n"));
     }
 
     #[test]

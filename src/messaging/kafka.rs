@@ -992,7 +992,6 @@ impl Drop for Transaction<'_> {
 #[cfg(test)]
 mod tests {
     use super::*;
-    use crate::test_utils::run_test_with_cx;
 
     #[test]
     fn test_acks_values() {
@@ -1371,7 +1370,7 @@ mod tests {
     #[cfg(not(feature = "kafka"))]
     #[test]
     fn producer_send_returns_deterministic_delivery_metadata() {
-        run_test_with_cx(|cx| async move {
+        crate::test_utils::run_test_with_cx(|cx| async move {
             let producer = KafkaProducer::new(ProducerConfig::default()).unwrap();
 
             // Use unique topic name to avoid cross-test contamination via the
@@ -1411,7 +1410,7 @@ mod tests {
     #[cfg(not(feature = "kafka"))]
     #[test]
     fn producer_rejects_blank_topic_name() {
-        run_test_with_cx(|cx| async move {
+        crate::test_utils::run_test_with_cx(|cx| async move {
             let producer = KafkaProducer::new(ProducerConfig::default()).unwrap();
             let err = producer
                 .send(&cx, "   ", None, b"x", None)
@@ -1424,7 +1423,7 @@ mod tests {
     #[cfg(not(feature = "kafka"))]
     #[test]
     fn producer_close_is_idempotent_and_blocks_new_operations() {
-        run_test_with_cx(|cx| async move {
+        crate::test_utils::run_test_with_cx(|cx| async move {
             let producer = KafkaProducer::new(ProducerConfig::default()).unwrap();
             producer
                 .send(&cx, "orders", None, b"before-close", None)

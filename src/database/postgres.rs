@@ -4713,13 +4713,13 @@ mod tests {
         assert_eq!(v.type_oid(), oid::INT2);
         buf.clear();
 
-        let v: i32 = 0x12345678;
+        let v: i32 = 0x1234_5678;
         v.to_sql(&mut buf).unwrap();
         assert_eq!(buf, [0x12, 0x34, 0x56, 0x78]);
         assert_eq!(v.type_oid(), oid::INT4);
         buf.clear();
 
-        let v: i64 = 0x0102030405060708;
+        let v: i64 = 0x0102_0304_0506_0708;
         v.to_sql(&mut buf).unwrap();
         assert_eq!(buf, [1, 2, 3, 4, 5, 6, 7, 8]);
         assert_eq!(v.type_oid(), oid::INT8);

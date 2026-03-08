@@ -848,15 +848,18 @@ impl RoutingTable {
         before - routes.len()
     }
 
-    /// Returns all healthy endpoints.
+    /// Returns all endpoints that can currently receive traffic in stable ID order.
     #[must_use]
-    pub fn healthy_endpoints(&self) -> Vec<Arc<Endpoint>> {
-        self.endpoints
+    pub fn dispatchable_endpoints(&self) -> Vec<Arc<Endpoint>> {
+        let mut endpoints = self
+            .endpoints
             .read()
             .values()
-            .filter(|e| e.state() == EndpointState::Healthy)
+            .filter(|endpoint| endpoint.state().can_receive())
             .cloned()
-            .collect()
+            .collect::<Vec<_>>();
+        endpoints.sort_unstable_by_key(|endpoint| endpoint.id);
+        endpoints
     }
 
     /// Returns route count.
@@ -1011,8 +1014,10 @@ impl SymbolRouter {
         let object_id = symbol.object_id();
         let primary_key = RouteKey::Object(object_id);
 
-        if let Some(entry) = self.table.lookup_without_default(&primary_key) {
-            if let Some(endpoint) = self.select_preferred_endpoint(&entry, object_id) {
+        let primary_entry = self.table.lookup_without_default(&primary_key);
+
+        if let Some(entry) = primary_entry.as_ref() {
+            if let Some(endpoint) = self.select_preferred_endpoint(entry, object_id) {
                 return Ok(RouteResult {
                     endpoint,
                     matched_key: primary_key,
@@ -1031,7 +1036,12 @@ impl SymbolRouter {
                         is_fallback: true,
                     });
                 }
+                return Err(RoutingError::NoHealthyEndpoints { object_id });
             }
+        }
+
+        if primary_entry.is_some() {
+            return Err(RoutingError::NoHealthyEndpoints { object_id });
         }
 
         Err(RoutingError::NoRoute {
@@ -1477,7 +1487,7 @@ impl SymbolDispatcher {
         cx: &Cx,
         symbol: &AuthenticatedSymbol,
     ) -> Result<DispatchResult, DispatchError> {
-        let endpoints = self.router.table().healthy_endpoints();
+        let endpoints = self.router.table().dispatchable_endpoints();
 
         if endpoints.is_empty() {
             return Err(DispatchError::NoEndpoints);
@@ -1542,7 +1552,7 @@ impl SymbolDispatcher {
         symbol: &AuthenticatedSymbol,
         required: usize,
     ) -> Result<DispatchResult, DispatchError> {
-        let endpoints = self.router.table().healthy_endpoints();
+        let endpoints = self.router.table().dispatchable_endpoints();
 
         if endpoints.len() < required {
             return Err(DispatchError::InsufficientEndpoints {
@@ -1771,10 +1781,21 @@ impl From<DispatchError> for Error {
 #[cfg(test)]
 mod tests {
     use super::*;
+    use crate::Cx;
+    use crate::security::authenticated::AuthenticatedSymbol;
+    use crate::security::tag::AuthenticationTag;
+    use crate::types::{Symbol, SymbolId, SymbolKind};
+    use futures_lite::future;
     use std::collections::HashSet;
 
     fn test_endpoint(id: u64) -> Endpoint {
         Endpoint::new(EndpointId(id), format!("node-{id}:8080"))
+    }
+
+    fn test_authenticated_symbol(esi: u32) -> AuthenticatedSymbol {
+        let id = SymbolId::new_for_test(1, 0, esi);
+        let symbol = Symbol::new(id, vec![esi as u8], SymbolKind::Source);
+        AuthenticatedSymbol::new_verified(symbol, AuthenticationTag::zero())
     }
 
     // Test 1: Endpoint state predicates
@@ -2157,6 +2178,60 @@ mod tests {
     }
 
     #[test]
+    fn test_symbol_router_object_route_with_only_unhealthy_endpoints_returns_no_healthy() {
+        let table = Arc::new(RoutingTable::new());
+        let object_id = ObjectId::new_for_test(77);
+        let unhealthy =
+            table.register_endpoint(test_endpoint(1).with_state(EndpointState::Unhealthy));
+        let entry = RoutingEntry::new(vec![unhealthy], Time::ZERO)
+            .with_strategy(LoadBalanceStrategy::FirstAvailable);
+        table.add_route(RouteKey::Object(object_id), entry);
+
+        let router = SymbolRouter::new(table);
+        let symbol = Symbol::new_for_test(77, 0, 0, &[1, 2, 3]);
+
+        let result = router.route(&symbol);
+        assert!(matches!(
+            result,
+            Err(RoutingError::NoHealthyEndpoints { object_id: oid }) if oid == object_id
+        ));
+    }
+
+    #[test]
+    fn test_symbol_router_unhealthy_default_route_returns_no_healthy() {
+        let table = Arc::new(RoutingTable::new());
+        let object_id = ObjectId::new_for_test(88);
+        let unhealthy =
+            table.register_endpoint(test_endpoint(1).with_state(EndpointState::Unhealthy));
+        let entry = RoutingEntry::new(vec![unhealthy], Time::ZERO)
+            .with_strategy(LoadBalanceStrategy::FirstAvailable);
+        table.add_route(RouteKey::Default, entry);
+
+        let router = SymbolRouter::new(table);
+        let symbol = Symbol::new_for_test(88, 0, 0, &[1, 2, 3]);
+
+        let result = router.route(&symbol);
+        assert!(matches!(
+            result,
+            Err(RoutingError::NoHealthyEndpoints { object_id: oid }) if oid == object_id
+        ));
+    }
+
+    #[test]
+    fn test_symbol_router_without_any_route_still_returns_no_route() {
+        let table = Arc::new(RoutingTable::new());
+        let router = SymbolRouter::new(table);
+        let object_id = ObjectId::new_for_test(99);
+        let symbol = Symbol::new_for_test(99, 0, 0, &[1, 2, 3]);
+
+        let result = router.route(&symbol);
+        assert!(matches!(
+            result,
+            Err(RoutingError::NoRoute { object_id: oid, .. }) if oid == object_id
+        ));
+    }
+
+    #[test]
     fn test_symbol_router_local_preference_unicast() {
         let table = Arc::new(RoutingTable::new());
         let local_region = RegionId::new_for_test(7, 0);
@@ -2309,6 +2384,78 @@ mod tests {
         assert!(table.update_endpoint_state(EndpointId(9), EndpointState::Draining));
         assert_eq!(endpoint.state(), EndpointState::Draining);
         assert!(!table.update_endpoint_state(EndpointId(999), EndpointState::Healthy));
+    }
+
+    #[test]
+    fn test_routing_table_dispatchable_endpoints_include_degraded_in_id_order() {
+        let table = RoutingTable::new();
+        let degraded =
+            table.register_endpoint(test_endpoint(3).with_state(EndpointState::Degraded));
+        let healthy = table.register_endpoint(test_endpoint(1).with_state(EndpointState::Healthy));
+        let _unhealthy =
+            table.register_endpoint(test_endpoint(2).with_state(EndpointState::Unhealthy));
+
+        let ids: Vec<_> = table
+            .dispatchable_endpoints()
+            .into_iter()
+            .map(|endpoint| endpoint.id)
+            .collect();
+
+        assert_eq!(ids, vec![healthy.id, degraded.id]);
+    }
+
+    #[test]
+    fn test_symbol_dispatcher_broadcast_uses_dispatchable_endpoints_in_id_order() {
+        let table = Arc::new(RoutingTable::new());
+        let degraded =
+            table.register_endpoint(test_endpoint(3).with_state(EndpointState::Degraded));
+        let healthy_a =
+            table.register_endpoint(test_endpoint(1).with_state(EndpointState::Healthy));
+        let healthy_b =
+            table.register_endpoint(test_endpoint(2).with_state(EndpointState::Healthy));
+
+        let router = Arc::new(SymbolRouter::new(table));
+        let dispatcher = SymbolDispatcher::new(router, DispatchConfig::default());
+        let cx: Cx = Cx::for_testing();
+
+        let result = future::block_on(dispatcher.dispatch_with_strategy(
+            &cx,
+            test_authenticated_symbol(7),
+            DispatchStrategy::Broadcast,
+        ))
+        .expect("broadcast dispatch should succeed");
+
+        let sent_to: Vec<_> = result.sent_to.into_iter().collect();
+        assert_eq!(sent_to, vec![healthy_a.id, healthy_b.id, degraded.id]);
+    }
+
+    #[test]
+    fn test_symbol_dispatcher_quorum_uses_lowest_dispatchable_ids_first() {
+        let table = Arc::new(RoutingTable::new());
+        let degraded =
+            table.register_endpoint(test_endpoint(3).with_state(EndpointState::Degraded));
+        let healthy_a =
+            table.register_endpoint(test_endpoint(1).with_state(EndpointState::Healthy));
+        let healthy_b =
+            table.register_endpoint(test_endpoint(2).with_state(EndpointState::Healthy));
+
+        let router = Arc::new(SymbolRouter::new(table));
+        let dispatcher = SymbolDispatcher::new(router, DispatchConfig::default());
+        let cx: Cx = Cx::for_testing();
+
+        let result = future::block_on(dispatcher.dispatch_with_strategy(
+            &cx,
+            test_authenticated_symbol(8),
+            DispatchStrategy::QuorumCast { required: 2 },
+        ))
+        .expect("quorum dispatch should succeed");
+
+        let sent_to: Vec<_> = result.sent_to.iter().copied().collect();
+        assert_eq!(sent_to, vec![healthy_a.id, healthy_b.id]);
+        assert_eq!(result.successes, 2);
+        assert_eq!(result.failures, 0);
+        assert!(result.quorum_reached(2));
+        assert!(!sent_to.contains(&degraded.id));
     }
 
     // Test 14: RoutingError display

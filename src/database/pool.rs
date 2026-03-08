@@ -388,9 +388,9 @@ impl<M: ConnectionManager> DbPool<M> {
                         return Err(DbPoolError::Connect(e));
                     }
                 }
-            } else {
-                return Err(DbPoolError::Full);
             }
+
+            Err(DbPoolError::Full)
         }
     }
 
