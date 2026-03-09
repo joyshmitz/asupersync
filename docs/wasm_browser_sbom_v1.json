@@ -64,7 +64,7 @@
       "path": "packages/browser-core/package.json",
       "package": "@asupersync/browser-core",
       "kind": "manifest",
-      "sha256": "f6b4e099b43cf6b7243eaad1130f09cc5f2699ae029a65a55baf9193aa6f2a73"
+      "sha256": "2d9ae09ac2b14acf2161e34dd665fe39e2fbd28cc4300f54284c13f0efa7a9e7"
     },
     {
       "path": "packages/browser-core/index.js",

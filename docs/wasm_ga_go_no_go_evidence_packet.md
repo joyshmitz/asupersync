@@ -30,6 +30,10 @@ artifact lineage rather than relying on policy-only governance text.
 The packet is also incomplete unless Gate 6 package-release and consumer-build
 evidence from `docs/wasm_release_channel_strategy.md` is present for the same
 candidate.
+That Gate 6 package evidence must carry command provenance for the real Browser
+Edition package gate: `corepack pnpm run validate` or both
+`bash scripts/validate_package_build.sh` and
+`bash scripts/validate_npm_pack_smoke.sh`.
 
 Required release-lineage references:
 

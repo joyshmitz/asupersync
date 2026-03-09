@@ -37,6 +37,10 @@ evidence below.
 That Browser Edition evidence must satisfy Gate 6 package-release and
 consumer-build artifacts from `docs/wasm_release_channel_strategy.md`, not
 just higher-level policy approval text.
+For the package-validation portion of Gate 6, the board must reject any packet
+that cannot show `corepack pnpm run validate` or both
+`bash scripts/validate_package_build.sh` and
+`bash scripts/validate_npm_pack_smoke.sh` for the reviewed candidate.
 
 | Browser Bead | Scope | Required Artifact-Backed Evidence |
 |---|---|---|

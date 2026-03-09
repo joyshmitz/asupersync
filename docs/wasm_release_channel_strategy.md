@@ -109,6 +109,14 @@ Required package-release artifacts:
 - `artifacts/npm/package_pack_dry_run_summary.json`
 - `artifacts/npm/publish_outcome.json`
 
+The Gate 6 package-validation command bundle must also prove that the candidate
+ran the full Browser Edition package gate, not a symbolic placeholder. The
+accepted evidence is either `corepack pnpm run validate` from the root workspace
+or direct command provenance showing both `bash scripts/validate_package_build.sh`
+and `bash scripts/validate_npm_pack_smoke.sh` for the same candidate window.
+A lone generic `validate` label without both underlying validators is
+insufficient for promotion.
+
 Required consumer-build and smoke artifacts:
 
 - `artifacts/onboarding/vanilla.summary.json`
@@ -127,7 +135,10 @@ security, and dependency gates are otherwise green.
 1. all required gates pass,
 2. no critical/high unresolved findings in security release gate report,
 3. dependency policy transitions are active and non-expired,
-4. package validation and pack dry-run artifacts exist for the candidate,
+4. package validation and pack dry-run artifacts exist for the candidate, with
+   command provenance tying the candidate to both
+   `bash scripts/validate_package_build.sh` and
+   `bash scripts/validate_npm_pack_smoke.sh`,
 5. onboarding and QA smoke artifacts exist for the same decision window.
 
 `canary -> stable` promotion requires:
@@ -138,7 +149,9 @@ security, and dependency gates are otherwise green.
    and security summaries,
 4. no unresolved deterministic replay failures from the selected promotion run,
 5. package validation, pack dry-run, and publish outcome artifacts are
-   reproducible for the current candidate,
+   reproducible for the current candidate, and the package-validation provenance
+   must still show both `bash scripts/validate_package_build.sh` and
+   `bash scripts/validate_npm_pack_smoke.sh`,
 6. consumer-build onboarding summaries and QA smoke bundle/summary artifacts
    are reproducible for the current candidate.
 
@@ -152,8 +165,10 @@ Demotion is mandatory when one of these triggers occurs post-publish:
 3. deterministic replay checks for mandatory scenarios fail in two consecutive
    release-gate runs,
 4. required promotion artifacts are missing or non-reproducible,
-5. package validation or pack dry-run artifacts are missing, stale, or do not
-   match the candidate being promoted,
+5. package validation or pack dry-run artifacts are missing, stale, do not
+   match the candidate being promoted, or do not prove both
+   `bash scripts/validate_package_build.sh` and
+   `bash scripts/validate_npm_pack_smoke.sh`,
 6. consumer-build onboarding or QA smoke artifacts are missing, stale, or not
    reproducible for the candidate being promoted.
 
@@ -172,7 +187,10 @@ Demotion actions:
 4. Run `rch` offloaded wasm profile checks.
 5. Run deterministic onboarding/scenario validation.
 6. Confirm package validation, pack dry-run, and publish outcome artifacts for
-   the candidate are present and non-empty.
+   the candidate are present and non-empty, and that the command bundle still
+   captures `corepack pnpm run validate` or both
+   `bash scripts/validate_package_build.sh` and
+   `bash scripts/validate_npm_pack_smoke.sh`.
 7. Confirm onboarding summaries plus QA smoke bundle/summary artifacts for the
    same candidate are present and non-empty.
 8. Publish promotion decision with command + artifact pointers.

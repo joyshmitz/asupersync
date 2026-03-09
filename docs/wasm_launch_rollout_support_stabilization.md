@@ -31,6 +31,10 @@ instead of policy-only declarations.
 In practice, rollout cannot advance unless Gate 6 package-release and
 consumer-build artifacts from `docs/wasm_release_channel_strategy.md` are
 present for the candidate under review.
+That package-release evidence must include command provenance for the full
+Browser Edition package gate: `corepack pnpm run validate` or both
+`bash scripts/validate_package_build.sh` and
+`bash scripts/validate_npm_pack_smoke.sh`.
 
 Minimum Browser Edition evidence bundle before `L0_INTERNAL`:
 
