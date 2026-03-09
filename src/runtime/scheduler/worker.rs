@@ -673,7 +673,7 @@ impl Parker {
             return;
         }
 
-        self.inner.waiting.fetch_add(1, Ordering::SeqCst);
+        self.inner.waiting.fetch_add(1, Ordering::Release);
         let mut guard = self.lock_unpoisoned();
         while self
             .inner
@@ -687,7 +687,7 @@ impl Parker {
                 .wait(guard)
                 .unwrap_or_else(std::sync::PoisonError::into_inner);
         }
-        self.inner.waiting.fetch_sub(1, Ordering::SeqCst);
+        self.inner.waiting.fetch_sub(1, Ordering::Release);
         drop(guard);
     }
 
@@ -715,7 +715,7 @@ impl Parker {
             return;
         }
 
-        self.inner.waiting.fetch_add(1, Ordering::SeqCst);
+        self.inner.waiting.fetch_add(1, Ordering::Release);
         let (guard, _timeout) = self
             .inner
             .cvar
@@ -726,7 +726,7 @@ impl Parker {
                     .is_err()
             })
             .unwrap_or_else(std::sync::PoisonError::into_inner);
-        self.inner.waiting.fetch_sub(1, Ordering::SeqCst);
+        self.inner.waiting.fetch_sub(1, Ordering::Release);
         drop(guard);
     }
 
@@ -750,8 +750,10 @@ impl Parker {
             return;
         }
         // No waiter currently parked or preparing to park under the mutex.
-        // The permit has been published, so the next park() will consume it.
-        if self.inner.waiting.load(Ordering::SeqCst) == 0 {
+        // The permit has been published via `notified`, so the next park()
+        // will consume it. `waiting` is an optimization hint — a stale read
+        // only causes an unnecessary (but harmless) mutex+condvar signal.
+        if self.inner.waiting.load(Ordering::Acquire) == 0 {
             return;
         }
         // Was not notified: the thread may be parked. We must acquire the
