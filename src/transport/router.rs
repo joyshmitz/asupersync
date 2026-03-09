@@ -527,13 +527,7 @@ impl LoadBalancer {
         }
 
         // Fallback: linear scan for pools with very few healthy endpoints.
-        for endpoint in endpoints {
-            if endpoint.state().can_receive() {
-                return Some(endpoint);
-            }
-        }
-
-        None
+        endpoints.iter().find(|ep| ep.state().can_receive())
     }
 
     /// Small-n random selection using rejection sampling.
