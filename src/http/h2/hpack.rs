@@ -1185,9 +1185,7 @@ fn decode_huffman(src: &Bytes) -> Result<String, H2Error> {
                 if let Some(sym_opt) = HUFFMAN_DECODE_INDEX.get(&(candidate, code_len as u8)) {
                     match sym_opt {
                         None => {
-                            return Err(H2Error::compression(
-                                "invalid huffman code (EOS symbol)",
-                            ));
+                            return Err(H2Error::compression("invalid huffman code (EOS symbol)"));
                         }
                         Some(sym) => {
                             result.push(*sym);

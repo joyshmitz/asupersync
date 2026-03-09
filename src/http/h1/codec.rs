@@ -317,7 +317,11 @@ fn parse_header_line_bounds(line_bytes: &[u8]) -> Result<(usize, usize, usize), 
 
     // Header field names cannot be empty, and all bytes before the colon
     // must be valid tchar (RFC 7230).
-    if colon == 0 || !line_bytes[..colon].iter().all(|&b| is_valid_header_name_byte(b)) {
+    if colon == 0
+        || !line_bytes[..colon]
+            .iter()
+            .all(|&b| is_valid_header_name_byte(b))
+    {
         return Err(HttpError::InvalidHeaderName);
     }
 
@@ -418,16 +422,21 @@ pub(super) fn require_transfer_encoding_chunked(value: &str) -> Result<(), HttpE
     Err(HttpError::BadTransferEncoding)
 }
 
-#[must_use]
-/// Thin `fmt::Write` adapter for [`BytesMut`] so `write!` macros can
-/// append directly without an intermediate `String` allocation.
-struct BytesMutWriter<'a>(&'a mut BytesMut);
-
-impl fmt::Write for BytesMutWriter<'_> {
-    fn write_str(&mut self, s: &str) -> fmt::Result {
-        self.0.extend_from_slice(s.as_bytes());
-        Ok(())
+/// Append a `usize` as decimal ASCII digits to `dst`.
+fn append_decimal(dst: &mut BytesMut, mut n: usize) {
+    // Stack buffer large enough for any usize (max 20 digits on 64-bit).
+    let mut buf = [0u8; 20];
+    let mut pos = buf.len();
+    if n == 0 {
+        dst.extend_from_slice(b"0");
+        return;
     }
+    while n > 0 {
+        pos -= 1;
+        buf[pos] = b'0' + (n % 10) as u8;
+        n /= 10;
+    }
+    dst.extend_from_slice(&buf[pos..]);
 }
 
 fn upper_hex_len(mut n: usize) -> usize {
@@ -956,48 +965,52 @@ impl Encoder<Response> for Http1Codec {
         };
         dst.reserve(64 + reason.len() + headers_bytes + encoded_body_bytes);
 
-        // Write directly to dst via BytesMutWriter — no intermediate String.
+        // Write directly to dst via extend_from_slice — no fmt machinery.
         {
-            let mut w = BytesMutWriter(dst);
-            let _ = fmt::Write::write_fmt(
-                &mut w,
-                format_args!("{} {} {}\r\n", resp.version, resp.status, reason),
-            );
+            // Status line: "HTTP/1.1 200 OK\r\n"
+            dst.extend_from_slice(resp.version.as_str().as_bytes());
+            dst.extend_from_slice(b" ");
+            append_decimal(dst, resp.status as usize);
+            dst.extend_from_slice(b" ");
+            dst.extend_from_slice(reason.as_bytes());
+            dst.extend_from_slice(b"\r\n");
 
             for (name, value) in &resp.headers {
-                let _ = fmt::Write::write_fmt(&mut w, format_args!("{name}: {value}\r\n"));
+                dst.extend_from_slice(name.as_bytes());
+                dst.extend_from_slice(b": ");
+                dst.extend_from_slice(value.as_bytes());
+                dst.extend_from_slice(b"\r\n");
             }
 
             if chunked {
-                w.0.extend_from_slice(b"\r\n");
+                dst.extend_from_slice(b"\r\n");
                 if !resp.body.is_empty() {
-                    append_chunk_size_line(w.0, resp.body.len());
-                    w.0.extend_from_slice(&resp.body);
-                    w.0.extend_from_slice(b"\r\n");
+                    append_chunk_size_line(dst, resp.body.len());
+                    dst.extend_from_slice(&resp.body);
+                    dst.extend_from_slice(b"\r\n");
                 }
-                w.0.extend_from_slice(b"0\r\n");
+                dst.extend_from_slice(b"0\r\n");
                 for (name, value) in &resp.trailers {
-                    w.0.extend_from_slice(name.as_bytes());
-                    w.0.extend_from_slice(b": ");
-                    w.0.extend_from_slice(value.as_bytes());
-                    w.0.extend_from_slice(b"\r\n");
+                    dst.extend_from_slice(name.as_bytes());
+                    dst.extend_from_slice(b": ");
+                    dst.extend_from_slice(value.as_bytes());
+                    dst.extend_from_slice(b"\r\n");
                 }
-                w.0.extend_from_slice(b"\r\n");
+                dst.extend_from_slice(b"\r\n");
                 return Ok(());
             }
 
             let suppress_content_length =
                 (100..=199).contains(&resp.status) || resp.status == 204 || resp.status == 304;
             if !has_content_length && !suppress_content_length {
-                let _ = fmt::Write::write_fmt(
-                    &mut w,
-                    format_args!("Content-Length: {}\r\n", resp.body.len()),
-                );
+                dst.extend_from_slice(b"Content-Length: ");
+                append_decimal(dst, resp.body.len());
+                dst.extend_from_slice(b"\r\n");
             }
 
-            w.0.extend_from_slice(b"\r\n");
+            dst.extend_from_slice(b"\r\n");
             if !resp.body.is_empty() {
-                w.0.extend_from_slice(&resp.body);
+                dst.extend_from_slice(&resp.body);
             }
         }
 
