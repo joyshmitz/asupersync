@@ -1171,11 +1171,21 @@ fn integration_health_degraded_and_unhealthy() {
 
 #[test]
 fn integration_session_basic() {
+    struct SessionMutatingHandler;
+    impl Handler for SessionMutatingHandler {
+        fn call(&self, req: Request) -> asupersync::web::Response {
+            if let Some(session) = req.extensions.get_typed::<asupersync::web::session::Session>() {
+                session.insert("user_id", "123");
+            }
+            asupersync::web::Response::new(StatusCode::OK, b"session-ok".to_vec())
+        }
+    }
+
     common::init_test_logging();
     test_phase!("Session Basic");
 
     let store = MemoryStore::new();
-    let inner = FnHandler::new(|| -> &'static str { "session-ok" });
+    let inner = SessionMutatingHandler;
     let session_handler = SessionLayer::new(store).wrap(inner);
 
     let router = Router::new().route("/dashboard", get(session_handler));
