@@ -31,7 +31,7 @@
 
 use crate::bytes::{BufMut, Bytes, BytesMut};
 use crate::codec::{Decoder, Encoder};
-use crate::util::check_ambient_entropy;
+use crate::util::{EntropySource, OsEntropy};
 use std::io;
 
 /// WebSocket frame opcode (4 bits).
@@ -388,6 +388,88 @@ impl FrameCodec {
         self.validate_reserved_bits = validate;
         self
     }
+
+    /// Encode a frame using the provided entropy source for client masking.
+    pub(crate) fn encode_with_entropy(
+        &self,
+        frame: &Frame,
+        dst: &mut BytesMut,
+        entropy: &dyn EntropySource,
+    ) -> Result<(), WsError> {
+        let payload_len = frame.payload.len();
+
+        // Control frame validation
+        if frame.opcode.is_control() {
+            if !frame.fin {
+                return Err(WsError::FragmentedControlFrame);
+            }
+            if payload_len > 125 {
+                return Err(WsError::ControlFrameTooLarge(payload_len));
+            }
+        }
+
+        // Determine if we need to mask (based on role)
+        let should_mask = self.role == Role::Client;
+
+        // First byte: FIN, RSV1-3, opcode
+        let mut first_byte = frame.opcode as u8;
+        if frame.fin {
+            first_byte |= 0x80;
+        }
+        if frame.rsv1 {
+            first_byte |= 0x40;
+        }
+        if frame.rsv2 {
+            first_byte |= 0x20;
+        }
+        if frame.rsv3 {
+            first_byte |= 0x10;
+        }
+
+        // Second byte: MASK bit + payload length (7-bit or indicator)
+        let mask_bit = if should_mask { 0x80 } else { 0 };
+
+        // Calculate header size
+        let header_size =
+            2 + if payload_len > 65535 {
+                8
+            } else if payload_len > 125 {
+                2
+            } else {
+                0
+            } + if should_mask { 4 } else { 0 };
+
+        // Reserve space
+        dst.reserve(header_size + payload_len);
+
+        // Write header
+        dst.put_u8(first_byte);
+
+        if payload_len <= 125 {
+            dst.put_u8(mask_bit | (payload_len as u8));
+        } else if payload_len <= 65535 {
+            dst.put_u8(mask_bit | 0x7E);
+            dst.put_u16(payload_len as u16);
+        } else {
+            dst.put_u8(mask_bit | 0x7F);
+            dst.put_u64(payload_len as u64);
+        }
+
+        // Write mask key and payload
+        if should_mask {
+            let mask_key = generate_mask_key(entropy);
+            dst.put_slice(&mask_key);
+
+            // Apply mask to payload and write
+            let mut masked_payload = BytesMut::from(frame.payload.as_ref());
+            apply_mask(&mut masked_payload, mask_key);
+            dst.put_slice(&masked_payload);
+        } else {
+            dst.put_slice(&frame.payload);
+        }
+
+        Ok(())
+    }
 }
 
 impl Decoder for FrameCodec {
@@ -689,79 +771,7 @@ impl Encoder<Frame> for FrameCodec {
     type Error = WsError;
 
     fn encode(&mut self, frame: Frame, dst: &mut BytesMut) -> Result<(), Self::Error> {
-        let payload_len = frame.payload.len();
-
-        // Control frame validation
-        if frame.opcode.is_control() {
-            if !frame.fin {
-                return Err(WsError::FragmentedControlFrame);
-            }
-            if payload_len > 125 {
-                return Err(WsError::ControlFrameTooLarge(payload_len));
-            }
-        }
-
-        // Determine if we need to mask (based on role)
-        let should_mask = self.role == Role::Client;
-
-        // First byte: FIN, RSV1-3, opcode
-        let mut first_byte = frame.opcode as u8;
-        if frame.fin {
-            first_byte |= 0x80;
-        }
-        if frame.rsv1 {
-            first_byte |= 0x40;
-        }
-        if frame.rsv2 {
-            first_byte |= 0x20;
-        }
-        if frame.rsv3 {
-            first_byte |= 0x10;
-        }
-
-        // Second byte: MASK bit + payload length (7-bit or indicator)
-        let mask_bit = if should_mask { 0x80 } else { 0 };
-
-        // Calculate header size
-        let header_size =
-            2 + if payload_len > 65535 {
-                8
-            } else if payload_len > 125 {
-                2
-            } else {
-                0
-            } + if should_mask { 4 } else { 0 };
-
-        // Reserve space
-        dst.reserve(header_size + payload_len);
-
-        // Write header
-        dst.put_u8(first_byte);
-
-        if payload_len <= 125 {
-            dst.put_u8(mask_bit | (payload_len as u8));
-        } else if payload_len <= 65535 {
-            dst.put_u8(mask_bit | 0x7E);
-            dst.put_u16(payload_len as u16);
-        } else {
-            dst.put_u8(mask_bit | 0x7F);
-            dst.put_u64(payload_len as u64);
-        }
-
-        // Write mask key and payload
-        if should_mask {
-            let mask_key = generate_mask_key().map_err(WsError::Io)?;
-            dst.put_slice(&mask_key);
-
-            // Apply mask to payload and write
-            let mut masked_payload = BytesMut::from(frame.payload.as_ref());
-            apply_mask(&mut masked_payload, mask_key);
-            dst.put_slice(&masked_payload);
-        } else {
-            dst.put_slice(&frame.payload);
-        }
-
-        Ok(())
+        self.encode_with_entropy(&frame, dst, &OsEntropy)
     }
 }
 
@@ -779,11 +789,10 @@ pub fn apply_mask(payload: &mut [u8], mask_key: [u8; 4]) {
 ///
 /// RFC 6455 §5.3 requires masking keys to be derived from a strong source of
 /// entropy to prevent cross-protocol attacks via intermediary cache poisoning.
-fn generate_mask_key() -> io::Result<[u8; 4]> {
+fn generate_mask_key(entropy: &dyn EntropySource) -> [u8; 4] {
     let mut key = [0u8; 4];
-    check_ambient_entropy("websocket_mask");
-    getrandom::fill(&mut key).map_err(io::Error::other)?;
-    Ok(key)
+    entropy.fill_bytes(&mut key);
+    key
 }
 
 /// Close codes defined by RFC 6455.
@@ -1033,6 +1042,49 @@ mod tests {
         // Server decodes (unmasks)
         let parsed = server_codec.decode(&mut buf).unwrap().unwrap();
         assert_eq!(parsed.payload.as_ref(), b"masked message");
+    }
+
+    #[derive(Debug, Clone, Copy)]
+    struct FixedEntropy([u8; 4]);
+
+    impl EntropySource for FixedEntropy {
+        fn fill_bytes(&self, dest: &mut [u8]) {
+            for (idx, byte) in dest.iter_mut().enumerate() {
+                *byte = self.0[idx % self.0.len()];
+            }
+        }
+
+        fn next_u64(&self) -> u64 {
+            u64::from_le_bytes([
+                self.0[0], self.0[1], self.0[2], self.0[3], self.0[0], self.0[1], self.0[2],
+                self.0[3],
+            ])
+        }
+
+        fn fork(&self, _task_id: crate::types::TaskId) -> std::sync::Arc<dyn EntropySource> {
+            std::sync::Arc::new(*self)
+        }
+
+        fn source_id(&self) -> &'static str {
+            "fixed"
+        }
+    }
+
+    #[test]
+    fn client_masking_uses_supplied_entropy_source() {
+        let client_codec = FrameCodec::client();
+        let mut server_codec = FrameCodec::server();
+        let mut buf = BytesMut::new();
+        let entropy = FixedEntropy([0x10, 0x20, 0x30, 0x40]);
+
+        client_codec
+            .encode_with_entropy(&Frame::text("mask-me"), &mut buf, &entropy)
+            .unwrap();
+
+        assert_eq!(&buf[2..6], &[0x10, 0x20, 0x30, 0x40]);
+
+        let parsed = server_codec.decode(&mut buf).unwrap().unwrap();
+        assert_eq!(parsed.payload.as_ref(), b"mask-me");
     }
 
     #[test]

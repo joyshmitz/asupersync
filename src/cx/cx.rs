@@ -1607,6 +1607,15 @@ impl<Caps> Cx<Caps> {
         self.handles.entropy.fork(task)
     }
 
+    /// Returns a cloned entropy handle for capability-aware subsystems.
+    #[must_use]
+    pub(crate) fn entropy_handle(&self) -> Arc<dyn EntropySource>
+    where
+        Caps: cap::HasRandom,
+    {
+        self.handles.entropy.clone()
+    }
+
     /// Generates a random `u64` using the context entropy source.
     #[must_use]
     pub fn random_u64(&self) -> u64

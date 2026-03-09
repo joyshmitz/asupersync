@@ -37,9 +37,10 @@ use super::client::{Message, MessageAssembler, WebSocket, WebSocketConfig};
 use super::close::{CloseHandshake, CloseReason, CloseState};
 use super::frame::{Frame, FrameCodec, Opcode, WsError};
 use crate::bytes::{Bytes, BytesMut};
-use crate::codec::{Decoder, Encoder};
+use crate::codec::Decoder;
 use crate::cx::Cx;
 use crate::io::{AsyncRead, AsyncWrite, ReadBuf};
+use crate::util::EntropySource;
 use parking_lot::Mutex;
 use smallvec::SmallVec;
 use std::io;
@@ -76,6 +77,8 @@ struct WebSocketShared<IO> {
     protocol: Option<String>,
     /// Pending pong payloads to send.
     pending_pongs: std::collections::VecDeque<Bytes>,
+    /// Entropy used for client masking when no per-call Cx is available.
+    entropy: Arc<dyn EntropySource>,
     /// True while one half is performing a frame write sequence.
     writer_active: bool,
     /// Wakers for waiters blocked on `writer_active`.
@@ -241,6 +244,7 @@ where
             assembler: self.assembler,
             protocol: self.protocol,
             pending_pongs: self.pending_pongs,
+            entropy: self.entropy,
             writer_active: false,
             writer_waiters: SmallVec::new(),
             id,
@@ -283,7 +287,9 @@ where
                 while let Some(payload) = shared.pending_pongs.pop_front() {
                     let pong = Frame::pong(payload);
                     let shared = &mut *shared;
-                    shared.codec.encode(pong, &mut shared.write_buf)?;
+                    shared
+                        .codec
+                        .encode_with_entropy(&pong, &mut shared.write_buf, cx.entropy())?;
                 }
             }
 
@@ -315,7 +321,9 @@ where
                             { self.shared.lock().close_handshake.receive_close(&frame)? };
 
                         if let Some(response_frame) = response {
-                            let send_result = self.send_frame_internal(response_frame).await;
+                            let send_result = self
+                                .send_frame_internal_with_entropy(&response_frame, cx.entropy())
+                                .await;
                             self.shared.lock().close_handshake.mark_response_sent();
                             send_result?;
                         }
@@ -414,6 +422,7 @@ where
             assembler: shared.assembler,
             protocol: shared.protocol,
             pending_pongs: shared.pending_pongs,
+            entropy: shared.entropy,
         })
     }
 
@@ -425,19 +434,37 @@ where
         };
 
         if let Some(f) = frame {
-            self.send_frame_internal(f).await?;
+            self.send_frame_internal(&f).await?;
         }
         Ok(())
     }
 
-    /// Internal: send a single frame (for control messages like pong/close).
-    async fn send_frame_internal(&self, frame: Frame) -> Result<(), WsError> {
-        {
-            let mut shared = self.shared.lock();
-            let shared = &mut *shared;
-            shared.codec.encode(frame, &mut shared.write_buf)?;
-        }
+    fn encode_frame_with_entropy(
+        &self,
+        frame: &Frame,
+        entropy: &dyn EntropySource,
+    ) -> Result<(), WsError> {
+        let mut shared = self.shared.lock();
+        let shared = &mut *shared;
+        shared
+            .codec
+            .encode_with_entropy(frame, &mut shared.write_buf, entropy)
+    }
+
+    async fn send_frame_internal_with_entropy(
+        &self,
+        frame: &Frame,
+        entropy: &dyn EntropySource,
+    ) -> Result<(), WsError> {
+        self.encode_frame_with_entropy(frame, entropy)?;
         flush_write_buf(&self.shared).await
+    }
+
+    /// Internal: send a single frame (for control messages like pong/close).
+    async fn send_frame_internal(&self, frame: &Frame) -> Result<(), WsError> {
+        let entropy = { Arc::clone(&self.shared.lock().entropy) };
+        self.send_frame_internal_with_entropy(frame, entropy.as_ref())
+            .await
     }
 
     /// Internal: read more data into buffer.
@@ -505,7 +532,7 @@ where
         }
 
         let frame = Frame::from(msg);
-        self.send_frame(frame).await
+        self.send_frame_with_entropy(&frame, cx.entropy()).await
     }
 
     /// Initiate a close handshake.
@@ -518,7 +545,7 @@ where
     /// Send a ping frame.
     pub async fn ping(&mut self, payload: impl Into<Bytes>) -> Result<(), WsError> {
         let frame = Frame::ping(payload);
-        self.send_frame(frame).await
+        self.send_frame(&frame).await
     }
 
     /// Check if the connection is open.
@@ -547,27 +574,48 @@ where
         };
 
         if let Some(f) = frame {
-            self.send_frame(f).await?;
+            self.send_frame(&f).await?;
         }
         Ok(())
     }
 
-    /// Internal: send a single frame.
-    async fn send_frame(&self, frame: Frame) -> Result<(), WsError> {
-        {
-            let mut shared = self.shared.lock();
-            let shared = &mut *shared;
-            shared.codec.encode(frame, &mut shared.write_buf)?;
-        }
+    fn encode_frame_with_entropy(
+        &self,
+        frame: &Frame,
+        entropy: &dyn EntropySource,
+    ) -> Result<(), WsError> {
+        let mut shared = self.shared.lock();
+        let shared = &mut *shared;
+        shared
+            .codec
+            .encode_with_entropy(frame, &mut shared.write_buf, entropy)
+    }
+
+    async fn send_frame_with_entropy(
+        &self,
+        frame: &Frame,
+        entropy: &dyn EntropySource,
+    ) -> Result<(), WsError> {
+        self.encode_frame_with_entropy(frame, entropy)?;
         flush_write_buf(&self.shared).await
+    }
+
+    /// Internal: send a single frame.
+    async fn send_frame(&self, frame: &Frame) -> Result<(), WsError> {
+        let entropy = { Arc::clone(&self.shared.lock().entropy) };
+        self.send_frame_with_entropy(frame, entropy.as_ref()).await
     }
 }
 
 #[cfg(test)]
 mod tests {
     use super::*;
+    use crate::codec::Encoder;
+    use crate::types::{Budget, RegionId, TaskId};
+    use crate::util::EntropySource;
     use futures_lite::future;
     use std::future::Future;
+    use std::sync::Arc;
     use std::sync::atomic::{AtomicUsize, Ordering};
     use std::task::{Context, Poll, Wake, Waker};
 
@@ -725,8 +773,8 @@ mod tests {
             }
 
             let (read_result, write_result) = future::zip(
-                read.send_frame_internal(read_frame),
-                write.send_frame(write_frame),
+                read.send_frame_internal(&read_frame),
+                write.send_frame(&write_frame),
             )
             .await;
             assert!(read_result.is_ok(), "read half frame send must succeed");
@@ -1021,6 +1069,60 @@ mod tests {
                 read.is_closed(),
                 "close handshake must transition to closed even when close response send fails"
             );
+        });
+    }
+
+    #[derive(Debug, Clone, Copy)]
+    struct FixedEntropy([u8; 4]);
+
+    impl EntropySource for FixedEntropy {
+        fn fill_bytes(&self, dest: &mut [u8]) {
+            for (idx, byte) in dest.iter_mut().enumerate() {
+                *byte = self.0[idx % self.0.len()];
+            }
+        }
+
+        fn next_u64(&self) -> u64 {
+            u64::from_le_bytes([
+                self.0[0], self.0[1], self.0[2], self.0[3], self.0[0], self.0[1], self.0[2],
+                self.0[3],
+            ])
+        }
+
+        fn fork(&self, _task_id: TaskId) -> Arc<dyn EntropySource> {
+            Arc::new(*self)
+        }
+
+        fn source_id(&self) -> &'static str {
+            "fixed"
+        }
+    }
+
+    fn test_cx_with_entropy(entropy: Arc<dyn EntropySource>) -> Cx {
+        Cx::new_with_observability(
+            RegionId::new_for_test(0, 0),
+            TaskId::new_for_test(0, 0),
+            Budget::INFINITE,
+            None,
+            None,
+            Some(entropy),
+        )
+    }
+
+    #[test]
+    fn split_send_uses_cx_entropy_for_client_masking() {
+        future::block_on(async {
+            let ws = WebSocket::from_upgraded(TestIo::new(vec![]), WebSocketConfig::default());
+            let (read, mut write) = ws.split();
+            let cx = test_cx_with_entropy(Arc::new(FixedEntropy([0xDE, 0xAD, 0xBE, 0xEF])));
+
+            write
+                .send(&cx, Message::text("hi"))
+                .await
+                .expect("split send should succeed");
+
+            let ws = read.reunite(write).expect("split halves must reunite");
+            assert_eq!(&ws.io.written[2..6], &[0xDE, 0xAD, 0xBE, 0xEF]);
         });
     }
 }

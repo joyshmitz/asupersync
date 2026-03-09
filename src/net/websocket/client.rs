@@ -26,12 +26,14 @@ use super::close::{CloseConfig, CloseHandshake, CloseReason, CloseState};
 use super::frame::{Frame, FrameCodec, Opcode, WsError};
 use super::handshake::{ClientHandshake, HandshakeError, HttpResponse, WsUrl};
 use crate::bytes::{Bytes, BytesMut};
-use crate::codec::{Decoder, Encoder};
+use crate::codec::Decoder;
 use crate::cx::Cx;
 use crate::io::{AsyncRead, AsyncWrite, ReadBuf};
 use crate::net::TcpStream;
+use crate::util::{EntropySource, OsEntropy};
 use std::io;
 use std::pin::Pin;
+use std::sync::Arc;
 use std::task::Poll;
 use std::time::Duration;
 
@@ -338,6 +340,8 @@ pub struct WebSocket<IO> {
     pub(super) protocol: Option<String>,
     /// Pending pong payloads to send.
     pub(super) pending_pongs: std::collections::VecDeque<Bytes>,
+    /// Entropy used for client masking when no per-call Cx is available.
+    pub(super) entropy: Arc<dyn EntropySource>,
 }
 
 impl<IO> WebSocket<IO>
@@ -349,6 +353,17 @@ where
     /// Use this when you've already performed the HTTP upgrade handshake.
     #[must_use]
     pub fn from_upgraded(io: IO, config: WebSocketConfig) -> Self {
+        Self::from_upgraded_with_entropy(io, config, Arc::new(OsEntropy))
+    }
+
+    /// Create a WebSocket from an upgraded I/O stream with an explicit
+    /// entropy capability for client masking.
+    #[must_use]
+    pub fn from_upgraded_with_entropy(
+        io: IO,
+        config: WebSocketConfig,
+        entropy: Arc<dyn EntropySource>,
+    ) -> Self {
         let max_message_size = config.max_message_size;
         let codec = FrameCodec::client().max_payload_size(config.max_frame_size);
         Self {
@@ -361,6 +376,7 @@ where
             assembler: MessageAssembler::new(max_message_size),
             protocol: None,
             pending_pongs: std::collections::VecDeque::new(),
+            entropy,
         }
     }
 
@@ -419,7 +435,8 @@ where
         }
 
         let frame = Frame::from(msg);
-        self.send_frame(frame).await
+        self.encode_frame_with_entropy(&frame, cx.entropy())?;
+        self.flush_write_buf().await
     }
 
     /// Receive a message.
@@ -443,7 +460,8 @@ where
             // one at a time from the front without reversing the whole queue).
             while let Some(payload) = self.pending_pongs.pop_front() {
                 let pong = Frame::pong(payload);
-                self.send_frame(pong).await?;
+                self.encode_frame_with_entropy(&pong, cx.entropy())?;
+                self.flush_write_buf().await?;
             }
 
             if let Some(frame) = self.codec.decode(&mut self.read_buf)? {
@@ -463,7 +481,11 @@ where
                     Opcode::Close => {
                         // Handle close handshake
                         if let Some(response) = self.close_handshake.receive_close(&frame)? {
-                            let send_result = self.send_frame(response).await;
+                            let send_result = async {
+                                self.encode_frame_with_entropy(&response, cx.entropy())?;
+                                self.flush_write_buf().await
+                            }
+                            .await;
                             self.close_handshake.mark_response_sent();
                             send_result?;
                         }
@@ -566,22 +588,28 @@ where
     /// Send a ping frame.
     pub async fn ping(&mut self, payload: impl Into<Bytes>) -> Result<(), WsError> {
         let frame = Frame::ping(payload);
-        self.send_frame(frame).await
+        self.send_frame(&frame).await
     }
 
     /// Internal: initiate close without waiting.
     async fn initiate_close(&mut self, reason: CloseReason) -> Result<(), WsError> {
         if let Some(frame) = self.close_handshake.initiate(reason) {
-            self.send_frame(frame).await?;
+            self.send_frame(&frame).await?;
         }
         Ok(())
     }
 
-    /// Internal: send a single frame.
-    async fn send_frame(&mut self, frame: Frame) -> Result<(), WsError> {
-        use std::future::poll_fn;
+    fn encode_frame_with_entropy(
+        &mut self,
+        frame: &Frame,
+        entropy: &dyn EntropySource,
+    ) -> Result<(), WsError> {
+        self.codec
+            .encode_with_entropy(frame, &mut self.write_buf, entropy)
+    }
 
-        self.codec.encode(frame, &mut self.write_buf)?;
+    async fn flush_write_buf(&mut self) -> Result<(), WsError> {
+        use std::future::poll_fn;
 
         while !self.write_buf.is_empty() {
             let n =
@@ -596,6 +624,13 @@ where
         }
 
         Ok(())
+    }
+
+    /// Internal: send a single frame.
+    async fn send_frame(&mut self, frame: &Frame) -> Result<(), WsError> {
+        let entropy = Arc::clone(&self.entropy);
+        self.encode_frame_with_entropy(frame, entropy.as_ref())?;
+        self.flush_write_buf().await
     }
 
     /// Internal: read more data into buffer.
@@ -715,7 +750,7 @@ impl WebSocket<TcpStream> {
         handshake.validate_response(&response)?;
 
         // Create WebSocket
-        let mut ws = Self::from_upgraded(tcp, config.clone());
+        let mut ws = Self::from_upgraded_with_entropy(tcp, config.clone(), cx.entropy_handle());
         ws.protocol = response.header("sec-websocket-protocol").map(String::from);
         if !trailing.is_empty() {
             ws.read_buf.extend_from_slice(&trailing);
@@ -851,9 +886,13 @@ impl From<WsError> for WsConnectError {
 #[cfg(test)]
 mod tests {
     use super::*;
+    use crate::codec::Encoder;
     use crate::io::{AsyncRead, AsyncWrite, ReadBuf};
+    use crate::types::{Budget, RegionId, TaskId};
+    use crate::util::EntropySource;
     use futures_lite::future;
     use std::pin::Pin;
+    use std::sync::Arc;
     use std::task::Poll;
 
     struct TestIo {
@@ -1276,6 +1315,57 @@ mod tests {
                 ws.is_closed(),
                 "close handshake must transition to closed even when close response send fails"
             );
+        });
+    }
+
+    #[derive(Debug, Clone, Copy)]
+    struct FixedEntropy([u8; 4]);
+
+    impl EntropySource for FixedEntropy {
+        fn fill_bytes(&self, dest: &mut [u8]) {
+            for (idx, byte) in dest.iter_mut().enumerate() {
+                *byte = self.0[idx % self.0.len()];
+            }
+        }
+
+        fn next_u64(&self) -> u64 {
+            u64::from_le_bytes([
+                self.0[0], self.0[1], self.0[2], self.0[3], self.0[0], self.0[1], self.0[2],
+                self.0[3],
+            ])
+        }
+
+        fn fork(&self, _task_id: TaskId) -> Arc<dyn EntropySource> {
+            Arc::new(*self)
+        }
+
+        fn source_id(&self) -> &'static str {
+            "fixed"
+        }
+    }
+
+    fn test_cx_with_entropy(entropy: Arc<dyn EntropySource>) -> Cx {
+        Cx::new_with_observability(
+            RegionId::new_for_test(0, 0),
+            TaskId::new_for_test(0, 0),
+            Budget::INFINITE,
+            None,
+            None,
+            Some(entropy),
+        )
+    }
+
+    #[test]
+    fn send_uses_cx_entropy_for_client_masking() {
+        future::block_on(async {
+            let mut ws = WebSocket::from_upgraded(TestIo::new(), WebSocketConfig::default());
+            let cx = test_cx_with_entropy(Arc::new(FixedEntropy([0xAA, 0xBB, 0xCC, 0xDD])));
+
+            ws.send(&cx, Message::text("hi"))
+                .await
+                .expect("send should succeed");
+
+            assert_eq!(&ws.io.written[2..6], &[0xAA, 0xBB, 0xCC, 0xDD]);
         });
     }
 }
