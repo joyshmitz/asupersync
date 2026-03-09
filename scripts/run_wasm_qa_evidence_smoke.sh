@@ -5,10 +5,12 @@
 #   bash ./scripts/run_wasm_qa_evidence_smoke.sh --list
 #   bash ./scripts/run_wasm_qa_evidence_smoke.sh --scenario WASM-QA-SMOKE-LAYERS --dry-run
 #   bash ./scripts/run_wasm_qa_evidence_smoke.sh --scenario WASM-QA-SMOKE-LAYERS --execute
+#   bash ./scripts/run_wasm_qa_evidence_smoke.sh --all --dry-run
 #   bash ./scripts/run_wasm_qa_evidence_smoke.sh --all --execute
 #
 # Bundle schema: wasm-qa-evidence-smoke-bundle-v1
 # Report schema: wasm-qa-evidence-smoke-run-report-v1
+# Suite summary schema: e2e-suite-summary-v3
 
 set -euo pipefail
 
@@ -26,8 +28,9 @@ LAYER_ID="${LAYER_ID:-L8}"
 TOOL_NAME="${TOOL_NAME:-smoke-runner}"
 TEST_LOG_LEVEL="${TEST_LOG_LEVEL:-info}"
 TEST_SEED="${TEST_SEED:-0xDEADBEEF}"
-SINGLE_ROOT="target/wasm-qa-evidence-smoke"
-SUITE_ROOT="target/e2e-results/wasm_qa_evidence_smoke"
+RUN_ID_OVERRIDE="${WASM_QA_SMOKE_RUN_ID:-}"
+SINGLE_ROOT="${WASM_QA_SMOKE_SINGLE_ROOT:-target/wasm-qa-evidence-smoke}"
+SUITE_ROOT="${WASM_QA_SMOKE_SUITE_ROOT:-target/e2e-results/wasm_qa_evidence_smoke}"
 SUITE_NAME="wasm-qa-evidence-smoke"
 SUITE_ID="${SUITE_NAME}_e2e"
 SUITE_SCENARIO_ID="E2E-SUITE-WASM-QA-EVIDENCE-SMOKE"
@@ -259,7 +262,7 @@ write_suite_summary() {
     --arg started_ts "$suite_started_ts" \
     --arg ended_ts "$suite_ended_ts" \
     --arg status "$suite_status" \
-    --arg repro_command "bash ./scripts/run_wasm_qa_evidence_smoke.sh --all --execute" \
+    --arg repro_command "bash ./scripts/run_wasm_qa_evidence_smoke.sh --all --${MODE}" \
     --arg artifact_path "$summary_path" \
     --arg suite "$SUITE_ID" \
     --arg timestamp "$(date -u +%Y-%m-%dT%H:%M:%SZ)" \
@@ -274,27 +277,27 @@ write_suite_summary() {
     --argjson pattern_failures "$tests_failed" \
     --argjson checks_passed "$tests_passed" \
     '{
-      schema_version,
-      suite_id,
-      scenario_id,
-      seed,
-      started_ts,
-      ended_ts,
-      status,
-      repro_command,
-      artifact_path,
-      suite,
-      timestamp,
-      test_log_level,
-      tests_passed,
-      tests_failed,
-      exit_code,
-      pattern_failures,
-      log_file,
-      artifact_dir,
-      checks_passed,
-      run_id,
-      mode,
+      schema_version: $schema_version,
+      suite_id: $suite_id,
+      scenario_id: $scenario_id,
+      seed: $seed,
+      started_ts: $started_ts,
+      ended_ts: $ended_ts,
+      status: $status,
+      repro_command: $repro_command,
+      artifact_path: $artifact_path,
+      suite: $suite,
+      timestamp: $timestamp,
+      test_log_level: $test_log_level,
+      tests_passed: $tests_passed,
+      tests_failed: $tests_failed,
+      exit_code: $exit_code,
+      pattern_failures: $pattern_failures,
+      log_file: $log_file,
+      artifact_dir: $artifact_dir,
+      checks_passed: $checks_passed,
+      run_id: $run_id,
+      mode: $mode,
       suite_name: $suite_id
     }' > "$summary_path"
 }
@@ -363,7 +366,7 @@ run_scenario_bundle() {
 }
 
 if [[ "$RUN_ALL" -eq 1 ]]; then
-  SUITE_RUN_ID="run_$(date +%Y%m%d_%H%M%S)"
+  SUITE_RUN_ID="${RUN_ID_OVERRIDE:-run_$(date +%Y%m%d_%H%M%S)}"
   SUITE_RUN_DIR="${SUITE_ROOT}/${SUITE_RUN_ID}"
   SUITE_LOG_PATH="${SUITE_RUN_DIR}/suite.log"
   SUITE_EVENTS_PATH="${SUITE_RUN_DIR}/suite_events.ndjson"
@@ -450,7 +453,7 @@ if [[ "$RUN_ALL" -eq 1 ]]; then
   exit "$SUITE_EXIT_CODE"
 fi
 
-RUN_ID="run_$(date +%Y%m%d_%H%M%S)"
+RUN_ID="${RUN_ID_OVERRIDE:-run_$(date +%Y%m%d_%H%M%S)}"
 OUTDIR="${SINGLE_ROOT}/${RUN_ID}/${SCENARIO}"
 load_scenario "$SCENARIO"
 echo "=== Executing $SCENARIO ==="

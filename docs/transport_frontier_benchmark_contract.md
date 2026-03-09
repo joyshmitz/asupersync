@@ -140,16 +140,24 @@ Benchmark logs MUST include:
 
 Canonical runner: `scripts/run_transport_frontier_benchmark_smoke.sh`
 
-The runner reads `artifacts/transport_frontier_benchmark_v1.json`, supports deterministic dry-run or execute modes, and emits:
+The runner reads `artifacts/transport_frontier_benchmark_v1.json`, supports deterministic per-scenario and whole-suite dry-run or execute modes, and emits:
 
 1. Per-scenario manifests with schema `transport-frontier-benchmark-smoke-bundle-v1`
 2. Aggregate run report with schema `transport-frontier-benchmark-smoke-run-report-v1`
+3. Whole-suite summary with schema `transport-frontier-benchmark-smoke-suite-summary-v1` when invoked with `--all`
+
+Supported invocations:
+
+- `bash ./scripts/run_transport_frontier_benchmark_smoke.sh --scenario <ID> --dry-run`
+- `bash ./scripts/run_transport_frontier_benchmark_smoke.sh --scenario <ID> --execute`
+- `bash ./scripts/run_transport_frontier_benchmark_smoke.sh --all --dry-run`
+- `bash ./scripts/run_transport_frontier_benchmark_smoke.sh --all --execute`
 
 Deterministic runner controls:
 
 - `AA08_RUN_ID`: override the generated run identifier for deterministic dry-run/contract tests
 - `AA08_TIMESTAMP`: override the manifest timestamp for deterministic dry-run/contract tests
-- `AA08_FINISHED_AT`: override the execute-mode completion timestamp when exact report content matters
+- `AA08_FINISHED_AT`: override the execute-mode completion timestamp when exact report or suite-summary content matters
 - `AA08_OUTPUT_ROOT`: redirect artifacts away from the default `target/transport-frontier-benchmark-smoke`
 
 Required bundle fields:
@@ -167,8 +175,30 @@ Required report fields:
 - `run_log_path`, `run_report_path`, `output_dir`, `rch_routed`
 - `started_at`, `finished_at`, `exit_code`
 
+In dry-run mode, the runner still materializes `run_report.json` as a deterministic placeholder report with `mode=dry-run` and `exit_code=0`, so the contract surface stays structurally identical between planning and execute runs.
+
+Required suite-summary fields:
+
+- `schema`, `run_id`, `mode`, `artifact_path`, `runner_script`
+- `output_dir`, `summary_path`, `started_at`, `finished_at`, `status`
+- `scenario_count`, `scenario_ids`, `all_rch_routed`, `suite_exit_code`, `scenarios`
+
+Required suite-summary scenario entry fields:
+
+- `scenario_id`, `description`, `workload_id`, `validation_surface`
+- `focus_dimension_ids`, `command`, `output_dir`, `bundle_manifest_path`
+- `run_log_path`, `run_report_path`, `status`, `exit_code`, `rch_routed`
+
+When `--all` is used, the runner writes the suite summary to:
+
+- `target/transport-frontier-benchmark-smoke/<run_id>/summary.json`
+
+In `--all --dry-run`, the summary is a deterministic planning artifact with `status=planned` and `suite_exit_code=null`.
+In `--all --execute`, the summary records per-scenario pass/fail status and the first non-zero suite exit code, while still retaining report pointers for every scenario that ran.
+
 Validation-prep smoke slices now include:
 
+- fairness flow-balance coverage
 - handoff/fallback metadata coverage
 - overload rejection visibility
 - deterministic operator-visibility bundle generation

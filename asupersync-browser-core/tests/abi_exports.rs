@@ -19,6 +19,20 @@ fn to_json<T: serde::Serialize>(value: &T) -> String {
     serde_json::to_string(value).expect("serialize JSON")
 }
 
+fn incompatible_consumer_version_json() -> String {
+    to_json(&WasmAbiVersion {
+        major: WASM_ABI_MAJOR_VERSION + 1,
+        minor: WASM_ABI_MINOR_VERSION,
+    })
+}
+
+fn backward_compatible_consumer_version_json() -> String {
+    to_json(&WasmAbiVersion {
+        major: WASM_ABI_MAJOR_VERSION,
+        minor: WASM_ABI_MINOR_VERSION + 1,
+    })
+}
+
 #[test]
 fn runtime_create_and_close_round_trip() {
     reset_dispatcher_for_tests();
@@ -179,6 +193,88 @@ fn abi_metadata_exports_match_runtime_constants() {
     assert_eq!(version.major, WASM_ABI_MAJOR_VERSION);
     assert_eq!(version.minor, WASM_ABI_MINOR_VERSION);
     assert_eq!(abi_fingerprint(), WASM_ABI_SIGNATURE_FINGERPRINT_V1);
+}
+
+#[test]
+fn runtime_create_rejects_incompatible_consumer_version_at_adapter_boundary() {
+    reset_dispatcher_for_tests();
+
+    let err = runtime_create(Some(incompatible_consumer_version_json()))
+        .expect_err("incompatible consumer version must fail");
+    let failure: WasmAbiFailure = parse_json(&err);
+    assert_eq!(failure.code, WasmAbiErrorCode::CompatibilityRejected);
+    assert!(failure.message.contains("ABI incompatible"));
+
+    let diagnostics = dispatcher_diagnostics_for_tests();
+    assert!(
+        diagnostics.is_clean(),
+        "compatibility rejection should not leak boundary state: {diagnostics:?}"
+    );
+}
+
+#[test]
+fn adapter_boundary_accepts_backward_compatible_consumer_minor() {
+    reset_dispatcher_for_tests();
+
+    let consumer_version_json = backward_compatible_consumer_version_json();
+    let runtime_json =
+        runtime_create(Some(consumer_version_json.clone())).expect("runtime_create succeeds");
+    let runtime: WasmHandleRef = parse_json(&runtime_json);
+
+    let scope_json = scope_enter(
+        to_json(&WasmScopeEnterRequest {
+            parent: runtime,
+            label: Some("compat".to_string()),
+        }),
+        Some(consumer_version_json.clone()),
+    )
+    .expect("scope_enter succeeds");
+    let scope: WasmHandleRef = parse_json(&scope_json);
+    assert_eq!(scope.kind, WasmHandleKind::Region);
+
+    let fetch_json = fetch_request(
+        to_json(&WasmFetchRequest {
+            scope,
+            url: "https://example.com/compat".to_string(),
+            method: "GET".to_string(),
+            body: None,
+        }),
+        Some(consumer_version_json.clone()),
+    )
+    .expect("fetch_request succeeds");
+    let fetch_outcome: WasmAbiOutcomeEnvelope = parse_json(&fetch_json);
+    assert!(matches!(
+        fetch_outcome,
+        WasmAbiOutcomeEnvelope::Ok {
+            value: WasmAbiValue::Handle(_)
+        }
+    ));
+
+    let scope_close_json =
+        scope_close(scope_json, Some(consumer_version_json.clone())).expect("scope_close succeeds");
+    let scope_close_outcome: WasmAbiOutcomeEnvelope = parse_json(&scope_close_json);
+    assert!(matches!(
+        scope_close_outcome,
+        WasmAbiOutcomeEnvelope::Ok {
+            value: WasmAbiValue::Unit
+        }
+    ));
+
+    let runtime_close_json =
+        runtime_close(runtime_json, Some(consumer_version_json)).expect("runtime_close succeeds");
+    let runtime_close_outcome: WasmAbiOutcomeEnvelope = parse_json(&runtime_close_json);
+    assert!(matches!(
+        runtime_close_outcome,
+        WasmAbiOutcomeEnvelope::Ok {
+            value: WasmAbiValue::Unit
+        }
+    ));
+
+    let diagnostics = dispatcher_diagnostics_for_tests();
+    assert!(
+        diagnostics.is_clean(),
+        "backward-compatible adapter flow should remain clean: {diagnostics:?}"
+    );
 }
 
 #[test]

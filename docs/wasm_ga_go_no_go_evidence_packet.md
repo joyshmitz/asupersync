@@ -22,6 +22,65 @@ Define a deterministic evidence packet that the GA review board uses to decide
 - `CONDITIONAL_GO`: only if waivers are policy-valid and none are release-blocking.
 - `NO_GO`: any release-blocking criterion fails or evidence is missing/unverifiable.
 
+## Browser Edition Release Artifact Set
+
+The current Browser Edition pilot or GA promotion bead is `asupersync-3qv04.7.3`.
+This packet must therefore bind the board decision to the live Browser Edition
+artifact lineage rather than relying on policy-only governance text.
+
+Required release-lineage references:
+
+1. `asupersync-3qv04.6.5` with `docs/wasm_abi_compatibility_policy.md`,
+   `artifacts/wasm_abi_contract_summary.json`,
+   `artifacts/wasm_abi_contract_events.ndjson`, and
+   `tests/wasm_packaged_abi_compatibility_matrix.rs`.
+2. `asupersync-3qv04.6.6` with
+   `docs/wasm_packaged_bootstrap_harness_contract.md`,
+   `docs/wasm_packaged_cancellation_harness_contract.md`,
+   `artifacts/wasm_packaged_bootstrap_harness_v1.json`, and
+   `artifacts/wasm_packaged_cancellation_harness_v1.json`.
+3. `asupersync-3qv04.6.7` with `.github/wasm_perf_budgets.json`,
+   `artifacts/wasm_budget_summary.json`, and
+   `artifacts/wasm_perf_regression_report.json`.
+4. `asupersync-3qv04.6.7.1` with `docs/wasm_bundle_size_budget.md`,
+   `artifacts/wasm_bundle_size_budget_v1.json`, and
+   `tests/wasm_bundle_size_budget_contract.rs`.
+5. `asupersync-3qv04.6.7.2` with
+   `docs/wasm_packaged_bootstrap_harness_contract.md`,
+   `artifacts/wasm_packaged_bootstrap_perf_summary.json`, and
+   `artifacts/wasm_packaged_bootstrap_harness_v1.json`.
+6. `asupersync-3qv04.6.7.3` with
+   `docs/wasm_packaged_cancellation_harness_contract.md`,
+   `artifacts/wasm_packaged_cancellation_perf_summary.json`, and
+   `artifacts/wasm_packaged_cancellation_harness_v1.json`.
+7. `asupersync-3qv04.6.8` with `docs/wasm_bundler_compatibility_matrix.md`,
+   `docs/wasm_typescript_package_topology.md`,
+   `artifacts/wasm_typescript_package_summary.json`, and
+   `artifacts/wasm_typescript_package_log.ndjson`.
+8. `asupersync-3qv04.7.1` with `.github/workflows/publish.yml`,
+   `artifacts/npm/package_release_validation.json`,
+   `artifacts/npm/package_pack_dry_run_summary.json`, and
+   `artifacts/npm/publish_outcome.json`.
+9. `asupersync-3qv04.7.2` with `docs/wasm_browser_sbom_v1.json`,
+   `docs/wasm_browser_provenance_attestation_v1.json`, and
+   `docs/wasm_browser_artifact_integrity_manifest_v1.json`.
+10. `asupersync-3qv04.8.6` with
+    `artifacts/onboarding/vanilla.summary.json`,
+    `artifacts/onboarding/react.summary.json`,
+    `artifacts/onboarding/next.summary.json`,
+    `target/wasm-qa-evidence-smoke/<run>/<scenario>/bundle_manifest.json`, and
+    `target/e2e-results/wasm_qa_evidence_smoke/run_<timestamp>/summary.json`.
+11. `asupersync-3qv04.9.1`, `asupersync-3qv04.9.2`, `asupersync-3qv04.9.3`,
+   `asupersync-3qv04.9.4`, and `asupersync-3qv04.9.5` with
+   `docs/wasm_quickstart_migration.md`,
+   `docs/wasm_bundler_compatibility_matrix.md`,
+   `docs/wasm_canonical_examples.md`,
+   `docs/wasm_troubleshooting_compendium.md`, and
+   `docs/wasm_api_surface_census.md`.
+
+Any release packet that omits these Browser Edition artifact references is
+incomplete for `asupersync-3qv04.7.3` and must be treated as `NO_GO`.
+
 ### Mandatory threshold policy
 
 These thresholds are minimums, not targets:
@@ -161,11 +220,32 @@ Minimum artifact bundle this packet must point to:
 1. `artifacts/security_release_gate_report.json`
 2. `artifacts/security_release_gate_events.ndjson`
 3. `artifacts/wasm_dependency_audit_summary.json`
-4. `artifacts/wasm_optimization_pipeline_summary.json`
-5. `artifacts/wasm/release/release_traceability.json`
-6. `artifacts/wasm/release/rollback_safety_report.json`
-7. `artifacts/wasm/release/incident_response_packet.json`
-8. `artifacts/wasm_release_rollback_playbook_summary.json`
+4. `artifacts/wasm_abi_contract_summary.json`
+5. `artifacts/wasm_abi_contract_events.ndjson`
+6. `artifacts/wasm_bundle_size_budget_v1.json`
+7. `artifacts/wasm_budget_summary.json`
+8. `artifacts/wasm_packaged_bootstrap_harness_v1.json`
+9. `artifacts/wasm_packaged_bootstrap_perf_summary.json`
+10. `artifacts/wasm_packaged_cancellation_harness_v1.json`
+11. `artifacts/wasm_packaged_cancellation_perf_summary.json`
+12. `artifacts/wasm_perf_regression_report.json`
+13. `artifacts/wasm_typescript_package_summary.json`
+14. `artifacts/wasm_typescript_package_log.ndjson`
+15. `artifacts/wasm_optimization_pipeline_summary.json`
+16. `artifacts/wasm/release/release_traceability.json`
+17. `artifacts/wasm/release/rollback_safety_report.json`
+18. `artifacts/wasm/release/incident_response_packet.json`
+19. `artifacts/wasm_release_rollback_playbook_summary.json`
+20. `artifacts/npm/package_release_validation.json`
+21. `artifacts/npm/package_pack_dry_run_summary.json`
+22. `artifacts/npm/publish_outcome.json`
+23. `docs/wasm_browser_sbom_v1.json`
+24. `docs/wasm_browser_provenance_attestation_v1.json`
+25. `docs/wasm_browser_artifact_integrity_manifest_v1.json`
+26. `artifacts/onboarding/vanilla.summary.json`
+27. `artifacts/onboarding/react.summary.json`
+28. `artifacts/onboarding/next.summary.json`
+29. `target/e2e-results/wasm_qa_evidence_smoke/run_<timestamp>/summary.json`
 
 ## Cross-References
 

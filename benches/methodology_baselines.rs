@@ -191,7 +191,7 @@ fn bench_channel_send_recv(c: &mut Criterion) {
             |b, &capacity| {
                 b.iter_batched(
                     || mpsc::channel::<u64>(capacity),
-                    |(tx, rx)| {
+                    |(tx, mut rx)| {
                         tx.try_send(42u64).expect("send");
                         let v = rx.try_recv().expect("recv");
                         black_box(v)
@@ -211,7 +211,7 @@ fn bench_channel_send_recv(c: &mut Criterion) {
             |b, &count| {
                 b.iter_batched(
                     || mpsc::channel::<u64>(count as usize),
-                    |(tx, rx)| {
+                    |(tx, mut rx)| {
                         for i in 0..count {
                             tx.try_send(i).expect("send");
                         }

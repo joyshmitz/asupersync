@@ -329,7 +329,7 @@ fn scenario_global_inject_pop(count: u32) -> String {
 
 /// MPSC: send N values, recv all, verify order preservation.
 fn scenario_mpsc_try_send_recv(count: usize) -> String {
-    let (tx, rx) = mpsc::channel::<u64>(count);
+    let (tx, mut rx) = mpsc::channel::<u64>(count);
     for i in 0..count as u64 {
         tx.try_send(i).expect("send should succeed");
     }
@@ -345,7 +345,7 @@ fn scenario_mpsc_try_send_recv(count: usize) -> String {
 
 /// MPSC: multiple producers interleave deterministically.
 fn scenario_mpsc_multi_producer_interleave() -> String {
-    let (tx, rx) = mpsc::channel::<u64>(100);
+    let (tx, mut rx) = mpsc::channel::<u64>(100);
     let tx2 = tx.clone();
     let tx3 = tx.clone();
 
@@ -371,7 +371,7 @@ fn scenario_oneshot_send_recv() -> String {
     let cx = Cx::for_testing();
     let mut output = String::new();
     for i in 0..50_u64 {
-        let (tx, rx) = oneshot::channel::<u64>();
+        let (tx, mut rx) = oneshot::channel::<u64>();
         tx.send(&cx, i * 7 + 3).expect("oneshot send");
         match rx.try_recv() {
             Ok(v) => write!(output, "{v},").expect("write"),
@@ -562,7 +562,7 @@ fn scenario_budget_deadline_check() -> String {
 
 /// SendPermit lifecycle via MPSC channel: reserve, commit, verify ordering.
 fn scenario_obligation_send_permit() -> String {
-    let (tx, rx) = mpsc::channel::<u64>(10);
+    let (tx, mut rx) = mpsc::channel::<u64>(10);
     let mut output = String::new();
 
     // Reserve permits, then commit in order

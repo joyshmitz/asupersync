@@ -115,6 +115,10 @@ fn artifact_versions_are_stable() {
         artifact["runner_report_schema_version"].as_str(),
         Some("transport-frontier-benchmark-smoke-run-report-v1")
     );
+    assert_eq!(
+        artifact["runner_suite_summary_schema_version"].as_str(),
+        Some("transport-frontier-benchmark-smoke-suite-summary-v1")
+    );
 }
 
 #[test]
@@ -184,6 +188,74 @@ fn runner_report_required_fields_are_stable() {
     .map(ToOwned::to_owned)
     .collect();
     assert_eq!(actual, expected, "report schema fields must remain stable");
+}
+
+#[test]
+fn runner_suite_summary_required_fields_are_stable() {
+    let artifact = load_artifact();
+    let actual: BTreeSet<String> = artifact["runner_suite_summary_required_fields"]
+        .as_array()
+        .expect("runner_suite_summary_required_fields must be array")
+        .iter()
+        .map(|field| field.as_str().expect("field must be string").to_string())
+        .collect();
+    let expected: BTreeSet<String> = [
+        "schema",
+        "run_id",
+        "mode",
+        "artifact_path",
+        "runner_script",
+        "output_dir",
+        "summary_path",
+        "started_at",
+        "finished_at",
+        "status",
+        "scenario_count",
+        "scenario_ids",
+        "all_rch_routed",
+        "suite_exit_code",
+        "scenarios",
+    ]
+    .into_iter()
+    .map(ToOwned::to_owned)
+    .collect();
+    assert_eq!(
+        actual, expected,
+        "suite summary schema fields must remain stable"
+    );
+}
+
+#[test]
+fn runner_suite_summary_scenario_fields_are_stable() {
+    let artifact = load_artifact();
+    let actual: BTreeSet<String> = artifact["runner_suite_summary_scenario_required_fields"]
+        .as_array()
+        .expect("runner_suite_summary_scenario_required_fields must be array")
+        .iter()
+        .map(|field| field.as_str().expect("field must be string").to_string())
+        .collect();
+    let expected: BTreeSet<String> = [
+        "scenario_id",
+        "description",
+        "workload_id",
+        "validation_surface",
+        "focus_dimension_ids",
+        "command",
+        "output_dir",
+        "bundle_manifest_path",
+        "run_log_path",
+        "run_report_path",
+        "status",
+        "exit_code",
+        "rch_routed",
+    ]
+    .into_iter()
+    .map(ToOwned::to_owned)
+    .collect();
+    assert_eq!(
+        actual, expected,
+        "suite summary scenario entry fields must remain stable"
+    );
 }
 
 // ── Transport component inventory ────────────────────────────────────
@@ -559,7 +631,7 @@ fn smoke_scenarios_include_validation_metadata() {
 }
 
 #[test]
-fn smoke_scenarios_cover_handoff_overload_and_visibility_slices() {
+fn smoke_scenarios_cover_fairness_handoff_overload_and_visibility_slices() {
     let artifact = load_artifact();
     let actual: BTreeSet<String> = artifact["smoke_scenarios"]
         .as_array()
@@ -569,6 +641,7 @@ fn smoke_scenarios_cover_handoff_overload_and_visibility_slices() {
         .collect();
 
     for required in [
+        "AA08-SMOKE-FAIRNESS-FLOW-BALANCE",
         "AA08-SMOKE-HANDOFF-FALLBACK",
         "AA08-SMOKE-OVERLOAD-SIGNAL",
         "AA08-SMOKE-OPERATOR-VISIBILITY",
@@ -581,6 +654,39 @@ fn smoke_scenarios_cover_handoff_overload_and_visibility_slices() {
 }
 
 #[test]
+fn fairness_smoke_scenario_points_to_round_robin_transport_replay() {
+    let artifact = load_artifact();
+    let fairness = artifact["smoke_scenarios"]
+        .as_array()
+        .expect("array")
+        .iter()
+        .find(|scenario| {
+            scenario["scenario_id"].as_str() == Some("AA08-SMOKE-FAIRNESS-FLOW-BALANCE")
+        })
+        .expect("fairness smoke scenario must exist");
+
+    assert_eq!(fairness["workload_id"].as_str(), Some("TW-FAIRNESS"));
+    assert_eq!(
+        fairness["validation_surface"].as_str(),
+        Some("src/transport/tests.rs::test_transport_workload_tw_fairness_round_robin_balance")
+    );
+    assert_eq!(
+        fairness["focus_dimension_ids"].as_array(),
+        Some(&vec![
+            Value::String("fairness".to_string()),
+            Value::String("operator-visibility".to_string()),
+        ])
+    );
+    assert!(
+        fairness["command"]
+            .as_str()
+            .expect("command string")
+            .contains("transport_workload_tw_fairness_round_robin_balance"),
+        "fairness smoke command must target the deterministic transport workload test"
+    );
+}
+
+#[test]
 fn runner_script_exists_and_declares_modes() {
     let root = repo_root();
     let script_path = root.join(RUNNER_SCRIPT_PATH);
@@ -588,13 +694,16 @@ fn runner_script_exists_and_declares_modes() {
     let script = std::fs::read_to_string(&script_path).unwrap();
     for token in [
         "--list",
+        "--all",
         "--scenario",
         "--dry-run",
         "--execute",
         "transport-frontier-benchmark-smoke-bundle-v1",
         "transport-frontier-benchmark-smoke-run-report-v1",
+        "transport-frontier-benchmark-smoke-suite-summary-v1",
         "AA08_RUN_ID",
         "AA08_TIMESTAMP",
+        "AA08_FINISHED_AT",
         "AA08_OUTPUT_ROOT",
     ] {
         assert!(script.contains(token), "runner missing token: {token}");
@@ -625,10 +734,18 @@ fn runner_dry_run_emits_replay_metadata_bundle() {
         .join("run_fixed")
         .join("AA08-SMOKE-HANDOFF-FALLBACK")
         .join("bundle_manifest.json");
+    let report_path = output_root
+        .path()
+        .join("run_fixed")
+        .join("AA08-SMOKE-HANDOFF-FALLBACK")
+        .join("run_report.json");
     assert!(bundle_path.exists(), "bundle manifest must be created");
+    assert!(report_path.exists(), "dry-run report must be created");
 
     let raw = std::fs::read_to_string(&bundle_path).expect("read bundle manifest");
     let bundle: Value = serde_json::from_str(&raw).expect("parse bundle manifest");
+    let report_raw = std::fs::read_to_string(&report_path).expect("read dry-run report");
+    let report: Value = serde_json::from_str(&report_raw).expect("parse dry-run report");
 
     assert_eq!(
         bundle["schema"].as_str(),
@@ -657,6 +774,186 @@ fn runner_dry_run_emits_replay_metadata_bundle() {
         bundle_path.to_str(),
         "bundle path should be recorded verbatim"
     );
+    assert_eq!(
+        report["schema"].as_str(),
+        Some("transport-frontier-benchmark-smoke-run-report-v1")
+    );
+    assert_eq!(
+        report["scenario_id"].as_str(),
+        Some("AA08-SMOKE-HANDOFF-FALLBACK")
+    );
+    assert_eq!(report["mode"].as_str(), Some("dry-run"));
+    assert_eq!(report["exit_code"].as_i64(), Some(0));
+    assert_eq!(
+        report["run_report_path"].as_str(),
+        report_path.to_str(),
+        "dry-run report path should be recorded verbatim"
+    );
+}
+
+#[test]
+fn runner_all_dry_run_emits_suite_summary() {
+    let root = repo_root();
+    let output_root = tempfile::tempdir().expect("tempdir");
+    let script_path = root.join(RUNNER_SCRIPT_PATH);
+    let artifact = load_artifact();
+
+    let status = std::process::Command::new("bash")
+        .arg(&script_path)
+        .arg("--all")
+        .arg("--dry-run")
+        .current_dir(&root)
+        .env("AA08_RUN_ID", "run_suite")
+        .env("AA08_TIMESTAMP", "2026-03-08T00:00:00Z")
+        .env("AA08_OUTPUT_ROOT", output_root.path())
+        .status()
+        .expect("run all dry-run script");
+    assert!(status.success(), "all dry-run script should succeed");
+
+    let summary_path = output_root.path().join("run_suite").join("summary.json");
+    assert!(summary_path.exists(), "suite summary must be created");
+
+    let raw = std::fs::read_to_string(&summary_path).expect("read suite summary");
+    let summary: Value = serde_json::from_str(&raw).expect("parse suite summary");
+
+    assert_eq!(
+        summary["schema"].as_str(),
+        Some("transport-frontier-benchmark-smoke-suite-summary-v1")
+    );
+    assert_eq!(summary["run_id"].as_str(), Some("run_suite"));
+    assert_eq!(summary["mode"].as_str(), Some("dry-run"));
+    assert_eq!(summary["status"].as_str(), Some("planned"));
+    assert_eq!(summary["suite_exit_code"], Value::Null);
+    assert_eq!(summary["all_rch_routed"].as_bool(), Some(true));
+    assert_eq!(
+        summary["summary_path"].as_str(),
+        summary_path.to_str(),
+        "summary path should be recorded verbatim"
+    );
+
+    let scenarios = summary["scenarios"]
+        .as_array()
+        .expect("scenarios must be array");
+    let expected_count = artifact["smoke_scenarios"]
+        .as_array()
+        .expect("smoke_scenarios must be array")
+        .len();
+    assert_eq!(scenarios.len(), expected_count);
+    assert_eq!(
+        summary["scenario_count"].as_u64(),
+        Some(expected_count as u64)
+    );
+
+    let expected_ids: Vec<&str> = artifact["smoke_scenarios"]
+        .as_array()
+        .unwrap()
+        .iter()
+        .map(|scenario| scenario["scenario_id"].as_str().unwrap())
+        .collect();
+    let actual_ids: Vec<&str> = summary["scenario_ids"]
+        .as_array()
+        .expect("scenario_ids must be array")
+        .iter()
+        .map(|id| id.as_str().expect("scenario id string"))
+        .collect();
+    assert_eq!(actual_ids, expected_ids);
+
+    for scenario in scenarios {
+        assert_eq!(scenario["status"].as_str(), Some("planned"));
+        assert_eq!(scenario["exit_code"], Value::Null);
+        let bundle_path = PathBuf::from(
+            scenario["bundle_manifest_path"]
+                .as_str()
+                .expect("bundle path string"),
+        );
+        let report_path = PathBuf::from(
+            scenario["run_report_path"]
+                .as_str()
+                .expect("report path string"),
+        );
+        assert!(bundle_path.exists(), "bundle manifest must exist");
+        assert!(report_path.exists(), "dry-run report must exist");
+    }
+}
+
+#[test]
+fn runner_all_execute_emits_suite_summary_with_reports() {
+    let root = repo_root();
+    let output_root = tempfile::tempdir().expect("tempdir");
+    let artifact_root = tempfile::tempdir().expect("artifact tempdir");
+    let script_path = root.join(RUNNER_SCRIPT_PATH);
+    let artifact_path = artifact_root
+        .path()
+        .join("transport_smoke_test_artifact.json");
+    let custom_artifact = serde_json::json!({
+        "contract_version": "transport-frontier-benchmark-v1",
+        "smoke_scenarios": [
+            {
+                "scenario_id": "AA08-TEST-ONE",
+                "description": "first execute scenario",
+                "workload_id": "TW-MULTIPATH",
+                "validation_surface": "tests::runner_all_execute_emits_suite_summary_with_reports",
+                "focus_dimension_ids": ["operator-visibility"],
+                "command": "printf 'scenario-one\\n'"
+            },
+            {
+                "scenario_id": "AA08-TEST-TWO",
+                "description": "second execute scenario",
+                "workload_id": "TW-HANDOFF",
+                "validation_surface": "tests::runner_all_execute_emits_suite_summary_with_reports",
+                "focus_dimension_ids": ["failure-handling"],
+                "command": "printf 'scenario-two\\n'"
+            }
+        ]
+    });
+    std::fs::write(
+        &artifact_path,
+        serde_json::to_string_pretty(&custom_artifact).expect("serialize custom artifact"),
+    )
+    .expect("write custom artifact");
+
+    let status = std::process::Command::new("bash")
+        .arg(&script_path)
+        .arg("--all")
+        .arg("--execute")
+        .current_dir(&root)
+        .env("AA08_ARTIFACT", &artifact_path)
+        .env("AA08_RUN_ID", "run_execute")
+        .env("AA08_TIMESTAMP", "2026-03-08T00:00:00Z")
+        .env("AA08_FINISHED_AT", "2026-03-08T00:00:05Z")
+        .env("AA08_OUTPUT_ROOT", output_root.path())
+        .status()
+        .expect("run all execute script");
+    assert!(status.success(), "all execute script should succeed");
+
+    let summary_path = output_root.path().join("run_execute").join("summary.json");
+    assert!(summary_path.exists(), "suite summary must be created");
+
+    let raw = std::fs::read_to_string(&summary_path).expect("read suite summary");
+    let summary: Value = serde_json::from_str(&raw).expect("parse suite summary");
+
+    assert_eq!(summary["mode"].as_str(), Some("execute"));
+    assert_eq!(summary["status"].as_str(), Some("passed"));
+    assert_eq!(summary["suite_exit_code"].as_i64(), Some(0));
+    assert_eq!(summary["all_rch_routed"].as_bool(), Some(false));
+    assert_eq!(summary["scenario_count"].as_u64(), Some(2));
+
+    let scenarios = summary["scenarios"]
+        .as_array()
+        .expect("scenarios must be array");
+    assert_eq!(scenarios.len(), 2);
+    for scenario in scenarios {
+        assert_eq!(scenario["status"].as_str(), Some("passed"));
+        assert_eq!(scenario["exit_code"].as_i64(), Some(0));
+        let report_path = PathBuf::from(
+            scenario["run_report_path"]
+                .as_str()
+                .expect("report path string"),
+        );
+        let log_path = PathBuf::from(scenario["run_log_path"].as_str().expect("log path string"));
+        assert!(report_path.exists(), "run report must exist");
+        assert!(log_path.exists(), "run log must exist");
+    }
 }
 
 #[test]

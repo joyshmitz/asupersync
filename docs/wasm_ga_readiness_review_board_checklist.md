@@ -28,6 +28,34 @@ evidence available:
 | `asupersync-umelq.12.5` | incident forensics and replay workflow | `docs/replay-debugging.md`, replay artifact pointer in decision packet |
 | `asupersync-umelq.18.10` | nightly stress/soak and flake-burndown | `docs/nightly_stress_soak_automation.md`, `target/nightly-stress/<run_id>/trend_report.json` |
 
+## Browser Edition Release Mapping
+
+The current Browser Edition release-promotion bead is `asupersync-3qv04.7.3`.
+This checklist remains the board-level fail-closed decision surface, but the
+packet is incomplete unless it also points to the live Browser Edition release
+evidence below.
+
+| Browser Bead | Scope | Required Artifact-Backed Evidence |
+|---|---|---|
+| `asupersync-3qv04.6.5` | packaged ABI compatibility upgrade/downgrade matrix | `docs/wasm_abi_compatibility_policy.md`, `artifacts/wasm_abi_contract_summary.json`, `artifacts/wasm_abi_contract_events.ndjson`, `tests/wasm_packaged_abi_compatibility_matrix.rs` |
+| `asupersync-3qv04.6.6` | packaged browser-behavior E2E baseline | `docs/wasm_packaged_bootstrap_harness_contract.md`, `docs/wasm_packaged_cancellation_harness_contract.md`, `artifacts/wasm_packaged_bootstrap_harness_v1.json`, `artifacts/wasm_packaged_cancellation_harness_v1.json` |
+| `asupersync-3qv04.6.7` | aggregate bundle-size, startup-latency, and memory budget enforcement | `.github/wasm_perf_budgets.json`, `artifacts/wasm_budget_summary.json`, `artifacts/wasm_perf_regression_report.json` |
+| `asupersync-3qv04.6.7.1` | bundle-size budgets and regression gates | `docs/wasm_bundle_size_budget.md`, `artifacts/wasm_bundle_size_budget_v1.json`, `tests/wasm_bundle_size_budget_contract.rs` |
+| `asupersync-3qv04.6.7.2` | packaged startup/bootstrap latency budgets | `docs/wasm_packaged_bootstrap_harness_contract.md`, `artifacts/wasm_packaged_bootstrap_perf_summary.json`, `artifacts/wasm_packaged_bootstrap_harness_v1.json` |
+| `asupersync-3qv04.6.7.3` | packaged steady-state, shutdown, and cancellation budgets | `docs/wasm_packaged_cancellation_harness_contract.md`, `artifacts/wasm_packaged_cancellation_perf_summary.json`, `artifacts/wasm_packaged_cancellation_harness_v1.json` |
+| `asupersync-3qv04.6.8` | package-manager and module-resolution compatibility matrix | `docs/wasm_bundler_compatibility_matrix.md`, `docs/wasm_typescript_package_topology.md`, `artifacts/wasm_typescript_package_summary.json`, `artifacts/wasm_typescript_package_log.ndjson` |
+| `asupersync-3qv04.7.1` | real package publish workflow and pack validation | `.github/workflows/publish.yml`, `artifacts/npm/package_release_validation.json`, `artifacts/npm/package_pack_dry_run_summary.json`, `artifacts/npm/publish_outcome.json` |
+| `asupersync-3qv04.7.2` | shipped-output SBOM, provenance, and integrity | `docs/wasm_browser_sbom_v1.json`, `docs/wasm_browser_provenance_attestation_v1.json`, `docs/wasm_browser_artifact_integrity_manifest_v1.json` |
+| `asupersync-3qv04.8.6` | deterministic onboarding and QA smoke entrypoints | `artifacts/onboarding/vanilla.summary.json`, `artifacts/onboarding/react.summary.json`, `artifacts/onboarding/next.summary.json`, `target/wasm-qa-evidence-smoke/<run>/<scenario>/bundle_manifest.json`, `target/e2e-results/wasm_qa_evidence_smoke/run_<timestamp>/summary.json` |
+| `asupersync-3qv04.9.1` | install and quickstart paths | `docs/wasm_quickstart_migration.md`, `docs/integration.md` |
+| `asupersync-3qv04.9.2` | environment support and compatibility guidance | `docs/wasm_bundler_compatibility_matrix.md`, `docs/wasm_release_channel_strategy.md` |
+| `asupersync-3qv04.9.3` | maintained example surfaces from validated fixtures | `docs/wasm_canonical_examples.md` |
+| `asupersync-3qv04.9.4` / `asupersync-3qv04.9.5` | troubleshooting plus API or version guidance | `docs/wasm_troubleshooting_compendium.md`, `docs/wasm_api_surface_census.md` |
+
+Missing any Browser Edition artifact above is a hard-blocking gap for
+`asupersync-3qv04.7.3` even if the older governance-program packet is
+otherwise complete.
+
 ## Mandatory Evidence Fields
 
 Every gate row in the review packet must define all fields below.

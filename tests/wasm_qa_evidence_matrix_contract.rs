@@ -5,11 +5,15 @@
 use serde_json::Value;
 use std::collections::BTreeSet;
 use std::path::{Path, PathBuf};
+use std::process::Command;
+use tempfile::TempDir;
 
 const DOC_PATH: &str = "docs/wasm_qa_evidence_matrix_contract.md";
 const ARTIFACT_PATH: &str = "artifacts/wasm_qa_evidence_matrix_v1.json";
 const RUNNER_SCRIPT_PATH: &str = "scripts/run_wasm_qa_evidence_smoke.sh";
 const PRIMARY_E2E_SCRIPT_PATH: &str = "scripts/run_all_e2e.sh";
+const CI_WORKFLOW_PATH: &str = ".github/workflows/ci.yml";
+const CI_MATRIX_POLICY_PATH: &str = ".github/ci_matrix_policy.json";
 
 fn repo_root() -> PathBuf {
     PathBuf::from(env!("CARGO_MANIFEST_DIR"))
@@ -24,6 +28,57 @@ fn load_artifact() -> Value {
     let raw = std::fs::read_to_string(repo_root().join(ARTIFACT_PATH))
         .expect("failed to load wasm qa evidence artifact");
     serde_json::from_str(&raw).expect("failed to parse artifact")
+}
+
+fn load_ci_workflow() -> String {
+    std::fs::read_to_string(repo_root().join(CI_WORKFLOW_PATH)).expect("failed to load ci workflow")
+}
+
+fn load_ci_matrix_policy() -> Value {
+    let raw = std::fs::read_to_string(repo_root().join(CI_MATRIX_POLICY_PATH))
+        .expect("failed to load ci matrix policy");
+    serde_json::from_str(&raw).expect("failed to parse ci matrix policy")
+}
+
+fn repo_relative_or_absolute(path: &str) -> PathBuf {
+    let path = PathBuf::from(path);
+    if path.is_absolute() {
+        path
+    } else {
+        repo_root().join(path)
+    }
+}
+
+fn run_all_dry_run_summary() -> (TempDir, String, Value) {
+    let suite_root = tempfile::tempdir().expect("suite root tempdir");
+    let output = Command::new("bash")
+        .arg(RUNNER_SCRIPT_PATH)
+        .arg("--all")
+        .arg("--dry-run")
+        .current_dir(repo_root())
+        .env("WASM_QA_SMOKE_SUITE_ROOT", suite_root.path())
+        .env("WASM_QA_SMOKE_RUN_ID", "run_contract_summary")
+        .output()
+        .expect("failed to execute wasm qa smoke runner");
+
+    assert!(
+        output.status.success(),
+        "runner dry-run failed:\nstdout:\n{}\n\nstderr:\n{}",
+        String::from_utf8_lossy(&output.stdout),
+        String::from_utf8_lossy(&output.stderr)
+    );
+
+    let stdout = String::from_utf8(output.stdout).expect("runner stdout must be utf-8");
+    let summary_path = stdout
+        .lines()
+        .find_map(|line| line.strip_prefix("Summary: ").map(str::trim))
+        .expect("runner output must include Summary: <path>")
+        .to_string();
+    let summary_raw = std::fs::read_to_string(repo_relative_or_absolute(&summary_path))
+        .expect("failed to read emitted suite summary");
+    let summary =
+        serde_json::from_str(&summary_raw).expect("failed to parse emitted suite summary");
+    (suite_root, summary_path, summary)
 }
 
 // -- Doc existence and structure --
@@ -597,6 +652,162 @@ fn runner_is_wired_into_primary_e2e_orchestrator() {
             "primary e2e orchestrator missing token: {token}"
         );
     }
+}
+
+#[test]
+fn runner_all_dry_run_emits_populated_suite_summary() {
+    let (suite_root, summary_path, summary) = run_all_dry_run_summary();
+
+    assert_eq!(
+        summary["schema_version"].as_str(),
+        Some("e2e-suite-summary-v3")
+    );
+    assert_eq!(
+        summary["suite_id"].as_str(),
+        Some("wasm-qa-evidence-smoke_e2e")
+    );
+    assert_eq!(
+        summary["scenario_id"].as_str(),
+        Some("E2E-SUITE-WASM-QA-EVIDENCE-SMOKE")
+    );
+    assert_eq!(summary["seed"].as_str(), Some("0xDEADBEEF"));
+    assert!(summary["started_ts"].as_str().is_some());
+    assert!(summary["ended_ts"].as_str().is_some());
+    assert_eq!(summary["status"].as_str(), Some("passed"));
+    assert_eq!(
+        summary["repro_command"].as_str(),
+        Some("bash ./scripts/run_wasm_qa_evidence_smoke.sh --all --dry-run")
+    );
+    assert_eq!(
+        summary["artifact_path"].as_str(),
+        Some(summary_path.as_str())
+    );
+    assert_eq!(
+        summary["suite"].as_str(),
+        Some("wasm-qa-evidence-smoke_e2e")
+    );
+    assert!(summary["timestamp"].as_str().is_some());
+    assert_eq!(summary["test_log_level"].as_str(), Some("info"));
+    assert_eq!(summary["tests_passed"].as_i64(), Some(0));
+    assert_eq!(summary["tests_failed"].as_i64(), Some(0));
+    assert_eq!(summary["exit_code"].as_i64(), Some(0));
+    assert_eq!(summary["pattern_failures"].as_i64(), Some(0));
+    assert!(summary["log_file"].as_str().is_some());
+    assert!(summary["artifact_dir"].as_str().is_some());
+    assert_eq!(summary["checks_passed"].as_i64(), Some(0));
+    assert_eq!(summary["run_id"].as_str(), Some("run_contract_summary"));
+    assert_eq!(summary["mode"].as_str(), Some("dry-run"));
+    assert!(
+        summary["repro_command"]
+            .as_str()
+            .is_some_and(|command| command.ends_with("--dry-run")),
+        "dry-run summary repro_command must preserve the generating mode"
+    );
+    assert_eq!(
+        summary["suite_name"].as_str(),
+        Some("wasm-qa-evidence-smoke_e2e")
+    );
+
+    let aggregate_run_dir = suite_root.path().join("run_contract_summary");
+    assert_eq!(
+        repo_relative_or_absolute(&summary_path),
+        aggregate_run_dir.join("summary.json")
+    );
+    let scenario_dirs = std::fs::read_dir(&aggregate_run_dir)
+        .expect("aggregate run dir must exist")
+        .filter_map(Result::ok)
+        .filter(|entry| entry.file_type().is_ok_and(|ft| ft.is_dir()))
+        .map(|entry| entry.path())
+        .collect::<Vec<_>>();
+    assert!(
+        !scenario_dirs.is_empty(),
+        "aggregate dry-run should emit per-scenario bundle directories"
+    );
+    for scenario_dir in scenario_dirs {
+        assert!(
+            scenario_dir.join("bundle_manifest.json").exists(),
+            "aggregate scenario bundle should include bundle_manifest.json"
+        );
+        assert!(
+            scenario_dir.join("run_report.json").exists(),
+            "aggregate scenario bundle should include run_report.json"
+        );
+    }
+}
+
+#[test]
+fn ci_workflow_runs_aggregate_dry_run_and_uploads_aggregate_artifacts() {
+    let workflow = load_ci_workflow();
+    for token in [
+        "WASM QA smoke runner (dry-run bundle contract)",
+        "bash scripts/run_wasm_qa_evidence_smoke.sh --all --dry-run",
+        "Upload WASM QA smoke bundles",
+        "name: wasm-qa-smoke-bundles",
+        "path: target/e2e-results/wasm_qa_evidence_smoke/*/*/",
+        "Upload WASM QA smoke suite summaries",
+        "name: wasm-qa-smoke-suite-summaries",
+        "path: target/e2e-results/wasm_qa_evidence_smoke/*/summary.json",
+    ] {
+        assert!(workflow.contains(token), "workflow missing token: {token}");
+    }
+}
+
+#[test]
+fn ci_matrix_policy_tracks_suite_summary_artifact_contract() {
+    let policy = load_ci_matrix_policy();
+    let lane = policy["lanes"]
+        .as_array()
+        .expect("ci matrix policy lanes must be array")
+        .iter()
+        .find(|lane| lane["lane_id"] == "wasm-browser-qa-smoke")
+        .expect("missing wasm-browser-qa-smoke lane");
+
+    let required_artifacts: BTreeSet<&str> = lane["required_artifact_names"]
+        .as_array()
+        .expect("required_artifact_names must be array")
+        .iter()
+        .map(|artifact| {
+            artifact
+                .as_str()
+                .expect("required artifact name must be string")
+        })
+        .collect();
+    for artifact in [
+        "wasm-browser-onboarding-smoke",
+        "wasm-qa-smoke-bundles",
+        "wasm-qa-smoke-suite-summaries",
+    ] {
+        assert!(
+            required_artifacts.contains(artifact),
+            "wasm-browser-qa-smoke lane missing artifact: {artifact}"
+        );
+    }
+
+    assert_eq!(
+        lane["replay_command"].as_str(),
+        Some(
+            "python3 scripts/run_browser_onboarding_checks.py --scenario all --dry-run --out-dir artifacts/onboarding && bash scripts/run_wasm_qa_evidence_smoke.sh --all --dry-run"
+        )
+    );
+    assert_eq!(
+        lane["thresholds"]["required_artifacts_min"].as_i64(),
+        Some(3)
+    );
+
+    let failure_taxonomy: BTreeSet<&str> = lane["failure_taxonomy"]
+        .as_array()
+        .expect("failure_taxonomy must be array")
+        .iter()
+        .map(|entry| {
+            entry
+                .as_str()
+                .expect("failure taxonomy entry must be string")
+        })
+        .collect();
+    assert!(
+        failure_taxonomy.contains("suite_summary_artifact_missing"),
+        "wasm-browser-qa-smoke lane must track missing suite summary artifacts"
+    );
 }
 
 // -- Downstream beads --

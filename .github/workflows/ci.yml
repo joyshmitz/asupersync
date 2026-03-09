@@ -293,28 +293,22 @@ jobs:
       - name: WASM QA smoke runner (dry-run bundle contract)
         run: |
           set -euo pipefail
-          for scenario in \
-            WASM-QA-SMOKE-LAYERS \
-            WASM-QA-SMOKE-PROFILES \
-            WASM-QA-SMOKE-EVIDENCE \
-            WASM-QA-SMOKE-CFG-MATRIX \
-            WASM-QA-SMOKE-NATIVE-BACKSTOP \
-            WASM-QA-SMOKE-PACKAGED-BOOTSTRAP \
-            WASM-QA-SMOKE-PACKAGED-CANCELLATION \
-            WASM-QA-SMOKE-HOST-BRIDGE \
-            WASM-QA-SMOKE-CROSS-BROWSER
-          do
-            bash scripts/run_wasm_qa_evidence_smoke.sh \
-              --scenario "$scenario" \
-              --dry-run
-          done
+          bash scripts/run_wasm_qa_evidence_smoke.sh --all --dry-run
 
       - name: Upload WASM QA smoke bundles
         if: always()
         uses: actions/upload-artifact@v4
         with:
           name: wasm-qa-smoke-bundles
-          path: target/wasm-qa-evidence-smoke/
+          path: target/e2e-results/wasm_qa_evidence_smoke/*/*/
+          retention-days: 30
+
+      - name: Upload WASM QA smoke suite summaries
+        if: always()
+        uses: actions/upload-artifact@v4
+        with:
+          name: wasm-qa-smoke-suite-summaries
+          path: target/e2e-results/wasm_qa_evidence_smoke/*/summary.json
           retention-days: 30
 
       - name: WASM bundler compatibility certification

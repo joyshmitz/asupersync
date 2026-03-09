@@ -23,6 +23,67 @@ Required upstream contracts:
 
 Launch cannot advance if any upstream contract is missing or stale.
 
+## Browser Edition Release Bundle Mapping
+
+This operating model is also the launch envelope for `asupersync-3qv04.7.3`,
+where Browser Edition pilot and GA criteria must be backed by real artifacts
+instead of policy-only declarations.
+
+Minimum Browser Edition evidence bundle before `L0_INTERNAL`:
+
+1. `asupersync-3qv04.6.5` packaged ABI evidence:
+   `docs/wasm_abi_compatibility_policy.md`,
+   `artifacts/wasm_abi_contract_summary.json`, and
+   `artifacts/wasm_abi_contract_events.ndjson`.
+2. `asupersync-3qv04.6.6` packaged browser-behavior harnesses:
+   `docs/wasm_packaged_bootstrap_harness_contract.md`,
+   `docs/wasm_packaged_cancellation_harness_contract.md`,
+   `artifacts/wasm_packaged_bootstrap_harness_v1.json`, and
+   `artifacts/wasm_packaged_cancellation_harness_v1.json`.
+3. `asupersync-3qv04.6.7` aggregate performance-budget outputs:
+   `.github/wasm_perf_budgets.json`,
+   `artifacts/wasm_budget_summary.json`, and
+   `artifacts/wasm_perf_regression_report.json`.
+4. `asupersync-3qv04.6.7.1`, `asupersync-3qv04.6.7.2`, and
+   `asupersync-3qv04.6.7.3` size, startup, and cancellation-budget leaves:
+   `docs/wasm_bundle_size_budget.md`,
+   `artifacts/wasm_bundle_size_budget_v1.json`,
+   `artifacts/wasm_packaged_bootstrap_perf_summary.json`, and
+   `artifacts/wasm_packaged_cancellation_perf_summary.json`.
+5. `asupersync-3qv04.6.8` package-manager and module-resolution evidence:
+   `docs/wasm_bundler_compatibility_matrix.md`,
+   `docs/wasm_typescript_package_topology.md`,
+   `artifacts/wasm_typescript_package_summary.json`, and
+   `artifacts/wasm_typescript_package_log.ndjson`.
+6. `asupersync-3qv04.7.1` release outputs:
+   `artifacts/npm/package_release_validation.json`,
+   `artifacts/npm/package_pack_dry_run_summary.json`, and
+   `artifacts/npm/publish_outcome.json`.
+7. `asupersync-3qv04.7.2` supply-chain artifacts:
+   `docs/wasm_browser_sbom_v1.json`,
+   `docs/wasm_browser_provenance_attestation_v1.json`, and
+   `docs/wasm_browser_artifact_integrity_manifest_v1.json`.
+8. `asupersync-3qv04.8.6` onboarding and QA smoke artifacts:
+   `wasm-browser-onboarding-smoke`, `wasm-qa-smoke-bundles`,
+   `wasm-qa-smoke-suite-summaries`,
+   `artifacts/onboarding/vanilla.summary.json`,
+   `artifacts/onboarding/react.summary.json`,
+   `artifacts/onboarding/next.summary.json`, and
+   `target/e2e-results/wasm_qa_evidence_smoke/run_<timestamp>/summary.json`.
+9. `asupersync-3qv04.9.1`, `asupersync-3qv04.9.2`, `asupersync-3qv04.9.3`,
+   `asupersync-3qv04.9.4`, and `asupersync-3qv04.9.5` developer-facing surfaces:
+   `docs/wasm_quickstart_migration.md`,
+   `docs/wasm_bundler_compatibility_matrix.md`,
+   `docs/wasm_canonical_examples.md`,
+   `docs/wasm_troubleshooting_compendium.md`, and
+   `docs/wasm_api_surface_census.md`.
+10. Board and launch certification artifacts:
+   `wasm-ga-readiness-review-board-certification` and
+   `wasm-launch-rollout-support-stabilization-certification`.
+
+If this Browser Edition evidence bundle is incomplete, rollout must remain
+blocked regardless of higher-level board approval text.
+
 ## Rollout Stages and Guardrails
 
 | Stage | Target Audience | Entry Criteria | Exit Criteria | Communication Obligation |

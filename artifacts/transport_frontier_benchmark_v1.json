@@ -3,6 +3,7 @@
   "bead_id": "asupersync-1508v.8.4",
   "runner_bundle_schema_version": "transport-frontier-benchmark-smoke-bundle-v1",
   "runner_report_schema_version": "transport-frontier-benchmark-smoke-run-report-v1",
+  "runner_suite_summary_schema_version": "transport-frontier-benchmark-smoke-suite-summary-v1",
   "runner_script": "scripts/run_transport_frontier_benchmark_smoke.sh",
   "runner_bundle_required_fields": [
     "schema",
@@ -42,6 +43,38 @@
     "started_at",
     "finished_at",
     "exit_code"
+  ],
+  "runner_suite_summary_required_fields": [
+    "schema",
+    "run_id",
+    "mode",
+    "artifact_path",
+    "runner_script",
+    "output_dir",
+    "summary_path",
+    "started_at",
+    "finished_at",
+    "status",
+    "scenario_count",
+    "scenario_ids",
+    "all_rch_routed",
+    "suite_exit_code",
+    "scenarios"
+  ],
+  "runner_suite_summary_scenario_required_fields": [
+    "scenario_id",
+    "description",
+    "workload_id",
+    "validation_surface",
+    "focus_dimension_ids",
+    "command",
+    "output_dir",
+    "bundle_manifest_path",
+    "run_log_path",
+    "run_report_path",
+    "status",
+    "exit_code",
+    "rch_routed"
   ],
   "transport_components": [
     {
@@ -210,6 +243,14 @@
       "validation_surface": "tests/transport_frontier_benchmark_contract.rs::sim_network_fully_connected_creates_paths",
       "focus_dimension_ids": ["fairness", "operator-visibility"],
       "command": "rch exec -- env CARGO_INCREMENTAL=0 CARGO_TARGET_DIR=/tmp/rch-codex-aa081 cargo test --test transport_frontier_benchmark_contract sim_network -- --nocapture"
+    },
+    {
+      "scenario_id": "AA08-SMOKE-FAIRNESS-FLOW-BALANCE",
+      "description": "Verify deterministic round-robin flow balance stays at the fair-share target",
+      "workload_id": "TW-FAIRNESS",
+      "validation_surface": "src/transport/tests.rs::test_transport_workload_tw_fairness_round_robin_balance",
+      "focus_dimension_ids": ["fairness", "operator-visibility"],
+      "command": "rch exec -- env CARGO_INCREMENTAL=0 CARGO_TARGET_DIR=/tmp/rch-codex-aa081 cargo test transport_workload_tw_fairness_round_robin_balance -- --nocapture"
     },
     {
       "scenario_id": "AA08-SMOKE-HANDOFF-FALLBACK",

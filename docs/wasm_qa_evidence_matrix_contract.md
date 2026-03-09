@@ -150,7 +150,7 @@ Every emitted line in `events.ndjson` must include:
 
 Bundle schema version: `wasm-qa-artifact-bundle-v1`
 
-Each scenario bundle under `target/wasm-qa-evidence-smoke/<run>/<scenario>/` must contain:
+Each single-scenario bundle under `target/wasm-qa-evidence-smoke/<run>/<scenario>/` must contain:
 
 - `bundle_manifest.json`
 - `run_report.json`
@@ -187,7 +187,18 @@ The runner reads `artifacts/wasm_qa_evidence_matrix_v1.json`, supports determini
 3. Structured event logs (`events.ndjson`) with schema `wasm-qa-e2e-log-v1`
 4. Retention metadata following `wasm-qa-artifact-retention-v1`
 
-When invoked as `bash ./scripts/run_wasm_qa_evidence_smoke.sh --all --execute`, the runner also emits a suite-level `summary.json` with schema `e2e-suite-summary-v3` under `target/e2e-results/wasm_qa_evidence_smoke/run_<timestamp>/`. That is the canonical surface used by `scripts/run_all_e2e.sh --suite wasm-qa-evidence-smoke`.
+When invoked with `bash ./scripts/run_wasm_qa_evidence_smoke.sh --all --dry-run` or `bash ./scripts/run_wasm_qa_evidence_smoke.sh --all --execute`, the runner emits the aggregate suite under `target/e2e-results/wasm_qa_evidence_smoke/run_<timestamp>/`. That aggregate run directory contains:
+
+- per-scenario bundle subdirectories at `target/e2e-results/wasm_qa_evidence_smoke/run_<timestamp>/<scenario>/`
+- a suite-level `summary.json` with schema `e2e-suite-summary-v3`
+
+That aggregate layout is the canonical surface used by `scripts/run_all_e2e.sh --suite wasm-qa-evidence-smoke`, and the dry-run mode is the lightweight regression path for validating summary-schema correctness without executing the underlying `rch`-backed commands. The emitted `repro_command` must preserve the generating mode so a dry-run suite summary never advertises execute-mode provenance.
+
+For isolated contract tests and deterministic smoke-run repros, the runner also accepts:
+
+- `WASM_QA_SMOKE_RUN_ID` to pin the emitted run directory name
+- `WASM_QA_SMOKE_SINGLE_ROOT` to redirect single-scenario bundles away from the default `target/wasm-qa-evidence-smoke`
+- `WASM_QA_SMOKE_SUITE_ROOT` to redirect aggregate `--all` output away from the default `target/e2e-results/wasm_qa_evidence_smoke`
 
 Packaged bootstrap/load/reload baseline harness (bead `asupersync-3qv04.8.4.1`) is tracked as smoke scenario `WASM-QA-SMOKE-PACKAGED-BOOTSTRAP`, which invokes:
 

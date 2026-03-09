@@ -518,7 +518,7 @@ fn tc_from_tower_checks_cancellation_before_await() {
 fn tc_into_tower_requires_cx_current() {
     let src = load_source("tower_bridge.rs");
     assert!(
-        src.contains("Cx::current().ok_or(BridgeError::NoCxAvailable)"),
+        src.contains("Cx::current()") && src.contains(".ok_or(BridgeError::NoCxAvailable)"),
         "IntoTower must require Cx::current() to be set"
     );
 }

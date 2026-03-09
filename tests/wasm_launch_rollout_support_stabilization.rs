@@ -52,6 +52,71 @@ fn rollout_doc_references_required_upstream_dependencies() {
 }
 
 #[test]
+fn rollout_doc_maps_browser_release_bundle_into_launch_requirements() {
+    let doc = load_doc();
+    for token in [
+        "asupersync-3qv04.7.3",
+        "asupersync-3qv04.6.5",
+        "asupersync-3qv04.6.6",
+        "asupersync-3qv04.6.7",
+        "asupersync-3qv04.6.7.1",
+        "asupersync-3qv04.6.7.2",
+        "asupersync-3qv04.6.7.3",
+        "asupersync-3qv04.6.8",
+        "asupersync-3qv04.7.1",
+        "asupersync-3qv04.7.2",
+        "asupersync-3qv04.8.6",
+        "asupersync-3qv04.9.1",
+        "asupersync-3qv04.9.2",
+        "asupersync-3qv04.9.3",
+        "asupersync-3qv04.9.4",
+        "asupersync-3qv04.9.5",
+        "artifacts/npm/package_release_validation.json",
+        "artifacts/npm/package_pack_dry_run_summary.json",
+        "artifacts/npm/publish_outcome.json",
+        "docs/wasm_browser_sbom_v1.json",
+        "docs/wasm_browser_provenance_attestation_v1.json",
+        "docs/wasm_browser_artifact_integrity_manifest_v1.json",
+        "docs/wasm_abi_compatibility_policy.md",
+        "artifacts/wasm_abi_contract_summary.json",
+        "artifacts/wasm_abi_contract_events.ndjson",
+        "docs/wasm_packaged_bootstrap_harness_contract.md",
+        "docs/wasm_packaged_cancellation_harness_contract.md",
+        "artifacts/wasm_packaged_bootstrap_harness_v1.json",
+        "artifacts/wasm_packaged_cancellation_harness_v1.json",
+        ".github/wasm_perf_budgets.json",
+        "artifacts/wasm_budget_summary.json",
+        "artifacts/wasm_perf_regression_report.json",
+        "docs/wasm_bundle_size_budget.md",
+        "artifacts/wasm_bundle_size_budget_v1.json",
+        "artifacts/wasm_packaged_bootstrap_perf_summary.json",
+        "artifacts/wasm_packaged_cancellation_perf_summary.json",
+        "docs/wasm_typescript_package_topology.md",
+        "artifacts/wasm_typescript_package_summary.json",
+        "artifacts/wasm_typescript_package_log.ndjson",
+        "wasm-browser-onboarding-smoke",
+        "wasm-qa-smoke-bundles",
+        "wasm-qa-smoke-suite-summaries",
+        "artifacts/onboarding/vanilla.summary.json",
+        "artifacts/onboarding/react.summary.json",
+        "artifacts/onboarding/next.summary.json",
+        "target/e2e-results/wasm_qa_evidence_smoke/run_<timestamp>/summary.json",
+        "docs/wasm_quickstart_migration.md",
+        "docs/wasm_bundler_compatibility_matrix.md",
+        "docs/wasm_canonical_examples.md",
+        "docs/wasm_troubleshooting_compendium.md",
+        "docs/wasm_api_surface_census.md",
+        "wasm-ga-readiness-review-board-certification",
+        "wasm-launch-rollout-support-stabilization-certification",
+    ] {
+        assert!(
+            doc.contains(token),
+            "doc missing Browser Edition rollout token: {token}"
+        );
+    }
+}
+
+#[test]
 fn rollout_doc_defines_stages_guardrails_and_comm_obligations() {
     let doc = load_doc();
     for token in [
