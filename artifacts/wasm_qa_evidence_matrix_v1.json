@@ -161,47 +161,47 @@
     {
       "scenario_id": "WASM-QA-SMOKE-LAYERS",
       "description": "Verify evidence layer catalog completeness and structure",
-      "command": "rch exec -- env CARGO_INCREMENTAL=0 CARGO_TARGET_DIR=/tmp/rch-codex-wasm-qa cargo test --test wasm_qa_evidence_matrix_contract layer -- --nocapture"
+      "command": "${RCH_BIN:-rch} exec -- env CARGO_INCREMENTAL=0 CARGO_TARGET_DIR=/tmp/rch-codex-wasm-qa cargo test --test wasm_qa_evidence_matrix_contract layer -- --nocapture"
     },
     {
       "scenario_id": "WASM-QA-SMOKE-PROFILES",
       "description": "Verify wasm profile catalog and cfg-gated file existence",
-      "command": "rch exec -- env CARGO_INCREMENTAL=0 CARGO_TARGET_DIR=/tmp/rch-codex-wasm-qa cargo test --test wasm_qa_evidence_matrix_contract profile -- --nocapture"
+      "command": "${RCH_BIN:-rch} exec -- env CARGO_INCREMENTAL=0 CARGO_TARGET_DIR=/tmp/rch-codex-wasm-qa cargo test --test wasm_qa_evidence_matrix_contract profile -- --nocapture"
     },
     {
       "scenario_id": "WASM-QA-SMOKE-EVIDENCE",
       "description": "Verify evidence item IDs are unique and well-formed",
-      "command": "rch exec -- env CARGO_INCREMENTAL=0 CARGO_TARGET_DIR=/tmp/rch-codex-wasm-qa cargo test --test wasm_qa_evidence_matrix_contract evidence -- --nocapture"
+      "command": "${RCH_BIN:-rch} exec -- env CARGO_INCREMENTAL=0 CARGO_TARGET_DIR=/tmp/rch-codex-wasm-qa cargo test --test wasm_qa_evidence_matrix_contract evidence -- --nocapture"
     },
     {
       "scenario_id": "WASM-QA-SMOKE-CFG-MATRIX",
       "description": "Run the ignored wasm profile compile-closure harness across the canonical browser matrix",
-      "command": "rch exec -- env CARGO_INCREMENTAL=0 CARGO_TARGET_DIR=/tmp/rch-codex-wasm-cfg cargo test --test wasm_cfg_compile_invariants wasm_profile_matrix_compile_closure_holds -- --ignored --nocapture"
+      "command": "${RCH_BIN:-rch} exec -- env CARGO_INCREMENTAL=0 CARGO_TARGET_DIR=/tmp/rch-codex-wasm-cfg cargo test --test wasm_cfg_compile_invariants wasm_profile_matrix_compile_closure_holds -- --ignored --nocapture"
     },
     {
       "scenario_id": "WASM-QA-SMOKE-NATIVE-BACKSTOP",
       "description": "Run the ignored native all-targets backstop after wasm cfg-gating changes",
-      "command": "rch exec -- env CARGO_INCREMENTAL=0 CARGO_TARGET_DIR=/tmp/rch-codex-wasm-cfg cargo test --test wasm_cfg_compile_invariants native_all_targets_backstop_holds -- --ignored --nocapture"
+      "command": "${RCH_BIN:-rch} exec -- env CARGO_INCREMENTAL=0 CARGO_TARGET_DIR=/tmp/rch-codex-wasm-cfg cargo test --test wasm_cfg_compile_invariants native_all_targets_backstop_holds -- --ignored --nocapture"
     },
     {
       "scenario_id": "WASM-QA-SMOKE-PACKAGED-BOOTSTRAP",
       "description": "Run packaged bootstrap/load/reload harness in dry-run mode and verify schema-style WASM E2E bundle emission",
-      "command": "rch exec -- env HARNESS_PROFILE=packaged_bootstrap HARNESS_DRY_RUN=1 RCH_BIN=/bin/true FAULT_MATRIX_MODE=reduced bash scripts/test_wasm_cross_framework_e2e.sh"
+      "command": "${RCH_BIN:-rch} exec -- env HARNESS_PROFILE=packaged_bootstrap HARNESS_DRY_RUN=1 RCH_BIN=/bin/true FAULT_MATRIX_MODE=reduced bash scripts/test_wasm_cross_framework_e2e.sh"
     },
     {
       "scenario_id": "WASM-QA-SMOKE-PACKAGED-CANCELLATION",
       "description": "Run packaged cancellation/quiescence harness in dry-run mode and verify schema-style WASM E2E bundle emission",
-      "command": "rch exec -- bash -lc 'set -euo pipefail; bash scripts/build_browser_core_artifacts.sh prod; env WASM_PACKAGED_CANCELLATION_DRY_RUN=1 WASM_PERF_PROFILE=core-min RCH_BIN=/bin/true bash scripts/test_wasm_packaged_cancellation_e2e.sh'"
+      "command": "${RCH_BIN:-rch} exec -- bash -lc 'set -euo pipefail; bash scripts/build_browser_core_artifacts.sh prod; env WASM_PACKAGED_CANCELLATION_DRY_RUN=1 WASM_PERF_PROFILE=core-min RCH_BIN=/bin/true bash scripts/test_wasm_packaged_cancellation_e2e.sh'"
     },
     {
       "scenario_id": "WASM-QA-SMOKE-HOST-BRIDGE",
       "description": "Run host-bridge fetch/streams/websocket/storage harness in dry-run mode and verify schema-style WASM E2E bundle emission",
-      "command": "rch exec -- env HARNESS_PROFILE=host_bridge HARNESS_DRY_RUN=1 RCH_BIN=/bin/true FAULT_MATRIX_MODE=reduced bash scripts/test_wasm_cross_framework_e2e.sh"
+      "command": "${RCH_BIN:-rch} exec -- env HARNESS_PROFILE=host_bridge HARNESS_DRY_RUN=1 RCH_BIN=/bin/true FAULT_MATRIX_MODE=reduced bash scripts/test_wasm_cross_framework_e2e.sh"
     },
     {
       "scenario_id": "WASM-QA-SMOKE-CROSS-BROWSER",
       "description": "Run full cross-framework harness in dry-run mode with an explicit browser matrix and verify matrix metadata in emitted artifacts",
-      "command": "rch exec -- env HARNESS_PROFILE=full HARNESS_DRY_RUN=1 RCH_BIN=/bin/true FAULT_MATRIX_MODE=reduced BROWSER_MATRIX=chromium-headless,firefox-headless,webkit-headless bash scripts/test_wasm_cross_framework_e2e.sh"
+      "command": "${RCH_BIN:-rch} exec -- env HARNESS_PROFILE=full HARNESS_DRY_RUN=1 RCH_BIN=/bin/true FAULT_MATRIX_MODE=reduced BROWSER_MATRIX=chromium-headless,firefox-headless,webkit-headless bash scripts/test_wasm_cross_framework_e2e.sh"
     }
   ],
   "downstream_beads": [

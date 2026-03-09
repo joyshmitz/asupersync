@@ -97,13 +97,38 @@ At minimum, promotion evidence must include:
 2. produced artifacts and paths,
 3. replay command pointers for any non-pass diagnostics.
 
+### Gate 6: Packaged release artifact and consumer-build evidence
+
+Pilot and GA promotion for `asupersync-3qv04.7.3` is not satisfied by policy
+documents alone. Release confidence must be derived from real packages, real
+consumer builds, and real behavioral evidence from the current candidate.
+
+Required package-release artifacts:
+
+- `artifacts/npm/package_release_validation.json`
+- `artifacts/npm/package_pack_dry_run_summary.json`
+- `artifacts/npm/publish_outcome.json`
+
+Required consumer-build and smoke artifacts:
+
+- `artifacts/onboarding/vanilla.summary.json`
+- `artifacts/onboarding/react.summary.json`
+- `artifacts/onboarding/next.summary.json`
+- `target/wasm-qa-evidence-smoke/<run>/<scenario>/bundle_manifest.json`
+- `target/e2e-results/wasm_qa_evidence_smoke/run_<timestamp>/summary.json`
+
+Missing any Gate 6 artifact is a release-blocking failure even if the policy,
+security, and dependency gates are otherwise green.
+
 ## Promotion Rules
 
 `nightly -> canary` promotion requires:
 
 1. all required gates pass,
 2. no critical/high unresolved findings in security release gate report,
-3. dependency policy transitions are active and non-expired.
+3. dependency policy transitions are active and non-expired,
+4. package validation and pack dry-run artifacts exist for the candidate,
+5. onboarding and QA smoke artifacts exist for the same decision window.
 
 `canary -> stable` promotion requires:
 
@@ -111,7 +136,11 @@ At minimum, promotion evidence must include:
 2. no blocked release criteria in security report (`gate_status != fail`),
 3. artifact provenance present and reproducible for optimization, dependency,
    and security summaries,
-4. no unresolved deterministic replay failures from the selected promotion run.
+4. no unresolved deterministic replay failures from the selected promotion run,
+5. package validation, pack dry-run, and publish outcome artifacts are
+   reproducible for the current candidate,
+6. consumer-build onboarding summaries and QA smoke bundle/summary artifacts
+   are reproducible for the current candidate.
 
 ## Demotion and Rollback Policy
 
@@ -122,7 +151,11 @@ Demotion is mandatory when one of these triggers occurs post-publish:
    conditional transition,
 3. deterministic replay checks for mandatory scenarios fail in two consecutive
    release-gate runs,
-4. required promotion artifacts are missing or non-reproducible.
+4. required promotion artifacts are missing or non-reproducible,
+5. package validation or pack dry-run artifacts are missing, stale, or do not
+   match the candidate being promoted,
+6. consumer-build onboarding or QA smoke artifacts are missing, stale, or not
+   reproducible for the candidate being promoted.
 
 Demotion actions:
 
@@ -138,8 +171,11 @@ Demotion actions:
 3. Run security gate with `--check-deps`.
 4. Run `rch` offloaded wasm profile checks.
 5. Run deterministic onboarding/scenario validation.
-6. Confirm all required artifacts exist and are non-empty.
-7. Publish promotion decision with command + artifact pointers.
+6. Confirm package validation, pack dry-run, and publish outcome artifacts for
+   the candidate are present and non-empty.
+7. Confirm onboarding summaries plus QA smoke bundle/summary artifacts for the
+   same candidate are present and non-empty.
+8. Publish promotion decision with command + artifact pointers.
 
 ## Traceability and Audit Fields
 
@@ -187,7 +223,14 @@ Policy wiring expectations:
    `bash scripts/validate_package_build.sh`, and pack-smoke checked with
    `bash scripts/validate_npm_pack_smoke.sh`, and evidenced with
    `npm pack --json --dry-run` before any npm publish can proceed.
-5. Rollback mode requires both target version and operator reason; the executed
+5. Consumer-build and behavioral evidence are artifactized alongside the
+   package-release bundle:
+   - `artifacts/onboarding/vanilla.summary.json`
+   - `artifacts/onboarding/react.summary.json`
+   - `artifacts/onboarding/next.summary.json`
+   - `target/wasm-qa-evidence-smoke/<run>/<scenario>/bundle_manifest.json`
+   - `target/e2e-results/wasm_qa_evidence_smoke/run_<timestamp>/summary.json`
+6. Rollback mode requires both target version and operator reason; the executed
    dist-tag commands must be captured in release artifacts.
 
 Incident response and rollback operational requirements are defined in:

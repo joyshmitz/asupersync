@@ -10,6 +10,11 @@ fn load_packet_doc() -> String {
         .expect("failed to load wasm ga go/no-go evidence packet doc")
 }
 
+fn load_release_strategy_doc() -> String {
+    std::fs::read_to_string("docs/wasm_release_channel_strategy.md")
+        .expect("failed to load wasm release channel strategy doc")
+}
+
 #[test]
 fn packet_doc_exists() {
     assert!(
@@ -213,6 +218,31 @@ fn packet_doc_binds_browser_release_packet_to_current_artifact_set() {
         assert!(
             doc.contains(token),
             "doc missing Browser Edition release packet token: {token}"
+        );
+    }
+}
+
+#[test]
+fn release_strategy_doc_requires_package_and_consumer_artifacts_for_ga_promotion() {
+    let doc = load_release_strategy_doc();
+    for token in [
+        "Gate 6: Packaged release artifact and consumer-build evidence",
+        "real packages",
+        "consumer builds",
+        "real behavioral evidence",
+        "artifacts/npm/package_release_validation.json",
+        "artifacts/npm/package_pack_dry_run_summary.json",
+        "artifacts/npm/publish_outcome.json",
+        "artifacts/onboarding/vanilla.summary.json",
+        "artifacts/onboarding/react.summary.json",
+        "artifacts/onboarding/next.summary.json",
+        "target/wasm-qa-evidence-smoke/<run>/<scenario>/bundle_manifest.json",
+        "target/e2e-results/wasm_qa_evidence_smoke/run_<timestamp>/summary.json",
+        "Missing any Gate 6 artifact is a release-blocking failure",
+    ] {
+        assert!(
+            doc.contains(token),
+            "release strategy doc missing artifact-backed promotion token: {token}"
         );
     }
 }

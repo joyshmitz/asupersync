@@ -28,6 +28,9 @@ Launch cannot advance if any upstream contract is missing or stale.
 This operating model is also the launch envelope for `asupersync-3qv04.7.3`,
 where Browser Edition pilot and GA criteria must be backed by real artifacts
 instead of policy-only declarations.
+In practice, rollout cannot advance unless Gate 6 package-release and
+consumer-build artifacts from `docs/wasm_release_channel_strategy.md` are
+present for the candidate under review.
 
 Minimum Browser Edition evidence bundle before `L0_INTERNAL`:
 

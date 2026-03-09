@@ -19,7 +19,7 @@ mod common;
 use asupersync::raptorq::decoder::{DecodeError, DecodeStats, InactivationDecoder, ReceivedSymbol};
 use asupersync::raptorq::regression::{
     G8_REPLAY_REF, G8_SCHEMA_VERSION, RegressionMonitor, RegressionReport, RegressionVerdict,
-    emit_regression_log,
+    regression_log_lines,
 };
 use asupersync::raptorq::systematic::SystematicEncoder;
 use asupersync::util::DetRng;
@@ -506,8 +506,10 @@ fn g2_per_scenario_gate_with_comparator() {
                 Some(&report),
             );
 
-            // Also emit G8-format regression log for each check.
-            emit_regression_log(&report);
+            // Keep stderr emission in the test harness rather than library code.
+            for line in regression_log_lines(&report) {
+                eprintln!("{line}");
+            }
 
             match report.overall_verdict {
                 RegressionVerdict::Accept | RegressionVerdict::Calibrating => pass_count += 1,

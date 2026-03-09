@@ -34,6 +34,9 @@ The current Browser Edition release-promotion bead is `asupersync-3qv04.7.3`.
 This checklist remains the board-level fail-closed decision surface, but the
 packet is incomplete unless it also points to the live Browser Edition release
 evidence below.
+That Browser Edition evidence must satisfy Gate 6 package-release and
+consumer-build artifacts from `docs/wasm_release_channel_strategy.md`, not
+just higher-level policy approval text.
 
 | Browser Bead | Scope | Required Artifact-Backed Evidence |
 |---|---|---|

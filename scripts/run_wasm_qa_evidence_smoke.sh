@@ -101,6 +101,13 @@ load_scenario() {
   fi
 }
 
+resolve_command_template() {
+  local command="$1"
+  command="${command//\$\{RCH_BIN:-rch\}/$RCH_BIN}"
+  command="${command//\$\{RCH_BIN\}/$RCH_BIN}"
+  printf '%s' "$command"
+}
+
 if [[ "$MODE" == "list" ]]; then
   echo "=== WASM QA Evidence Matrix Smoke Scenarios ==="
   jq -r '.smoke_scenarios[] | "  \(.scenario_id): \(.description)"' "$ARTIFACT"
@@ -338,7 +345,9 @@ run_scenario_bundle() {
 
   emit_event "scenario_start" "blocked" -1 "" "warm" "$(retention_until_utc warm)"
   local EXITCODE=0
-  eval "$COMMAND" > "$RUN_LOG_PATH" 2>&1 || EXITCODE=$?
+  local EXEC_COMMAND
+  EXEC_COMMAND="$(resolve_command_template "$COMMAND")"
+  eval "$EXEC_COMMAND" > "$RUN_LOG_PATH" 2>&1 || EXITCODE=$?
 
   local VERDICT="pass"
   local FAILURE_REASON=""
@@ -458,7 +467,7 @@ OUTDIR="${SINGLE_ROOT}/${RUN_ID}/${SCENARIO}"
 load_scenario "$SCENARIO"
 echo "=== Executing $SCENARIO ==="
 echo "  $DESCRIPTION"
-echo "  command: $COMMAND"
+echo "  command: $(resolve_command_template "$COMMAND")"
 
 set +e
 scenario_result="$(run_scenario_bundle "$RUN_ID" "$SCENARIO" "$OUTDIR" "$MODE")"

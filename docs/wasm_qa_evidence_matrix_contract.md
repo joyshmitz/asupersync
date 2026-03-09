@@ -187,6 +187,8 @@ The runner reads `artifacts/wasm_qa_evidence_matrix_v1.json`, supports determini
 3. Structured event logs (`events.ndjson`) with schema `wasm-qa-e2e-log-v1`
 4. Retention metadata following `wasm-qa-artifact-retention-v1`
 
+Smoke scenario command templates are stored with `${RCH_BIN:-rch} exec --` rather than a hardcoded `rch exec --`, so CI and contract tests can swap in a fake or alternate `rch` binary without editing the artifact.
+
 When invoked with `bash ./scripts/run_wasm_qa_evidence_smoke.sh --all --dry-run` or `bash ./scripts/run_wasm_qa_evidence_smoke.sh --all --execute`, the runner emits the aggregate suite under `target/e2e-results/wasm_qa_evidence_smoke/run_<timestamp>/`. That aggregate run directory contains:
 
 - per-scenario bundle subdirectories at `target/e2e-results/wasm_qa_evidence_smoke/run_<timestamp>/<scenario>/`
@@ -203,19 +205,19 @@ For isolated contract tests and deterministic smoke-run repros, the runner also 
 Packaged bootstrap/load/reload baseline harness (bead `asupersync-3qv04.8.4.1`) is tracked as smoke scenario `WASM-QA-SMOKE-PACKAGED-BOOTSTRAP`, which invokes:
 
 ```bash
-rch exec -- env HARNESS_PROFILE=packaged_bootstrap HARNESS_DRY_RUN=1 RCH_BIN=/bin/true FAULT_MATRIX_MODE=reduced bash scripts/test_wasm_cross_framework_e2e.sh
+${RCH_BIN:-rch} exec -- env HARNESS_PROFILE=packaged_bootstrap HARNESS_DRY_RUN=1 RCH_BIN=/bin/true FAULT_MATRIX_MODE=reduced bash scripts/test_wasm_cross_framework_e2e.sh
 ```
 
 Host-bridge fetch/streams/websocket/storage baseline harness (bead `asupersync-3qv04.8.4.3`) is tracked as smoke scenario `WASM-QA-SMOKE-HOST-BRIDGE`, which invokes:
 
 ```bash
-rch exec -- env HARNESS_PROFILE=host_bridge HARNESS_DRY_RUN=1 RCH_BIN=/bin/true FAULT_MATRIX_MODE=reduced bash scripts/test_wasm_cross_framework_e2e.sh
+${RCH_BIN:-rch} exec -- env HARNESS_PROFILE=host_bridge HARNESS_DRY_RUN=1 RCH_BIN=/bin/true FAULT_MATRIX_MODE=reduced bash scripts/test_wasm_cross_framework_e2e.sh
 ```
 
 Cross-browser compatibility + forensics baseline harness (bead `asupersync-3qv04.8.5`) is tracked as smoke scenario `WASM-QA-SMOKE-CROSS-BROWSER`, which invokes:
 
 ```bash
-rch exec -- env HARNESS_PROFILE=full HARNESS_DRY_RUN=1 RCH_BIN=/bin/true FAULT_MATRIX_MODE=reduced BROWSER_MATRIX=chromium-headless,firefox-headless,webkit-headless bash scripts/test_wasm_cross_framework_e2e.sh
+${RCH_BIN:-rch} exec -- env HARNESS_PROFILE=full HARNESS_DRY_RUN=1 RCH_BIN=/bin/true FAULT_MATRIX_MODE=reduced BROWSER_MATRIX=chromium-headless,firefox-headless,webkit-headless bash scripts/test_wasm_cross_framework_e2e.sh
 ```
 
 ## Validation
@@ -230,9 +232,9 @@ bash ./scripts/run_all_e2e.sh --suite wasm-qa-evidence-smoke
 Focused invariant test command (routed through `rch`):
 
 ```bash
-rch exec -- env CARGO_INCREMENTAL=0 CARGO_TARGET_DIR=/tmp/rch-codex-wasm-qa cargo test --test wasm_qa_evidence_matrix_contract -- --nocapture
-rch exec -- env CARGO_INCREMENTAL=0 CARGO_TARGET_DIR=/tmp/rch-codex-wasm-cfg cargo test --test wasm_cfg_compile_invariants wasm_profile_matrix_compile_closure_holds -- --ignored --nocapture
-rch exec -- env CARGO_INCREMENTAL=0 CARGO_TARGET_DIR=/tmp/rch-codex-wasm-cfg cargo test --test wasm_cfg_compile_invariants native_all_targets_backstop_holds -- --ignored --nocapture
+${RCH_BIN:-rch} exec -- env CARGO_INCREMENTAL=0 CARGO_TARGET_DIR=/tmp/rch-codex-wasm-qa cargo test --test wasm_qa_evidence_matrix_contract -- --nocapture
+${RCH_BIN:-rch} exec -- env CARGO_INCREMENTAL=0 CARGO_TARGET_DIR=/tmp/rch-codex-wasm-cfg cargo test --test wasm_cfg_compile_invariants wasm_profile_matrix_compile_closure_holds -- --ignored --nocapture
+${RCH_BIN:-rch} exec -- env CARGO_INCREMENTAL=0 CARGO_TARGET_DIR=/tmp/rch-codex-wasm-cfg cargo test --test wasm_cfg_compile_invariants native_all_targets_backstop_holds -- --ignored --nocapture
 ```
 
 ## Cross-References

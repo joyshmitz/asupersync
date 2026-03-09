@@ -152,7 +152,7 @@ fn doc_reproduction_command_uses_rch() {
     let doc = load_doc();
     assert!(
         doc.contains(
-            "rch exec -- env CARGO_INCREMENTAL=0 CARGO_TARGET_DIR=/tmp/rch-codex-wasm-qa cargo test --test wasm_qa_evidence_matrix_contract -- --nocapture"
+            "${RCH_BIN:-rch} exec -- env CARGO_INCREMENTAL=0 CARGO_TARGET_DIR=/tmp/rch-codex-wasm-qa cargo test --test wasm_qa_evidence_matrix_contract -- --nocapture"
         ),
         "doc must route heavy validation through rch"
     );
@@ -463,7 +463,10 @@ fn smoke_scenarios_are_rch_routed() {
     for scenario in scenarios {
         let sid = scenario["scenario_id"].as_str().unwrap();
         let cmd = scenario["command"].as_str().unwrap();
-        assert!(cmd.contains("rch exec --"), "scenario {sid} must use rch");
+        assert!(
+            cmd.contains("${RCH_BIN:-rch} exec --"),
+            "scenario {sid} must use the RCH_BIN placeholder"
+        );
     }
 }
 
@@ -733,6 +736,83 @@ fn runner_all_dry_run_emits_populated_suite_summary() {
             "aggregate scenario bundle should include run_report.json"
         );
     }
+}
+
+#[test]
+fn runner_execute_mode_honors_rch_bin_override() {
+    let temp = tempfile::tempdir().expect("tempdir");
+    let fake_rch = temp.path().join("fake-rch");
+    let fake_log = temp.path().join("fake-rch.log");
+    std::fs::write(
+        &fake_rch,
+        format!(
+            "#!/usr/bin/env bash\nset -euo pipefail\nprintf '%s\\n' \"$@\" > {}\n",
+            fake_log.display()
+        ),
+    )
+    .expect("write fake rch");
+
+    let mut perms = std::fs::metadata(&fake_rch)
+        .expect("fake rch metadata")
+        .permissions();
+    #[cfg(unix)]
+    {
+        use std::os::unix::fs::PermissionsExt;
+        perms.set_mode(0o755);
+        std::fs::set_permissions(&fake_rch, perms).expect("chmod fake rch");
+    }
+
+    let single_root = temp.path().join("runner-out");
+    let output = Command::new("bash")
+        .arg(RUNNER_SCRIPT_PATH)
+        .arg("--scenario")
+        .arg("WASM-QA-SMOKE-LAYERS")
+        .arg("--execute")
+        .current_dir(repo_root())
+        .env("RCH_BIN", &fake_rch)
+        .env("WASM_QA_SMOKE_SINGLE_ROOT", &single_root)
+        .env("WASM_QA_SMOKE_RUN_ID", "run_fake_rch")
+        .output()
+        .expect("execute smoke runner with fake rch");
+
+    assert!(
+        output.status.success(),
+        "runner execute mode failed with fake rch:\nstdout:\n{}\n\nstderr:\n{}",
+        String::from_utf8_lossy(&output.stdout),
+        String::from_utf8_lossy(&output.stderr)
+    );
+
+    let argv = std::fs::read_to_string(&fake_log).expect("fake rch log");
+    for token in [
+        "exec",
+        "--",
+        "env",
+        "CARGO_INCREMENTAL=0",
+        "CARGO_TARGET_DIR=/tmp/rch-codex-wasm-qa",
+        "cargo",
+        "test",
+        "--test",
+        "wasm_qa_evidence_matrix_contract",
+        "layer",
+        "--nocapture",
+    ] {
+        assert!(
+            argv.contains(token),
+            "fake rch invocation missing token: {token}\nlogged argv:\n{argv}"
+        );
+    }
+
+    let run_dir = single_root
+        .join("run_fake_rch")
+        .join("WASM-QA-SMOKE-LAYERS");
+    assert!(
+        run_dir.join("run_report.json").exists(),
+        "execute mode should emit run_report.json"
+    );
+    assert!(
+        run_dir.join("bundle_manifest.json").exists(),
+        "execute mode should emit bundle_manifest.json"
+    );
 }
 
 #[test]

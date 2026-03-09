@@ -112,6 +112,7 @@ mod tests {
     fn test_asupersync_runtime_creation() {
         let cx = Cx::for_testing();
         let rt = AsupersyncRuntime::new(&cx);
+<<<<<<< HEAD
         assert_eq!(rt.region_id(), cx.region_id());
         assert_eq!(rt.cx().region_id(), cx.region_id());
     }
@@ -147,5 +148,10 @@ mod tests {
         let _cx_guard = Cx::set_current(Some(cx.clone()));
         let region = with_tokio_context_sync(|| Cx::current().expect("current cx").region_id());
         assert_eq!(region, cx.region_id());
+||||||| parent of 2e0cd80c (feat(tests,docs): extend WASM evidence matrix, release channel strategy, and CI gates)
+        assert_eq!(rt.region_id, cx.region());
+=======
+        assert_eq!(rt.region_id, cx.region_id());
+>>>>>>> 2e0cd80c (feat(tests,docs): extend WASM evidence matrix, release channel strategy, and CI gates)
     }
 }

@@ -27,6 +27,9 @@ Define a deterministic evidence packet that the GA review board uses to decide
 The current Browser Edition pilot or GA promotion bead is `asupersync-3qv04.7.3`.
 This packet must therefore bind the board decision to the live Browser Edition
 artifact lineage rather than relying on policy-only governance text.
+The packet is also incomplete unless Gate 6 package-release and consumer-build
+evidence from `docs/wasm_release_channel_strategy.md` is present for the same
+candidate.
 
 Required release-lineage references:
 
