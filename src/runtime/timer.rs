@@ -51,18 +51,21 @@ impl TimerHeap {
     }
 
     /// Returns the number of timers in the heap.
+    #[inline]
     #[must_use]
     pub fn len(&self) -> usize {
         self.heap.len()
     }
 
     /// Returns true if the heap is empty.
+    #[inline]
     #[must_use]
     pub fn is_empty(&self) -> bool {
         self.heap.is_empty()
     }
 
     /// Adds a timer for a task with the given deadline.
+    #[inline]
     pub fn insert(&mut self, task: TaskId, deadline: Time) {
         let generation = self.next_generation;
         self.next_generation = self.next_generation.wrapping_add(1);
@@ -74,6 +77,7 @@ impl TimerHeap {
     }
 
     /// Returns the earliest deadline, if any.
+    #[inline]
     #[must_use]
     pub fn peek_deadline(&self) -> Option<Time> {
         self.heap.peek().map(|e| e.deadline)

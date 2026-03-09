@@ -400,18 +400,21 @@ impl IoDriver {
     }
 
     /// Returns current statistics.
+    #[inline]
     #[must_use]
     pub fn stats(&self) -> &IoStats {
         &self.stats
     }
 
     /// Returns the number of registered wakers.
+    #[inline]
     #[must_use]
     pub fn waker_count(&self) -> usize {
         self.wakers.len()
     }
 
     /// Returns `true` if no wakers are registered.
+    #[inline]
     #[must_use]
     pub fn is_empty(&self) -> bool {
         self.wakers.is_empty()
@@ -678,18 +681,21 @@ impl IoRegistration {
     }
 
     /// Returns the registration token.
+    #[inline]
     #[must_use]
     pub fn token(&self) -> Token {
         self.token
     }
 
     /// Returns the current interest set.
+    #[inline]
     #[must_use]
     pub fn interest(&self) -> Interest {
         self.interest
     }
 
     /// Returns true if the driver is still alive.
+    #[inline]
     #[must_use]
     pub fn is_active(&self) -> bool {
         self.driver.strong_count() > 0
