@@ -10,6 +10,7 @@ pub struct YieldNow {
 impl Future for YieldNow {
     type Output = ();
 
+    #[inline]
     fn poll(mut self: Pin<&mut Self>, cx: &mut Context<'_>) -> Poll<Self::Output> {
         if self.yielded {
             Poll::Ready(())
@@ -22,6 +23,7 @@ impl Future for YieldNow {
 }
 
 /// Yields execution back to the runtime, allowing other tasks to run.
+#[inline]
 #[must_use]
 pub fn yield_now() -> YieldNow {
     YieldNow { yielded: false }

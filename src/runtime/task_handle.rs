@@ -79,6 +79,7 @@ impl<T> TaskHandle<T> {
     }
 
     /// Returns the task ID of the spawned task.
+    #[inline]
     #[must_use]
     pub fn task_id(&self) -> TaskId {
         self.task_id
@@ -93,6 +94,7 @@ impl<T> TaskHandle<T> {
     /// The closed-channel case matters for drop semantics: dropping an
     /// unpolled join future should not stamp an abort reason onto a task
     /// that has already terminated and closed its join channel.
+    #[inline]
     #[must_use]
     pub fn is_finished(&self) -> bool {
         self.receiver.is_ready() || self.receiver.is_closed()
@@ -254,6 +256,7 @@ impl<T> JoinFuture<'_, T> {
 impl<T> std::future::Future for JoinFuture<'_, T> {
     type Output = Result<T, JoinError>;
 
+    #[inline]
     fn poll(
         mut self: std::pin::Pin<&mut Self>,
         cx: &mut std::task::Context<'_>,

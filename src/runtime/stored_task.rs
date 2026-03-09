@@ -112,6 +112,7 @@ impl StoredTask {
     }
 
     /// Returns the number of times this task has been polled.
+    #[inline]
     #[must_use]
     pub fn poll_count(&self) -> u64 {
         self.poll_count

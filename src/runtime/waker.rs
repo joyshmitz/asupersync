@@ -46,6 +46,7 @@ impl WakerState {
     }
 
     /// Creates a waker for a specific task with unknown wake source.
+    #[inline]
     #[must_use]
     pub fn waker_for(self: &Arc<Self>, task: TaskId) -> Waker {
         self.waker_for_source(task, WakeSource::Unknown)
@@ -71,6 +72,7 @@ impl WakerState {
     }
 
     /// Returns true if any tasks have been woken.
+    #[inline]
     #[must_use]
     pub fn has_woken(&self) -> bool {
         let woken = self.woken.lock();
