@@ -2,11 +2,31 @@
 //!
 //! Implements RFC 7541: HPACK - Header Compression for HTTP/2.
 
-use std::collections::VecDeque;
+use std::collections::{HashMap, VecDeque};
+use std::sync::LazyLock;
 
 use crate::bytes::{Bytes, BytesMut};
 
 use super::error::H2Error;
+
+/// Pre-built index for exact (name, value) → 1-based static table index lookups.
+static STATIC_EXACT_INDEX: LazyLock<HashMap<(&'static str, &'static str), usize>> =
+    LazyLock::new(|| {
+        STATIC_TABLE
+            .iter()
+            .enumerate()
+            .map(|(i, &(n, v))| ((n, v), i + 1))
+            .collect()
+    });
+
+/// Pre-built index for name-only → first 1-based static table index lookups.
+static STATIC_NAME_INDEX: LazyLock<HashMap<&'static str, usize>> = LazyLock::new(|| {
+    let mut map = HashMap::with_capacity(STATIC_TABLE.len());
+    for (i, &(name, _)) in STATIC_TABLE.iter().enumerate() {
+        map.entry(name).or_insert(i + 1);
+    }
+    map
+});
 
 /// Maximum size of the dynamic table (default: 4096 bytes).
 pub const DEFAULT_MAX_TABLE_SIZE: usize = 4096;
@@ -219,24 +239,14 @@ impl Default for DynamicTable {
     }
 }
 
-/// Find entry in static table by name and value.
+/// Find entry in static table by name and value (O(1) via pre-built index).
 fn find_static(name: &str, value: &str) -> Option<usize> {
-    for (i, (n, v)) in STATIC_TABLE.iter().enumerate() {
-        if *n == name && *v == value {
-            return Some(i + 1);
-        }
-    }
-    None
+    STATIC_EXACT_INDEX.get(&(name, value)).copied()
 }
 
-/// Find entry in static table by name only.
+/// Find entry in static table by name only (O(1) via pre-built index).
 fn find_static_name(name: &str) -> Option<usize> {
-    for (i, (n, _)) in STATIC_TABLE.iter().enumerate() {
-        if *n == name {
-            return Some(i + 1);
-        }
-    }
-    None
+    STATIC_NAME_INDEX.get(name).copied()
 }
 
 /// Get entry from static table by index.
@@ -2418,5 +2428,33 @@ mod tests {
 
         let h3 = Header::new("accept", "*/*");
         assert_ne!(h, h3);
+    }
+
+    #[test]
+    fn static_index_exact_matches_linear_scan() {
+        // Verify HashMap index returns identical results to linear scan
+        for (i, &(name, value)) in STATIC_TABLE.iter().enumerate() {
+            let expected = i + 1;
+            assert_eq!(
+                find_static(name, value),
+                Some(expected),
+                "exact match failed for ({name}, {value}) at index {expected}"
+            );
+        }
+        // Non-existent exact match
+        assert_eq!(find_static("x-custom", "foo"), None);
+        // Name exists but value doesn't match
+        assert_eq!(find_static(":method", "DELETE"), None);
+    }
+
+    #[test]
+    fn static_name_index_matches_first_occurrence() {
+        // Verify name-only index returns the first occurrence
+        assert_eq!(find_static_name(":method"), Some(2)); // first :method
+        assert_eq!(find_static_name(":path"), Some(4)); // first :path
+        assert_eq!(find_static_name(":status"), Some(8)); // first :status
+        assert_eq!(find_static_name(":scheme"), Some(6)); // first :scheme
+        assert_eq!(find_static_name("content-type"), Some(31));
+        assert_eq!(find_static_name("x-nonexistent"), None);
     }
 }

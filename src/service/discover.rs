@@ -90,7 +90,7 @@ where
     let mut seen = HashSet::with_capacity(items.len());
     let mut deduped = Vec::with_capacity(items.len());
     for item in items {
-        if seen.insert(item.clone()) {
+        if seen.insert(item) {
             deduped.push(item.clone());
         }
     }
