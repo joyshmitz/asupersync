@@ -50,14 +50,24 @@ impl CheckpointState {
 
     /// Records a checkpoint without a message.
     pub fn record(&mut self) {
-        self.last_checkpoint = Some(Instant::now());
+        self.record_at(Instant::now());
+    }
+
+    /// Records a checkpoint at an explicit instant.
+    pub fn record_at(&mut self, at: Instant) {
+        self.last_checkpoint = Some(at);
         self.last_message = None;
         self.checkpoint_count += 1;
     }
 
     /// Records a checkpoint with a message.
     pub fn record_with_message(&mut self, message: String) {
-        self.last_checkpoint = Some(Instant::now());
+        self.record_with_message_at(message, Instant::now());
+    }
+
+    /// Records a checkpoint with a message at an explicit instant.
+    pub fn record_with_message_at(&mut self, message: String, at: Instant) {
+        self.last_checkpoint = Some(at);
         self.last_message = Some(message);
         self.checkpoint_count += 1;
     }
@@ -182,6 +192,35 @@ mod tests {
     }
 
     #[test]
+    fn test_checkpoint_state_record_at() {
+        init_test("test_checkpoint_state_record_at");
+        let mut state = CheckpointState::new();
+        let at = Instant::now();
+
+        state.record_at(at);
+
+        crate::assert_with_log!(
+            state.last_checkpoint == Some(at),
+            "explicit checkpoint instant stored",
+            format!("{at:?}"),
+            format!("{:?}", state.last_checkpoint)
+        );
+        crate::assert_with_log!(
+            state.last_message.is_none(),
+            "record_at clears message",
+            true,
+            state.last_message.is_none()
+        );
+        crate::assert_with_log!(
+            state.checkpoint_count == 1,
+            "record_at increments count",
+            1,
+            state.checkpoint_count
+        );
+        crate::test_complete!("test_checkpoint_state_record_at");
+    }
+
+    #[test]
     fn test_checkpoint_state_record_with_message() {
         init_test("test_checkpoint_state_record_with_message");
         let mut state = CheckpointState::new();
@@ -212,6 +251,35 @@ mod tests {
             state.last_message.is_none()
         );
         crate::test_complete!("test_checkpoint_state_record_with_message");
+    }
+
+    #[test]
+    fn test_checkpoint_state_record_with_message_at() {
+        init_test("test_checkpoint_state_record_with_message_at");
+        let mut state = CheckpointState::new();
+        let at = Instant::now();
+
+        state.record_with_message_at("hello".to_string(), at);
+
+        crate::assert_with_log!(
+            state.last_checkpoint == Some(at),
+            "explicit checkpoint instant stored",
+            format!("{at:?}"),
+            format!("{:?}", state.last_checkpoint)
+        );
+        crate::assert_with_log!(
+            state.last_message.as_deref() == Some("hello"),
+            "record_with_message_at stores message",
+            Some("hello"),
+            state.last_message.as_deref()
+        );
+        crate::assert_with_log!(
+            state.checkpoint_count == 1,
+            "record_with_message_at increments count",
+            1,
+            state.checkpoint_count
+        );
+        crate::test_complete!("test_checkpoint_state_record_with_message_at");
     }
 
     #[test]
