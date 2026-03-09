@@ -7,7 +7,7 @@
 use crate::bytes::BytesMut;
 use crate::codec::{Decoder, Encoder};
 use crate::http::h1::types::{self, Method, Request, Response, Version};
-use memchr::{memchr, memchr_iter};
+use memchr::{memchr, memchr_iter, memmem};
 use std::fmt;
 use std::io;
 
@@ -207,12 +207,7 @@ fn find_headers_end(buf: &[u8]) -> Option<usize> {
 /// Returns the index of `\r` when found.
 #[inline]
 fn find_crlf(buf: &[u8]) -> Option<usize> {
-    for idx in memchr_iter(b'\n', buf) {
-        if idx > 0 && buf[idx - 1] == b'\r' {
-            return Some(idx - 1);
-        }
-    }
-    None
+    memmem::find(buf, b"\r\n")
 }
 
 /// Collect all CRLF (`\r\n`) positions in `buf` into a pre-allocated vector.
