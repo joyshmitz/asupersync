@@ -100,6 +100,8 @@ pub struct IoDriver {
     interests: HashMap<Token, Interest>,
     /// Pre-allocated events buffer to avoid allocation per turn.
     events: Events,
+    /// Reusable waker buffer to avoid allocation per turn.
+    waker_buf: Vec<Waker>,
     /// Statistics for diagnostics.
     stats: IoStats,
 }
@@ -117,6 +119,7 @@ impl IoDriver {
             wakers: TokenSlab::new(),
             interests: HashMap::with_capacity(interest_map_capacity(DEFAULT_EVENTS_CAPACITY)),
             events: Events::with_capacity(DEFAULT_EVENTS_CAPACITY),
+            waker_buf: Vec::with_capacity(64),
             stats: IoStats::default(),
         }
     }
@@ -131,6 +134,7 @@ impl IoDriver {
             wakers: TokenSlab::new(),
             interests: HashMap::with_capacity(interest_map_capacity(events_capacity)),
             events: Events::with_capacity(events_capacity),
+            waker_buf: Vec::with_capacity(events_capacity.min(256)),
             stats: IoStats::default(),
         }
     }
@@ -301,7 +305,7 @@ impl IoDriver {
         self.stats.polls += 1;
         self.stats.events_received += n as u64;
 
-        let mut wakers = Vec::with_capacity(self.events.len());
+        self.waker_buf.clear();
 
         // Dispatch wakers for ready events
         for event in &self.events {
@@ -309,14 +313,14 @@ impl IoDriver {
             on_event(event, interest);
             let slab_key = SlabToken::from_usize(event.token.0);
             if let Some(waker) = self.wakers.get(slab_key) {
-                wakers.push(waker.clone());
+                self.waker_buf.push(waker.clone());
                 self.stats.wakers_dispatched += 1;
             } else {
                 self.stats.unknown_tokens += 1;
             }
         }
 
-        for waker in wakers {
+        for waker in self.waker_buf.drain(..) {
             waker.wake();
         }
 
