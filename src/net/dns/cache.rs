@@ -2,13 +2,22 @@
 //!
 //! Provides a thread-safe cache for DNS lookup results with TTL-based expiration.
 
+use crate::types::Time;
 use parking_lot::RwLock;
 use std::borrow::Cow;
 use std::collections::HashMap;
 use std::sync::atomic::{AtomicU64, Ordering};
-use std::time::{Duration, Instant};
+use std::time::Duration;
 
 use super::lookup::LookupIp;
+
+fn wall_clock_now() -> Time {
+    crate::time::wall_now()
+}
+
+fn duration_to_nanos(duration: Duration) -> u64 {
+    duration.as_nanos().min(u128::from(u64::MAX)) as u64
+}
 
 /// Configuration for the DNS cache.
 #[derive(Debug, Clone)]
@@ -38,26 +47,25 @@ impl Default for CacheConfig {
 #[derive(Debug, Clone)]
 struct CacheEntry<T> {
     data: T,
-    expires_at: Instant,
-    inserted_at: Instant,
+    expires_at: Time,
+    inserted_at: Time,
 }
 
 impl<T> CacheEntry<T> {
-    fn new(data: T, ttl: Duration) -> Self {
-        let now = Instant::now();
+    fn new_at(data: T, ttl: Duration, now: Time) -> Self {
         Self {
             data,
-            expires_at: now + ttl,
+            expires_at: now.saturating_add_nanos(duration_to_nanos(ttl)),
             inserted_at: now,
         }
     }
 
-    fn is_expired(&self) -> bool {
-        Instant::now() >= self.expires_at
+    fn is_expired_at(&self, now: Time) -> bool {
+        now >= self.expires_at
     }
 
-    fn remaining_ttl(&self) -> Duration {
-        self.expires_at.saturating_duration_since(Instant::now())
+    fn remaining_ttl_at(&self, now: Time) -> Duration {
+        Duration::from_nanos(self.expires_at.duration_since(now))
     }
 }
 
@@ -66,6 +74,7 @@ impl<T> CacheEntry<T> {
 pub struct DnsCache {
     ip_cache: RwLock<HashMap<String, CacheEntry<LookupIp>>>,
     config: CacheConfig,
+    time_getter: fn() -> Time,
     stat_hits: AtomicU64,
     stat_misses: AtomicU64,
     stat_evictions: AtomicU64,
@@ -81,24 +90,38 @@ impl DnsCache {
     /// Creates a new DNS cache with custom configuration.
     #[must_use]
     pub fn with_config(config: CacheConfig) -> Self {
+        Self::with_time_getter(config, wall_clock_now)
+    }
+
+    /// Creates a new DNS cache with a custom configuration and time source.
+    #[must_use]
+    pub fn with_time_getter(config: CacheConfig, time_getter: fn() -> Time) -> Self {
         Self {
             ip_cache: RwLock::new(HashMap::new()),
             config,
+            time_getter,
             stat_hits: AtomicU64::new(0),
             stat_misses: AtomicU64::new(0),
             stat_evictions: AtomicU64::new(0),
         }
     }
 
+    /// Returns the time source used by this cache.
+    #[must_use]
+    pub const fn time_getter(&self) -> fn() -> Time {
+        self.time_getter
+    }
+
     /// Looks up an IP address result from the cache.
     pub fn get_ip(&self, host: &str) -> Option<LookupIp> {
         let key = normalize_host_key(host);
+        let now = (self.time_getter)();
 
         // Fast path: check expiry under read lock, clone only the data.
         {
             let cache = self.ip_cache.read();
             if let Some(entry) = cache.get(key.as_ref()) {
-                if !entry.is_expired() {
+                if !entry.is_expired_at(now) {
                     self.stat_hits.fetch_add(1, Ordering::Relaxed);
                     return Some(entry.data.clone());
                 }
@@ -112,7 +135,9 @@ impl DnsCache {
         let mut evicted_expired = false;
         let refreshed = {
             let mut cache = self.ip_cache.write();
-            let expired = cache.get(key.as_ref()).is_some_and(CacheEntry::is_expired);
+            let expired = cache
+                .get(key.as_ref())
+                .is_some_and(|entry| entry.is_expired_at(now));
             if expired {
                 cache.remove(key.as_ref());
                 evicted_expired = true;
@@ -155,6 +180,7 @@ impl DnsCache {
 
         let ttl = self.clamp_ttl(lookup.ttl());
         let key = normalize_host_key(host);
+        let now = (self.time_getter)();
 
         let mut cache = self.ip_cache.write();
         let is_update = cache.contains_key(key.as_ref());
@@ -162,7 +188,7 @@ impl DnsCache {
         // Evict only when inserting a new key at capacity.
         // Updating an existing key must not evict unrelated entries.
         if !is_update && cache.len() >= self.config.max_entries {
-            self.evict_expired_locked(&mut cache);
+            self.evict_expired_locked(&mut cache, now);
 
             // If still at capacity, remove oldest
             if cache.len() >= self.config.max_entries {
@@ -173,7 +199,10 @@ impl DnsCache {
             }
         }
 
-        cache.insert(key.into_owned(), CacheEntry::new(lookup.clone(), ttl));
+        cache.insert(
+            key.into_owned(),
+            CacheEntry::new_at(lookup.clone(), ttl, now),
+        );
     }
 
     /// Removes an entry from the cache.
@@ -196,8 +225,9 @@ impl DnsCache {
 
     /// Evicts expired entries from the cache.
     pub fn evict_expired(&self) {
+        let now = (self.time_getter)();
         let mut cache = self.ip_cache.write();
-        self.evict_expired_locked(&mut cache);
+        self.evict_expired_locked(&mut cache, now);
     }
 
     /// Returns cache statistics.
@@ -226,9 +256,9 @@ impl DnsCache {
         ttl.max(self.config.min_ttl).min(self.config.max_ttl)
     }
 
-    fn evict_expired_locked(&self, cache: &mut HashMap<String, CacheEntry<LookupIp>>) {
+    fn evict_expired_locked(&self, cache: &mut HashMap<String, CacheEntry<LookupIp>>, now: Time) {
         let before = cache.len();
-        cache.retain(|_, entry| !entry.is_expired());
+        cache.retain(|_, entry| !entry.is_expired_at(now));
         let evicted = before - cache.len();
 
         if evicted > 0 {
@@ -282,7 +312,20 @@ pub struct CacheStats {
 #[cfg(test)]
 mod tests {
     use super::*;
+    use std::cell::Cell;
     use std::net::IpAddr;
+
+    thread_local! {
+        static TEST_NOW: Cell<u64> = const { Cell::new(0) };
+    }
+
+    fn set_test_time(nanos: u64) {
+        TEST_NOW.with(|now| now.set(nanos));
+    }
+
+    fn test_time() -> Time {
+        Time::from_nanos(TEST_NOW.with(Cell::get))
+    }
 
     fn init_test(name: &str) {
         crate::test_utils::init_test_logging();
@@ -328,6 +371,12 @@ mod tests {
         let cache = DnsCache::default();
         let dbg = format!("{cache:?}");
         assert!(dbg.contains("DnsCache"), "{dbg}");
+    }
+
+    #[test]
+    fn dns_cache_with_time_getter() {
+        let cache = DnsCache::with_time_getter(CacheConfig::default(), test_time);
+        assert_eq!((cache.time_getter())().as_nanos(), 0);
     }
 
     #[test]
@@ -383,12 +432,13 @@ mod tests {
     #[test]
     fn cache_expiration() {
         init_test("cache_expiration");
+        set_test_time(0);
         let config = CacheConfig {
             min_ttl: Duration::from_millis(1),
             max_ttl: Duration::from_millis(50),
             ..Default::default()
         };
-        let cache = DnsCache::with_config(config);
+        let cache = DnsCache::with_time_getter(config, test_time);
 
         let lookup = LookupIp::new(
             vec!["192.0.2.1".parse::<IpAddr>().unwrap()],
@@ -405,8 +455,8 @@ mod tests {
             immediate.is_some()
         );
 
-        // Wait for expiration
-        std::thread::sleep(Duration::from_millis(10));
+        // Advance deterministically beyond the cached TTL.
+        set_test_time(Duration::from_millis(10).as_nanos() as u64);
 
         // Should be expired
         let expired = cache.get_ip("example.com");
@@ -414,6 +464,38 @@ mod tests {
         let size = cache.stats().size;
         crate::assert_with_log!(size == 0, "expired evicted", 0, size);
         crate::test_complete!("cache_expiration");
+    }
+
+    #[test]
+    fn cache_evict_expired_uses_time_getter_without_sleep() {
+        init_test("cache_evict_expired_uses_time_getter_without_sleep");
+        set_test_time(0);
+        let config = CacheConfig {
+            min_ttl: Duration::from_millis(1),
+            max_ttl: Duration::from_millis(50),
+            ..Default::default()
+        };
+        let cache = DnsCache::with_time_getter(config, test_time);
+
+        let lookup = LookupIp::new(
+            vec!["192.0.2.4".parse::<IpAddr>().expect("ip parse")],
+            Duration::from_millis(1),
+        );
+        cache.put_ip("expired.example", &lookup);
+        crate::assert_with_log!(
+            cache.stats().size == 1,
+            "entry inserted",
+            1,
+            cache.stats().size
+        );
+
+        set_test_time(Duration::from_millis(10).as_nanos() as u64);
+        cache.evict_expired();
+
+        let stats = cache.stats();
+        crate::assert_with_log!(stats.size == 0, "expired entry removed", 0, stats.size);
+        crate::assert_with_log!(stats.evictions == 1, "single eviction", 1, stats.evictions);
+        crate::test_complete!("cache_evict_expired_uses_time_getter_without_sleep");
     }
 
     #[test]
@@ -538,7 +620,7 @@ mod tests {
             ..Default::default()
         };
         let cache = DnsCache::with_config(config);
-        let inserted_at = Instant::now();
+        let inserted_at = Time::from_nanos(42);
         let ttl = Duration::from_mins(5);
 
         let alpha = LookupIp::new(vec!["192.0.2.1".parse::<IpAddr>().expect("ip parse")], ttl);
@@ -552,7 +634,7 @@ mod tests {
                 CacheEntry {
                     data: zeta,
                     inserted_at,
-                    expires_at: inserted_at + ttl,
+                    expires_at: inserted_at.saturating_add_nanos(duration_to_nanos(ttl)),
                 },
             );
             entries.insert(
@@ -560,7 +642,7 @@ mod tests {
                 CacheEntry {
                     data: alpha,
                     inserted_at,
-                    expires_at: inserted_at + ttl,
+                    expires_at: inserted_at.saturating_add_nanos(duration_to_nanos(ttl)),
                 },
             );
         }
