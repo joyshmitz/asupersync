@@ -5,10 +5,15 @@
 //! are dropped.
 
 use super::Stream;
+use crate::types::Time;
 use pin_project::pin_project;
 use std::pin::Pin;
 use std::task::{Context, Poll};
-use std::time::{Duration, Instant};
+use std::time::Duration;
+
+fn wall_clock_now() -> Time {
+    crate::time::wall_now()
+}
 
 /// A stream that yields at most one item per time period.
 ///
@@ -24,16 +29,23 @@ pub struct Throttle<S> {
     #[pin]
     stream: S,
     period: Duration,
-    last_yield: Option<Instant>,
+    last_yield: Option<Time>,
+    time_getter: fn() -> Time,
 }
 
 impl<S> Throttle<S> {
     /// Creates a new `Throttle` stream.
     pub(crate) fn new(stream: S, period: Duration) -> Self {
+        Self::with_time_getter(stream, period, wall_clock_now)
+    }
+
+    /// Creates a new `Throttle` stream with a custom time source.
+    pub fn with_time_getter(stream: S, period: Duration, time_getter: fn() -> Time) -> Self {
         Self {
             stream,
             period,
             last_yield: None,
+            time_getter,
         }
     }
 
@@ -51,6 +63,11 @@ impl<S> Throttle<S> {
     pub fn into_inner(self) -> S {
         self.stream
     }
+
+    /// Returns the configured time source.
+    pub const fn time_getter(&self) -> fn() -> Time {
+        self.time_getter
+    }
 }
 
 impl<S: Stream> Stream for Throttle<S> {
@@ -61,10 +78,12 @@ impl<S: Stream> Stream for Throttle<S> {
         loop {
             match this.stream.as_mut().poll_next(cx) {
                 Poll::Ready(Some(item)) => {
-                    let now = Instant::now();
+                    let now = (this.time_getter)();
                     let should_yield = match this.last_yield {
                         None => true,
-                        Some(last) => now.duration_since(*last) >= *this.period,
+                        Some(last) => {
+                            Duration::from_nanos(now.duration_since(*last)) >= *this.period
+                        }
                     };
                     if should_yield {
                         *this.last_yield = Some(now);
@@ -84,7 +103,10 @@ mod tests {
     use super::*;
     use crate::stream::iter;
     use std::sync::Arc;
+    use std::sync::atomic::{AtomicU64, Ordering};
     use std::task::{Wake, Waker};
+
+    static TEST_NOW_NANOS: AtomicU64 = AtomicU64::new(0);
 
     struct NoopWaker;
 
@@ -99,6 +121,14 @@ mod tests {
     fn init_test(name: &str) {
         crate::test_utils::init_test_logging();
         crate::test_phase!(name);
+    }
+
+    fn set_test_time(nanos: u64) {
+        TEST_NOW_NANOS.store(nanos, Ordering::SeqCst);
+    }
+
+    fn test_time() -> Time {
+        Time::from_nanos(TEST_NOW_NANOS.load(Ordering::SeqCst))
     }
 
     #[test]
@@ -173,8 +203,9 @@ mod tests {
     #[test]
     fn throttle_with_delay() {
         init_test("throttle_with_delay");
-        // Use a very short period to verify items pass after the window.
-        let mut stream = Throttle::new(iter(vec![1, 2, 3]), Duration::from_millis(1));
+        set_test_time(0);
+        let mut stream =
+            Throttle::with_time_getter(iter(vec![1, 2, 3]), Duration::from_millis(1), test_time);
         let waker = noop_waker();
         let mut cx = Context::from_waker(&waker);
 
@@ -184,21 +215,29 @@ mod tests {
             Poll::Ready(Some(1))
         );
 
-        // Sleep to let the window expire.
-        std::thread::sleep(Duration::from_millis(5));
+        set_test_time(Duration::from_millis(5).as_nanos() as u64);
 
-        // Now the next available item should pass (2 or 3 depending on timing).
-        let poll = Pin::new(&mut stream).poll_next(&mut cx);
-        assert!(matches!(poll, Poll::Ready(Some(_))));
+        assert_eq!(
+            Pin::new(&mut stream).poll_next(&mut cx),
+            Poll::Ready(Some(2))
+        );
+        set_test_time(Duration::from_millis(10).as_nanos() as u64);
+        assert_eq!(
+            Pin::new(&mut stream).poll_next(&mut cx),
+            Poll::Ready(Some(3))
+        );
         crate::test_complete!("throttle_with_delay");
     }
 
     #[test]
     fn throttle_accessors() {
         init_test("throttle_accessors");
-        let mut stream = Throttle::new(iter(vec![1, 2]), Duration::from_millis(100));
+        set_test_time(17);
+        let mut stream =
+            Throttle::with_time_getter(iter(vec![1, 2]), Duration::from_millis(100), test_time);
         let _ref = stream.get_ref();
         let _mut = stream.get_mut();
+        assert_eq!((stream.time_getter())().as_nanos(), 17);
         let inner = stream.into_inner();
         let mut inner = inner;
         let waker = noop_waker();

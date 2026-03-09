@@ -4,11 +4,17 @@
 //! only the most recent item after a quiet period has elapsed.
 
 use super::Stream;
+use crate::time::Sleep;
+use crate::types::Time;
 use pin_project::pin_project;
 use std::future::Future;
 use std::pin::Pin;
 use std::task::{Context, Poll};
-use std::time::{Duration, Instant};
+use std::time::Duration;
+
+fn wall_clock_now() -> Time {
+    crate::time::wall_now()
+}
 
 /// A stream that debounces items, emitting only after a quiet period.
 ///
@@ -23,8 +29,10 @@ use std::time::{Duration, Instant};
 ///
 /// # Note
 ///
-/// This combinator uses wall-clock time via `std::time::Instant` and
-/// requires the executor to re-poll after the quiet period expires.
+/// By default this combinator uses the runtime wall clock via
+/// [`crate::time::wall_now`], but tests and adapters can override that with
+/// [`Debounce::with_time_getter`]. The executor still needs to re-poll after
+/// the quiet period expires.
 /// For proper async timer integration, consider pairing with a timeout
 /// or interval-driven polling loop.
 #[pin_project]
@@ -34,11 +42,12 @@ pub struct Debounce<S: Stream> {
     stream: S,
     period: Duration,
     /// The most recently received item and when it was received.
-    pending: Option<(S::Item, Instant)>,
+    pending: Option<(S::Item, Time)>,
     /// Whether the underlying stream has ended.
     done: bool,
     /// Timer future for delayed wakeup (avoids spin-loop).
     timer: Option<Pin<Box<dyn Future<Output = ()> + Send>>>,
+    time_getter: fn() -> Time,
 }
 
 impl<S: Stream + std::fmt::Debug> std::fmt::Debug for Debounce<S> {
@@ -54,12 +63,18 @@ impl<S: Stream + std::fmt::Debug> std::fmt::Debug for Debounce<S> {
 impl<S: Stream> Debounce<S> {
     /// Creates a new `Debounce` stream.
     pub(crate) fn new(stream: S, period: Duration) -> Self {
+        Self::with_time_getter(stream, period, wall_clock_now)
+    }
+
+    /// Creates a new `Debounce` stream with a custom time source.
+    pub fn with_time_getter(stream: S, period: Duration, time_getter: fn() -> Time) -> Self {
         Self {
             stream,
             period,
             pending: None,
             done: false,
             timer: None,
+            time_getter,
         }
     }
 
@@ -77,6 +92,11 @@ impl<S: Stream> Debounce<S> {
     pub fn into_inner(self) -> S {
         self.stream
     }
+
+    /// Returns the configured time source.
+    pub const fn time_getter(&self) -> fn() -> Time {
+        self.time_getter
+    }
 }
 
 impl<S: Stream> Stream for Debounce<S> {
@@ -91,7 +111,7 @@ impl<S: Stream> Stream for Debounce<S> {
             loop {
                 match this.stream.as_mut().poll_next(cx) {
                     Poll::Ready(Some(item)) => {
-                        *this.pending = Some((item, Instant::now()));
+                        *this.pending = Some((item, (this.time_getter)()));
                         // New item arrived, reset the timer.
                         *this.timer = None;
                     }
@@ -106,16 +126,22 @@ impl<S: Stream> Stream for Debounce<S> {
 
         // Check if the buffered item's quiet period has elapsed.
         if let Some((_, received_at)) = this.pending.as_ref() {
-            if *this.done || received_at.elapsed() >= *this.period {
+            let now = (this.time_getter)();
+            let elapsed = Duration::from_nanos(now.duration_since(*received_at));
+            if *this.done || elapsed >= *this.period {
                 *this.timer = None;
                 let (item, _) = this.pending.take().unwrap();
                 return Poll::Ready(Some(item));
             }
             // Set up a timer for the remaining quiet period.
-            let remaining = this.period.saturating_sub(received_at.elapsed());
+            let remaining = this.period.saturating_sub(elapsed);
             if this.timer.is_none() || !had_pending_before {
-                let now = crate::time::wall_now();
-                *this.timer = Some(Box::pin(crate::time::sleep(now, remaining)));
+                let remaining_nanos = remaining.as_nanos().min(u128::from(u64::MAX)) as u64;
+                let deadline = now.saturating_add_nanos(remaining_nanos);
+                *this.timer = Some(Box::pin(Sleep::with_time_getter(
+                    deadline,
+                    *this.time_getter,
+                )));
             }
             // Poll the timer to register the waker for delayed wakeup.
             if let Some(ref mut timer) = *this.timer {
@@ -142,7 +168,10 @@ mod tests {
     use crate::stream::iter;
     use std::pin::Pin;
     use std::sync::Arc;
+    use std::sync::atomic::{AtomicU64, Ordering};
     use std::task::{Poll, Wake, Waker};
+
+    static TEST_NOW_NANOS: AtomicU64 = AtomicU64::new(0);
 
     struct NoopWaker;
 
@@ -157,6 +186,14 @@ mod tests {
     fn init_test(name: &str) {
         crate::test_utils::init_test_logging();
         crate::test_phase!(name);
+    }
+
+    fn set_test_time(nanos: u64) {
+        TEST_NOW_NANOS.store(nanos, Ordering::SeqCst);
+    }
+
+    fn test_time() -> Time {
+        Time::from_nanos(TEST_NOW_NANOS.load(Ordering::SeqCst))
     }
 
     #[test]
@@ -239,9 +276,12 @@ mod tests {
     #[test]
     fn debounce_accessors() {
         init_test("debounce_accessors");
-        let mut stream = Debounce::new(iter(vec![1, 2]), Duration::from_millis(100));
+        set_test_time(17);
+        let mut stream =
+            Debounce::with_time_getter(iter(vec![1, 2]), Duration::from_millis(100), test_time);
         let _ref = stream.get_ref();
         let _mut = stream.get_mut();
+        assert_eq!((stream.time_getter())().as_nanos(), 17);
         let inner = stream.into_inner();
         let mut inner = inner;
         let waker = noop_waker();
@@ -274,8 +314,10 @@ mod tests {
     #[test]
     fn debounce_emits_immediately_when_timer_future_is_ready() {
         init_test("debounce_emits_immediately_when_timer_future_is_ready");
-        let mut stream = Debounce::new(PendingStream, Duration::from_mins(1));
-        stream.pending = Some((7, Instant::now()));
+        set_test_time(0);
+        let mut stream =
+            Debounce::with_time_getter(PendingStream, Duration::from_mins(1), test_time);
+        stream.pending = Some((7, Time::from_nanos(0)));
         stream.timer = Some(Box::pin(std::future::ready(())));
 
         let waker = noop_waker();
@@ -287,5 +329,31 @@ mod tests {
         assert!(stream.pending.is_none(), "pending item should be drained");
         assert!(stream.timer.is_none(), "timer should be cleared after emit");
         crate::test_complete!("debounce_emits_immediately_when_timer_future_is_ready");
+    }
+
+    #[test]
+    fn debounce_respects_custom_time_getter_without_sleeping() {
+        init_test("debounce_respects_custom_time_getter_without_sleeping");
+        set_test_time(0);
+        let mut stream =
+            Debounce::with_time_getter(PendingStream, Duration::from_secs(5), test_time);
+        stream.pending = Some((11, Time::from_nanos(0)));
+
+        let waker = noop_waker();
+        let mut cx = Context::from_waker(&waker);
+
+        assert_eq!(Pin::new(&mut stream).poll_next(&mut cx), Poll::Pending);
+        assert!(stream.pending.is_some(), "item should still be buffered");
+        assert!(stream.timer.is_some(), "timer should be armed");
+
+        set_test_time(Duration::from_secs(5).as_nanos() as u64);
+
+        assert_eq!(
+            Pin::new(&mut stream).poll_next(&mut cx),
+            Poll::Ready(Some(11))
+        );
+        assert!(stream.pending.is_none(), "pending item should be emitted");
+        assert!(stream.timer.is_none(), "timer should be cleared after emit");
+        crate::test_complete!("debounce_respects_custom_time_getter_without_sleeping");
     }
 }
