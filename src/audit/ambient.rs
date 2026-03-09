@@ -81,16 +81,6 @@ pub const KNOWN_FINDINGS: &[AmbientFinding] = &[
         exemption_reason: Some("Timer driver is the time provider"),
     },
     AmbientFinding {
-        file: "server/connection.rs",
-        line: 125,
-        evidence_pattern: "Instant::now()",
-        category: AmbientCategory::Time,
-        severity: Severity::Warning,
-        description: "Instant::now() in ConnectionManager::accept()",
-        exempt: false,
-        exemption_reason: None,
-    },
-    AmbientFinding {
         file: "runtime/blocking_pool.rs",
         line: 194,
         evidence_pattern: "std::time::Instant::now()",
@@ -122,17 +112,8 @@ pub const KNOWN_FINDINGS: &[AmbientFinding] = &[
         exemption_reason: Some("Blocking pool requires real OS threads by design"),
     },
     // ── Entropy ─────────────────────────────────────────────────────────
-    AmbientFinding {
-        file: "net/websocket/frame.rs",
-        line: 768,
-        evidence_pattern: "getrandom::fill(",
-        category: AmbientCategory::Entropy,
-        severity: Severity::Critical,
-        description: "getrandom::fill() for WebSocket mask key",
-        exempt: false,
-        exemption_reason: None,
-    },
-    // NOTE: net/websocket/handshake.rs was fixed — now uses EntropySource capability.
+    // NOTE: net/websocket/handshake.rs and net/websocket/frame.rs now use
+    // EntropySource capability plumbing instead of direct ambient randomness.
     // ── IO ──────────────────────────────────────────────────────────────
     AmbientFinding {
         file: "web/debug.rs",
@@ -192,12 +173,11 @@ mod tests {
     }
 
     #[test]
-    fn critical_findings_exist() {
+    fn critical_findings_resolved() {
         let critical = count_by_severity(Severity::Critical);
-        // Critical: WebSocket frame masking still bypasses Cx entropy.
         assert!(
-            critical >= 1,
-            "Expected at least 1 non-exempt critical finding, got {critical}"
+            critical == 0,
+            "Expected zero non-exempt critical findings, got {critical}"
         );
     }
 
