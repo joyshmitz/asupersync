@@ -597,6 +597,7 @@ impl Default for Decoder {
 }
 
 /// Encode an integer using HPACK integer encoding.
+#[inline]
 fn encode_integer(dst: &mut BytesMut, value: usize, prefix_bits: u8, prefix: u8) {
     let max_first = (1 << prefix_bits) - 1;
 
@@ -712,6 +713,7 @@ fn encode_huffman(src: &[u8]) -> Vec<u8> {
 }
 
 /// Encode a string (with optional Huffman encoding per RFC 7541 Section 5.2).
+#[inline]
 fn encode_string(dst: &mut BytesMut, value: &str, use_huffman: bool) {
     if use_huffman {
         let encoded = encode_huffman(value.as_bytes());

@@ -143,17 +143,20 @@ impl FrameHeader {
     }
 
     /// Write this frame header to a buffer.
+    #[inline]
     pub fn write(&self, dst: &mut BytesMut) {
-        dst.reserve(FRAME_HEADER_SIZE);
-        dst.put_u8((self.length >> 16) as u8);
-        dst.put_u8((self.length >> 8) as u8);
-        dst.put_u8(self.length as u8);
-        dst.put_u8(self.frame_type);
-        dst.put_u8(self.flags);
-        dst.put_u8(((self.stream_id >> 24) & 0x7f) as u8);
-        dst.put_u8((self.stream_id >> 16) as u8);
-        dst.put_u8((self.stream_id >> 8) as u8);
-        dst.put_u8(self.stream_id as u8);
+        let buf: [u8; FRAME_HEADER_SIZE] = [
+            (self.length >> 16) as u8,
+            (self.length >> 8) as u8,
+            self.length as u8,
+            self.frame_type,
+            self.flags,
+            ((self.stream_id >> 24) & 0x7f) as u8,
+            (self.stream_id >> 16) as u8,
+            (self.stream_id >> 8) as u8,
+            self.stream_id as u8,
+        ];
+        dst.extend_from_slice(&buf);
     }
 
     /// Check if the frame has a specific flag set.
@@ -205,6 +208,7 @@ impl Frame {
     }
 
     /// Encode this frame to bytes.
+    #[inline]
     pub fn encode(&self, dst: &mut BytesMut) {
         match self {
             Self::Data(f) => f.encode(dst),
@@ -276,6 +280,7 @@ impl DataFrame {
     }
 
     /// Encode this frame.
+    #[inline]
     pub fn encode(&self, dst: &mut BytesMut) {
         let mut flags = 0u8;
         if self.end_stream {
@@ -394,6 +399,7 @@ impl HeadersFrame {
     }
 
     /// Encode this frame.
+    #[inline]
     pub fn encode(&self, dst: &mut BytesMut) {
         let mut flags = 0u8;
         if self.end_stream {
@@ -492,6 +498,7 @@ impl PriorityFrame {
     }
 
     /// Encode this frame.
+    #[inline]
     pub fn encode(&self, dst: &mut BytesMut) {
         let header = FrameHeader {
             length: 5,
@@ -552,6 +559,7 @@ impl RstStreamFrame {
     }
 
     /// Encode this frame.
+    #[inline]
     pub fn encode(&self, dst: &mut BytesMut) {
         let header = FrameHeader {
             length: 4,
@@ -633,6 +641,7 @@ impl SettingsFrame {
     }
 
     /// Encode this frame.
+    #[inline]
     pub fn encode(&self, dst: &mut BytesMut) {
         let mut flags = 0u8;
         if self.ack {
@@ -782,6 +791,7 @@ impl PushPromiseFrame {
     }
 
     /// Encode this frame.
+    #[inline]
     pub fn encode(&self, dst: &mut BytesMut) {
         let mut flags = 0u8;
         if self.end_headers {
@@ -848,6 +858,7 @@ impl PingFrame {
     }
 
     /// Encode this frame.
+    #[inline]
     pub fn encode(&self, dst: &mut BytesMut) {
         let mut flags = 0u8;
         if self.ack {
@@ -916,6 +927,7 @@ impl GoAwayFrame {
     }
 
     /// Encode this frame.
+    #[inline]
     pub fn encode(&self, dst: &mut BytesMut) {
         let header = FrameHeader {
             length: (8 + self.debug_data.len()) as u32,
@@ -982,6 +994,7 @@ impl WindowUpdateFrame {
     }
 
     /// Encode this frame.
+    #[inline]
     pub fn encode(&self, dst: &mut BytesMut) {
         let header = FrameHeader {
             length: 4,
@@ -1020,6 +1033,7 @@ impl ContinuationFrame {
     }
 
     /// Encode this frame.
+    #[inline]
     pub fn encode(&self, dst: &mut BytesMut) {
         let mut flags = 0u8;
         if self.end_headers {
