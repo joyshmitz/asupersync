@@ -13,7 +13,7 @@
 mod common;
 
 use asupersync::raptorq::decoder::{DecodeError, InactivationDecoder, ReceivedSymbol};
-use asupersync::raptorq::gf256::Gf256;
+use asupersync::raptorq::gf256::{Gf256, Gf256ProfilePackId, gf256_profile_pack_catalog};
 use asupersync::raptorq::proof::ProofOutcome;
 use asupersync::raptorq::systematic::{ConstraintMatrix, SystematicEncoder, SystematicParams};
 use asupersync::types::ObjectId;
@@ -1980,6 +1980,82 @@ fn e5_simd_ablation_artifact_matches_current_x86_defaults() {
         decision["changes"]["addmul_min_lane"].as_u64(),
         Some(8192),
         "E5 ablation decision must keep the selected x86 addmul lane floor"
+    );
+}
+
+/// Validate the live GF256 x86 profile-pack metadata stays aligned with the
+/// canonical 2026-03-04 E5 default-contract artifact.
+#[test]
+fn e5_live_gf256_catalog_matches_current_x86_default_contract() {
+    let artifact: serde_json::Value = serde_json::from_str(include_str!(
+        "../artifacts/raptorq_track_e_gf256_bench_v1.json"
+    ))
+    .expect("Track-E benchmark artifact must be valid JSON");
+    let decision = &artifact["simd_policy_ablation_2026_03_04"]["decision"];
+    let x86 = gf256_profile_pack_catalog()
+        .iter()
+        .find(|metadata| metadata.profile_pack == Gf256ProfilePackId::X86Avx2BalancedV1)
+        .expect("x86 profile-pack metadata must exist");
+
+    assert_eq!(
+        decision["decision_role"].as_str(),
+        Some("canonical_current_x86_default_contract"),
+        "E5 artifact must keep the current x86-default contract role explicit"
+    );
+    assert_eq!(
+        x86.architecture_class.as_str(),
+        "x86-avx2",
+        "live x86 profile-pack metadata must stay architecture-specific"
+    );
+    assert_eq!(
+        x86.selected_tuning_candidate_id, "x86-avx2-t32-u4-pf64-split-balanced-v1",
+        "live x86 profile-pack metadata must keep the selected split-biased candidate"
+    );
+    assert!(
+        x86.selected_tuning_candidate_id.contains("split-balanced"),
+        "live x86 profile-pack metadata must stay on the split-biased candidate"
+    );
+    assert!(
+        x86.mul_min_total > x86.mul_max_total,
+        "live x86 profile-pack metadata must keep dual-mul auto disabled by default"
+    );
+    assert_eq!(
+        x86.addmul_min_total,
+        24 * 1024,
+        "live x86 profile-pack metadata must keep the selected addmul auto-window floor"
+    );
+    assert_eq!(
+        x86.addmul_max_total,
+        32 * 1024,
+        "live x86 profile-pack metadata must keep the selected addmul auto-window ceiling"
+    );
+    assert_eq!(
+        x86.addmul_min_lane,
+        8 * 1024,
+        "live x86 profile-pack metadata must keep the selected addmul lane floor"
+    );
+    assert_eq!(
+        x86.replay_pointer, "replay:rq-e-gf256-profile-pack-v3",
+        "live x86 profile-pack metadata must keep the documented replay contract"
+    );
+    assert_eq!(
+        x86.command_bundle, "rch exec -- cargo bench --bench raptorq_benchmark -- gf256_primitives",
+        "live x86 profile-pack metadata must keep the manifest command-bundle contract"
+    );
+    assert_eq!(
+        decision["changes"]["mul_window"].as_str(),
+        Some("unchanged: disabled (mul_min_total > mul_max_total)"),
+        "artifact must keep the x86 mul-window contract in sync with live metadata"
+    );
+    assert_eq!(
+        decision["changes"]["addmul_window"].as_str(),
+        Some("24576..32768 total bytes"),
+        "artifact must keep the x86 addmul-window contract in sync with live metadata"
+    );
+    assert_eq!(
+        decision["changes"]["addmul_min_lane"].as_u64(),
+        Some(x86.addmul_min_lane as u64),
+        "artifact must keep the x86 addmul lane-floor contract in sync with live metadata"
     );
 }
 
