@@ -8,7 +8,7 @@ members = [
     "franken_kernel",
     "franken_evidence",
     "franken_decision",
-    "frankenlab",
+    "frankenlab", "drop_unwrap_finder",
 ]
 exclude = ["fuzz"]
 

@@ -1698,7 +1698,9 @@ impl<Caps> Cx<Caps> {
     pub(crate) fn set_cancel_internal(&self, value: bool) {
         let mut inner = self.inner.write();
         inner.cancel_requested = value;
-        inner.fast_cancel.store(value, std::sync::atomic::Ordering::Release);
+        inner
+            .fast_cancel
+            .store(value, std::sync::atomic::Ordering::Release);
         if !value {
             inner.cancel_reason = None;
         }

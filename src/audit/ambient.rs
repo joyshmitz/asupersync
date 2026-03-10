@@ -82,8 +82,8 @@ pub const KNOWN_FINDINGS: &[AmbientFinding] = &[
     },
     AmbientFinding {
         file: "runtime/blocking_pool.rs",
-        line: 194,
-        evidence_pattern: "std::time::Instant::now()",
+        line: 62,
+        evidence_pattern: "Instant::now()",
         category: AmbientCategory::Time,
         severity: Severity::Info,
         description: "Instant::now() in blocking pool timeout",
@@ -103,7 +103,7 @@ pub const KNOWN_FINDINGS: &[AmbientFinding] = &[
     },
     AmbientFinding {
         file: "runtime/blocking_pool.rs",
-        line: 622,
+        line: 688,
         evidence_pattern: "thread::Builder::new()",
         category: AmbientCategory::Spawn,
         severity: Severity::Info,

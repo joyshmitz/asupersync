@@ -328,12 +328,12 @@ mod tests {
     use crate::types::{Budget, RegionId, TaskId};
     #[cfg(unix)]
     use nix::fcntl::{FcntlArg, OFlag, fcntl};
+    use std::cell::Cell;
     use std::net::SocketAddr;
     use std::sync::Arc;
     use std::sync::atomic::{AtomicUsize, Ordering};
     use std::task::{Context, Wake, Waker};
     use std::time::Instant;
-    use std::cell::Cell;
 
     thread_local! {
         static TEST_NOW_NANOS: Cell<u64> = const { Cell::new(0) };

@@ -400,7 +400,9 @@ impl Notified<'_> {
                         //    If `notified` were true, we would have returned `Ready` above.
                         // 2. By `WaitSlab::remove()`. But `remove()` is only called when we
                         //    clear `self.waiter_index`, so we couldn't be here with this index.
-                        unreachable!("waker is never None while notified is false for a live Notified future");
+                        unreachable!(
+                            "waker is never None while notified is false for a live Notified future"
+                        );
                     }
                 }
             } else {

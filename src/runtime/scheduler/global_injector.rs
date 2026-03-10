@@ -47,13 +47,10 @@ impl Ord for TimedTask {
     fn cmp(&self, other: &Self) -> CmpOrdering {
         // Reverse ordering for min-heap (earliest deadline first).
         // For equal deadlines, lower generation (earlier insertion) comes first.
-        other
-            .deadline
-            .cmp(&self.deadline)
-            .then_with(|| {
-                let diff = other.generation.wrapping_sub(self.generation).cast_signed();
-                diff.cmp(&0)
-            })
+        other.deadline.cmp(&self.deadline).then_with(|| {
+            let diff = other.generation.wrapping_sub(self.generation).cast_signed();
+            diff.cmp(&0)
+        })
     }
 }
 
