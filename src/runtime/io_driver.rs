@@ -516,9 +516,11 @@ impl IoDriverHandle {
         interest: Interest,
         waker: Waker,
     ) -> io::Result<IoRegistration> {
-        if self.is_polling.load(Ordering::Acquire) {
-            let _ = self.reactor.wake();
-        }
+        // Always nudge the reactor before mutating registrations. Relying on a
+        // sampled `is_polling` flag is racy: a poller can transition into the
+        // blocking wait right after this load, which is especially harmful for
+        // io_uring because register/modify also need access to the shared ring.
+        let _ = self.reactor.wake();
         let token = {
             let mut driver = self.inner.lock();
             driver.register(source, interest, waker)?
@@ -528,7 +530,6 @@ impl IoDriverHandle {
             Arc::downgrade(&self.inner),
             interest,
             self.reactor.clone(),
-            self.is_polling.clone(),
         ))
     }
 
@@ -657,7 +658,6 @@ pub struct IoRegistration {
     interest: Interest,
     driver: Weak<Mutex<IoDriver>>,
     reactor: Arc<dyn Reactor>,
-    is_polling: Arc<AtomicBool>,
     /// Cached copy of the last waker stored in the driver slab.
     /// Used for `Waker::will_wake` comparison to avoid unnecessary
     /// atomic ref-count bumps and mutex acquisitions on the hot path.
@@ -675,23 +675,22 @@ impl IoRegistration {
         driver: Weak<Mutex<IoDriver>>,
         interest: Interest,
         reactor: Arc<dyn Reactor>,
-        is_polling: Arc<AtomicBool>,
     ) -> Self {
         Self {
             token,
             interest,
             driver,
             reactor,
-            is_polling,
             cached_waker: None,
             deregistered: false,
         }
     }
 
     fn wake_polling_reactor(&self) {
-        if self.is_polling.load(Ordering::Acquire) {
-            let _ = self.reactor.wake();
-        }
+        // Mutations must wake unconditionally. A concurrent poll can enter its
+        // blocking wait after any sampled visibility check but before we submit
+        // the fresh register/modify/deregister operation.
+        let _ = self.reactor.wake();
     }
 
     /// Returns the registration token.
@@ -1886,6 +1885,30 @@ mod tests {
     }
 
     #[test]
+    fn io_driver_handle_register_preemptively_wakes_reactor() {
+        init_test("io_driver_handle_register_preemptively_wakes_reactor");
+        let reactor = Arc::new(WakeTrackingBlockingReactor::new());
+        let reactor_handle: Arc<dyn Reactor> = reactor.clone();
+        let driver = IoDriverHandle::new(reactor_handle);
+        let source = TestFdSource;
+        let (waker, _) = create_test_waker();
+
+        let reg = driver
+            .register(&source, Interest::READABLE, waker)
+            .expect("register should succeed");
+        let wake_calls = reactor.wake_calls();
+        crate::assert_with_log!(
+            wake_calls >= 1,
+            "register preemptively wakes reactor",
+            true,
+            wake_calls >= 1
+        );
+        drop(reg);
+
+        crate::test_complete!("io_driver_handle_register_preemptively_wakes_reactor");
+    }
+
+    #[test]
     fn io_registration_rearm_wakes_inflight_poll() {
         init_test("io_registration_rearm_wakes_inflight_poll");
         let reactor = Arc::new(WakeTrackingBlockingReactor::new());
@@ -1926,6 +1949,34 @@ mod tests {
         drop(reg);
 
         crate::test_complete!("io_registration_rearm_wakes_inflight_poll");
+    }
+
+    #[test]
+    fn io_registration_rearm_preemptively_wakes_reactor() {
+        init_test("io_registration_rearm_preemptively_wakes_reactor");
+        let reactor = Arc::new(WakeTrackingBlockingReactor::new());
+        let reactor_handle: Arc<dyn Reactor> = reactor.clone();
+        let driver = IoDriverHandle::new(reactor_handle);
+        let source = TestFdSource;
+        let (waker, _) = create_test_waker();
+        let mut reg = driver
+            .register(&source, Interest::READABLE, waker)
+            .expect("register should succeed");
+        let baseline = reactor.wake_calls();
+
+        let (new_waker, _) = create_test_waker();
+        reg.rearm(Interest::READABLE, &new_waker)
+            .expect("rearm should succeed");
+
+        let wake_calls = reactor.wake_calls();
+        crate::assert_with_log!(
+            wake_calls >= baseline + 1,
+            "rearm preemptively wakes reactor",
+            true,
+            wake_calls >= baseline + 1
+        );
+
+        crate::test_complete!("io_registration_rearm_preemptively_wakes_reactor");
     }
 
     #[test]

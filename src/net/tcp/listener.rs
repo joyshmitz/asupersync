@@ -122,6 +122,21 @@ impl TcpListener {
                     Err(err) => return Poll::Ready(Err(err)),
                 };
 
+                // Close the re-arm race for readiness backends that can miss a
+                // listener wake when a connection lands between the initial
+                // `accept()` returning WouldBlock and the fresh poll
+                // registration becoming effective. If a client arrived during
+                // that window, consume it immediately instead of sleeping until
+                // another connection retriggers readiness.
+                match self.inner.accept() {
+                    Ok((stream, addr)) => {
+                        self.reset_accept_storm();
+                        return Poll::Ready(TcpStream::from_std(stream).map(|stream| (stream, addr)));
+                    }
+                    Err(ref err) if err.kind() == io::ErrorKind::WouldBlock => {}
+                    Err(err) => return Poll::Ready(Err(err)),
+                }
+
                 let delay = if mode == InterestRegistrationMode::FallbackPoll {
                     FALLBACK_ACCEPT_BACKOFF.max(storm_backoff)
                 } else if storm_backoff > REARMED_ACCEPT_BACKOFF_BASE {
@@ -308,6 +323,7 @@ impl TcpListenerApi for TcpListener {
 #[cfg(test)]
 mod tests {
     use super::*;
+    use crate::runtime::reactor::{Events, Reactor, Source, Token};
     use crate::runtime::{IoDriverHandle, LabReactor};
     use crate::types::{Budget, RegionId, TaskId};
     #[cfg(unix)]
@@ -392,6 +408,96 @@ mod tests {
         assert!(matches!(poll, Poll::Pending));
         let registered = listener.registration.lock().is_some();
         assert!(registered);
+    }
+
+    struct HookReactor {
+        on_register: Arc<dyn Fn() + Send + Sync>,
+        registrations: AtomicUsize,
+    }
+
+    impl std::fmt::Debug for HookReactor {
+        fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+            f.debug_struct("HookReactor")
+                .field(
+                    "registrations",
+                    &self.registrations.load(Ordering::SeqCst),
+                )
+                .finish()
+        }
+    }
+
+    impl Reactor for HookReactor {
+        fn register(
+            &self,
+            _source: &dyn Source,
+            _token: Token,
+            _interest: Interest,
+        ) -> io::Result<()> {
+            self.registrations.fetch_add(1, Ordering::SeqCst);
+            (self.on_register)();
+            Ok(())
+        }
+
+        fn modify(&self, _token: Token, _interest: Interest) -> io::Result<()> {
+            Ok(())
+        }
+
+        fn deregister(&self, _token: Token) -> io::Result<()> {
+            self.registrations
+                .fetch_update(Ordering::SeqCst, Ordering::SeqCst, |current| {
+                    current.checked_sub(1)
+                })
+                .ok();
+            Ok(())
+        }
+
+        fn poll(&self, events: &mut Events, _timeout: Option<Duration>) -> io::Result<usize> {
+            events.clear();
+            Ok(0)
+        }
+
+        fn wake(&self) -> io::Result<()> {
+            Ok(())
+        }
+
+        fn registration_count(&self) -> usize {
+            self.registrations.load(Ordering::SeqCst)
+        }
+    }
+
+    #[test]
+    fn listener_accepts_connection_that_arrives_during_register_window() {
+        let raw = net::TcpListener::bind("127.0.0.1:0").expect("bind");
+        let addr = raw.local_addr().expect("local addr");
+        raw.set_nonblocking(true).expect("nonblocking");
+
+        let listener = TcpListener::from_std(raw).expect("wrap listener");
+        let reactor = Arc::new(HookReactor {
+            on_register: Arc::new(move || {
+                let _client = net::TcpStream::connect(addr).expect("client connect");
+            }),
+            registrations: AtomicUsize::new(0),
+        });
+        let driver = IoDriverHandle::new(reactor);
+        let cx = Cx::new_with_observability(
+            RegionId::new_for_test(0, 0),
+            TaskId::new_for_test(0, 0),
+            Budget::INFINITE,
+            None,
+            Some(driver),
+            None,
+        );
+        let _guard = Cx::set_current(Some(cx));
+
+        let waker = noop_waker();
+        let mut cx = Context::from_waker(&waker);
+
+        let poll = listener.poll_accept(&mut cx);
+        let Poll::Ready(Ok((_stream, peer_addr))) = poll else {
+            panic!("post-register accept recheck should catch the queued connection");
+        };
+
+        assert_eq!(peer_addr.ip(), std::net::Ipv4Addr::LOCALHOST);
     }
 
     #[cfg(unix)]

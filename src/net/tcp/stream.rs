@@ -388,9 +388,11 @@ impl TcpStream {
     #[cfg(not(target_arch = "wasm32"))]
     #[inline]
     fn register_interest(&mut self, cx: &Context<'_>, interest: Interest) -> io::Result<()> {
-        let mut target_interest = interest;
+        // A plain `TcpStream` has a single waiter. Re-arm only the caller's
+        // current interest instead of sticky-unioning historical bits, which
+        // otherwise keeps stale WRITABLE polls alive during later read waits.
+        let target_interest = interest;
         if let Some(registration) = &mut self.registration {
-            target_interest = registration.interest() | interest;
             // Re-arm reactor interest and conditionally update the waker in a
             // single lock acquisition.  The waker clone is skipped when the
             // task's waker hasn't changed (will_wake guard).
@@ -919,6 +921,7 @@ mod tests {
     struct CountingReactor {
         inner: LabReactor,
         modify_calls: AtomicUsize,
+        last_interest_bits: AtomicUsize,
     }
 
     impl CountingReactor {
@@ -926,11 +929,16 @@ mod tests {
             Arc::new(Self {
                 inner: LabReactor::new(),
                 modify_calls: AtomicUsize::new(0),
+                last_interest_bits: AtomicUsize::new(Interest::empty().bits() as usize),
             })
         }
 
         fn modify_calls(&self) -> usize {
             self.modify_calls.load(Ordering::SeqCst)
+        }
+
+        fn last_interest(&self) -> Interest {
+            Interest::from_bits(self.last_interest_bits.load(Ordering::SeqCst) as u8)
         }
     }
 
@@ -941,11 +949,15 @@ mod tests {
             token: Token,
             interest: Interest,
         ) -> io::Result<()> {
+            self.last_interest_bits
+                .store(interest.bits() as usize, Ordering::SeqCst);
             self.inner.register(source, token, interest)
         }
 
         fn modify(&self, token: Token, interest: Interest) -> io::Result<()> {
             self.modify_calls.fetch_add(1, Ordering::SeqCst);
+            self.last_interest_bits
+                .store(interest.bits() as usize, Ordering::SeqCst);
             self.inner.modify(token, interest)
         }
 
@@ -1258,6 +1270,62 @@ mod tests {
             "connect waiter must re-arm on every poll, even when interest is unchanged"
         );
         assert!(registration.is_some(), "registration should remain active");
+    }
+
+    #[test]
+    fn stream_rearm_replaces_stale_writable_interest() {
+        let listener = TcpListener::bind("127.0.0.1:0").expect("bind listener");
+        let addr = listener.local_addr().expect("local addr");
+        let client = net::TcpStream::connect(addr).expect("connect");
+        let (_server, _) = listener.accept().expect("accept");
+        client.set_nonblocking(true).expect("nonblocking");
+
+        let reactor = CountingReactor::new();
+        let driver = IoDriverHandle::new(reactor.clone());
+        let cx = Cx::new_with_observability(
+            RegionId::new_for_test(0, 0),
+            TaskId::new_for_test(0, 0),
+            Budget::INFINITE,
+            None,
+            Some(driver),
+            None,
+        );
+        let _guard = Cx::set_current(Some(cx));
+
+        let mut stream = TcpStream::from_std(client).expect("wrap stream");
+        let waker = noop_waker();
+        let task_cx = Context::from_waker(&waker);
+
+        stream
+            .register_interest(&task_cx, Interest::WRITABLE)
+            .expect("register writable");
+        assert_eq!(
+            stream
+                .registration
+                .as_ref()
+                .expect("registration after writable wait")
+                .interest(),
+            Interest::WRITABLE,
+            "initial wait should arm writability only"
+        );
+
+        stream
+            .register_interest(&task_cx, Interest::READABLE)
+            .expect("rearm readable");
+        assert_eq!(
+            reactor.last_interest(),
+            Interest::READABLE,
+            "subsequent read wait must drop the stale writable bit"
+        );
+        assert_eq!(
+            stream
+                .registration
+                .as_ref()
+                .expect("registration after readable wait")
+                .interest(),
+            Interest::READABLE,
+            "registration should track the live caller interest"
+        );
     }
 
     #[test]
