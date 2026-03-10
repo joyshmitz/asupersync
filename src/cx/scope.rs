@@ -157,7 +157,7 @@ pub(crate) fn payload_to_string(payload: &Box<dyn std::any::Any + Send>) -> Stri
 }
 
 struct RegionRunner<'a, Fut> {
-    fut: Pin<Box<CatchUnwind<Fut>>>,
+    fut: Pin<&'a mut CatchUnwind<Fut>>,
     state: Option<&'a mut RuntimeState>,
     child_region: RegionId,
 }
@@ -905,9 +905,10 @@ impl<P: Policy> Scope<'_, P> {
         let child_scope = Scope::<P2>::new(child_region, child_budget);
 
         let fut = f(child_scope, &mut *state);
+        let pinned_fut = std::pin::pin!(CatchUnwind { inner: fut });
 
         let runner = RegionRunner {
-            fut: Box::pin(CatchUnwind { inner: fut }),
+            fut: pinned_fut,
             state: Some(state),
             child_region,
         };
@@ -1167,7 +1168,7 @@ impl<P: Policy> Scope<'_, P> {
 
         let mut futures: Vec<_> = handles
             .iter_mut()
-            .map(|h| Box::pin(h.join_with_drop_reason(cx, CancelReason::race_loser())))
+            .map(|h| h.join_with_drop_reason(cx, CancelReason::race_loser()))
             .collect();
         let mut ready_results: Vec<Option<Result<T, JoinError>>> = std::iter::repeat_with(|| None)
             .take(futures.len())
@@ -1184,7 +1185,7 @@ impl<P: Policy> Scope<'_, P> {
                 if ready_results[i].is_some() {
                     continue;
                 }
-                if let std::task::Poll::Ready(res) = future.as_mut().poll(poll_cx) {
+                if let std::task::Poll::Ready(res) = std::pin::Pin::new(future).poll(poll_cx) {
                     ready_results[i] = Some(res);
                     newly_ready.push(i);
                 }
