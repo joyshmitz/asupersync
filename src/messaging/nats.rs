@@ -19,6 +19,7 @@ use crate::cx::Cx;
 use crate::io::{AsyncRead, AsyncWriteExt, ReadBuf};
 use crate::net::TcpStream;
 use crate::tracing_compat::warn;
+use crate::types::Time;
 use parking_lot::Mutex;
 use std::collections::HashMap;
 use std::fmt;
@@ -28,6 +29,20 @@ use std::sync::Arc;
 use std::sync::atomic::{AtomicU64, Ordering};
 use std::task::Poll;
 use std::time::Duration;
+
+const REQUEST_TIMEOUT_MESSAGE: &str = "request timeout";
+
+fn timeout_now(cx: &Cx) -> Time {
+    cx.timer_driver()
+        .map_or_else(crate::time::wall_now, |driver| driver.now())
+}
+
+fn request_timeout_error() -> NatsError {
+    NatsError::Io(io::Error::new(
+        io::ErrorKind::TimedOut,
+        REQUEST_TIMEOUT_MESSAGE,
+    ))
+}
 
 /// Error type for NATS operations.
 #[derive(Debug)]
@@ -639,6 +654,21 @@ impl NatsClient {
         Ok(())
     }
 
+    async fn read_more_until(&mut self, cx: &Cx, deadline: Time) -> Result<(), NatsError> {
+        let now = timeout_now(cx);
+        let remaining = Duration::from_nanos(deadline.duration_since(now));
+        match crate::time::timeout(now, remaining, self.read_more()).await {
+            Ok(result) => result,
+            Err(_) => Err(request_timeout_error()),
+        }
+    }
+
+    async fn cleanup_request_subscription(&mut self, cx: &Cx, sid: u64, reason: &str) {
+        if let Err(err) = self.unsubscribe(cx, sid).await {
+            warn!(sid, reason, error = %err, "NATS request cleanup failed");
+        }
+    }
+
     /// Try to parse a complete message from the buffer.
     fn try_parse_message(&mut self) -> Result<Option<NatsMessage>, NatsError> {
         let buf = self.read_buf.available();
@@ -904,28 +934,36 @@ impl NatsClient {
         let mut sub = self.subscribe(cx, &inbox).await?;
 
         // Publish request with reply-to inbox
-        self.publish_request(cx, subject, &inbox, payload).await?;
+        if let Err(err) = self.publish_request(cx, subject, &inbox, payload).await {
+            self.cleanup_request_subscription(cx, sub.sid(), "publish_request_failed")
+                .await;
+            return Err(err);
+        }
 
         // Wait for response with timeout
-        let timeout = self.config.request_timeout;
-        let start = std::time::Instant::now();
+        let deadline = timeout_now(cx) + self.config.request_timeout;
 
         loop {
             cx.checkpoint().map_err(|_| NatsError::Cancelled)?;
 
-            // Check timeout
-            if start.elapsed() > timeout {
-                // Clean up subscription
-                self.unsubscribe(cx, sub.sid()).await?;
-                return Err(NatsError::Protocol("request timeout".to_string()));
+            if let Err(err) = self.read_more_until(cx, deadline).await {
+                self.cleanup_request_subscription(cx, sub.sid(), REQUEST_TIMEOUT_MESSAGE)
+                    .await;
+                return Err(err);
             }
-
-            // Try to read any pending messages
-            self.read_more().await?;
 
             // Process messages looking for our reply
             loop {
-                match self.try_parse_message()? {
+                let message = match self.try_parse_message() {
+                    Ok(message) => message,
+                    Err(err) => {
+                        self.cleanup_request_subscription(cx, sub.sid(), "parse_failed")
+                            .await;
+                        return Err(err);
+                    }
+                };
+
+                match message {
                     Some(NatsMessage::Ping) => {
                         self.stream.write_all(b"PONG\r\n").await?;
                         self.stream.flush().await?;
@@ -940,6 +978,8 @@ impl NatsClient {
                         self.dispatch_message(m);
                     }
                     Some(NatsMessage::Err(e)) => {
+                        self.cleanup_request_subscription(cx, sub.sid(), "server_error")
+                            .await;
                         return Err(NatsError::Server(e));
                     }
                     Some(_) => {}
@@ -1242,6 +1282,24 @@ impl Drop for Subscription {
 #[cfg(test)]
 mod tests {
     use super::*;
+    use crate::test_utils::{assert_completes_within, run_test_with_cx};
+    use std::io::{BufRead, BufReader, Read, Write};
+    use std::net::TcpListener;
+    use std::thread;
+
+    fn read_protocol_line(reader: &mut BufReader<std::net::TcpStream>) -> String {
+        let mut line = String::new();
+        let bytes = reader.read_line(&mut line).expect("read protocol line");
+        assert!(bytes > 0, "peer closed before sending a full protocol line");
+        line
+    }
+
+    fn parse_pub_payload_len(header: &str) -> usize {
+        let parts: Vec<_> = header.split_whitespace().collect();
+        assert_eq!(parts.first().copied(), Some("PUB"));
+        assert_eq!(parts.len(), 4, "request publish must include reply-to");
+        parts[3].parse().expect("parse PUB payload length")
+    }
 
     #[test]
     fn test_config_from_url_simple() {
@@ -1521,6 +1579,94 @@ mod tests {
     fn nats_error_source_io() {
         let err = NatsError::Io(io::Error::other("disk"));
         assert!(std::error::Error::source(&err).is_some());
+    }
+
+    #[test]
+    fn nats_request_timeout_error_is_classified_as_timeout() {
+        assert!(request_timeout_error().is_timeout());
+    }
+
+    #[test]
+    fn request_enforces_timeout_while_socket_reads_are_pending() {
+        let listener = TcpListener::bind("127.0.0.1:0").expect("bind test listener");
+        let addr = listener.local_addr().expect("listener addr");
+        let server = thread::spawn(move || {
+            let (mut stream, _) = listener.accept().expect("accept client");
+            stream
+                .set_read_timeout(Some(Duration::from_secs(2)))
+                .expect("set read timeout");
+            stream
+                .write_all(
+                    b"INFO {\"server_id\":\"id\",\"server_name\":\"test\",\"version\":\"2.10.0\",\"proto\":1,\"max_payload\":1048576}\r\n",
+                )
+                .expect("write INFO");
+            stream.flush().expect("flush INFO");
+
+            let mut reader = BufReader::new(stream);
+            let connect = read_protocol_line(&mut reader);
+            assert!(
+                connect.starts_with("CONNECT "),
+                "unexpected CONNECT: {connect:?}"
+            );
+
+            let subscribe = read_protocol_line(&mut reader);
+            assert!(
+                subscribe.starts_with("SUB _INBOX."),
+                "unexpected SUB: {subscribe:?}"
+            );
+
+            let publish = read_protocol_line(&mut reader);
+            assert!(
+                publish.starts_with("PUB svc.echo _INBOX."),
+                "unexpected PUB: {publish:?}"
+            );
+
+            let payload_len = parse_pub_payload_len(&publish);
+            let mut payload = vec![0_u8; payload_len + 2];
+            reader
+                .read_exact(&mut payload)
+                .expect("read request payload");
+            assert_eq!(&payload[..payload_len], b"ping");
+            assert_eq!(&payload[payload_len..], b"\r\n");
+
+            read_protocol_line(&mut reader)
+        });
+
+        run_test_with_cx(|cx| async move {
+            let mut config = NatsConfig::default();
+            config.host = addr.ip().to_string();
+            config.port = addr.port();
+            config.request_timeout = Duration::from_millis(100);
+
+            assert_completes_within(
+                Duration::from_secs(2),
+                "nats request timeout enforcement",
+                move || {
+                    let config = config.clone();
+                    Box::pin(async move {
+                        let mut client = NatsClient::connect_with_config(&cx, config)
+                            .await
+                            .expect("connect to test server");
+                        let err = client
+                            .request(&cx, "svc.echo", b"ping")
+                            .await
+                            .expect_err("request must time out");
+                        assert!(
+                            matches!(err, NatsError::Io(ref io_err) if io_err.kind() == io::ErrorKind::TimedOut),
+                            "expected timed out I/O error, got {err:?}"
+                        );
+                        assert!(err.is_timeout(), "expected timeout classification");
+                    })
+                },
+            )
+            .await;
+        });
+
+        let unsubscribe = server.join().expect("server join");
+        assert!(
+            unsubscribe.starts_with("UNSUB "),
+            "timeout cleanup must unsubscribe, got {unsubscribe:?}"
+        );
     }
 
     #[test]
