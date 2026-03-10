@@ -379,7 +379,7 @@ impl Signal {
                 let notified = self.slot.notify.notified();
                 let current = self.slot.deliveries.load(Ordering::Acquire);
                 if current > self.seen_deliveries {
-                    self.seen_deliveries = current;
+                    self.seen_deliveries = self.seen_deliveries.saturating_add(1);
                     return Some(());
                 }
                 notified.await;
@@ -596,6 +596,33 @@ mod tests {
         let got = futures_lite::future::block_on(stream.recv());
         crate::assert_with_log!(got.is_some(), "recv returns delivery", true, got.is_some());
         crate::test_complete!("signal_recv_observes_delivery");
+    }
+
+    #[cfg(unix)]
+    #[test]
+    fn signal_recv_preserves_multiple_recorded_deliveries() {
+        init_test("signal_recv_preserves_multiple_recorded_deliveries");
+        let mut stream = signal(SignalKind::terminate()).expect("stream available");
+        let dispatcher = dispatcher_for(SignalKind::terminate()).expect("dispatcher");
+        dispatcher.inject(SignalKind::terminate());
+        dispatcher.inject(SignalKind::terminate());
+
+        let first = futures_lite::future::block_on(stream.recv());
+        crate::assert_with_log!(
+            first.is_some(),
+            "first recv consumes one pending delivery",
+            true,
+            first.is_some()
+        );
+
+        let second = futures_lite::future::block_on(stream.recv());
+        crate::assert_with_log!(
+            second.is_some(),
+            "second recv consumes second pending delivery",
+            true,
+            second.is_some()
+        );
+        crate::test_complete!("signal_recv_preserves_multiple_recorded_deliveries");
     }
 
     #[cfg(unix)]
