@@ -239,7 +239,7 @@ mod tests {
         let second = Pin::new(&mut future).poll(&mut cx);
         let expected: Vec<usize> = (0..COLLECT_COOPERATIVE_BUDGET + 5).collect();
         crate::assert_with_log!(
-            second == Poll::Ready(expected),
+            second == Poll::Ready(expected.clone()),
             "second poll completes collection",
             Poll::Ready(expected),
             second

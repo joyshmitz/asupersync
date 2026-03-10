@@ -320,7 +320,7 @@ mod tests {
     use std::cell::Cell;
 
     thread_local! {
-        static TEST_NOW_NANOS: Cell<u64> = Cell::new(0);
+        static TEST_NOW_NANOS: Cell<u64> = const { Cell::new(0) };
     }
 
     #[test]
@@ -350,7 +350,7 @@ mod tests {
     }
 
     fn test_time() -> Time {
-        Time::from_nanos(TEST_NOW_NANOS.with(|t| t.get()))
+        Time::from_nanos(TEST_NOW_NANOS.with(std::cell::Cell::get))
     }
 
     struct CountingWaker {

@@ -970,9 +970,7 @@ mod tests {
             true,
             completed
         );
-        let stats = if let Poll::Ready(stats) = poll {
-            stats
-        } else {
+        let Poll::Ready(stats) = poll else {
             return;
         };
 

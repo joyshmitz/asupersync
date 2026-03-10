@@ -2264,7 +2264,7 @@ mod tests {
     use std::net::TcpListener;
 
     thread_local! {
-        static HTTP_CLIENT_TEST_TIME_NANOS: Cell<u64> = Cell::new(0);
+        static HTTP_CLIENT_TEST_TIME_NANOS: Cell<u64> = const { Cell::new(0) };
     }
 
     fn set_http_client_test_time(nanos: u64) {

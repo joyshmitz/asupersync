@@ -40,7 +40,7 @@ fn bench_region_creation(c: &mut Criterion) {
 
     group.bench_function("create_root_region", |b: &mut criterion::Bencher| {
         b.iter_batched(
-            || RuntimeState::new(),
+            RuntimeState::new,
             |mut state| std::hint::black_box(state.create_root_region(Budget::INFINITE)),
             criterion::BatchSize::SmallInput,
         );

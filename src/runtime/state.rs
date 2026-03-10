@@ -2256,6 +2256,7 @@ impl RuntimeState {
     /// Uses an iterative loop instead of recursion to bound stack depth and
     /// enable future migration to `ShardGuard`-based locking (where recursive
     /// self-calls would deadlock on non-reentrant mutexes).
+    #[allow(clippy::too_many_lines)]
     pub fn advance_region_state(&mut self, initial_region: RegionId) {
         let mut current = Some(initial_region);
 
