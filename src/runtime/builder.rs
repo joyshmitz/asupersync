@@ -1439,6 +1439,7 @@ impl RuntimeInner {
             thread_name_prefix: format!("{}-blocking", config.thread_name_prefix),
             on_thread_start: config.on_thread_start.clone(),
             on_thread_stop: config.on_thread_stop.clone(),
+            ..Default::default()
         };
         Some(crate::runtime::blocking_pool::BlockingPool::with_config(
             config.blocking.min_threads,

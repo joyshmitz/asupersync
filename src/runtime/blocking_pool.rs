@@ -47,10 +47,32 @@ use std::fmt;
 use std::sync::Arc;
 use std::sync::atomic::{AtomicBool, AtomicU64, AtomicUsize, Ordering};
 use std::thread::{self, JoinHandle as ThreadJoinHandle};
-use std::time::Duration;
+use std::time::{Duration, Instant};
 
 /// Default idle timeout before retiring excess threads.
 const DEFAULT_IDLE_TIMEOUT: Duration = Duration::from_secs(10);
+
+/// Time source hook used by timeout accounting paths.
+pub type TimeGetter = fn() -> Instant;
+
+/// Sleep hook used by blocking wait loops outside worker threads.
+pub type SleepFn = fn(Duration);
+
+fn wall_clock_now() -> Instant {
+    Instant::now()
+}
+
+fn blocking_thread_sleep(duration: Duration) {
+    thread::sleep(duration);
+}
+
+fn timeout_deadline(timeout: Duration, time_getter: TimeGetter) -> Instant {
+    time_getter() + timeout
+}
+
+fn timeout_remaining(deadline: Instant, time_getter: TimeGetter) -> Duration {
+    deadline.saturating_duration_since(time_getter())
+}
 
 /// A handle to the blocking pool that can be cloned and shared.
 #[derive(Clone)]
@@ -122,6 +144,10 @@ struct BlockingPoolInner {
     mutex: Mutex<()>,
     /// Idle timeout for excess threads.
     idle_timeout: Duration,
+    /// Time source for timeout accounting.
+    time_getter: TimeGetter,
+    /// Sleep hook for blocking wait loops.
+    sleep_fn: SleepFn,
     /// Thread name prefix.
     thread_name_prefix: String,
     /// Callback when a thread starts.
@@ -155,14 +181,17 @@ struct BlockingTaskCompletion {
     condvar: Condvar,
     /// Mutex for condition variable.
     mutex: Mutex<()>,
+    /// Time source for timeout accounting.
+    time_getter: TimeGetter,
 }
 
 impl BlockingTaskCompletion {
-    fn new() -> Self {
+    fn new(time_getter: TimeGetter) -> Self {
         Self {
             done: AtomicBool::new(false),
             condvar: Condvar::new(),
             mutex: Mutex::new(()),
+            time_getter,
         }
     }
 
@@ -189,10 +218,10 @@ impl BlockingTaskCompletion {
         if self.done.load(Ordering::Acquire) {
             return true;
         }
-        let deadline = std::time::Instant::now() + timeout;
+        let deadline = timeout_deadline(timeout, self.time_getter);
         let mut guard = self.mutex.lock();
         while !self.done.load(Ordering::Acquire) {
-            let remaining = deadline.saturating_duration_since(std::time::Instant::now());
+            let remaining = timeout_remaining(deadline, self.time_getter);
             if remaining.is_zero() {
                 return false;
             }
@@ -309,6 +338,8 @@ impl BlockingPool {
             condvar: Condvar::new(),
             mutex: Mutex::new(()),
             idle_timeout: options.idle_timeout,
+            time_getter: options.time_getter,
+            sleep_fn: options.sleep_fn,
             thread_name_prefix: options.thread_name_prefix,
             on_thread_start: options.on_thread_start,
             on_thread_stop: options.on_thread_stop,
@@ -357,7 +388,7 @@ impl BlockingPool {
     {
         let task_id = self.inner.next_task_id.fetch_add(1, Ordering::Relaxed);
         let cancelled = Arc::new(AtomicBool::new(false));
-        let completion = Arc::new(BlockingTaskCompletion::new());
+        let completion = Arc::new(BlockingTaskCompletion::new(self.inner.time_getter));
         let handle = BlockingTaskHandle {
             task_id,
             cancelled: Arc::clone(&cancelled),
@@ -442,12 +473,12 @@ impl BlockingPool {
     pub fn shutdown_and_wait(&self, timeout: Duration) -> bool {
         self.shutdown();
 
-        let deadline = std::time::Instant::now() + timeout;
+        let deadline = timeout_deadline(timeout, self.inner.time_getter);
 
         // Wait for all threads to exit by monitoring active_threads counter.
         // Threads decrement this counter when they exit the worker loop.
         while self.inner.active_threads.load(Ordering::Acquire) > 0 {
-            let remaining = deadline.saturating_duration_since(std::time::Instant::now());
+            let remaining = timeout_remaining(deadline, self.inner.time_getter);
             if remaining.is_zero() {
                 return false;
             }
@@ -456,7 +487,7 @@ impl BlockingPool {
             self.notify_all();
 
             // Wait a bit before checking again
-            thread::sleep(Duration::from_millis(10).min(remaining));
+            (self.inner.sleep_fn)(Duration::from_millis(10).min(remaining));
         }
 
         // All threads have exited, now join the handles to clean up
@@ -514,7 +545,7 @@ impl BlockingPoolHandle {
     {
         let task_id = self.inner.next_task_id.fetch_add(1, Ordering::Relaxed);
         let cancelled = Arc::new(AtomicBool::new(false));
-        let completion = Arc::new(BlockingTaskCompletion::new());
+        let completion = Arc::new(BlockingTaskCompletion::new(self.inner.time_getter));
         let handle = BlockingTaskHandle {
             task_id,
             cancelled: Arc::clone(&cancelled),
@@ -581,6 +612,16 @@ impl BlockingPoolHandle {
 pub struct BlockingPoolOptions {
     /// Idle timeout before retiring excess threads.
     pub idle_timeout: Duration,
+    /// Time source used for timeout accounting.
+    ///
+    /// Primarily intended for deterministic tests and custom runtimes that
+    /// need blocking-pool waits to align with a controlled clock.
+    pub time_getter: TimeGetter,
+    /// Sleep hook used by shutdown wait loops outside worker threads.
+    ///
+    /// Primarily intended for deterministic tests that need to advance a
+    /// synthetic clock without sleeping the host thread.
+    pub sleep_fn: SleepFn,
     /// Thread name prefix.
     pub thread_name_prefix: String,
     /// Callback when a thread starts.
@@ -593,6 +634,8 @@ impl Default for BlockingPoolOptions {
     fn default() -> Self {
         Self {
             idle_timeout: DEFAULT_IDLE_TIMEOUT,
+            time_getter: wall_clock_now,
+            sleep_fn: blocking_thread_sleep,
             thread_name_prefix: "asupersync".to_string(),
             on_thread_start: None,
             on_thread_stop: None,
@@ -604,6 +647,14 @@ impl fmt::Debug for BlockingPoolOptions {
     fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
         f.debug_struct("BlockingPoolOptions")
             .field("idle_timeout", &self.idle_timeout)
+            .field(
+                "custom_time_getter",
+                &(!std::ptr::fn_addr_eq(self.time_getter, wall_clock_now as TimeGetter)),
+            )
+            .field(
+                "custom_sleep_fn",
+                &(!std::ptr::fn_addr_eq(self.sleep_fn, blocking_thread_sleep as SleepFn)),
+            )
             .field("thread_name_prefix", &self.thread_name_prefix)
             .field("on_thread_start", &self.on_thread_start.is_some())
             .field("on_thread_stop", &self.on_thread_stop.is_some())
@@ -731,7 +782,7 @@ fn try_claim_idle_retirement(inner: &BlockingPoolInner) -> bool {
 /// The worker loop for blocking pool threads.
 #[allow(clippy::significant_drop_tightening)] // Condvar wait pattern intentionally holds and rechecks under mutex.
 fn blocking_worker_loop(inner: &BlockingPoolInner) -> bool {
-    let mut idle_since: Option<std::time::Instant> = None;
+    let mut idle_since: Option<Instant> = None;
 
     loop {
         // Try to get work from the queue
@@ -773,7 +824,7 @@ fn blocking_worker_loop(inner: &BlockingPoolInner) -> bool {
         // Check if we should retire this thread
         let active = inner.active_threads.load(Ordering::Relaxed);
         if active > inner.min_threads {
-            let now = std::time::Instant::now();
+            let now = (inner.time_getter)();
             let start = *idle_since.get_or_insert(now);
             let elapsed = now.saturating_duration_since(start);
 
@@ -867,6 +918,50 @@ mod tests {
     use super::*;
     use std::collections::HashSet;
     use std::sync::atomic::{AtomicI32, AtomicU64, AtomicUsize};
+    use std::sync::{Mutex as StdMutex, OnceLock};
+
+    static DETERMINISTIC_HOOK_TEST_LOCK: OnceLock<StdMutex<()>> = OnceLock::new();
+    static SCRIPTED_TIME_BASE: OnceLock<Instant> = OnceLock::new();
+    static SCRIPTED_TIME_CALLS: AtomicUsize = AtomicUsize::new(0);
+    static SCRIPTED_TIME_OFFSET_MS: AtomicU64 = AtomicU64::new(0);
+    static SCRIPTED_SLEEP_CALLS: AtomicUsize = AtomicUsize::new(0);
+
+    fn deterministic_hook_test_guard() -> std::sync::MutexGuard<'static, ()> {
+        DETERMINISTIC_HOOK_TEST_LOCK
+            .get_or_init(|| StdMutex::new(()))
+            .lock()
+            .expect("deterministic hook test lock poisoned")
+    }
+
+    fn reset_scripted_time_state() {
+        SCRIPTED_TIME_CALLS.store(0, Ordering::Relaxed);
+        SCRIPTED_TIME_OFFSET_MS.store(0, Ordering::Relaxed);
+        SCRIPTED_SLEEP_CALLS.store(0, Ordering::Relaxed);
+    }
+
+    fn scripted_time_base() -> Instant {
+        *SCRIPTED_TIME_BASE.get_or_init(Instant::now)
+    }
+
+    fn stepped_timeout_time() -> Instant {
+        let base = scripted_time_base();
+        if SCRIPTED_TIME_CALLS.fetch_add(1, Ordering::Relaxed) == 0 {
+            base
+        } else {
+            base + Duration::from_millis(25)
+        }
+    }
+
+    fn advancing_timeout_time() -> Instant {
+        scripted_time_base()
+            + Duration::from_millis(SCRIPTED_TIME_OFFSET_MS.load(Ordering::Relaxed))
+    }
+
+    fn advancing_timeout_sleep(duration: Duration) {
+        SCRIPTED_SLEEP_CALLS.fetch_add(1, Ordering::Relaxed);
+        let millis = duration.as_millis().min(u128::from(u64::MAX)) as u64;
+        SCRIPTED_TIME_OFFSET_MS.fetch_add(millis, Ordering::Relaxed);
+    }
 
     #[test]
     fn basic_spawn_and_wait() {
@@ -1378,6 +1473,8 @@ mod tests {
             condvar: Condvar::new(),
             mutex: Mutex::new(()),
             idle_timeout: Duration::from_millis(1),
+            time_getter: wall_clock_now,
+            sleep_fn: blocking_thread_sleep,
             thread_name_prefix: "retire-test".to_string(),
             on_thread_start: None,
             on_thread_stop: None,
@@ -1479,6 +1576,8 @@ mod tests {
             condvar: Condvar::new(),
             mutex: Mutex::new(()),
             idle_timeout: Duration::from_millis(10),
+            time_getter: wall_clock_now,
+            sleep_fn: blocking_thread_sleep,
             thread_name_prefix: "max-test".to_string(),
             on_thread_start: None,
             on_thread_stop: None,
@@ -1514,6 +1613,8 @@ mod tests {
             condvar: Condvar::new(),
             mutex: Mutex::new(()),
             idle_timeout: Duration::from_millis(10),
+            time_getter: wall_clock_now,
+            sleep_fn: blocking_thread_sleep,
             thread_name_prefix: "overflow".to_string(),
             on_thread_start: None,
             on_thread_stop: None,
@@ -1528,10 +1629,66 @@ mod tests {
 
     #[test]
     fn completion_wait_after_signal_returns_immediately() {
-        let comp = BlockingTaskCompletion::new();
+        let comp = BlockingTaskCompletion::new(wall_clock_now);
         comp.signal_done();
         // Must return immediately, not block
         assert!(comp.wait_timeout(Duration::from_millis(0)));
+    }
+
+    #[test]
+    fn completion_wait_timeout_uses_custom_time_getter() {
+        let _guard = deterministic_hook_test_guard();
+        reset_scripted_time_state();
+
+        let completion = BlockingTaskCompletion::new(stepped_timeout_time);
+
+        assert!(
+            !completion.wait_timeout(Duration::from_millis(10)),
+            "custom time getter should let wait_timeout observe elapsed time without wall sleep"
+        );
+        assert_eq!(
+            SCRIPTED_TIME_CALLS.load(Ordering::Relaxed),
+            2,
+            "timeout path should only consult the synthetic clock for deadline and remaining time"
+        );
+    }
+
+    #[test]
+    fn shutdown_and_wait_uses_custom_time_and_sleep_hooks() {
+        let _guard = deterministic_hook_test_guard();
+        reset_scripted_time_state();
+
+        let pool = BlockingPool::with_config(
+            0,
+            1,
+            BlockingPoolOptions {
+                time_getter: advancing_timeout_time,
+                sleep_fn: advancing_timeout_sleep,
+                ..Default::default()
+            },
+        );
+        pool.inner.active_threads.store(1, Ordering::Release);
+
+        assert!(
+            !pool.shutdown_and_wait(Duration::from_millis(25)),
+            "synthetic time should drive shutdown timeout accounting without wall sleep"
+        );
+        assert!(
+            pool.is_shutdown(),
+            "shutdown flag should be set before waiting"
+        );
+        assert!(
+            SCRIPTED_SLEEP_CALLS.load(Ordering::Relaxed) > 0,
+            "shutdown wait loop should use the configured sleep hook"
+        );
+        assert_eq!(
+            SCRIPTED_TIME_OFFSET_MS.load(Ordering::Relaxed),
+            25,
+            "sleep hook should advance the synthetic clock through the full timeout budget"
+        );
+
+        // Prevent Drop from treating the synthetic active thread count as a live worker.
+        pool.inner.active_threads.store(0, Ordering::Release);
     }
 
     #[test]
