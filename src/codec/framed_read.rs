@@ -12,6 +12,11 @@ const DEFAULT_CAPACITY: usize = 8192;
 
 /// Stack buffer size for reads.
 const READ_BUF_SIZE: usize = 8192;
+/// Cooperative cap on repeated read/decode passes inside one `poll_next`.
+///
+/// Without this bound, an always-ready reader that never produces a full frame
+/// can monopolize a single executor turn indefinitely.
+const MAX_READ_PASSES_PER_POLL: usize = 32;
 
 /// Async framed reader that applies a `Decoder` to an `AsyncRead` source.
 ///
@@ -94,6 +99,7 @@ where
 
     fn poll_next(self: Pin<&mut Self>, cx: &mut Context<'_>) -> Poll<Option<Self::Item>> {
         let this = self.get_mut();
+        let mut read_passes = 0usize;
 
         loop {
             // Try to decode a frame from buffered data.
@@ -128,6 +134,11 @@ where
                         // Loop back to handle EOF decoding.
                     } else {
                         this.buffer.put_slice(filled);
+                        read_passes += 1;
+                        if read_passes >= MAX_READ_PASSES_PER_POLL {
+                            cx.waker().wake_by_ref();
+                            return Poll::Pending;
+                        }
                         // Loop back to try decoding.
                     }
                 }
@@ -153,6 +164,7 @@ mod tests {
     use crate::codec::LinesCodec;
     use std::io;
     use std::sync::Arc;
+    use std::sync::atomic::{AtomicBool, Ordering};
     use std::task::{Wake, Waker};
 
     struct NoopWaker;
@@ -163,6 +175,22 @@ mod tests {
 
     fn noop_waker() -> Waker {
         Waker::from(Arc::new(NoopWaker))
+    }
+
+    struct TrackWaker(Arc<AtomicBool>);
+
+    impl Wake for TrackWaker {
+        fn wake(self: Arc<Self>) {
+            self.0.store(true, Ordering::SeqCst);
+        }
+
+        fn wake_by_ref(self: &Arc<Self>) {
+            self.0.store(true, Ordering::SeqCst);
+        }
+    }
+
+    fn track_waker(flag: Arc<AtomicBool>) -> Waker {
+        Waker::from(Arc::new(TrackWaker(flag)))
     }
 
     /// A reader that yields all data immediately.
@@ -294,6 +322,37 @@ mod tests {
         }
     }
 
+    struct AlwaysReadyByteReader {
+        reads: usize,
+        panic_after: usize,
+    }
+
+    impl AlwaysReadyByteReader {
+        fn new(panic_after: usize) -> Self {
+            Self {
+                reads: 0,
+                panic_after,
+            }
+        }
+    }
+
+    impl AsyncRead for AlwaysReadyByteReader {
+        fn poll_read(
+            self: Pin<&mut Self>,
+            _cx: &mut Context<'_>,
+            buf: &mut ReadBuf<'_>,
+        ) -> Poll<io::Result<()>> {
+            let this = self.get_mut();
+            assert!(
+                this.reads < this.panic_after,
+                "reader was polled too many times without yielding"
+            );
+            this.reads += 1;
+            buf.put_slice(b"a");
+            Poll::Ready(Ok(()))
+        }
+    }
+
     #[test]
     fn framed_read_multi_chunk() {
         let reader = ChunkedReader::new(vec![b"hel", b"lo\nwo", b"rld\n"]);
@@ -309,5 +368,31 @@ mod tests {
 
         let poll = Pin::new(&mut framed).poll_next(&mut cx);
         assert!(matches!(poll, Poll::Ready(None)));
+    }
+
+    #[test]
+    fn framed_read_yields_cooperatively_on_always_ready_reader() {
+        let reader = AlwaysReadyByteReader::new(MAX_READ_PASSES_PER_POLL + 1);
+        let mut framed = FramedRead::new(reader, LinesCodec::new());
+        let woke = Arc::new(AtomicBool::new(false));
+        let waker = track_waker(Arc::clone(&woke));
+        let mut cx = Context::from_waker(&waker);
+
+        let poll = Pin::new(&mut framed).poll_next(&mut cx);
+        assert!(matches!(poll, Poll::Pending));
+        assert!(
+            woke.load(Ordering::SeqCst),
+            "cooperative yield should self-wake for continued draining"
+        );
+        assert_eq!(
+            framed.get_ref().reads,
+            MAX_READ_PASSES_PER_POLL,
+            "poll_next should stop after the cooperative read budget"
+        );
+        assert_eq!(
+            framed.read_buffer().len(),
+            MAX_READ_PASSES_PER_POLL,
+            "already-read bytes must stay buffered across the cooperative yield"
+        );
     }
 }

@@ -13,6 +13,11 @@ const DEFAULT_CAPACITY: usize = 8192;
 
 /// Stack buffer size for reads.
 const READ_BUF_SIZE: usize = 8192;
+/// Cooperative cap on repeated read/decode passes inside one `poll_next`.
+///
+/// Without this bound, an always-ready transport that never completes a frame
+/// can monopolize a single executor turn indefinitely.
+const MAX_READ_PASSES_PER_POLL: usize = 32;
 
 /// Full-duplex framed transport.
 ///
@@ -125,6 +130,7 @@ where
 
     fn poll_next(self: Pin<&mut Self>, cx: &mut Context<'_>) -> Poll<Option<Self::Item>> {
         let this = self.get_mut();
+        let mut read_passes = 0usize;
 
         loop {
             // Try to decode a frame from buffered data.
@@ -158,6 +164,11 @@ where
                         this.eof = true;
                     } else {
                         this.read_buf.put_slice(filled);
+                        read_passes += 1;
+                        if read_passes >= MAX_READ_PASSES_PER_POLL {
+                            cx.waker().wake_by_ref();
+                            return Poll::Pending;
+                        }
                     }
                 }
             }
@@ -230,7 +241,9 @@ impl<T: std::fmt::Debug, U: std::fmt::Debug> std::fmt::Debug for Framed<T, U> {
 mod tests {
     use super::*;
     use crate::codec::LinesCodec;
+    use std::io;
     use std::sync::Arc;
+    use std::sync::atomic::{AtomicBool, Ordering};
     use std::task::{Wake, Waker};
 
     struct NoopWaker;
@@ -241,6 +254,22 @@ mod tests {
 
     fn noop_waker() -> Waker {
         Waker::from(Arc::new(NoopWaker))
+    }
+
+    struct TrackWaker(Arc<AtomicBool>);
+
+    impl Wake for TrackWaker {
+        fn wake(self: Arc<Self>) {
+            self.0.store(true, Ordering::SeqCst);
+        }
+
+        fn wake_by_ref(self: &Arc<Self>) {
+            self.0.store(true, Ordering::SeqCst);
+        }
+    }
+
+    fn track_waker(flag: Arc<AtomicBool>) -> Waker {
+        Waker::from(Arc::new(TrackWaker(flag)))
     }
 
     /// Duplex transport backed by separate read and write buffers.
@@ -280,6 +309,60 @@ mod tests {
     }
 
     impl AsyncWrite for DuplexBuf {
+        fn poll_write(
+            self: Pin<&mut Self>,
+            _cx: &mut Context<'_>,
+            buf: &[u8],
+        ) -> Poll<io::Result<usize>> {
+            let this = self.get_mut();
+            this.written.extend_from_slice(buf);
+            Poll::Ready(Ok(buf.len()))
+        }
+
+        fn poll_flush(self: Pin<&mut Self>, _cx: &mut Context<'_>) -> Poll<io::Result<()>> {
+            Poll::Ready(Ok(()))
+        }
+
+        fn poll_shutdown(self: Pin<&mut Self>, _cx: &mut Context<'_>) -> Poll<io::Result<()>> {
+            Poll::Ready(Ok(()))
+        }
+    }
+
+    #[derive(Debug)]
+    struct AlwaysReadyDuplex {
+        reads: usize,
+        panic_after: usize,
+        written: Vec<u8>,
+    }
+
+    impl AlwaysReadyDuplex {
+        fn new(panic_after: usize) -> Self {
+            Self {
+                reads: 0,
+                panic_after,
+                written: Vec::new(),
+            }
+        }
+    }
+
+    impl AsyncRead for AlwaysReadyDuplex {
+        fn poll_read(
+            self: Pin<&mut Self>,
+            _cx: &mut Context<'_>,
+            buf: &mut ReadBuf<'_>,
+        ) -> Poll<io::Result<()>> {
+            let this = self.get_mut();
+            assert!(
+                this.reads < this.panic_after,
+                "transport was polled too many times without yielding"
+            );
+            this.reads += 1;
+            buf.put_slice(b"a");
+            Poll::Ready(Ok(()))
+        }
+    }
+
+    impl AsyncWrite for AlwaysReadyDuplex {
         fn poll_write(
             self: Pin<&mut Self>,
             _cx: &mut Context<'_>,
@@ -450,5 +533,31 @@ mod tests {
 
         let poll = Pin::new(&mut framed).poll_next(&mut cx);
         assert!(matches!(poll, Poll::Ready(None)));
+    }
+
+    #[test]
+    fn framed_yields_cooperatively_on_always_ready_transport() {
+        let transport = AlwaysReadyDuplex::new(MAX_READ_PASSES_PER_POLL + 1);
+        let mut framed = Framed::new(transport, LinesCodec::new());
+        let woke = Arc::new(AtomicBool::new(false));
+        let waker = track_waker(Arc::clone(&woke));
+        let mut cx = Context::from_waker(&waker);
+
+        let poll = Pin::new(&mut framed).poll_next(&mut cx);
+        assert!(matches!(poll, Poll::Pending));
+        assert!(
+            woke.load(Ordering::SeqCst),
+            "cooperative yield should self-wake for continued draining"
+        );
+        assert_eq!(
+            framed.get_ref().reads,
+            MAX_READ_PASSES_PER_POLL,
+            "poll_next should stop after the cooperative read budget"
+        );
+        assert_eq!(
+            framed.read_buffer().len(),
+            MAX_READ_PASSES_PER_POLL,
+            "already-read bytes must stay buffered across the cooperative yield"
+        );
     }
 }
