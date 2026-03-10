@@ -578,7 +578,12 @@ impl IntrusiveStack {
     /// # Complexity
     ///
     /// O(k) time where k is the number stolen. Allocates a Vec for the result.
-    pub fn steal_batch(&mut self, max_steal: usize, arena: &mut Arena<TaskRecord>, stolen: &mut Vec<TaskId>) {
+    pub fn steal_batch(
+        &mut self,
+        max_steal: usize,
+        arena: &mut Arena<TaskRecord>,
+        stolen: &mut Vec<TaskId>,
+    ) {
         if self.is_empty() {
             return;
         }

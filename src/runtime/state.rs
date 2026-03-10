@@ -2340,7 +2340,9 @@ impl RuntimeState {
                         };
 
                         if closed {
-                            if let Some(pos) = self.finalizing_regions.iter().position(|&r| r == region_id) {
+                            if let Some(pos) =
+                                self.finalizing_regions.iter().position(|&r| r == region_id)
+                            {
                                 self.finalizing_regions.swap_remove(pos);
                             }
                             // Emit RegionCloseComplete trace event (pairs

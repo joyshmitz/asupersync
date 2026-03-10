@@ -17,9 +17,9 @@ mod iocp_impl {
     #![allow(unsafe_code)]
 
     use super::{Event, Events, Interest, Reactor, Source, Token};
-    use std::collections::HashMap;
     use parking_lot::Mutex;
     use polling::{Event as PollEvent, Events as PollEvents, Poller};
+    use std::collections::HashMap;
     use std::io;
     use std::num::NonZeroUsize;
     use std::os::windows::io::{BorrowedSocket, RawSocket};

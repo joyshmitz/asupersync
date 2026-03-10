@@ -772,7 +772,7 @@ mod tests {
                 shared.codec = FrameCodec::server();
             }
 
-            let (read_result, write_result) = future::zip(
+            let (read_result, write_result): (Result<(), _>, Result<(), _>) = future::zip(
                 read.send_frame_internal(&read_frame),
                 write.send_frame(&write_frame),
             )

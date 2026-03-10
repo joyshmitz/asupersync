@@ -314,11 +314,14 @@ mod tests {
     use nix::fcntl::{FcntlArg, OFlag, fcntl};
     use std::net::SocketAddr;
     use std::sync::Arc;
-    use std::sync::atomic::{AtomicU64, AtomicUsize, Ordering};
+    use std::sync::atomic::{AtomicUsize, Ordering};
     use std::task::{Context, Wake, Waker};
     use std::time::Instant;
+    use std::cell::Cell;
 
-    static TEST_NOW_NANOS: AtomicU64 = AtomicU64::new(0);
+    thread_local! {
+        static TEST_NOW_NANOS: Cell<u64> = Cell::new(0);
+    }
 
     #[test]
     fn test_bind() {
@@ -343,11 +346,11 @@ mod tests {
     }
 
     fn set_test_time(nanos: u64) {
-        TEST_NOW_NANOS.store(nanos, Ordering::SeqCst);
+        TEST_NOW_NANOS.with(|t| t.set(nanos));
     }
 
     fn test_time() -> Time {
-        Time::from_nanos(TEST_NOW_NANOS.load(Ordering::SeqCst))
+        Time::from_nanos(TEST_NOW_NANOS.with(|t| t.get()))
     }
 
     struct CountingWaker {

@@ -2929,7 +2929,7 @@ mod tests {
         assert_eq!(tunnel.prefetched_len(), 5);
         let mut first = [0u8; 3];
         block_on(async {
-            poll_fn(|cx| {
+            poll_fn(|cx| -> std::task::Poll<Result<(), std::io::Error>> {
                 let mut rb = ReadBuf::new(&mut first);
                 Pin::new(&mut tunnel).poll_read(cx, &mut rb)
             })

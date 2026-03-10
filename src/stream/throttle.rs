@@ -115,8 +115,8 @@ impl<S: Stream> Stream for Throttle<S> {
 mod tests {
     use super::*;
     use crate::stream::iter;
-    use std::sync::atomic::{AtomicU64, Ordering};
     use std::sync::Arc;
+    use std::sync::atomic::{AtomicU64, Ordering};
     use std::task::{Context, Poll, Wake, Waker};
 
     static TEST_NOW_NANOS: AtomicU64 = AtomicU64::new(0);

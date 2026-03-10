@@ -39,9 +39,8 @@ fn bench_region_creation(c: &mut Criterion) {
     let mut group = c.benchmark_group("tracing_overhead");
 
     group.bench_function("create_root_region", |b: &mut criterion::Bencher| {
+        let mut state = RuntimeState::new();
         b.iter(|| {
-            let mut state = RuntimeState::new();
-            // This triggers RegionRecord::new which has the span creation
             std::hint::black_box(state.create_root_region(Budget::INFINITE))
         });
     });
@@ -53,12 +52,9 @@ fn bench_task_creation(c: &mut Criterion) {
     let mut group = c.benchmark_group("tracing_overhead");
 
     group.bench_function("create_task", |b: &mut criterion::Bencher| {
+        let mut state = RuntimeState::new();
+        let region = state.create_root_region(Budget::INFINITE);
         b.iter(|| {
-            let mut state = RuntimeState::new();
-            let region = state.create_root_region(Budget::INFINITE);
-            // This triggers Scope::spawn which has tracing
-            // But we can't easily use Scope here without Cx.
-            // RuntimeState::create_task also has tracing (debug!).
             std::hint::black_box(state.create_task(region, Budget::INFINITE, async { 42 }))
         });
     });
