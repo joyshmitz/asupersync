@@ -45,8 +45,8 @@ fn browser_udp_poll_unsupported<T>(op: &str) -> Poll<io::Result<T>> {
 /// A UDP socket.
 #[derive(Debug)]
 pub struct UdpSocket {
-    inner: Arc<StdUdpSocket>,
     registration: Option<IoRegistration>,
+    inner: Arc<StdUdpSocket>,
 }
 
 impl UdpSocket {

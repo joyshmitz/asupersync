@@ -261,13 +261,13 @@ fn split_io_state(registration: Option<IoRegistration>) -> SplitIoState {
 /// receives a combined waker that dispatches to both, preventing lost wakeups
 /// when halves are polled from different tasks.
 pub(crate) struct TcpStreamInner {
+    /// Per-direction wakers and shared reactor registration.
+    state: Mutex<SplitIoState>,
     /// The underlying TCP stream.
     #[cfg(not(target_arch = "wasm32"))]
     stream: Arc<net::TcpStream>,
     #[cfg(target_arch = "wasm32")]
     unsupported: (),
-    /// Per-direction wakers and shared reactor registration.
-    state: Mutex<SplitIoState>,
 }
 
 impl std::fmt::Debug for TcpStreamInner {

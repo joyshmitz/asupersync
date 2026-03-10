@@ -177,10 +177,10 @@ pub struct UCred {
 /// guaranteed delivery, use higher-level protocols.
 #[derive(Debug)]
 pub struct UnixStream {
-    /// The underlying standard library stream.
-    pub(crate) inner: Arc<net::UnixStream>,
     /// Reactor registration for I/O events (lazily initialized).
     registration: Mutex<Option<IoRegistration>>,
+    /// The underlying standard library stream.
+    pub(crate) inner: Arc<net::UnixStream>,
 }
 
 impl UnixStream {

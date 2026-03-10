@@ -61,6 +61,8 @@ use std::task::{Context, Poll};
 /// the single reactor registration/waker slot.
 #[derive(Debug)]
 pub struct UnixDatagram {
+    /// Reactor registration for async I/O wakeup.
+    registration: Option<IoRegistration>,
     /// The underlying standard library datagram socket.
     inner: net::UnixDatagram,
     /// Path to the socket file (for cleanup on drop).
@@ -68,8 +70,6 @@ pub struct UnixDatagram {
     path: Option<PathBuf>,
     /// Device/inode identity captured at bind time for safe cleanup.
     cleanup_identity: Option<super::listener::SocketFileIdentity>,
-    /// Reactor registration for async I/O wakeup.
-    registration: Option<IoRegistration>,
 }
 
 impl UnixDatagram {

@@ -32,8 +32,8 @@ fn wall_clock_now() -> Time {
 /// A TCP listener.
 #[derive(Debug)]
 pub struct TcpListener {
-    pub(crate) inner: net::TcpListener,
     registration: Mutex<Option<IoRegistration>>,
+    pub(crate) inner: net::TcpListener,
     accept_storm: Mutex<AcceptStormState>,
     time_getter: fn() -> Time,
 }
@@ -422,7 +422,7 @@ mod tests {
                     "registrations",
                     &self.registrations.load(Ordering::SeqCst),
                 )
-                .finish()
+                .finish_non_exhaustive()
         }
     }
 

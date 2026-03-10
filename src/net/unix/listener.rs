@@ -110,6 +110,8 @@ pub(crate) fn remove_socket_file_if_same_inode(
 /// namespace socket).
 #[derive(Debug)]
 pub struct UnixListener {
+    /// Reactor registration for I/O events (lazily initialized).
+    registration: Mutex<Option<IoRegistration>>,
     /// The underlying standard library listener.
     inner: net::UnixListener,
     /// Path to the socket file (for cleanup on drop).
@@ -117,8 +119,6 @@ pub struct UnixListener {
     path: Option<PathBuf>,
     /// Device/inode identity captured at bind time for safe cleanup.
     cleanup_identity: Option<SocketFileIdentity>,
-    /// Reactor registration for I/O events (lazily initialized).
-    registration: Mutex<Option<IoRegistration>>,
 }
 
 impl UnixListener {

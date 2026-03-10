@@ -42,8 +42,8 @@ fn browser_tcp_poll_unsupported<T>(op: &str) -> Poll<io::Result<T>> {
 /// A TCP stream.
 #[derive(Debug)]
 pub struct TcpStream {
-    inner: Arc<net::TcpStream>,
     registration: Option<IoRegistration>,
+    inner: Arc<net::TcpStream>,
     shutdown_on_drop: bool,
 }
 
