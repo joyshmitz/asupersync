@@ -626,7 +626,7 @@ impl Scheduler {
         scratch.push(first);
 
         while let Some(peek) = lane.peek() {
-            if peek.priority != priority {
+            if peek.priority != priority || scratch.len() >= scratch.capacity() {
                 break;
             }
             // `peek` guarantees the next `pop` is `Some`.
@@ -658,7 +658,7 @@ impl Scheduler {
         scratch.push(first);
 
         while let Some(peek) = lane.peek() {
-            if peek.deadline != deadline {
+            if peek.deadline != deadline || scratch.len() >= scratch.capacity() {
                 break;
             }
             scratch.push(lane.pop().expect("popped after peek"));
