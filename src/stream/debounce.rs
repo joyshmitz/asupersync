@@ -7,7 +7,6 @@ use super::Stream;
 use crate::time::Sleep;
 use crate::types::Time;
 use pin_project::pin_project;
-use std::future::Future;
 use std::pin::Pin;
 use std::task::{Context, Poll};
 use std::time::Duration;
@@ -31,10 +30,9 @@ fn wall_clock_now() -> Time {
 ///
 /// By default this combinator uses the runtime wall clock via
 /// [`crate::time::wall_now`], but tests and adapters can override that with
-/// [`Debounce::with_time_getter`]. The executor still needs to re-poll after
-/// the quiet period expires.
-/// For proper async timer integration, consider pairing with a timeout
-/// or interval-driven polling loop.
+/// [`Debounce::with_time_getter`]. The combinator still arms an internal
+/// [`Sleep`] so the executor gets a real wakeup when the quiet period expires,
+/// while readiness decisions continue to use the configured time getter.
 #[pin_project]
 #[must_use = "streams do nothing unless polled"]
 pub struct Debounce<S: Stream> {
@@ -45,8 +43,12 @@ pub struct Debounce<S: Stream> {
     pending: Option<(S::Item, Time)>,
     /// Whether the underlying stream has ended.
     done: bool,
-    /// Timer future for delayed wakeup (avoids spin-loop).
-    timer: Option<Pin<Box<dyn Future<Output = ()> + Send>>>,
+    /// Wake-capable timer source for delayed wakeup (avoids spin-loop).
+    ///
+    /// Expiry decisions still use `time_getter`; this sleep exists so the
+    /// executor has a real wake source instead of hanging until an unrelated
+    /// poll arrives.
+    timer: Option<Pin<Box<Sleep>>>,
     time_getter: fn() -> Time,
 }
 
@@ -137,11 +139,10 @@ impl<S: Stream> Stream for Debounce<S> {
             let remaining = this.period.saturating_sub(elapsed);
             if this.timer.is_none() || !had_pending_before {
                 let remaining_nanos = remaining.as_nanos().min(u128::from(u64::MAX)) as u64;
-                let deadline = now.saturating_add_nanos(remaining_nanos);
-                *this.timer = Some(Box::pin(Sleep::with_time_getter(
-                    deadline,
-                    *this.time_getter,
-                )));
+                // The wake source must use wall time so `Sleep` can register
+                // a real waker even when `time_getter` points at a custom clock.
+                let wake_deadline = wall_clock_now().saturating_add_nanos(remaining_nanos);
+                *this.timer = Some(Box::pin(Sleep::new(wake_deadline)));
             }
             // Poll the timer to register the waker for delayed wakeup.
             if let Some(ref mut timer) = *this.timer {
@@ -318,7 +319,7 @@ mod tests {
         let mut stream =
             Debounce::with_time_getter(PendingStream, Duration::from_mins(1), test_time);
         stream.pending = Some((7, Time::from_nanos(0)));
-        stream.timer = Some(Box::pin(std::future::ready(())));
+        stream.timer = Some(Box::pin(Sleep::new(Time::from_nanos(0))));
 
         let waker = noop_waker();
         let mut cx = Context::from_waker(&waker);
@@ -355,5 +356,26 @@ mod tests {
         assert!(stream.pending.is_none(), "pending item should be emitted");
         assert!(stream.timer.is_none(), "timer should be cleared after emit");
         crate::test_complete!("debounce_respects_custom_time_getter_without_sleeping");
+    }
+
+    #[test]
+    fn debounce_custom_time_getter_arms_wake_capable_sleep() {
+        init_test("debounce_custom_time_getter_arms_wake_capable_sleep");
+        set_test_time(0);
+        let mut stream =
+            Debounce::with_time_getter(PendingStream, Duration::from_secs(5), test_time);
+        stream.pending = Some((13, Time::from_nanos(0)));
+
+        let waker = noop_waker();
+        let mut cx = Context::from_waker(&waker);
+
+        assert_eq!(Pin::new(&mut stream).poll_next(&mut cx), Poll::Pending);
+        let timer = stream.timer.as_ref().expect("timer should be armed");
+        let sleep = timer.as_ref().get_ref();
+        assert!(
+            sleep.time_getter.is_none(),
+            "debounce timer must use Sleep::new for wake registration"
+        );
+        crate::test_complete!("debounce_custom_time_getter_arms_wake_capable_sleep");
     }
 }
