@@ -19,7 +19,7 @@ mod iocp_impl {
     use super::{Event, Events, Interest, Reactor, Source, Token};
     use parking_lot::Mutex;
     use polling::{Event as PollEvent, Events as PollEvents, Poller};
-    use std::collections::HashMap;
+    use hashbrown::HashMap;
     use std::io;
     use std::num::NonZeroUsize;
     use std::os::windows::io::{BorrowedSocket, RawSocket};

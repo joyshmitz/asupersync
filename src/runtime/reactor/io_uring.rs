@@ -17,7 +17,7 @@ mod imp {
     use super::super::{Event, Events, Interest, Reactor, Source, Token};
     use io_uring::{IoUring, opcode, types};
     use parking_lot::Mutex;
-    use std::collections::HashMap;
+    use hashbrown::HashMap;
     use std::io;
     use std::os::fd::{AsRawFd, FromRawFd, OwnedFd, RawFd};
     use std::sync::atomic::{AtomicBool, Ordering};
