@@ -8,6 +8,12 @@ use std::future::Future;
 use std::pin::Pin;
 use std::task::{Context, Poll};
 
+/// Cooperative budget for items drained in a single poll.
+///
+/// Without this bound, an always-ready upstream stream can monopolize one
+/// executor turn while `Count` drains the entire stream.
+const COUNT_COOPERATIVE_BUDGET: usize = 1024;
+
 /// A future that counts the items in a stream.
 ///
 /// Created by [`StreamExt::count`](super::StreamExt::count).
@@ -36,10 +42,16 @@ where
     #[inline]
     fn poll(self: Pin<&mut Self>, cx: &mut Context<'_>) -> Poll<usize> {
         let mut this = self.project();
+        let mut counted_this_poll = 0usize;
         loop {
             match this.stream.as_mut().poll_next(cx) {
                 Poll::Ready(Some(_)) => {
                     *this.count += 1;
+                    counted_this_poll += 1;
+                    if counted_this_poll >= COUNT_COOPERATIVE_BUDGET {
+                        cx.waker().wake_by_ref();
+                        return Poll::Pending;
+                    }
                 }
                 Poll::Ready(None) => return Poll::Ready(*this.count),
                 Poll::Pending => return Poll::Pending,
@@ -53,7 +65,8 @@ mod tests {
     use super::*;
     use crate::stream::iter;
     use std::sync::Arc;
-    use std::task::{Wake, Waker};
+    use std::sync::atomic::{AtomicBool, Ordering};
+    use std::task::{Context, Poll, Wake, Waker};
 
     struct NoopWaker;
 
@@ -63,6 +76,44 @@ mod tests {
 
     fn noop_waker() -> Waker {
         Waker::from(Arc::new(NoopWaker))
+    }
+
+    struct TrackWaker(Arc<AtomicBool>);
+
+    impl Wake for TrackWaker {
+        fn wake(self: Arc<Self>) {
+            self.0.store(true, Ordering::SeqCst);
+        }
+
+        fn wake_by_ref(self: &Arc<Self>) {
+            self.0.store(true, Ordering::SeqCst);
+        }
+    }
+
+    #[derive(Debug, Default)]
+    struct AlwaysReadyCounter {
+        next: usize,
+        end: usize,
+    }
+
+    impl AlwaysReadyCounter {
+        fn new(end: usize) -> Self {
+            Self { next: 0, end }
+        }
+    }
+
+    impl Stream for AlwaysReadyCounter {
+        type Item = usize;
+
+        fn poll_next(mut self: Pin<&mut Self>, _cx: &mut Context<'_>) -> Poll<Option<Self::Item>> {
+            if self.next >= self.end {
+                return Poll::Ready(None);
+            }
+
+            let item = self.next;
+            self.next += 1;
+            Poll::Ready(Some(item))
+        }
     }
 
     fn init_test(name: &str) {
@@ -119,5 +170,49 @@ mod tests {
             Poll::Pending => panic!("expected Ready"),
         }
         crate::test_complete!("count_single");
+    }
+
+    #[test]
+    fn count_yields_after_budget_on_always_ready_stream() {
+        init_test("count_yields_after_budget_on_always_ready_stream");
+        let mut future = Count::new(AlwaysReadyCounter::new(COUNT_COOPERATIVE_BUDGET + 5));
+        let woke = Arc::new(AtomicBool::new(false));
+        let waker = Waker::from(Arc::new(TrackWaker(woke.clone())));
+        let mut cx = Context::from_waker(&waker);
+
+        let first = Pin::new(&mut future).poll(&mut cx);
+        crate::assert_with_log!(
+            matches!(first, Poll::Pending),
+            "first poll yields cooperatively",
+            "Poll::Pending",
+            first
+        );
+        crate::assert_with_log!(
+            future.count == COUNT_COOPERATIVE_BUDGET,
+            "count preserved across yield",
+            COUNT_COOPERATIVE_BUDGET,
+            future.count
+        );
+        crate::assert_with_log!(
+            future.stream.next == COUNT_COOPERATIVE_BUDGET,
+            "upstream advanced only to budget",
+            COUNT_COOPERATIVE_BUDGET,
+            future.stream.next
+        );
+        crate::assert_with_log!(
+            woke.load(Ordering::SeqCst),
+            "self-wake requested",
+            true,
+            woke.load(Ordering::SeqCst)
+        );
+
+        let second = Pin::new(&mut future).poll(&mut cx);
+        crate::assert_with_log!(
+            second == Poll::Ready(COUNT_COOPERATIVE_BUDGET + 5),
+            "second poll completes count",
+            Poll::Ready(COUNT_COOPERATIVE_BUDGET + 5),
+            second
+        );
+        crate::test_complete!("count_yields_after_budget_on_always_ready_stream");
     }
 }

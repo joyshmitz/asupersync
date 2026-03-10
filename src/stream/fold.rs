@@ -8,6 +8,12 @@ use std::future::Future;
 use std::pin::Pin;
 use std::task::{Context, Poll};
 
+/// Cooperative budget for items folded in a single poll.
+///
+/// Without this cap, a synchronously ready stream can keep `Fold` inside one
+/// `poll` call until exhaustion and starve sibling tasks.
+const FOLD_COOPERATIVE_BUDGET: usize = 1024;
+
 /// A future that folds all items from a stream into a single value.
 ///
 /// Created by [`StreamExt::fold`](super::StreamExt::fold).
@@ -42,11 +48,17 @@ where
     #[inline]
     fn poll(self: Pin<&mut Self>, cx: &mut Context<'_>) -> Poll<Acc> {
         let mut this = self.project();
+        let mut folded_this_poll = 0usize;
         loop {
             match this.stream.as_mut().poll_next(cx) {
                 Poll::Ready(Some(item)) => {
                     let acc = this.acc.take().expect("Fold polled after completion");
                     *this.acc = Some((this.f)(acc, item));
+                    folded_this_poll += 1;
+                    if folded_this_poll >= FOLD_COOPERATIVE_BUDGET {
+                        cx.waker().wake_by_ref();
+                        return Poll::Pending;
+                    }
                 }
                 Poll::Ready(None) => {
                     return Poll::Ready(this.acc.take().expect("Fold polled after completion"));
@@ -62,7 +74,8 @@ mod tests {
     use super::*;
     use crate::stream::iter;
     use std::sync::Arc;
-    use std::task::{Wake, Waker};
+    use std::sync::atomic::{AtomicBool, Ordering};
+    use std::task::{Context, Poll, Wake, Waker};
 
     struct NoopWaker;
 
@@ -72,6 +85,44 @@ mod tests {
 
     fn noop_waker() -> Waker {
         Waker::from(Arc::new(NoopWaker))
+    }
+
+    struct TrackWaker(Arc<AtomicBool>);
+
+    impl Wake for TrackWaker {
+        fn wake(self: Arc<Self>) {
+            self.0.store(true, Ordering::SeqCst);
+        }
+
+        fn wake_by_ref(self: &Arc<Self>) {
+            self.0.store(true, Ordering::SeqCst);
+        }
+    }
+
+    #[derive(Debug, Default)]
+    struct AlwaysReadyCounter {
+        next: usize,
+        end: usize,
+    }
+
+    impl AlwaysReadyCounter {
+        fn new(end: usize) -> Self {
+            Self { next: 0, end }
+        }
+    }
+
+    impl Stream for AlwaysReadyCounter {
+        type Item = usize;
+
+        fn poll_next(mut self: Pin<&mut Self>, _cx: &mut Context<'_>) -> Poll<Option<Self::Item>> {
+            if self.next >= self.end {
+                return Poll::Ready(None);
+            }
+
+            let item = self.next;
+            self.next += 1;
+            Poll::Ready(Some(item))
+        }
     }
 
     fn init_test(name: &str) {
@@ -152,5 +203,55 @@ mod tests {
             Poll::Pending => panic!("expected Ready"),
         }
         crate::test_complete!("fold_empty");
+    }
+
+    #[test]
+    fn fold_yields_after_budget_on_always_ready_stream() {
+        init_test("fold_yields_after_budget_on_always_ready_stream");
+        let mut future = Fold::new(
+            AlwaysReadyCounter::new(FOLD_COOPERATIVE_BUDGET + 5),
+            0usize,
+            |acc, x| acc + x,
+        );
+        let woke = Arc::new(AtomicBool::new(false));
+        let waker = Waker::from(Arc::new(TrackWaker(woke.clone())));
+        let mut cx = Context::from_waker(&waker);
+
+        let first = Pin::new(&mut future).poll(&mut cx);
+        crate::assert_with_log!(
+            matches!(first, Poll::Pending),
+            "first poll yields cooperatively",
+            "Poll::Pending",
+            first
+        );
+        let expected_partial = (0..FOLD_COOPERATIVE_BUDGET).sum::<usize>();
+        crate::assert_with_log!(
+            future.acc == Some(expected_partial),
+            "partial accumulator retained across yield",
+            Some(expected_partial),
+            future.acc
+        );
+        crate::assert_with_log!(
+            future.stream.next == FOLD_COOPERATIVE_BUDGET,
+            "upstream advanced only to budget",
+            FOLD_COOPERATIVE_BUDGET,
+            future.stream.next
+        );
+        crate::assert_with_log!(
+            woke.load(Ordering::SeqCst),
+            "self-wake requested",
+            true,
+            woke.load(Ordering::SeqCst)
+        );
+
+        let second = Pin::new(&mut future).poll(&mut cx);
+        let expected_total = (0..FOLD_COOPERATIVE_BUDGET + 5).sum::<usize>();
+        crate::assert_with_log!(
+            second == Poll::Ready(expected_total),
+            "second poll completes fold",
+            Poll::Ready(expected_total),
+            second
+        );
+        crate::test_complete!("fold_yields_after_budget_on_always_ready_stream");
     }
 }

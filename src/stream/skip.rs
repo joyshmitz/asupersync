@@ -5,6 +5,13 @@ use pin_project::pin_project;
 use std::pin::Pin;
 use std::task::{Context, Poll};
 
+/// Cooperative budget for skipped items drained in a single poll.
+///
+/// Without this bound, always-ready upstream streams can monopolize an
+/// executor turn when skipping large prefixes (or an unbounded skip_while
+/// predicate), preventing fair progress for sibling tasks.
+const SKIP_COOPERATIVE_BUDGET: usize = 1024;
+
 /// Stream for the [`skip`](super::StreamExt::skip) method.
 #[pin_project]
 #[derive(Debug)]
@@ -27,9 +34,19 @@ impl<S: Stream> Stream for Skip<S> {
     #[inline]
     fn poll_next(self: Pin<&mut Self>, cx: &mut Context<'_>) -> Poll<Option<Self::Item>> {
         let mut this = self.project();
+        let mut skipped_this_poll = 0usize;
         while *this.remaining > 0 {
             match this.stream.as_mut().poll_next(cx) {
-                Poll::Ready(Some(_)) => *this.remaining -= 1,
+                Poll::Ready(Some(_)) => {
+                    *this.remaining -= 1;
+                    skipped_this_poll += 1;
+                    if *this.remaining > 0 && skipped_this_poll >= SKIP_COOPERATIVE_BUDGET {
+                        // Yield cooperatively for fairness, then continue skipping
+                        // on the next poll.
+                        cx.waker().wake_by_ref();
+                        return Poll::Pending;
+                    }
+                }
                 Poll::Ready(None) => return Poll::Ready(None),
                 Poll::Pending => return Poll::Pending,
             }
@@ -81,12 +98,20 @@ where
             return this.stream.poll_next(cx);
         }
 
+        let mut skipped_this_poll = 0usize;
         loop {
             match this.stream.as_mut().poll_next(cx) {
                 Poll::Ready(Some(item)) => {
                     if !(this.predicate)(&item) {
                         *this.done = true;
                         return Poll::Ready(Some(item));
+                    }
+                    skipped_this_poll += 1;
+                    if skipped_this_poll >= SKIP_COOPERATIVE_BUDGET {
+                        // Prevent one poll from consuming an unbounded run of
+                        // skip-matching items.
+                        cx.waker().wake_by_ref();
+                        return Poll::Pending;
                     }
                 }
                 Poll::Ready(None) => return Poll::Ready(None),
@@ -128,6 +153,21 @@ mod tests {
             items.push(item);
         }
         items
+    }
+
+    #[derive(Debug, Default)]
+    struct AlwaysReadyCounter {
+        next: usize,
+    }
+
+    impl Stream for AlwaysReadyCounter {
+        type Item = usize;
+
+        fn poll_next(mut self: Pin<&mut Self>, _cx: &mut Context<'_>) -> Poll<Option<Self::Item>> {
+            let item = self.next;
+            self.next = self.next.saturating_add(1);
+            Poll::Ready(Some(item))
+        }
     }
 
     #[test]
@@ -198,5 +238,32 @@ mod tests {
         let (lower, upper) = s.size_hint();
         assert_eq!(lower, 0); // unknown how many will be skipped
         assert_eq!(upper, Some(3));
+    }
+
+    #[test]
+    fn test_skip_yields_after_budget_on_always_ready_stream() {
+        let mut s = Skip::new(AlwaysReadyCounter::default(), SKIP_COOPERATIVE_BUDGET + 5);
+        let waker = noop_waker();
+        let mut cx = Context::from_waker(&waker);
+
+        let first = Pin::new(&mut s).poll_next(&mut cx);
+        assert!(matches!(first, Poll::Pending));
+        assert_eq!(s.remaining, 5);
+        assert_eq!(s.stream.next, SKIP_COOPERATIVE_BUDGET);
+
+        let second = Pin::new(&mut s).poll_next(&mut cx);
+        assert_eq!(second, Poll::Ready(Some(SKIP_COOPERATIVE_BUDGET + 5)));
+    }
+
+    #[test]
+    fn test_skip_while_yields_after_budget_when_predicate_stays_true() {
+        let mut s = SkipWhile::new(AlwaysReadyCounter::default(), |_: &usize| true);
+        let waker = noop_waker();
+        let mut cx = Context::from_waker(&waker);
+
+        let first = Pin::new(&mut s).poll_next(&mut cx);
+        assert!(matches!(first, Poll::Pending));
+        assert_eq!(s.stream.next, SKIP_COOPERATIVE_BUDGET);
+        assert!(!s.done);
     }
 }

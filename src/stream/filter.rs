@@ -7,6 +7,12 @@ use pin_project::pin_project;
 use std::pin::Pin;
 use std::task::{Context, Poll};
 
+/// Cooperative budget for rejected items drained in a single poll.
+///
+/// Without this cap, an always-ready upstream stream can monopolize the
+/// executor forever if the predicate or mapper keeps rejecting items.
+const FILTER_REJECTION_BUDGET: usize = 1024;
+
 /// A stream that yields only items matching a predicate.
 ///
 /// Created by [`StreamExt::filter`](super::StreamExt::filter).
@@ -51,13 +57,18 @@ where
     #[inline]
     fn poll_next(self: Pin<&mut Self>, cx: &mut Context<'_>) -> Poll<Option<S::Item>> {
         let mut this = self.project();
+        let mut rejected_this_poll = 0usize;
         loop {
             match this.stream.as_mut().poll_next(cx) {
                 Poll::Ready(Some(item)) => {
                     if (this.predicate)(&item) {
                         return Poll::Ready(Some(item));
                     }
-                    // Item filtered out, continue to next
+                    rejected_this_poll += 1;
+                    if rejected_this_poll >= FILTER_REJECTION_BUDGET {
+                        cx.waker().wake_by_ref();
+                        return Poll::Pending;
+                    }
                 }
                 Poll::Ready(None) => return Poll::Ready(None),
                 Poll::Pending => return Poll::Pending,
@@ -116,13 +127,18 @@ where
     #[inline]
     fn poll_next(self: Pin<&mut Self>, cx: &mut Context<'_>) -> Poll<Option<T>> {
         let mut this = self.project();
+        let mut rejected_this_poll = 0usize;
         loop {
             match this.stream.as_mut().poll_next(cx) {
                 Poll::Ready(Some(item)) => {
                     if let Some(result) = (this.f)(item) {
                         return Poll::Ready(Some(result));
                     }
-                    // Item filtered out, continue to next
+                    rejected_this_poll += 1;
+                    if rejected_this_poll >= FILTER_REJECTION_BUDGET {
+                        cx.waker().wake_by_ref();
+                        return Poll::Pending;
+                    }
                 }
                 Poll::Ready(None) => return Poll::Ready(None),
                 Poll::Pending => return Poll::Pending,
@@ -142,7 +158,8 @@ mod tests {
     use super::*;
     use crate::stream::{StreamExt, iter};
     use std::sync::Arc;
-    use std::task::{Wake, Waker};
+    use std::sync::atomic::{AtomicBool, Ordering};
+    use std::task::{Context, Poll, Wake, Waker};
 
     struct NoopWaker;
 
@@ -152,6 +169,33 @@ mod tests {
 
     fn noop_waker() -> Waker {
         Waker::from(Arc::new(NoopWaker))
+    }
+
+    struct TrackWaker(Arc<AtomicBool>);
+
+    impl Wake for TrackWaker {
+        fn wake(self: Arc<Self>) {
+            self.0.store(true, Ordering::SeqCst);
+        }
+
+        fn wake_by_ref(self: &Arc<Self>) {
+            self.0.store(true, Ordering::SeqCst);
+        }
+    }
+
+    #[derive(Debug, Default)]
+    struct AlwaysReadyCounter {
+        next: usize,
+    }
+
+    impl Stream for AlwaysReadyCounter {
+        type Item = usize;
+
+        fn poll_next(mut self: Pin<&mut Self>, _cx: &mut Context<'_>) -> Poll<Option<Self::Item>> {
+            let item = self.next;
+            self.next = self.next.saturating_add(1);
+            Poll::Ready(Some(item))
+        }
     }
 
     fn init_test(name: &str) {
@@ -515,5 +559,45 @@ mod tests {
         let stream = FilterMap::new(iter(vec![1, 2]), mapper as fn(i32) -> Option<i32>);
         let dbg = format!("{stream:?}");
         assert!(dbg.contains("FilterMap"));
+    }
+
+    #[test]
+    fn filter_yields_after_rejection_budget_on_always_ready_stream() {
+        init_test("filter_yields_after_rejection_budget_on_always_ready_stream");
+        let wake_flag = Arc::new(AtomicBool::new(false));
+        let waker: Waker = Arc::new(TrackWaker(Arc::clone(&wake_flag))).into();
+        let mut cx = Context::from_waker(&waker);
+        let accept_after = FILTER_REJECTION_BUDGET + 1;
+        let mut stream = Filter::new(AlwaysReadyCounter::default(), move |item: &usize| {
+            *item == accept_after
+        });
+
+        let first = Pin::new(&mut stream).poll_next(&mut cx);
+        assert_eq!(first, Poll::Pending);
+        assert!(wake_flag.load(Ordering::SeqCst));
+
+        let second = Pin::new(&mut stream).poll_next(&mut cx);
+        assert_eq!(second, Poll::Ready(Some(accept_after)));
+        crate::test_complete!("filter_yields_after_rejection_budget_on_always_ready_stream");
+    }
+
+    #[test]
+    fn filter_map_yields_after_rejection_budget_on_always_ready_stream() {
+        init_test("filter_map_yields_after_rejection_budget_on_always_ready_stream");
+        let wake_flag = Arc::new(AtomicBool::new(false));
+        let waker: Waker = Arc::new(TrackWaker(Arc::clone(&wake_flag))).into();
+        let mut cx = Context::from_waker(&waker);
+        let accept_after = FILTER_REJECTION_BUDGET + 1;
+        let mut stream = FilterMap::new(AlwaysReadyCounter::default(), move |item: usize| {
+            (item == accept_after).then_some(item)
+        });
+
+        let first = Pin::new(&mut stream).poll_next(&mut cx);
+        assert_eq!(first, Poll::Pending);
+        assert!(wake_flag.load(Ordering::SeqCst));
+
+        let second = Pin::new(&mut stream).poll_next(&mut cx);
+        assert_eq!(second, Poll::Ready(Some(accept_after)));
+        crate::test_complete!("filter_map_yields_after_rejection_budget_on_always_ready_stream");
     }
 }

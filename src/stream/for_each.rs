@@ -8,6 +8,11 @@ use std::future::Future;
 use std::pin::Pin;
 use std::task::{Context, Poll};
 
+/// Cooperative budget for items processed in a single poll.
+///
+/// Without this bound, always-ready streams can monopolize one executor turn.
+const FOR_EACH_COOPERATIVE_BUDGET: usize = 1024;
+
 /// A future that executes a closure for each item in a stream.
 ///
 /// Created by [`StreamExt::for_each`](super::StreamExt::for_each).
@@ -37,10 +42,16 @@ where
     #[inline]
     fn poll(self: Pin<&mut Self>, cx: &mut Context<'_>) -> Poll<()> {
         let mut this = self.project();
+        let mut processed_this_poll = 0usize;
         loop {
             match this.stream.as_mut().poll_next(cx) {
                 Poll::Ready(Some(item)) => {
                     (this.f)(item);
+                    processed_this_poll += 1;
+                    if processed_this_poll >= FOR_EACH_COOPERATIVE_BUDGET {
+                        cx.waker().wake_by_ref();
+                        return Poll::Pending;
+                    }
                 }
                 Poll::Ready(None) => return Poll::Ready(()),
                 Poll::Pending => return Poll::Pending,
@@ -83,12 +94,18 @@ where
 
     fn poll(self: Pin<&mut Self>, cx: &mut Context<'_>) -> Poll<()> {
         let mut this = self.project();
+        let mut processed_this_poll = 0usize;
         loop {
             // Complete pending future first
             if let Some(fut) = this.pending.as_mut().as_pin_mut() {
                 match fut.poll(cx) {
                     Poll::Ready(()) => {
                         this.pending.set(None);
+                        processed_this_poll += 1;
+                        if processed_this_poll >= FOR_EACH_COOPERATIVE_BUDGET {
+                            cx.waker().wake_by_ref();
+                            return Poll::Pending;
+                        }
                     }
                     Poll::Pending => return Poll::Pending,
                 }
@@ -112,7 +129,8 @@ mod tests {
     use crate::stream::iter;
     use std::cell::RefCell;
     use std::sync::Arc;
-    use std::task::{Wake, Waker};
+    use std::sync::atomic::{AtomicBool, Ordering};
+    use std::task::{Poll, Wake, Waker};
 
     struct NoopWaker;
 
@@ -122,6 +140,44 @@ mod tests {
 
     fn noop_waker() -> Waker {
         Waker::from(Arc::new(NoopWaker))
+    }
+
+    struct TrackWaker(Arc<AtomicBool>);
+
+    impl Wake for TrackWaker {
+        fn wake(self: Arc<Self>) {
+            self.0.store(true, Ordering::SeqCst);
+        }
+
+        fn wake_by_ref(self: &Arc<Self>) {
+            self.0.store(true, Ordering::SeqCst);
+        }
+    }
+
+    #[derive(Debug, Default)]
+    struct AlwaysReadyCounter {
+        next: usize,
+        end: usize,
+    }
+
+    impl AlwaysReadyCounter {
+        fn new(end: usize) -> Self {
+            Self { next: 0, end }
+        }
+    }
+
+    impl Stream for AlwaysReadyCounter {
+        type Item = usize;
+
+        fn poll_next(mut self: Pin<&mut Self>, _cx: &mut Context<'_>) -> Poll<Option<Self::Item>> {
+            if self.next >= self.end {
+                return Poll::Ready(None);
+            }
+
+            let item = self.next;
+            self.next += 1;
+            Poll::Ready(Some(item))
+        }
     }
 
     fn init_test(name: &str) {
@@ -218,5 +274,124 @@ mod tests {
         crate::assert_with_log!(!called, "closure not called", false, called);
 
         crate::test_complete!("for_each_async_empty");
+    }
+
+    #[test]
+    fn for_each_yields_after_budget_on_always_ready_stream() {
+        init_test("for_each_yields_after_budget_on_always_ready_stream");
+        let seen = RefCell::new(Vec::new());
+        let mut future = ForEach::new(
+            AlwaysReadyCounter::new(FOR_EACH_COOPERATIVE_BUDGET + 5),
+            |x| seen.borrow_mut().push(x),
+        );
+        let woke = Arc::new(AtomicBool::new(false));
+        let waker = Waker::from(Arc::new(TrackWaker(woke.clone())));
+        let mut cx = Context::from_waker(&waker);
+
+        let first = Pin::new(&mut future).poll(&mut cx);
+        crate::assert_with_log!(
+            matches!(first, Poll::Pending),
+            "first poll yields cooperatively",
+            "Poll::Pending",
+            first
+        );
+        crate::assert_with_log!(
+            future.stream.next == FOR_EACH_COOPERATIVE_BUDGET,
+            "upstream advanced only to budget",
+            FOR_EACH_COOPERATIVE_BUDGET,
+            future.stream.next
+        );
+        crate::assert_with_log!(
+            seen.borrow().len() == FOR_EACH_COOPERATIVE_BUDGET,
+            "side effects applied to budget items",
+            FOR_EACH_COOPERATIVE_BUDGET,
+            seen.borrow().len()
+        );
+        crate::assert_with_log!(
+            woke.load(Ordering::SeqCst),
+            "self-wake requested",
+            true,
+            woke.load(Ordering::SeqCst)
+        );
+
+        let second = Pin::new(&mut future).poll(&mut cx);
+        crate::assert_with_log!(
+            matches!(second, Poll::Ready(())),
+            "second poll completes",
+            "Poll::Ready(())",
+            second
+        );
+        crate::assert_with_log!(
+            seen.borrow().len() == FOR_EACH_COOPERATIVE_BUDGET + 5,
+            "all side effects complete",
+            FOR_EACH_COOPERATIVE_BUDGET + 5,
+            seen.borrow().len()
+        );
+        crate::test_complete!("for_each_yields_after_budget_on_always_ready_stream");
+    }
+
+    #[test]
+    fn for_each_async_yields_after_budget_on_immediate_futures() {
+        init_test("for_each_async_yields_after_budget_on_immediate_futures");
+        let seen = RefCell::new(Vec::new());
+        let mut future = ForEachAsync::new(
+            AlwaysReadyCounter::new(FOR_EACH_COOPERATIVE_BUDGET + 5),
+            |x| {
+                let seen = &seen;
+                Box::pin(async move {
+                    seen.borrow_mut().push(x);
+                })
+            },
+        );
+        let woke = Arc::new(AtomicBool::new(false));
+        let waker = Waker::from(Arc::new(TrackWaker(woke.clone())));
+        let mut cx = Context::from_waker(&waker);
+
+        let first = Pin::new(&mut future).poll(&mut cx);
+        crate::assert_with_log!(
+            matches!(first, Poll::Pending),
+            "first poll yields cooperatively",
+            "Poll::Pending",
+            first
+        );
+        crate::assert_with_log!(
+            future.stream.next == FOR_EACH_COOPERATIVE_BUDGET,
+            "upstream advanced only to budget",
+            FOR_EACH_COOPERATIVE_BUDGET,
+            future.stream.next
+        );
+        crate::assert_with_log!(
+            future.pending.is_none(),
+            "no pending future left at cooperative boundary",
+            true,
+            future.pending.is_none()
+        );
+        crate::assert_with_log!(
+            seen.borrow().len() == FOR_EACH_COOPERATIVE_BUDGET,
+            "side effects applied to budget items",
+            FOR_EACH_COOPERATIVE_BUDGET,
+            seen.borrow().len()
+        );
+        crate::assert_with_log!(
+            woke.load(Ordering::SeqCst),
+            "self-wake requested",
+            true,
+            woke.load(Ordering::SeqCst)
+        );
+
+        let second = Pin::new(&mut future).poll(&mut cx);
+        crate::assert_with_log!(
+            matches!(second, Poll::Ready(())),
+            "second poll completes",
+            "Poll::Ready(())",
+            second
+        );
+        crate::assert_with_log!(
+            seen.borrow().len() == FOR_EACH_COOPERATIVE_BUDGET + 5,
+            "all side effects complete",
+            FOR_EACH_COOPERATIVE_BUDGET + 5,
+            seen.borrow().len()
+        );
+        crate::test_complete!("for_each_async_yields_after_budget_on_immediate_futures");
     }
 }
