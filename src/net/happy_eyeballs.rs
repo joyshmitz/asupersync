@@ -21,7 +21,7 @@
 //! - RFC 8305: Happy Eyeballs Version 2: Better Connectivity Using Concurrency
 //! - RFC 6555: Happy Eyeballs -- Success with Dual-Stack Hosts (superseded by 8305)
 
-use std::future::Future;
+use std::future::{Future, poll_fn};
 use std::io;
 use std::net::{IpAddr, SocketAddr};
 use std::pin::Pin;
@@ -30,7 +30,7 @@ use std::time::Duration;
 
 use crate::cx::Cx;
 use crate::net::TcpStream;
-use crate::time::{sleep, timeout};
+use crate::time::{Sleep, TimeoutFuture};
 use crate::types::Time;
 
 /// Configuration for Happy Eyeballs connection racing.
@@ -155,6 +155,15 @@ fn sort_socket_addrs(addrs: &[SocketAddr]) -> Vec<SocketAddr> {
 /// Cancel-safe. Dropping the returned future cancels all pending connection
 /// attempts. Blocking pool connections continue but results are discarded.
 pub async fn connect(addrs: &[SocketAddr], config: &HappyEyeballsConfig) -> io::Result<TcpStream> {
+    connect_with_time_getter(addrs, config, timeout_now).await
+}
+
+/// Races connection attempts to a set of addresses using an explicit time source.
+pub(crate) async fn connect_with_time_getter(
+    addrs: &[SocketAddr],
+    config: &HappyEyeballsConfig,
+    time_getter: fn() -> Time,
+) -> io::Result<TcpStream> {
     if addrs.is_empty() {
         return Err(io::Error::new(
             io::ErrorKind::InvalidInput,
@@ -164,7 +173,7 @@ pub async fn connect(addrs: &[SocketAddr], config: &HappyEyeballsConfig) -> io::
 
     // Single address: skip the racing machinery entirely
     if addrs.len() == 1 {
-        return connect_one(addrs[0], config.connect_timeout).await;
+        return connect_one(addrs[0], config.connect_timeout, time_getter).await;
     }
 
     // Sort addresses: interleave IPv6 and IPv4 while preserving each
@@ -172,7 +181,7 @@ pub async fn connect(addrs: &[SocketAddr], config: &HappyEyeballsConfig) -> io::
     let sorted_addrs = sort_socket_addrs(addrs);
 
     // Race connections with staggered starts
-    connect_racing(&sorted_addrs, config).await
+    connect_racing(&sorted_addrs, config, time_getter).await
 }
 
 /// Races connection attempts with staggered starts.
@@ -186,8 +195,9 @@ pub async fn connect(addrs: &[SocketAddr], config: &HappyEyeballsConfig) -> io::
 async fn connect_racing(
     addrs: &[SocketAddr],
     config: &HappyEyeballsConfig,
+    time_getter: fn() -> Time,
 ) -> io::Result<TcpStream> {
-    let now = timeout_now();
+    let now = time_getter();
 
     // Build staggered connection futures.
     //
@@ -209,6 +219,7 @@ async fn connect_racing(
             stagger,
             addr,
             connect_timeout,
+            time_getter,
         )));
     }
 
@@ -219,7 +230,7 @@ async fn connect_racing(
     // errors, only returning on first Ok or when all attempts exhaust.
     let overall_deadline =
         now.saturating_add_nanos(duration_to_nanos_saturating(config.overall_timeout));
-    RaceConnections::new(futures, overall_deadline).await
+    RaceConnections::new(futures, overall_deadline, time_getter).await
 }
 
 #[inline]
@@ -262,35 +273,28 @@ struct RaceConnections {
     pending: usize,
     /// Last error seen (returned if all fail).
     last_error: Option<io::Error>,
-    /// Overall deadline for the entire procedure.
-    #[allow(dead_code)]
-    deadline: Time,
     /// Sleep future for overall timeout.
-    timeout_sleep: Pin<Box<dyn Future<Output = ()> + Send>>,
+    timeout_sleep: Sleep,
+    /// Time source used for timeout decisions.
+    time_getter: fn() -> Time,
 }
 
 impl RaceConnections {
-    fn new(futures: Vec<ConnectFuture>, deadline: Time) -> Self {
+    fn new(futures: Vec<ConnectFuture>, deadline: Time, time_getter: fn() -> Time) -> Self {
         let pending = futures.len();
-        let now = timeout_now();
-        let remaining = Duration::from_nanos(deadline.as_nanos().saturating_sub(now.as_nanos()));
-        let timeout_sleep = Box::pin(sleep(now, remaining));
+        let timeout_sleep = Sleep::new(deadline);
         Self {
             futures: futures.into_iter().map(Some).collect(),
             pending,
             last_error: None,
-            deadline,
             timeout_sleep,
+            time_getter,
         }
     }
-}
 
-impl Future for RaceConnections {
-    type Output = io::Result<TcpStream>;
-
-    fn poll(mut self: Pin<&mut Self>, cx: &mut Context<'_>) -> Poll<Self::Output> {
+    fn poll_with_time(&mut self, now: Time, cx: &mut Context<'_>) -> Poll<io::Result<TcpStream>> {
         // Check overall timeout first
-        if Pin::new(&mut self.timeout_sleep).poll(cx).is_ready() {
+        if self.timeout_sleep.poll_with_time(now).is_ready() {
             let err = self.last_error.take().unwrap_or_else(|| {
                 io::Error::new(
                     io::ErrorKind::TimedOut,
@@ -354,42 +358,95 @@ impl Future for RaceConnections {
     }
 }
 
+impl Future for RaceConnections {
+    type Output = io::Result<TcpStream>;
+
+    fn poll(mut self: Pin<&mut Self>, cx: &mut Context<'_>) -> Poll<Self::Output> {
+        let now = (self.time_getter)();
+        let poll = self.as_mut().get_mut().poll_with_time(now, cx);
+        if poll.is_pending() {
+            let this = self.as_mut().get_mut();
+            // Preserve wake registration even when timeout decisions use a
+            // manual or virtual clock.
+            let _ = Pin::new(&mut this.timeout_sleep).poll(cx);
+        }
+        poll
+    }
+}
+
 /// Connects to a single address after a stagger delay, with a per-connection timeout.
 async fn staggered_connect(
     now: Time,
     stagger: Duration,
     addr: SocketAddr,
     connect_timeout: Duration,
+    time_getter: fn() -> Time,
 ) -> io::Result<TcpStream> {
     // Wait for our stagger slot
     if !stagger.is_zero() {
-        sleep(now, stagger).await;
+        let deadline = now.saturating_add_nanos(duration_to_nanos_saturating(stagger));
+        sleep_until_with_time_getter(deadline, time_getter).await;
     }
 
     // Attempt connection with timeout
-    connect_one(addr, connect_timeout).await
+    connect_one(addr, connect_timeout, time_getter).await
 }
 
 /// Connects to a single address with a timeout.
-async fn connect_one(addr: SocketAddr, connect_timeout: Duration) -> io::Result<TcpStream> {
-    let now = timeout_now();
-
-    if connect_timeout.is_zero() {
+async fn connect_one(
+    addr: SocketAddr,
+    timeout_duration: Duration,
+    time_getter: fn() -> Time,
+) -> io::Result<TcpStream> {
+    if timeout_duration.is_zero() {
         return Err(io::Error::new(
             io::ErrorKind::TimedOut,
             "zero connect timeout",
         ));
     }
 
-    let connect_fut = TcpStream::connect(addr);
+    let deadline =
+        time_getter().saturating_add_nanos(duration_to_nanos_saturating(timeout_duration));
 
-    match timeout(now, connect_timeout, connect_fut).await {
+    match future_with_timeout(Box::pin(TcpStream::connect(addr)), deadline, time_getter).await {
         Ok(result) => result,
         Err(_elapsed) => Err(io::Error::new(
             io::ErrorKind::TimedOut,
-            format!("connection to {addr} timed out after {connect_timeout:?}"),
+            format!("connection to {addr} timed out after {timeout_duration:?}"),
         )),
     }
+}
+
+async fn sleep_until_with_time_getter(deadline: Time, time_getter: fn() -> Time) {
+    let mut sleep = Sleep::new(deadline);
+    poll_fn(|cx| {
+        if sleep.poll_with_time(time_getter()).is_ready() {
+            return Poll::Ready(());
+        }
+
+        let _ = Pin::new(&mut sleep).poll(cx);
+        Poll::Pending
+    })
+    .await;
+}
+
+async fn future_with_timeout<F>(
+    future: F,
+    deadline: Time,
+    time_getter: fn() -> Time,
+) -> Result<F::Output, crate::time::Elapsed>
+where
+    F: Future + Unpin,
+{
+    let mut timeout = TimeoutFuture::new(future, deadline);
+    poll_fn(|cx| match timeout.poll_with_time(time_getter(), cx) {
+        Poll::Ready(result) => Poll::Ready(result),
+        Poll::Pending => {
+            let _ = Pin::new(&mut timeout).poll(cx);
+            Poll::Pending
+        }
+    })
+    .await
 }
 
 /// Gets the current time, preferring the runtime timer driver over wall clock.
@@ -412,10 +469,25 @@ fn timeout_now() -> Time {
 #[cfg(test)]
 mod tests {
     use super::*;
+    use std::future::pending;
+    use std::sync::Arc;
+    use std::sync::atomic::{AtomicU64, Ordering};
+    use std::task::{Wake, Waker};
 
     fn init_test(name: &str) {
         crate::test_utils::init_test_logging();
         crate::test_phase!(name);
+    }
+
+    struct NoopWaker;
+
+    impl Wake for NoopWaker {
+        fn wake(self: Arc<Self>) {}
+        fn wake_by_ref(self: &Arc<Self>) {}
+    }
+
+    fn noop_waker() -> Waker {
+        Arc::new(NoopWaker).into()
     }
 
     // =======================================================================
@@ -662,6 +734,60 @@ mod tests {
         crate::test_complete!("compute_stagger_delay_saturates_on_overflow");
     }
 
+    #[test]
+    fn sleep_until_with_time_getter_waits_for_custom_clock() {
+        static TEST_NOW: AtomicU64 = AtomicU64::new(0);
+
+        fn test_time() -> Time {
+            Time::from_nanos(TEST_NOW.load(Ordering::SeqCst))
+        }
+
+        init_test("sleep_until_with_time_getter_waits_for_custom_clock");
+
+        TEST_NOW.store(1_000, Ordering::SeqCst);
+        let mut sleep = Box::pin(sleep_until_with_time_getter(
+            Time::from_nanos(1_500),
+            test_time,
+        ));
+        let waker = noop_waker();
+        let mut cx = Context::from_waker(&waker);
+
+        assert!(Future::poll(sleep.as_mut(), &mut cx).is_pending());
+
+        TEST_NOW.store(2_000, Ordering::SeqCst);
+        assert!(Future::poll(sleep.as_mut(), &mut cx).is_ready());
+        crate::test_complete!("sleep_until_with_time_getter_waits_for_custom_clock");
+    }
+
+    #[test]
+    fn future_with_timeout_honors_custom_clock() {
+        static TEST_NOW: AtomicU64 = AtomicU64::new(0);
+
+        fn test_time() -> Time {
+            Time::from_nanos(TEST_NOW.load(Ordering::SeqCst))
+        }
+
+        init_test("future_with_timeout_honors_custom_clock");
+
+        TEST_NOW.store(1_000, Ordering::SeqCst);
+        let mut future = Box::pin(future_with_timeout(
+            pending::<()>(),
+            Time::from_nanos(1_500),
+            test_time,
+        ));
+        let waker = noop_waker();
+        let mut cx = Context::from_waker(&waker);
+
+        assert!(Future::poll(future.as_mut(), &mut cx).is_pending());
+
+        TEST_NOW.store(2_000, Ordering::SeqCst);
+        assert!(matches!(
+            Future::poll(future.as_mut(), &mut cx),
+            Poll::Ready(Err(_))
+        ));
+        crate::test_complete!("future_with_timeout_honors_custom_clock");
+    }
+
     // =======================================================================
     // connect() edge case tests (no network needed)
     // =======================================================================
@@ -795,13 +921,39 @@ mod tests {
             });
 
         let deadline = timeout_now().saturating_add_nanos(5_000_000_000);
-        let race = RaceConnections::new(vec![fail_fut], deadline);
+        let race = RaceConnections::new(vec![fail_fut], deadline, timeout_now);
         let result = futures_lite::future::block_on(race);
 
         // Should complete with the error
         assert!(result.is_err());
         assert_eq!(result.unwrap_err().kind(), io::ErrorKind::ConnectionRefused);
         crate::test_complete!("race_connections_all_fail");
+    }
+
+    #[test]
+    fn race_connections_timeout_honors_custom_clock() {
+        static TEST_NOW: AtomicU64 = AtomicU64::new(0);
+
+        fn test_time() -> Time {
+            Time::from_nanos(TEST_NOW.load(Ordering::SeqCst))
+        }
+
+        init_test("race_connections_timeout_honors_custom_clock");
+
+        TEST_NOW.store(1_000, Ordering::SeqCst);
+        let pending_fut: ConnectFuture =
+            Box::pin(async { pending::<io::Result<TcpStream>>().await });
+        let deadline = Time::from_nanos(1_500);
+        let mut race = RaceConnections::new(vec![pending_fut], deadline, test_time);
+        let waker = noop_waker();
+        let mut cx = Context::from_waker(&waker);
+
+        assert!(race.poll_with_time(test_time(), &mut cx).is_pending());
+
+        TEST_NOW.store(2_000, Ordering::SeqCst);
+        let result = race.poll_with_time(test_time(), &mut cx);
+        assert!(matches!(result, Poll::Ready(Err(err)) if err.kind() == io::ErrorKind::TimedOut));
+        crate::test_complete!("race_connections_timeout_honors_custom_clock");
     }
 
     // =======================================================================

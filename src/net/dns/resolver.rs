@@ -12,7 +12,9 @@
 //! with future async DNS implementations.
 
 use std::net::{IpAddr, SocketAddr, TcpStream as StdTcpStream, ToSocketAddrs};
+use std::pin::Pin;
 use std::sync::Arc;
+use std::task::{Context, Poll};
 use std::time::Duration;
 
 use super::cache::{CacheConfig, CacheStats, DnsCache};
@@ -22,7 +24,7 @@ use crate::cx::Cx;
 use crate::net::TcpStream;
 use crate::runtime::spawn_blocking;
 use crate::runtime::spawn_blocking::spawn_blocking_on_thread;
-use crate::time::timeout;
+use crate::time::{Elapsed, Sleep};
 use crate::types::Time;
 
 /// DNS resolver configuration.
@@ -107,6 +109,7 @@ impl ResolverConfig {
 pub struct Resolver {
     config: ResolverConfig,
     cache: Arc<DnsCache>,
+    time_getter: fn() -> Time,
 }
 
 impl Resolver {
@@ -120,7 +123,35 @@ impl Resolver {
     #[must_use]
     pub fn with_config(config: ResolverConfig) -> Self {
         let cache = Arc::new(DnsCache::with_config(config.cache_config.clone()));
-        Self { config, cache }
+        Self {
+            config,
+            cache,
+            time_getter: default_timeout_now,
+        }
+    }
+
+    /// Creates a new resolver with a custom time source.
+    #[must_use]
+    pub fn with_time_getter(config: ResolverConfig, time_getter: fn() -> Time) -> Self {
+        let cache = Arc::new(DnsCache::with_time_getter(
+            config.cache_config.clone(),
+            time_getter,
+        ));
+        Self {
+            config,
+            cache,
+            time_getter,
+        }
+    }
+
+    /// Returns the time source used for resolver timeout decisions.
+    #[must_use]
+    pub const fn time_getter(&self) -> fn() -> Time {
+        self.time_getter
+    }
+
+    fn timeout_future<F>(&self, duration: Duration, future: F) -> ResolverTimeout<F> {
+        ResolverTimeout::new(future, duration, self.time_getter)
     }
 
     /// Looks up IP addresses for a hostname.
@@ -185,7 +216,7 @@ impl Resolver {
             Err(last_error.unwrap_or(DnsError::Timeout))
         }));
 
-        timeout(timeout_now(), self.config.timeout, lookup)
+        self.timeout_future(self.config.timeout, lookup)
             .await
             .map_or(Err(DnsError::Timeout), |result| result)
     }
@@ -284,7 +315,7 @@ impl Resolver {
                 + self.config.happy_eyeballs_delay * addrs.len() as u32,
         };
 
-        happy_eyeballs::connect(addrs, &config)
+        happy_eyeballs::connect_with_time_getter(addrs, &config, self.time_getter)
             .await
             .map_err(|e| DnsError::Connection(e.to_string()))
     }
@@ -322,7 +353,8 @@ impl Resolver {
             Ok::<_, DnsError>(stream)
         }));
 
-        let result = timeout(timeout_now(), timeout_duration, connect)
+        let result = self
+            .timeout_future(timeout_duration, connect)
             .await
             .map_or(Err(DnsError::Timeout), |result| result)?;
 
@@ -376,17 +408,70 @@ impl Clone for Resolver {
         Self {
             config: self.config.clone(),
             cache: Arc::clone(&self.cache),
+            time_getter: self.time_getter,
         }
     }
 }
 
-fn timeout_now() -> Time {
+fn default_timeout_now() -> Time {
     if let Some(current) = Cx::current() {
         if let Some(driver) = current.timer_driver() {
             return driver.now();
         }
     }
     crate::time::wall_now()
+}
+
+fn duration_to_nanos(duration: Duration) -> u64 {
+    duration.as_nanos().min(u128::from(u64::MAX)) as u64
+}
+
+#[derive(Debug)]
+struct ResolverTimeout<F> {
+    future: F,
+    sleep: Sleep,
+    time_getter: fn() -> Time,
+}
+
+impl<F> ResolverTimeout<F> {
+    fn new(future: F, duration: Duration, time_getter: fn() -> Time) -> Self {
+        let deadline = time_getter().saturating_add_nanos(duration_to_nanos(duration));
+        Self {
+            future,
+            sleep: Sleep::new(deadline),
+            time_getter,
+        }
+    }
+
+    #[cfg(test)]
+    #[must_use]
+    const fn deadline(&self) -> Time {
+        self.sleep.deadline()
+    }
+}
+
+impl<F> std::future::Future for ResolverTimeout<F>
+where
+    F: std::future::Future + Unpin,
+{
+    type Output = Result<F::Output, Elapsed>;
+
+    fn poll(self: Pin<&mut Self>, cx: &mut Context<'_>) -> Poll<Self::Output> {
+        let this = self.get_mut();
+
+        if let Poll::Ready(output) = Pin::new(&mut this.future).poll(cx) {
+            return Poll::Ready(Ok(output));
+        }
+
+        if this.sleep.poll_with_time((this.time_getter)()).is_ready() {
+            return Poll::Ready(Err(Elapsed::new(this.sleep.deadline())));
+        }
+
+        // Preserve wake registration even when timeout decisions use a
+        // manual clock for deterministic tests.
+        let _ = Pin::new(&mut this.sleep).poll(cx);
+        Poll::Pending
+    }
 }
 
 async fn spawn_blocking_dns<F, T>(f: F) -> Result<T, DnsError>
@@ -409,10 +494,35 @@ where
 mod tests {
     use super::*;
     use futures_lite::future;
+    use std::future::{Future, pending};
+    use std::sync::Arc;
+    use std::sync::atomic::{AtomicU64, Ordering};
+    use std::task::{Wake, Waker};
 
     fn init_test(name: &str) {
         crate::test_utils::init_test_logging();
         crate::test_phase!(name);
+    }
+
+    static TEST_NOW: AtomicU64 = AtomicU64::new(0);
+
+    fn set_test_time(nanos: u64) {
+        TEST_NOW.store(nanos, Ordering::SeqCst);
+    }
+
+    fn test_time() -> Time {
+        Time::from_nanos(TEST_NOW.load(Ordering::SeqCst))
+    }
+
+    struct NoopWaker;
+
+    impl Wake for NoopWaker {
+        fn wake(self: Arc<Self>) {}
+        fn wake_by_ref(self: &Arc<Self>) {}
+    }
+
+    fn noop_waker() -> Waker {
+        Arc::new(NoopWaker).into()
     }
 
     #[test]
@@ -503,6 +613,77 @@ mod tests {
         crate::assert_with_log!(timed_out, "timed out", true, timed_out);
 
         crate::test_complete!("resolver_timeout_zero");
+    }
+
+    #[test]
+    fn resolver_with_time_getter_threads_clock_into_cache() {
+        init_test("resolver_with_time_getter_threads_clock_into_cache");
+        set_test_time(0);
+
+        let resolver = Resolver::with_time_getter(ResolverConfig::default(), test_time);
+
+        crate::assert_with_log!(
+            (resolver.time_getter())().as_nanos() == 0,
+            "resolver time getter",
+            0,
+            (resolver.time_getter())().as_nanos()
+        );
+        crate::assert_with_log!(
+            (resolver.cache.time_getter())().as_nanos() == 0,
+            "cache time getter",
+            0,
+            (resolver.cache.time_getter())().as_nanos()
+        );
+
+        crate::test_complete!("resolver_with_time_getter_threads_clock_into_cache");
+    }
+
+    #[test]
+    fn resolver_timeout_future_uses_time_getter_for_deadline() {
+        init_test("resolver_timeout_future_uses_time_getter_for_deadline");
+        set_test_time(1_000);
+
+        let resolver = Resolver::with_time_getter(ResolverConfig::default(), test_time);
+        let future = resolver.timeout_future(Duration::from_nanos(500), pending::<()>());
+
+        crate::assert_with_log!(
+            future.deadline() == Time::from_nanos(1_500),
+            "deadline",
+            Time::from_nanos(1_500),
+            future.deadline()
+        );
+
+        crate::test_complete!("resolver_timeout_future_uses_time_getter_for_deadline");
+    }
+
+    #[test]
+    fn resolver_timeout_future_poll_honors_custom_time_getter() {
+        init_test("resolver_timeout_future_poll_honors_custom_time_getter");
+        set_test_time(1_000);
+
+        let resolver = Resolver::with_time_getter(ResolverConfig::default(), test_time);
+        let mut future = resolver.timeout_future(Duration::from_nanos(500), pending::<()>());
+        let waker = noop_waker();
+        let mut cx = Context::from_waker(&waker);
+
+        let first: Poll<Result<(), Elapsed>> = Future::poll(Pin::new(&mut future), &mut cx);
+        crate::assert_with_log!(
+            first.is_pending(),
+            "first poll pending",
+            true,
+            first.is_pending()
+        );
+
+        set_test_time(2_000);
+        let second: Poll<Result<(), Elapsed>> = Future::poll(Pin::new(&mut future), &mut cx);
+        crate::assert_with_log!(
+            matches!(second, Poll::Ready(Err(_))),
+            "second poll elapsed",
+            true,
+            matches!(second, Poll::Ready(Err(_)))
+        );
+
+        crate::test_complete!("resolver_timeout_future_poll_honors_custom_time_getter");
     }
 
     #[test]
