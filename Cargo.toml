@@ -190,6 +190,8 @@ hmac = "0.12"
 rdkafka = { version = "0.39", default-features = false, optional = true }
 # Systematic concurrency testing for scheduler (loom-tests feature)
 loom = { version = "0.7", optional = true }
+# Reactor backends use HashMap on multiple platforms.
+hashbrown = "0.15"
 # Lightweight async helpers used by web handler adapter shims.
 futures-lite = "2.6"
 # Optional gzip/deflate compression via pure-Rust miniz_oxide backend.

@@ -17,11 +17,72 @@ use std::io;
 use std::net::{SocketAddr, ToSocketAddrs};
 use std::pin::Pin;
 use std::sync::Arc;
+use std::sync::atomic::{AtomicU64, Ordering};
 use std::task::Poll;
 use std::time::Duration;
 
 const TRANSIENT_ACCEPT_BACKOFF_BASE: Duration = Duration::from_millis(2);
 const TRANSIENT_ACCEPT_BACKOFF_CAP: Duration = Duration::from_millis(64);
+
+/// Low-overhead listener counters for diagnosing accept-path stalls.
+#[derive(Debug, Default)]
+pub struct Http1ListenerStats {
+    accepted_total: AtomicU64,
+    transient_accept_errors_total: AtomicU64,
+    spawn_failures_total: AtomicU64,
+    last_accept_at_ms: AtomicU64,
+}
+
+/// Immutable snapshot of [`Http1ListenerStats`].
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub struct Http1ListenerStatsSnapshot {
+    /// Total successful accepts observed by the listener.
+    pub accepted_total: u64,
+    /// Total transient accept errors that triggered listener backoff.
+    pub transient_accept_errors_total: u64,
+    /// Total failures to spawn a per-connection task after accept succeeded.
+    pub spawn_failures_total: u64,
+    /// Unix time in milliseconds when the listener last accepted a connection.
+    pub last_accept_at_ms: u64,
+}
+
+impl Http1ListenerStats {
+    fn record_accepted(&self) {
+        self.accepted_total.fetch_add(1, Ordering::Relaxed);
+        self.last_accept_at_ms
+            .store(listener_diag_now_ms(), Ordering::Relaxed);
+    }
+
+    fn record_transient_accept_error(&self) {
+        self.transient_accept_errors_total
+            .fetch_add(1, Ordering::Relaxed);
+    }
+
+    fn record_spawn_failure(&self) {
+        self.spawn_failures_total.fetch_add(1, Ordering::Relaxed);
+    }
+
+    /// Returns a point-in-time copy of the listener counters.
+    #[must_use]
+    pub fn snapshot(&self) -> Http1ListenerStatsSnapshot {
+        Http1ListenerStatsSnapshot {
+            accepted_total: self.accepted_total.load(Ordering::Relaxed),
+            transient_accept_errors_total: self
+                .transient_accept_errors_total
+                .load(Ordering::Relaxed),
+            spawn_failures_total: self.spawn_failures_total.load(Ordering::Relaxed),
+            last_accept_at_ms: self.last_accept_at_ms.load(Ordering::Relaxed),
+        }
+    }
+}
+
+fn listener_diag_now_ms() -> u64 {
+    std::time::SystemTime::now()
+        .duration_since(std::time::UNIX_EPOCH)
+        .ok()
+        .and_then(|duration| u64::try_from(duration.as_millis()).ok())
+        .unwrap_or(0)
+}
 
 /// Configuration for the HTTP/1.1 listener.
 #[derive(Debug, Clone)]
@@ -98,6 +159,7 @@ pub struct Http1Listener<F> {
     config: Http1ListenerConfig,
     shutdown_signal: ShutdownSignal,
     connection_manager: ConnectionManager,
+    stats: Arc<Http1ListenerStats>,
 }
 
 impl<F, Fut> Http1Listener<F>
@@ -120,6 +182,7 @@ where
         let shutdown_signal = ShutdownSignal::new();
         let connection_manager =
             ConnectionManager::new(config.max_connections, shutdown_signal.clone());
+        let stats = Arc::new(Http1ListenerStats::default());
 
         Ok(Self {
             tcp_listener,
@@ -127,6 +190,7 @@ where
             config,
             shutdown_signal,
             connection_manager,
+            stats,
         })
     }
 
@@ -139,6 +203,7 @@ where
         let shutdown_signal = ShutdownSignal::new();
         let connection_manager =
             ConnectionManager::new(config.max_connections, shutdown_signal.clone());
+        let stats = Arc::new(Http1ListenerStats::default());
 
         Self {
             tcp_listener,
@@ -146,6 +211,7 @@ where
             config,
             shutdown_signal,
             connection_manager,
+            stats,
         }
     }
 
@@ -166,6 +232,12 @@ where
     #[must_use]
     pub fn connection_manager(&self) -> &ConnectionManager {
         &self.connection_manager
+    }
+
+    /// Returns the accept-path diagnostic counters for this listener.
+    #[must_use]
+    pub fn stats_handle(&self) -> Arc<Http1ListenerStats> {
+        Arc::clone(&self.stats)
     }
 
     /// Returns the local address this listener is bound to.
@@ -225,10 +297,12 @@ where
 
             let (stream, addr) = match accept_result {
                 Ok(conn) => {
+                    self.stats.record_accepted();
                     transient_accept_streak = 0;
                     conn
                 }
                 Err(ref e) if is_transient_accept_error(e) => {
+                    self.stats.record_transient_accept_error();
                     transient_accept_streak = transient_accept_streak.saturating_add(1);
                     crate::time::sleep(
                         transient_accept_now(),
@@ -258,7 +332,10 @@ where
                 shutdown_signal,
                 runtime,
             )
-            .map_err(|err| io::Error::other(format!("failed to spawn connection task: {err}")))?;
+            .map_err(|err| {
+                self.stats.record_spawn_failure();
+                io::Error::other(format!("failed to spawn connection task: {err}"))
+            })?;
             tasks.push(handle);
         }
 
