@@ -520,6 +520,19 @@ pub fn sigalrm() -> io::Result<Signal> {
 #[cfg(test)]
 mod tests {
     use super::*;
+    use std::future::Future;
+    use std::sync::Arc;
+    use std::task::{Context, Poll, Wake, Waker};
+
+    struct NoopWaker;
+
+    impl Wake for NoopWaker {
+        fn wake(self: Arc<Self>) {}
+    }
+
+    fn noop_waker() -> Waker {
+        Waker::from(Arc::new(NoopWaker))
+    }
 
     fn init_test(name: &str) {
         crate::test_utils::init_test_logging();
@@ -593,8 +606,16 @@ mod tests {
         dispatcher_for(SignalKind::terminate())
             .expect("dispatcher")
             .inject(SignalKind::terminate());
-        let got = futures_lite::future::block_on(stream.recv());
-        crate::assert_with_log!(got.is_some(), "recv returns delivery", true, got.is_some());
+        let waker = noop_waker();
+        let mut cx = Context::from_waker(&waker);
+        let mut recv = Box::pin(stream.recv());
+        let poll = recv.as_mut().poll(&mut cx);
+        crate::assert_with_log!(
+            matches!(poll, Poll::Ready(Some(()))),
+            "recv returns delivery",
+            "Poll::Ready(Some(()))",
+            poll
+        );
         crate::test_complete!("signal_recv_observes_delivery");
     }
 
@@ -606,21 +627,26 @@ mod tests {
         let dispatcher = dispatcher_for(SignalKind::terminate()).expect("dispatcher");
         dispatcher.inject(SignalKind::terminate());
         dispatcher.inject(SignalKind::terminate());
+        let waker = noop_waker();
+        let mut cx = Context::from_waker(&waker);
 
-        let first = futures_lite::future::block_on(stream.recv());
+        let mut first_recv = Box::pin(stream.recv());
+        let first = first_recv.as_mut().poll(&mut cx);
         crate::assert_with_log!(
-            first.is_some(),
+            matches!(first, Poll::Ready(Some(()))),
             "first recv consumes one pending delivery",
-            true,
-            first.is_some()
+            "Poll::Ready(Some(()))",
+            first
         );
+        drop(first_recv);
 
-        let second = futures_lite::future::block_on(stream.recv());
+        let mut second_recv = Box::pin(stream.recv());
+        let second = second_recv.as_mut().poll(&mut cx);
         crate::assert_with_log!(
-            second.is_some(),
+            matches!(second, Poll::Ready(Some(()))),
             "second recv consumes second pending delivery",
-            true,
-            second.is_some()
+            "Poll::Ready(Some(()))",
+            second
         );
         crate::test_complete!("signal_recv_preserves_multiple_recorded_deliveries");
     }

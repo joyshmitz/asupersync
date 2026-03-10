@@ -394,9 +394,13 @@ impl Notified<'_> {
                 match &mut waiters.entries[index].waker {
                     Some(existing) if existing.will_wake(cx.waker()) => {}
                     Some(existing) => existing.clone_from(cx.waker()),
-                    slot @ None => {
-                        *slot = Some(cx.waker().clone());
-                        waiters.active += 1;
+                    None => {
+                        // This state is unreachable. `waker` is only set to `None` in two cases:
+                        // 1. By `notify_one`/`notify_waiters`, which also set `notified = true`.
+                        //    If `notified` were true, we would have returned `Ready` above.
+                        // 2. By `WaitSlab::remove()`. But `remove()` is only called when we
+                        //    clear `self.waiter_index`, so we couldn't be here with this index.
+                        unreachable!("waker is never None while notified is false for a live Notified future");
                     }
                 }
             } else {
