@@ -36,6 +36,10 @@ use std::sync::Arc;
 use std::sync::atomic::{AtomicU64, Ordering};
 use std::time::{Duration, Instant};
 
+fn wall_clock_now() -> Instant {
+    Instant::now()
+}
+
 // ─── ConnectionManager trait ────────────────────────────────────────────────
 
 /// Manages the lifecycle of database connections.
@@ -161,7 +165,7 @@ struct IdleConnection<C> {
 
 impl<C> IdleConnection<C> {
     fn new(conn: C) -> Self {
-        let now = Instant::now();
+        let now = wall_clock_now();
         Self {
             conn,
             created_at: now,
@@ -169,12 +173,12 @@ impl<C> IdleConnection<C> {
         }
     }
 
-    fn is_expired(&self, config: &DbPoolConfig) -> bool {
-        self.created_at.elapsed() > config.max_lifetime
+    fn is_expired_at(&self, config: &DbPoolConfig, now: Instant) -> bool {
+        now.saturating_duration_since(self.created_at) > config.max_lifetime
     }
 
-    fn is_idle_too_long(&self, config: &DbPoolConfig) -> bool {
-        self.last_used.elapsed() > config.idle_timeout
+    fn is_idle_too_long_at(&self, config: &DbPoolConfig, now: Instant) -> bool {
+        now.saturating_duration_since(self.last_used) > config.idle_timeout
     }
 }
 
@@ -197,6 +201,7 @@ pub struct DbPool<M: ConnectionManager> {
     config: DbPoolConfig,
     inner: Mutex<PoolInner<M::Connection>>,
     stats: PoolStatCounters,
+    time_getter: fn() -> Instant,
 }
 
 struct PoolStatCounters {
@@ -284,6 +289,15 @@ impl<E: std::error::Error + 'static> std::error::Error for DbPoolError<E> {
 impl<M: ConnectionManager> DbPool<M> {
     /// Create a new connection pool with the given manager and configuration.
     pub fn new(manager: M, config: DbPoolConfig) -> Self {
+        Self::with_time_getter(manager, config, wall_clock_now)
+    }
+
+    /// Create a new connection pool with a custom time source.
+    pub fn with_time_getter(
+        manager: M,
+        config: DbPoolConfig,
+        time_getter: fn() -> Instant,
+    ) -> Self {
         Self {
             manager: Arc::new(manager),
             config,
@@ -293,6 +307,7 @@ impl<M: ConnectionManager> DbPool<M> {
                 closed: false,
             }),
             stats: PoolStatCounters::default(),
+            time_getter,
         }
     }
 
@@ -305,6 +320,12 @@ impl<M: ConnectionManager> DbPool<M> {
     #[must_use]
     pub fn config(&self) -> &DbPoolConfig {
         &self.config
+    }
+
+    /// Get the time source used by lifecycle bookkeeping.
+    #[must_use]
+    pub const fn time_getter(&self) -> fn() -> Instant {
+        self.time_getter
     }
 
     /// Get current pool statistics.
@@ -338,8 +359,9 @@ impl<M: ConnectionManager> DbPool<M> {
 
             if let Some(idle) = inner.idle.pop_front() {
                 // Drop lock before expensive operations
-                let is_expired = idle.is_expired(&self.config);
-                let is_stale = idle.is_idle_too_long(&self.config);
+                let now = (self.time_getter)();
+                let is_expired = idle.is_expired_at(&self.config, now);
+                let is_stale = idle.is_idle_too_long_at(&self.config, now);
                 let needs_validation = self.config.validate_on_checkout;
                 drop(inner);
 
@@ -379,7 +401,7 @@ impl<M: ConnectionManager> DbPool<M> {
                 match self.manager.connect() {
                     Ok(conn) => {
                         self.stats.total_creates.fetch_add(1, Ordering::Relaxed);
-                        return self.finish_checkout(conn, Instant::now());
+                        return self.finish_checkout(conn, (self.time_getter)());
                     }
                     Err(e) => {
                         // Roll back total count on failure.
@@ -442,7 +464,7 @@ impl<M: ConnectionManager> DbPool<M> {
         &self,
         policy: &RetryPolicy,
     ) -> Result<PooledConnection<'_, M>, DbPoolError<M::Error>> {
-        let deadline = Instant::now() + self.config.connection_timeout;
+        let deadline = (self.time_getter)() + self.config.connection_timeout;
         let mut attempt = 0u32;
 
         loop {
@@ -462,7 +484,7 @@ impl<M: ConnectionManager> DbPool<M> {
                     }
 
                     // Check if deadline already passed.
-                    let remaining = deadline.saturating_duration_since(Instant::now());
+                    let remaining = deadline.saturating_duration_since((self.time_getter)());
                     if remaining.is_zero() {
                         self.stats.total_timeouts.fetch_add(1, Ordering::Relaxed);
                         return Err(DbPoolError::Timeout);
@@ -473,7 +495,7 @@ impl<M: ConnectionManager> DbPool<M> {
                     std::thread::sleep(delay.min(remaining));
 
                     // Re-check deadline after sleep.
-                    if Instant::now() >= deadline {
+                    if (self.time_getter)() >= deadline {
                         self.stats.total_timeouts.fetch_add(1, Ordering::Relaxed);
                         return Err(DbPoolError::Timeout);
                     }
@@ -509,7 +531,7 @@ impl<M: ConnectionManager> DbPool<M> {
                 inner.idle.push_back(IdleConnection {
                     conn,
                     created_at,
-                    last_used: Instant::now(),
+                    last_used: (self.time_getter)(),
                 });
                 None
             }
@@ -563,13 +585,16 @@ impl<M: ConnectionManager> DbPool<M> {
     /// Returns the number of connections evicted.
     pub fn evict_stale(&self) -> usize {
         let mut inner = self.inner.lock();
+        let now = (self.time_getter)();
 
         // Drain all idle, keep only the valid ones.
         let mut keep = VecDeque::new();
         let mut to_disconnect = Vec::new();
 
         while let Some(entry) = inner.idle.pop_front() {
-            if entry.is_expired(&self.config) || entry.is_idle_too_long(&self.config) {
+            if entry.is_expired_at(&self.config, now)
+                || entry.is_idle_too_long_at(&self.config, now)
+            {
                 to_disconnect.push(entry.conn);
             } else {
                 keep.push_back(entry);
@@ -607,7 +632,7 @@ impl<M: ConnectionManager> DbPool<M> {
             match self.manager.connect() {
                 Ok(conn) => {
                     self.stats.total_creates.fetch_add(1, Ordering::Relaxed);
-                    self.return_connection(conn, Instant::now());
+                    self.return_connection(conn, (self.time_getter)());
                     created += 1;
                 }
                 Err(_) => {
@@ -779,11 +804,21 @@ pub struct AsyncDbPool<M: AsyncConnectionManager> {
     config: DbPoolConfig,
     inner: Mutex<PoolInner<M::Connection>>,
     stats: PoolStatCounters,
+    time_getter: fn() -> Instant,
 }
 
 impl<M: AsyncConnectionManager> AsyncDbPool<M> {
     /// Create a new async connection pool.
     pub fn new(manager: M, config: DbPoolConfig) -> Self {
+        Self::with_time_getter(manager, config, wall_clock_now)
+    }
+
+    /// Create a new async connection pool with a custom time source.
+    pub fn with_time_getter(
+        manager: M,
+        config: DbPoolConfig,
+        time_getter: fn() -> Instant,
+    ) -> Self {
         Self {
             manager: Arc::new(manager),
             config,
@@ -793,6 +828,7 @@ impl<M: AsyncConnectionManager> AsyncDbPool<M> {
                 closed: false,
             }),
             stats: PoolStatCounters::default(),
+            time_getter,
         }
     }
 
@@ -805,6 +841,12 @@ impl<M: AsyncConnectionManager> AsyncDbPool<M> {
     #[must_use]
     pub fn config(&self) -> &DbPoolConfig {
         &self.config
+    }
+
+    /// Get the time source used by lifecycle bookkeeping.
+    #[must_use]
+    pub const fn time_getter(&self) -> fn() -> Instant {
+        self.time_getter
     }
 
     /// Get current pool statistics.
@@ -847,8 +889,9 @@ impl<M: AsyncConnectionManager> AsyncDbPool<M> {
             };
 
             if let Some(idle) = candidate {
-                let is_expired = idle.is_expired(&self.config);
-                let is_stale = idle.is_idle_too_long(&self.config);
+                let now = (self.time_getter)();
+                let is_expired = idle.is_expired_at(&self.config, now);
+                let is_stale = idle.is_idle_too_long_at(&self.config, now);
 
                 if is_expired || is_stale {
                     {
@@ -943,7 +986,7 @@ impl<M: AsyncConnectionManager> AsyncDbPool<M> {
                 Outcome::Ok(conn) => {
                     guard.active = false;
                     self.stats.total_creates.fetch_add(1, Ordering::Relaxed);
-                    return self.finish_async_checkout(conn, Instant::now());
+                    return self.finish_async_checkout(conn, (self.time_getter)());
                 }
                 Outcome::Err(e) => {
                     guard.active = false;
@@ -998,7 +1041,7 @@ impl<M: AsyncConnectionManager> AsyncDbPool<M> {
                 inner.idle.push_back(IdleConnection {
                     conn,
                     created_at,
-                    last_used: Instant::now(),
+                    last_used: (self.time_getter)(),
                 });
                 None
             }
@@ -1131,11 +1174,35 @@ impl<M: AsyncConnectionManager> fmt::Debug for AsyncPooledConnection<'_, M> {
 mod tests {
     use super::*;
     use std::sync::atomic::{AtomicBool, AtomicUsize, Ordering};
-    use std::sync::{Arc, Condvar, Mutex};
+    use std::sync::{Arc, Condvar, Mutex, OnceLock};
 
     fn init_test(name: &str) {
         crate::test_utils::init_test_logging();
         crate::test_phase!(name);
+    }
+
+    static TEST_NOW_OFFSET_NS: AtomicU64 = AtomicU64::new(0);
+    static TEST_NOW_BASE: OnceLock<Instant> = OnceLock::new();
+    static TEST_TIME_LOCK: OnceLock<Mutex<()>> = OnceLock::new();
+
+    fn set_test_time(nanos: u64) {
+        TEST_NOW_OFFSET_NS.store(nanos, Ordering::SeqCst);
+    }
+
+    fn lock_test_clock() -> std::sync::MutexGuard<'static, ()> {
+        TEST_TIME_LOCK
+            .get_or_init(|| Mutex::new(()))
+            .lock()
+            .expect("test time lock poisoned")
+    }
+
+    fn test_now() -> Instant {
+        TEST_NOW_BASE
+            .get_or_init(Instant::now)
+            .checked_add(Duration::from_nanos(
+                TEST_NOW_OFFSET_NS.load(Ordering::SeqCst),
+            ))
+            .expect("test instant overflow")
     }
 
     // ================================================================
@@ -1218,6 +1285,54 @@ mod tests {
 
         fn disconnect(&self, _conn: Self::Connection) {
             self.disconnects.fetch_add(1, Ordering::SeqCst);
+        }
+    }
+
+    struct AsyncTestManager {
+        inner: TestManager,
+    }
+
+    impl AsyncTestManager {
+        fn new() -> Self {
+            Self {
+                inner: TestManager::new(),
+            }
+        }
+
+        fn disconnects(&self) -> usize {
+            self.inner.disconnects()
+        }
+    }
+
+    impl AsyncConnectionManager for AsyncTestManager {
+        type Connection = TestConnection;
+        type Error = TestError;
+
+        fn connect(
+            &self,
+            _cx: &Cx,
+        ) -> impl std::future::Future<Output = Outcome<Self::Connection, Self::Error>> + Send
+        {
+            let result = self.inner.connect();
+            async move {
+                match result {
+                    Ok(conn) => Outcome::Ok(conn),
+                    Err(err) => Outcome::Err(err),
+                }
+            }
+        }
+
+        fn is_valid(
+            &self,
+            _cx: &Cx,
+            conn: &mut Self::Connection,
+        ) -> impl std::future::Future<Output = bool> + Send {
+            let is_valid = self.inner.is_valid(conn);
+            async move { is_valid }
+        }
+
+        fn disconnect(&self, conn: Self::Connection) {
+            self.inner.disconnect(conn);
         }
     }
 
@@ -1825,6 +1940,78 @@ mod tests {
 
         drop(held);
         crate::test_complete!("warm_up_only_tops_up_missing_idle_connections");
+    }
+
+    #[test]
+    fn evict_stale_uses_time_getter_for_idle_timeout_without_sleep() {
+        init_test("evict_stale_uses_time_getter_for_idle_timeout_without_sleep");
+        let _clock_guard = lock_test_clock();
+        set_test_time(0);
+        let config = DbPoolConfig::default()
+            .idle_timeout(Duration::from_millis(5))
+            .max_lifetime(Duration::from_secs(60));
+        let pool = DbPool::with_time_getter(TestManager::new(), config, test_now);
+
+        let conn = pool.get().unwrap();
+        conn.return_to_pool();
+        assert_eq!(pool.stats().idle, 1);
+
+        set_test_time(Duration::from_millis(6).as_nanos() as u64);
+        let evicted = pool.evict_stale();
+        assert_eq!(evicted, 1);
+        assert_eq!(pool.stats().idle, 0);
+        assert_eq!(pool.stats().total_discards, 1);
+        assert_eq!(pool.manager.disconnects(), 1);
+        crate::test_complete!("evict_stale_uses_time_getter_for_idle_timeout_without_sleep");
+    }
+
+    #[test]
+    fn evict_stale_uses_time_getter_for_max_lifetime_without_sleep() {
+        init_test("evict_stale_uses_time_getter_for_max_lifetime_without_sleep");
+        let _clock_guard = lock_test_clock();
+        set_test_time(0);
+        let config = DbPoolConfig::default()
+            .idle_timeout(Duration::from_secs(60))
+            .max_lifetime(Duration::from_millis(5));
+        let pool = DbPool::with_time_getter(TestManager::new(), config, test_now);
+
+        let conn = pool.get().unwrap();
+        conn.return_to_pool();
+        assert_eq!(pool.stats().idle, 1);
+
+        set_test_time(Duration::from_millis(6).as_nanos() as u64);
+        let evicted = pool.evict_stale();
+        assert_eq!(evicted, 1);
+        assert_eq!(pool.stats().idle, 0);
+        assert_eq!(pool.stats().total_discards, 1);
+        assert_eq!(pool.manager.disconnects(), 1);
+        crate::test_complete!("evict_stale_uses_time_getter_for_max_lifetime_without_sleep");
+    }
+
+    #[test]
+    fn async_pool_time_getter_evicts_stale_idle_on_checkout_without_sleep() {
+        init_test("async_pool_time_getter_evicts_stale_idle_on_checkout_without_sleep");
+        let _clock_guard = lock_test_clock();
+        set_test_time(0);
+        let config = DbPoolConfig::default()
+            .idle_timeout(Duration::from_millis(5))
+            .max_lifetime(Duration::from_secs(60));
+        let pool = AsyncDbPool::with_time_getter(AsyncTestManager::new(), config, test_now);
+        let cx = Cx::for_testing();
+
+        futures_lite::future::block_on(async {
+            let conn = pool.get(&cx).await.expect("initial checkout");
+            let first_id = conn.id;
+            drop(conn);
+
+            set_test_time(Duration::from_millis(6).as_nanos() as u64);
+            let conn = pool.get(&cx).await.expect("second checkout");
+            assert_ne!(conn.id, first_id);
+        });
+
+        assert_eq!(pool.stats().total_discards, 1);
+        assert_eq!(pool.manager.disconnects(), 1);
+        crate::test_complete!("async_pool_time_getter_evicts_stale_idle_on_checkout_without_sleep");
     }
 
     // ================================================================
