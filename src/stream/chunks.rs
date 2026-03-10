@@ -8,6 +8,12 @@ use pin_project::pin_project;
 use std::pin::Pin;
 use std::task::{Context, Poll};
 
+/// Cooperative budget for items drained in a single poll.
+///
+/// Without this bound, large chunk capacities combined with always-ready
+/// upstream streams can monopolize an executor turn.
+const CHUNKS_COOPERATIVE_BUDGET: usize = 1024;
+
 /// A stream that yields items in fixed-size chunks.
 ///
 /// Created by [`StreamExt::chunks`](super::StreamExt::chunks).
@@ -56,12 +62,18 @@ where
 
     fn poll_next(self: Pin<&mut Self>, cx: &mut Context<'_>) -> Poll<Option<Self::Item>> {
         let mut this = self.project();
+        let mut drained_this_poll = 0usize;
         loop {
             match this.stream.as_mut().poll_next(cx) {
                 Poll::Ready(Some(item)) => {
                     this.items.push(item);
                     if this.items.len() >= *this.cap {
                         return Poll::Ready(Some(std::mem::take(this.items)));
+                    }
+                    drained_this_poll += 1;
+                    if drained_this_poll >= CHUNKS_COOPERATIVE_BUDGET {
+                        cx.waker().wake_by_ref();
+                        return Poll::Pending;
                     }
                 }
                 Poll::Ready(None) => {
@@ -140,12 +152,18 @@ where
             this.items.reserve(need);
         }
 
+        let mut drained_this_poll = 0usize;
         loop {
             match this.stream.as_mut().poll_next(cx) {
                 Poll::Ready(Some(item)) => {
                     this.items.push(item);
                     if this.items.len() >= cap {
                         return Poll::Ready(Some(std::mem::take(this.items)));
+                    }
+                    drained_this_poll += 1;
+                    if drained_this_poll >= CHUNKS_COOPERATIVE_BUDGET {
+                        cx.waker().wake_by_ref();
+                        return Poll::Pending;
                     }
                 }
                 Poll::Ready(None) => {
@@ -177,6 +195,7 @@ mod tests {
     use crate::stream::StreamExt;
     use crate::stream::iter;
     use std::sync::Arc;
+    use std::sync::atomic::{AtomicBool, Ordering};
     use std::task::{Wake, Waker};
 
     struct NoopWaker;
@@ -187,6 +206,18 @@ mod tests {
 
     fn noop_waker() -> Waker {
         Waker::from(Arc::new(NoopWaker))
+    }
+
+    struct TrackWaker(Arc<AtomicBool>);
+
+    impl Wake for TrackWaker {
+        fn wake(self: Arc<Self>) {
+            self.0.store(true, Ordering::SeqCst);
+        }
+
+        fn wake_by_ref(self: &Arc<Self>) {
+            self.0.store(true, Ordering::SeqCst);
+        }
     }
 
     fn collect_chunks<S: Stream + Unpin>(stream: &mut S) -> Vec<S::Item> {
@@ -325,5 +356,106 @@ mod tests {
         let is_none = matches!(poll, Poll::Ready(None));
         crate::assert_with_log!(is_none, "no partial chunk", true, is_none);
         crate::test_complete!("chunks_exact_divisible_no_partial");
+    }
+
+    #[derive(Debug, Default)]
+    struct AlwaysReadyCounter {
+        next: usize,
+    }
+
+    impl Stream for AlwaysReadyCounter {
+        type Item = usize;
+
+        fn poll_next(mut self: Pin<&mut Self>, _cx: &mut Context<'_>) -> Poll<Option<Self::Item>> {
+            let item = self.next;
+            self.next = self.next.saturating_add(1);
+            Poll::Ready(Some(item))
+        }
+    }
+
+    #[test]
+    fn chunks_yield_after_budget_on_always_ready_stream() {
+        init_test("chunks_yield_after_budget_on_always_ready_stream");
+        let mut stream = Chunks::new(AlwaysReadyCounter::default(), CHUNKS_COOPERATIVE_BUDGET + 5);
+        let woke = Arc::new(AtomicBool::new(false));
+        let waker = Waker::from(Arc::new(TrackWaker(woke.clone())));
+        let mut cx = Context::from_waker(&waker);
+
+        let first = Pin::new(&mut stream).poll_next(&mut cx);
+        let ok = matches!(first, Poll::Pending);
+        crate::assert_with_log!(ok, "first poll yields cooperatively", true, ok);
+        let ok = stream.items.len() == CHUNKS_COOPERATIVE_BUDGET;
+        crate::assert_with_log!(
+            ok,
+            "buffered items preserved across yield",
+            CHUNKS_COOPERATIVE_BUDGET,
+            stream.items.len()
+        );
+        let ok = stream.stream.next == CHUNKS_COOPERATIVE_BUDGET;
+        crate::assert_with_log!(
+            ok,
+            "upstream advanced only to budget",
+            CHUNKS_COOPERATIVE_BUDGET,
+            stream.stream.next
+        );
+        let ok = woke.load(Ordering::SeqCst);
+        crate::assert_with_log!(ok, "self-wake requested", true, ok);
+
+        let second = Pin::new(&mut stream).poll_next(&mut cx);
+        let ok =
+            matches!(second, Poll::Ready(Some(ref c)) if c.len() == CHUNKS_COOPERATIVE_BUDGET + 5);
+        crate::assert_with_log!(
+            ok,
+            "second poll completes buffered chunk",
+            CHUNKS_COOPERATIVE_BUDGET + 5,
+            second
+        );
+        crate::test_complete!("chunks_yield_after_budget_on_always_ready_stream");
+    }
+
+    #[test]
+    fn ready_chunks_flush_after_budget_on_always_ready_stream() {
+        init_test("ready_chunks_flush_after_budget_on_always_ready_stream");
+        let mut stream =
+            ReadyChunks::new(AlwaysReadyCounter::default(), CHUNKS_COOPERATIVE_BUDGET + 5);
+        let woke = Arc::new(AtomicBool::new(false));
+        let waker = Waker::from(Arc::new(TrackWaker(woke.clone())));
+        let mut cx = Context::from_waker(&waker);
+
+        let first = Pin::new(&mut stream).poll_next(&mut cx);
+        let ok = matches!(first, Poll::Pending);
+        crate::assert_with_log!(
+            ok,
+            "first poll yields cooperatively",
+            "Poll::Pending",
+            first
+        );
+        let ok = stream.items.len() == CHUNKS_COOPERATIVE_BUDGET;
+        crate::assert_with_log!(
+            ok,
+            "buffered items preserved across yield",
+            CHUNKS_COOPERATIVE_BUDGET,
+            stream.items.len()
+        );
+        let ok = stream.stream.next == CHUNKS_COOPERATIVE_BUDGET;
+        crate::assert_with_log!(
+            ok,
+            "upstream advanced only to budget",
+            CHUNKS_COOPERATIVE_BUDGET,
+            stream.stream.next
+        );
+        let ok = woke.load(Ordering::SeqCst);
+        crate::assert_with_log!(ok, "self-wake requested", true, ok);
+
+        let second = Pin::new(&mut stream).poll_next(&mut cx);
+        let ok =
+            matches!(second, Poll::Ready(Some(ref c)) if c.len() == CHUNKS_COOPERATIVE_BUDGET + 5);
+        crate::assert_with_log!(
+            ok,
+            "second poll completes buffered chunk",
+            CHUNKS_COOPERATIVE_BUDGET + 5,
+            second
+        );
+        crate::test_complete!("ready_chunks_flush_after_budget_on_always_ready_stream");
     }
 }

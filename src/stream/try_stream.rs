@@ -7,6 +7,12 @@ use std::future::Future;
 use std::pin::Pin;
 use std::task::{Context, Poll};
 
+/// Cooperative budget for success-path items drained in a single poll.
+///
+/// Without this bound, an always-ready success-heavy stream can monopolize one
+/// executor turn while these terminal futures drain the entire input.
+const TRY_STREAM_COOPERATIVE_BUDGET: usize = 1024;
+
 /// A future that collects items from a stream of Results.
 ///
 /// Short-circuits on the first error.
@@ -36,10 +42,16 @@ where
     type Output = Result<C, E>;
 
     fn poll(mut self: Pin<&mut Self>, cx: &mut Context<'_>) -> Poll<Result<C, E>> {
+        let mut processed_this_poll = 0usize;
         loop {
             match Pin::new(&mut self.stream).poll_next(cx) {
                 Poll::Ready(Some(Ok(item))) => {
                     self.collection.extend(std::iter::once(item));
+                    processed_this_poll += 1;
+                    if processed_this_poll >= TRY_STREAM_COOPERATIVE_BUDGET {
+                        cx.waker().wake_by_ref();
+                        return Poll::Pending;
+                    }
                 }
                 Poll::Ready(Some(Err(e))) => {
                     return Poll::Ready(Err(e));
@@ -87,6 +99,7 @@ where
     type Output = Result<Acc, E>;
 
     fn poll(mut self: Pin<&mut Self>, cx: &mut Context<'_>) -> Poll<Result<Acc, E>> {
+        let mut processed_this_poll = 0usize;
         loop {
             match Pin::new(&mut self.stream).poll_next(cx) {
                 Poll::Ready(Some(Ok(item))) => {
@@ -94,6 +107,11 @@ where
                     match (self.f)(acc, item) {
                         Ok(new_acc) => self.acc = Some(new_acc),
                         Err(e) => return Poll::Ready(Err(e)),
+                    }
+                    processed_this_poll += 1;
+                    if processed_this_poll >= TRY_STREAM_COOPERATIVE_BUDGET {
+                        cx.waker().wake_by_ref();
+                        return Poll::Pending;
                     }
                 }
                 Poll::Ready(Some(Err(e))) => return Poll::Ready(Err(e)),
@@ -138,11 +156,17 @@ where
     type Output = Result<(), E>;
 
     fn poll(mut self: Pin<&mut Self>, cx: &mut Context<'_>) -> Poll<Result<(), E>> {
+        let mut processed_this_poll = 0usize;
         loop {
             match Pin::new(&mut self.stream).poll_next(cx) {
                 Poll::Ready(Some(item)) => {
                     if let Err(e) = (self.f)(item) {
                         return Poll::Ready(Err(e));
+                    }
+                    processed_this_poll += 1;
+                    if processed_this_poll >= TRY_STREAM_COOPERATIVE_BUDGET {
+                        cx.waker().wake_by_ref();
+                        return Poll::Pending;
                     }
                 }
                 Poll::Ready(None) => return Poll::Ready(Ok(())),
@@ -157,7 +181,8 @@ mod tests {
     use super::*;
     use crate::stream::iter;
     use std::sync::Arc;
-    use std::task::{Wake, Waker};
+    use std::sync::atomic::{AtomicBool, Ordering};
+    use std::task::{Context, Poll, Wake, Waker};
 
     struct NoopWaker;
 
@@ -167,6 +192,70 @@ mod tests {
 
     fn noop_waker() -> Waker {
         Waker::from(Arc::new(NoopWaker))
+    }
+
+    struct TrackWaker(Arc<AtomicBool>);
+
+    impl Wake for TrackWaker {
+        fn wake(self: Arc<Self>) {
+            self.0.store(true, Ordering::SeqCst);
+        }
+
+        fn wake_by_ref(self: &Arc<Self>) {
+            self.0.store(true, Ordering::SeqCst);
+        }
+    }
+
+    #[derive(Debug, Default)]
+    struct AlwaysReadyOkStream {
+        next: usize,
+        end: usize,
+    }
+
+    impl AlwaysReadyOkStream {
+        fn new(end: usize) -> Self {
+            Self { next: 0, end }
+        }
+    }
+
+    impl Stream for AlwaysReadyOkStream {
+        type Item = Result<usize, &'static str>;
+
+        fn poll_next(mut self: Pin<&mut Self>, _cx: &mut Context<'_>) -> Poll<Option<Self::Item>> {
+            if self.next >= self.end {
+                return Poll::Ready(None);
+            }
+
+            let item = self.next;
+            self.next += 1;
+            Poll::Ready(Some(Ok(item)))
+        }
+    }
+
+    #[derive(Debug, Default)]
+    struct AlwaysReadyValueStream {
+        next: usize,
+        end: usize,
+    }
+
+    impl AlwaysReadyValueStream {
+        fn new(end: usize) -> Self {
+            Self { next: 0, end }
+        }
+    }
+
+    impl Stream for AlwaysReadyValueStream {
+        type Item = usize;
+
+        fn poll_next(mut self: Pin<&mut Self>, _cx: &mut Context<'_>) -> Poll<Option<Self::Item>> {
+            if self.next >= self.end {
+                return Poll::Ready(None);
+            }
+
+            let item = self.next;
+            self.next += 1;
+            Poll::Ready(Some(item))
+        }
     }
 
     fn init_test(name: &str) {
@@ -342,5 +431,170 @@ mod tests {
             Poll::Pending => panic!("expected Ready"),
         }
         crate::test_complete!("try_for_each_error");
+    }
+
+    #[test]
+    fn try_collect_yields_after_budget_on_always_ready_success_stream() {
+        init_test("try_collect_yields_after_budget_on_always_ready_success_stream");
+        let mut future = TryCollect::new(
+            AlwaysReadyOkStream::new(TRY_STREAM_COOPERATIVE_BUDGET + 5),
+            Vec::new(),
+        );
+        let woke = Arc::new(AtomicBool::new(false));
+        let waker = Waker::from(Arc::new(TrackWaker(woke.clone())));
+        let mut cx = Context::from_waker(&waker);
+
+        let first = Pin::new(&mut future).poll(&mut cx);
+        crate::assert_with_log!(
+            matches!(first, Poll::Pending),
+            "first poll yields cooperatively",
+            "Poll::Pending",
+            first
+        );
+        crate::assert_with_log!(
+            future.collection.len() == TRY_STREAM_COOPERATIVE_BUDGET,
+            "collection preserved across yield",
+            TRY_STREAM_COOPERATIVE_BUDGET,
+            future.collection.len()
+        );
+        crate::assert_with_log!(
+            future.stream.next == TRY_STREAM_COOPERATIVE_BUDGET,
+            "upstream advanced only to budget",
+            TRY_STREAM_COOPERATIVE_BUDGET,
+            future.stream.next
+        );
+        crate::assert_with_log!(
+            woke.load(Ordering::SeqCst),
+            "self-wake requested",
+            true,
+            woke.load(Ordering::SeqCst)
+        );
+
+        let second = Pin::new(&mut future).poll(&mut cx);
+        crate::assert_with_log!(
+            second
+                == Poll::Ready(Ok::<Vec<usize>, &'static str>(
+                    (0..TRY_STREAM_COOPERATIVE_BUDGET + 5).collect(),
+                )),
+            "second poll completes collection",
+            Poll::Ready(Ok::<Vec<usize>, &'static str>(
+                (0..TRY_STREAM_COOPERATIVE_BUDGET + 5).collect::<Vec<_>>()
+            )),
+            second
+        );
+        crate::test_complete!("try_collect_yields_after_budget_on_always_ready_success_stream");
+    }
+
+    #[test]
+    fn try_fold_yields_after_budget_on_always_ready_success_stream() {
+        init_test("try_fold_yields_after_budget_on_always_ready_success_stream");
+        let mut future = TryFold::new(
+            AlwaysReadyOkStream::new(TRY_STREAM_COOPERATIVE_BUDGET + 5),
+            0usize,
+            |acc, x| Ok::<usize, &'static str>(acc + x),
+        );
+        let woke = Arc::new(AtomicBool::new(false));
+        let waker = Waker::from(Arc::new(TrackWaker(woke.clone())));
+        let mut cx = Context::from_waker(&waker);
+
+        let first = Pin::new(&mut future).poll(&mut cx);
+        crate::assert_with_log!(
+            matches!(first, Poll::Pending),
+            "first poll yields cooperatively",
+            "Poll::Pending",
+            first
+        );
+        crate::assert_with_log!(
+            future.acc == Some((0..TRY_STREAM_COOPERATIVE_BUDGET).sum()),
+            "accumulator preserved across yield",
+            Some((0..TRY_STREAM_COOPERATIVE_BUDGET).sum::<usize>()),
+            future.acc
+        );
+        crate::assert_with_log!(
+            future.stream.next == TRY_STREAM_COOPERATIVE_BUDGET,
+            "upstream advanced only to budget",
+            TRY_STREAM_COOPERATIVE_BUDGET,
+            future.stream.next
+        );
+        crate::assert_with_log!(
+            woke.load(Ordering::SeqCst),
+            "self-wake requested",
+            true,
+            woke.load(Ordering::SeqCst)
+        );
+
+        let second = Pin::new(&mut future).poll(&mut cx);
+        crate::assert_with_log!(
+            second
+                == Poll::Ready(Ok::<usize, &'static str>(
+                    (0..TRY_STREAM_COOPERATIVE_BUDGET + 5).sum(),
+                )),
+            "second poll completes fold",
+            Poll::Ready(Ok::<usize, &'static str>(
+                (0..TRY_STREAM_COOPERATIVE_BUDGET + 5).sum::<usize>()
+            )),
+            second
+        );
+        crate::test_complete!("try_fold_yields_after_budget_on_always_ready_success_stream");
+    }
+
+    #[test]
+    fn try_for_each_yields_after_budget_on_always_ready_success_stream() {
+        use std::cell::RefCell;
+        use std::rc::Rc;
+        init_test("try_for_each_yields_after_budget_on_always_ready_success_stream");
+        let results = Rc::new(RefCell::new(Vec::new()));
+        let results_clone = results.clone();
+        let mut future = TryForEach::new(
+            AlwaysReadyValueStream::new(TRY_STREAM_COOPERATIVE_BUDGET + 5),
+            move |x| {
+                results_clone.borrow_mut().push(x);
+                Ok::<(), &'static str>(())
+            },
+        );
+        let woke = Arc::new(AtomicBool::new(false));
+        let waker = Waker::from(Arc::new(TrackWaker(woke.clone())));
+        let mut cx = Context::from_waker(&waker);
+
+        let first = Pin::new(&mut future).poll(&mut cx);
+        crate::assert_with_log!(
+            matches!(first, Poll::Pending),
+            "first poll yields cooperatively",
+            "Poll::Pending",
+            first
+        );
+        crate::assert_with_log!(
+            results.borrow().len() == TRY_STREAM_COOPERATIVE_BUDGET,
+            "side effects preserved across yield",
+            TRY_STREAM_COOPERATIVE_BUDGET,
+            results.borrow().len()
+        );
+        crate::assert_with_log!(
+            future.stream.next == TRY_STREAM_COOPERATIVE_BUDGET,
+            "upstream advanced only to budget",
+            TRY_STREAM_COOPERATIVE_BUDGET,
+            future.stream.next
+        );
+        crate::assert_with_log!(
+            woke.load(Ordering::SeqCst),
+            "self-wake requested",
+            true,
+            woke.load(Ordering::SeqCst)
+        );
+
+        let second = Pin::new(&mut future).poll(&mut cx);
+        crate::assert_with_log!(
+            second == Poll::Ready(Ok::<(), &'static str>(())),
+            "second poll completes for_each",
+            Poll::Ready(Ok::<(), ()>(())),
+            second
+        );
+        crate::assert_with_log!(
+            *results.borrow() == (0..TRY_STREAM_COOPERATIVE_BUDGET + 5).collect::<Vec<_>>(),
+            "all side effects observed after completion",
+            (0..TRY_STREAM_COOPERATIVE_BUDGET + 5).collect::<Vec<_>>(),
+            *results.borrow()
+        );
+        crate::test_complete!("try_for_each_yields_after_budget_on_always_ready_success_stream");
     }
 }

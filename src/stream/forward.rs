@@ -6,6 +6,12 @@ use crate::cx::Cx;
 use crate::runtime::yield_now;
 use crate::stream::{Stream, StreamExt};
 
+/// Cooperative budget for successful sends in a single executor turn.
+///
+/// Without this cap, forwarding from an always-ready stream into a receiver
+/// with spare capacity can monopolize a poll until the input is fully drained.
+const FORWARD_SEND_BUDGET: usize = 1024;
+
 /// Sink wrapper for mpsc sender.
 pub struct SinkStream<T> {
     sender: mpsc::Sender<T>,
@@ -47,6 +53,7 @@ pub async fn forward<S, T>(
 where
     S: Stream<Item = T> + Unpin,
 {
+    let mut sent_since_yield = 0usize;
     while let Some(item) = stream.next().await {
         // Use try_send + yield_now to avoid blocking the executor
         // In Phase 0/1, we might not have async blocking send that yields to executor properly
@@ -66,6 +73,12 @@ where
                 Err(e) => return Err(e),
             }
         }
+
+        sent_since_yield += 1;
+        if sent_since_yield >= FORWARD_SEND_BUDGET {
+            sent_since_yield = 0;
+            yield_now().await;
+        }
     }
     Ok(())
 }
@@ -75,6 +88,7 @@ mod tests {
     use super::*;
     use crate::stream::iter;
     use std::sync::Arc;
+    use std::sync::atomic::{AtomicBool, Ordering};
     use std::task::{Context, Wake, Waker};
 
     struct NoopWaker;
@@ -85,6 +99,18 @@ mod tests {
 
     fn noop_waker() -> Waker {
         Waker::from(Arc::new(NoopWaker))
+    }
+
+    struct TrackWaker(Arc<AtomicBool>);
+
+    impl Wake for TrackWaker {
+        fn wake(self: Arc<Self>) {
+            self.0.store(true, Ordering::SeqCst);
+        }
+
+        fn wake_by_ref(self: &Arc<Self>) {
+            self.0.store(true, Ordering::SeqCst);
+        }
     }
 
     fn init_test(name: &str) {
@@ -150,5 +176,48 @@ mod tests {
         crate::assert_with_log!(completed, "empty forward completes", true, completed);
 
         crate::test_complete!("forward_empty_stream_ok");
+    }
+
+    #[test]
+    fn forward_yields_after_budget_on_always_ready_stream() {
+        init_test("forward_yields_after_budget_on_always_ready_stream");
+        let cx: Cx = Cx::for_testing();
+        let item_count = FORWARD_SEND_BUDGET + 1;
+        let (tx, mut rx) = mpsc::channel::<usize>(item_count + 1);
+        let stream = iter(0..item_count);
+
+        let woke = Arc::new(AtomicBool::new(false));
+        let waker = Waker::from(Arc::new(TrackWaker(Arc::clone(&woke))));
+        let mut task_cx = Context::from_waker(&waker);
+        let mut future = std::pin::pin!(forward(&cx, stream, tx));
+
+        let first_poll = future.as_mut().poll(&mut task_cx);
+        let first_pending = matches!(first_poll, std::task::Poll::Pending);
+        crate::assert_with_log!(first_pending, "first poll pending", true, first_pending);
+        let woke_after_budget = woke.load(Ordering::SeqCst);
+        crate::assert_with_log!(
+            woke_after_budget,
+            "self wake scheduled",
+            true,
+            woke_after_budget
+        );
+
+        let second_poll = future.as_mut().poll(&mut task_cx);
+        let second_ready = matches!(second_poll, std::task::Poll::Ready(Ok(())));
+        crate::assert_with_log!(second_ready, "second poll ready", true, second_ready);
+
+        let mut received = Vec::with_capacity(item_count);
+        while let Ok(item) = rx.try_recv() {
+            received.push(item);
+        }
+        let expected: Vec<_> = (0..item_count).collect();
+        crate::assert_with_log!(
+            received == expected,
+            "all forwarded items",
+            expected,
+            received
+        );
+
+        crate::test_complete!("forward_yields_after_budget_on_always_ready_stream");
     }
 }

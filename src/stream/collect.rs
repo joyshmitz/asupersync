@@ -239,9 +239,9 @@ mod tests {
         let second = Pin::new(&mut future).poll(&mut cx);
         let expected: Vec<usize> = (0..COLLECT_COOPERATIVE_BUDGET + 5).collect();
         crate::assert_with_log!(
-            second == Poll::Ready(expected.clone()),
+            second == Poll::Ready(expected),
             "second poll completes collection",
-            Poll::Ready(expected.clone()),
+            Poll::Ready(expected),
             second
         );
         crate::test_complete!("collect_yields_after_budget_on_always_ready_stream");
