@@ -401,17 +401,46 @@ impl<M: ConnectionManager> DbPool<M> {
                 }
 
                 // Validate if configured.
-                if needs_validation && !self.manager.is_valid(&idle.conn) {
-                    {
-                        let mut inner = self.inner.lock();
-                        inner.total = inner.total.saturating_sub(1);
+                if needs_validation {
+                    struct ValidatingGuard<'a, M: ConnectionManager> {
+                        pool: &'a DbPool<M>,
+                        conn: Option<M::Connection>,
                     }
-                    self.stats
-                        .total_validation_failures
-                        .fetch_add(1, Ordering::Relaxed);
-                    self.stats.total_discards.fetch_add(1, Ordering::Relaxed);
-                    self.manager.disconnect(idle.conn);
-                    continue;
+                    impl<M: ConnectionManager> Drop for ValidatingGuard<'_, M> {
+                        fn drop(&mut self) {
+                            if let Some(conn) = self.conn.take() {
+                                {
+                                    let mut inner = self.pool.inner.lock();
+                                    inner.total = inner.total.saturating_sub(1);
+                                }
+                                self.pool
+                                    .stats
+                                    .total_discards
+                                    .fetch_add(1, Ordering::Relaxed);
+                                self.pool.manager.disconnect(conn);
+                            }
+                        }
+                    }
+
+                    let mut guard = ValidatingGuard {
+                        pool: self,
+                        conn: Some(idle.conn),
+                    };
+
+                    if !self.manager.is_valid(guard.conn.as_ref().unwrap()) {
+                        let conn = guard.conn.take().unwrap();
+                        {
+                            let mut inner = self.inner.lock();
+                            inner.total = inner.total.saturating_sub(1);
+                        }
+                        self.stats
+                            .total_validation_failures
+                            .fetch_add(1, Ordering::Relaxed);
+                        self.stats.total_discards.fetch_add(1, Ordering::Relaxed);
+                        self.manager.disconnect(conn);
+                        continue;
+                    }
+                    return self.finish_checkout(guard.conn.take().unwrap(), idle.created_at);
                 }
 
                 return self.finish_checkout(idle.conn, idle.created_at);
@@ -422,13 +451,32 @@ impl<M: ConnectionManager> DbPool<M> {
                 inner.total += 1;
                 drop(inner); // Release lock during creation.
 
+                struct PendingGuard<'a, M: ConnectionManager> {
+                    pool: &'a DbPool<M>,
+                    active: bool,
+                }
+                impl<M: ConnectionManager> Drop for PendingGuard<'_, M> {
+                    fn drop(&mut self) {
+                        if self.active {
+                            let mut inner = self.pool.inner.lock();
+                            inner.total = inner.total.saturating_sub(1);
+                        }
+                    }
+                }
+
+                let mut guard = PendingGuard {
+                    pool: self,
+                    active: true,
+                };
+
                 match self.manager.connect() {
                     Ok(conn) => {
+                        guard.active = false;
                         self.stats.total_creates.fetch_add(1, Ordering::Relaxed);
                         return self.finish_checkout(conn, (self.time_getter)());
                     }
                     Err(e) => {
-                        // Roll back total count on failure.
+                        guard.active = false;
                         let mut inner = self.inner.lock();
                         inner.total = inner.total.saturating_sub(1);
                         return Err(DbPoolError::Connect(e));
@@ -653,13 +701,33 @@ impl<M: ConnectionManager> DbPool<M> {
             inner.total += 1;
             drop(inner);
 
+            struct PendingGuard<'a, M: ConnectionManager> {
+                pool: &'a DbPool<M>,
+                active: bool,
+            }
+            impl<M: ConnectionManager> Drop for PendingGuard<'_, M> {
+                fn drop(&mut self) {
+                    if self.active {
+                        let mut inner = self.pool.inner.lock();
+                        inner.total = inner.total.saturating_sub(1);
+                    }
+                }
+            }
+
+            let mut guard = PendingGuard {
+                pool: self,
+                active: true,
+            };
+
             match self.manager.connect() {
                 Ok(conn) => {
+                    guard.active = false;
                     self.stats.total_creates.fetch_add(1, Ordering::Relaxed);
                     self.return_connection(conn, (self.time_getter)());
                     created += 1;
                 }
                 Err(_) => {
+                    guard.active = false;
                     let mut inner = self.inner.lock();
                     inner.total = inner.total.saturating_sub(1);
                 }
