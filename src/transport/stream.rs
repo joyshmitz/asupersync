@@ -18,6 +18,12 @@ fn wall_clock_now() -> Time {
     crate::time::wall_now()
 }
 
+/// Cooperative budget for rejected symbols drained in a single poll.
+///
+/// Without this cap, an always-ready upstream stream can monopolize one
+/// executor turn if every symbol is rejected by the predicate.
+const FILTER_REJECTION_BUDGET: usize = 64;
+
 fn duration_to_nanos(duration: Duration) -> u64 {
     duration.as_nanos().min(u128::from(u64::MAX)) as u64
 }
@@ -251,13 +257,18 @@ where
         cx: &mut Context<'_>,
     ) -> Poll<Option<Result<AuthenticatedSymbol, StreamError>>> {
         let this = self.get_mut();
+        let mut rejected = 0usize;
         loop {
             match Pin::new(&mut this.inner).poll_next(cx) {
                 Poll::Ready(Some(Ok(s))) => {
                     if (this.f)(&s) {
                         return Poll::Ready(Some(Ok(s)));
                     }
-                    // Loop to next
+                    rejected = rejected.saturating_add(1);
+                    if rejected >= FILTER_REJECTION_BUDGET {
+                        cx.waker().wake_by_ref();
+                        return Poll::Pending;
+                    }
                 }
                 other => return other,
             }
@@ -586,7 +597,7 @@ mod tests {
     use crate::types::{Symbol, SymbolId, SymbolKind};
     use futures_lite::future;
     use std::sync::Arc;
-    use std::sync::atomic::{AtomicBool, AtomicU64, Ordering};
+    use std::sync::atomic::{AtomicBool, AtomicU64, AtomicUsize, Ordering};
     use std::task::{Wake, Waker};
     use std::thread;
     use std::time::Instant;
@@ -635,6 +646,31 @@ mod tests {
             _cx: &mut Context<'_>,
         ) -> Poll<Option<Result<AuthenticatedSymbol, StreamError>>> {
             Poll::Pending
+        }
+    }
+
+    struct AlwaysReadyRejectingStream {
+        remaining: usize,
+        emitted: Arc<AtomicUsize>,
+    }
+
+    impl AlwaysReadyRejectingStream {
+        fn new(remaining: usize, emitted: Arc<AtomicUsize>) -> Self {
+            Self { remaining, emitted }
+        }
+    }
+
+    impl SymbolStream for AlwaysReadyRejectingStream {
+        fn poll_next(
+            mut self: Pin<&mut Self>,
+            _cx: &mut Context<'_>,
+        ) -> Poll<Option<Result<AuthenticatedSymbol, StreamError>>> {
+            if self.remaining == 0 {
+                return Poll::Ready(None);
+            }
+            self.remaining = self.remaining.saturating_sub(1);
+            self.emitted.fetch_add(1, Ordering::SeqCst);
+            Poll::Ready(Some(Ok(create_symbol(2))))
         }
     }
 
@@ -842,6 +878,44 @@ mod tests {
         );
 
         crate::test_complete!("test_filter_stream_propagates_error");
+    }
+
+    #[test]
+    fn test_filter_stream_yields_after_rejection_budget_on_always_ready_stream() {
+        init_test("test_filter_stream_yields_after_rejection_budget_on_always_ready_stream");
+        let emitted = Arc::new(AtomicUsize::new(0));
+        let stream = AlwaysReadyRejectingStream::new(10_000, Arc::clone(&emitted));
+        let mut filtered = stream.filter(|_symbol| false);
+
+        let woke = Arc::new(AtomicBool::new(false));
+        let waker = flagged_waker(Arc::clone(&woke));
+        let mut context = Context::from_waker(&waker);
+
+        let first = Pin::new(&mut filtered).poll_next(&mut context);
+        crate::assert_with_log!(
+            matches!(first, Poll::Pending),
+            "first poll yields cooperatively",
+            true,
+            matches!(first, Poll::Pending)
+        );
+        crate::assert_with_log!(
+            woke.load(Ordering::SeqCst),
+            "cooperative yield self-wakes",
+            true,
+            woke.load(Ordering::SeqCst)
+        );
+
+        let drained = emitted.load(Ordering::SeqCst);
+        crate::assert_with_log!(
+            drained == FILTER_REJECTION_BUDGET,
+            "drained rejected symbols bounded by budget",
+            FILTER_REJECTION_BUDGET,
+            drained
+        );
+
+        crate::test_complete!(
+            "test_filter_stream_yields_after_rejection_budget_on_always_ready_stream"
+        );
     }
 
     #[test]

@@ -115,6 +115,12 @@ impl<S: SymbolSink + ?Sized> SymbolSinkExt for S {}
 
 // ---- Futures ----
 
+/// Cooperative budget for successful sends drained in a single poll.
+///
+/// Without this cap, `send_all()` can monopolize one executor turn when both
+/// the iterator and sink stay always-ready for long runs.
+const SEND_ALL_COOPERATIVE_BUDGET: usize = 1024;
+
 /// Future for `send()`.
 pub struct SendFuture<'a, S: ?Sized> {
     sink: &'a mut S,
@@ -166,6 +172,7 @@ where
     type Output = Result<usize, SinkError>;
 
     fn poll(mut self: Pin<&mut Self>, cx: &mut Context<'_>) -> Poll<Self::Output> {
+        let mut sent_this_poll = 0usize;
         loop {
             // Try to send buffered item
             if let Some(symbol) = self.buffered.take() {
@@ -178,7 +185,14 @@ where
                     }
                 }
                 match Pin::new(&mut *self.sink).poll_send(cx, symbol.clone()) {
-                    Poll::Ready(Ok(())) => self.count += 1,
+                    Poll::Ready(Ok(())) => {
+                        self.count += 1;
+                        sent_this_poll += 1;
+                        if sent_this_poll >= SEND_ALL_COOPERATIVE_BUDGET {
+                            cx.waker().wake_by_ref();
+                            return Poll::Pending;
+                        }
+                    }
                     Poll::Ready(Err(e)) => return Poll::Ready(Err(e)),
                     Poll::Pending => {
                         self.buffered = Some(symbol);
@@ -538,7 +552,7 @@ mod tests {
     use parking_lot::Mutex;
     use std::sync::Arc;
     use std::sync::atomic::{AtomicBool, Ordering};
-    use std::task::{Wake, Waker};
+    use std::task::{Context, Poll, Wake, Waker};
 
     fn init_test(name: &str) {
         crate::test_utils::init_test_logging();
@@ -761,6 +775,86 @@ mod tests {
         crate::assert_with_log!(sent_len == 3, "sent", 3usize, sent_len);
         crate::assert_with_log!(flush_count == 1, "flush count", 1usize, flush_count);
         crate::test_complete!("test_send_all_counts_and_flushes");
+    }
+
+    #[test]
+    fn test_send_all_yields_after_budget_on_always_ready_sink() {
+        init_test("test_send_all_yields_after_budget_on_always_ready_sink");
+        let mut sink = TrackingSink::new(TrackingSinkState::new());
+        let state = sink.state();
+        let symbols = (0..(SEND_ALL_COOPERATIVE_BUDGET as u32 + 5))
+            .map(create_symbol)
+            .collect::<Vec<_>>();
+        let woke = Arc::new(AtomicBool::new(false));
+        let waker = flagged_waker(woke.clone());
+        let mut context = Context::from_waker(&waker);
+        let mut future = sink.send_all(symbols);
+        let mut future = Pin::new(&mut future);
+
+        let first = future.as_mut().poll(&mut context);
+        crate::assert_with_log!(
+            matches!(first, Poll::Pending),
+            "first poll yields cooperatively",
+            "Poll::Pending",
+            first
+        );
+        crate::assert_with_log!(
+            woke.load(Ordering::SeqCst),
+            "cooperative yield self-wakes",
+            true,
+            woke.load(Ordering::SeqCst)
+        );
+        crate::assert_with_log!(
+            future.count == SEND_ALL_COOPERATIVE_BUDGET,
+            "budgeted sends counted before yielding",
+            SEND_ALL_COOPERATIVE_BUDGET,
+            future.count
+        );
+        let (sent_len, flush_count) = {
+            let state = state.lock();
+            (state.sent.len(), state.flush_count)
+        };
+        crate::assert_with_log!(
+            sent_len == SEND_ALL_COOPERATIVE_BUDGET,
+            "sink observed only budgeted sends on first poll",
+            SEND_ALL_COOPERATIVE_BUDGET,
+            sent_len
+        );
+        crate::assert_with_log!(
+            flush_count == 0,
+            "flush deferred until iterator drains",
+            0usize,
+            flush_count
+        );
+
+        let second = future.as_mut().poll(&mut context);
+        let second_total = match second {
+            Poll::Ready(Ok(total)) => Some(total),
+            _ => None,
+        };
+        crate::assert_with_log!(
+            second_total == Some(SEND_ALL_COOPERATIVE_BUDGET + 5),
+            "second poll completes remaining sends",
+            Some(SEND_ALL_COOPERATIVE_BUDGET + 5),
+            second_total
+        );
+        let (sent_len, flush_count) = {
+            let state = state.lock();
+            (state.sent.len(), state.flush_count)
+        };
+        crate::assert_with_log!(
+            sent_len == SEND_ALL_COOPERATIVE_BUDGET + 5,
+            "all symbols were eventually sent",
+            SEND_ALL_COOPERATIVE_BUDGET + 5,
+            sent_len
+        );
+        crate::assert_with_log!(
+            flush_count == 1,
+            "final completion still flushes exactly once",
+            1usize,
+            flush_count
+        );
+        crate::test_complete!("test_send_all_yields_after_budget_on_always_ready_sink");
     }
 
     #[test]
