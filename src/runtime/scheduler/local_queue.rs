@@ -167,12 +167,16 @@ impl LocalQueue {
     /// already present in this queue.
     #[inline]
     fn schedule_local_push(&self, task: TaskId) -> bool {
-        let mut queue = self.inner.lock();
-        // Since `schedule_local` is mostly called for unique unparked tasks, we
-        // assume uniqueness rather than paying O(N) on the hot path. The
-        // scheduler execution loop naturally drops duplicate `TaskId` polls.
-        queue.push_back(task);
-        true
+        self.tasks.with_tasks_arena_mut(|arena| {
+            if arena.get(task.arena_index()).is_none() {
+                return false;
+            }
+            let mut queue = self.inner.lock();
+            if !queue.contains(&task) {
+                queue.push_back(task);
+            }
+            true
+        })
     }
 
     /// Pushes multiple tasks to the local queue under one arena/queue lock.
