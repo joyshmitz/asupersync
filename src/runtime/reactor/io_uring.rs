@@ -1,8 +1,9 @@
 //! io_uring-based reactor implementation (Linux only, feature-gated).
 //!
 //! This reactor uses io_uring's PollAdd opcode to provide readiness notifications.
-//! Poll operations are one-shot by default, so we re-arm after each completion
-//! unless ONESHOT is requested.
+//! Poll registrations are treated as one-shot, matching the epoll and kqueue
+//! backends: higher layers must explicitly re-arm after they observe
+//! `WouldBlock`.
 //!
 //! NOTE: This module uses unsafe to submit SQEs and manage eventfd FDs.
 //! The safety invariants are documented inline.
@@ -31,12 +32,49 @@ mod imp {
     struct RegistrationInfo {
         raw_fd: RawFd,
         interest: Interest,
+        active_poll_user_data: Option<u64>,
+    }
+
+    #[derive(Debug)]
+    struct ReactorState {
+        registrations: HashMap<Token, RegistrationInfo>,
+        poll_ops: HashMap<u64, Token>,
+        next_poll_user_data: u64,
+    }
+
+    impl ReactorState {
+        fn new() -> Self {
+            Self {
+                registrations: HashMap::new(),
+                poll_ops: HashMap::new(),
+                next_poll_user_data: 1,
+            }
+        }
+
+        fn allocate_poll_user_data(&mut self) -> io::Result<u64> {
+            for _ in 0..u16::MAX {
+                let candidate = self.next_poll_user_data;
+                self.next_poll_user_data = self.next_poll_user_data.wrapping_add(1);
+                if candidate == 0
+                    || candidate == WAKE_USER_DATA
+                    || candidate == REMOVE_USER_DATA
+                    || self.poll_ops.contains_key(&candidate)
+                {
+                    continue;
+                }
+                return Ok(candidate);
+            }
+
+            Err(io::Error::other(
+                "exhausted io_uring poll user_data allocation space",
+            ))
+        }
     }
 
     /// io_uring-based reactor.
     pub struct IoUringReactor {
         ring: Mutex<IoUring>,
-        registrations: Mutex<HashMap<Token, RegistrationInfo>>,
+        state: Mutex<ReactorState>,
         wake_fd: OwnedFd,
         wake_pending: AtomicBool,
     }
@@ -44,7 +82,7 @@ mod imp {
     impl std::fmt::Debug for IoUringReactor {
         fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
             f.debug_struct("IoUringReactor")
-                .field("registrations", &self.registrations)
+                .field("state", &self.state)
                 .field("wake_fd", &self.wake_fd)
                 .field("wake_pending", &self.wake_pending.load(Ordering::Relaxed))
                 .finish_non_exhaustive()
@@ -68,7 +106,7 @@ mod imp {
 
             Ok(Self {
                 ring: Mutex::new(ring),
-                registrations: Mutex::new(HashMap::new()),
+                state: Mutex::new(ReactorState::new()),
                 wake_fd,
                 wake_pending: AtomicBool::new(false),
             })
@@ -76,20 +114,18 @@ mod imp {
 
         fn submit_poll_add(
             &self,
-            token: Token,
             raw_fd: RawFd,
             interest: Interest,
+            user_data: u64,
         ) -> io::Result<()> {
             let mut ring = self.ring.lock();
-            let user_data = token_to_user_data(token)?;
             submit_poll_entry(&mut ring, raw_fd, interest, user_data)?;
             ring.submit()?;
             Ok(())
         }
 
-        fn submit_poll_remove(&self, token: Token) -> io::Result<()> {
+        fn submit_poll_remove(&self, target_user_data: u64) -> io::Result<()> {
             let mut ring = self.ring.lock();
-            let target_user_data = token_to_user_data(token)?;
             let entry = opcode::PollRemove::new(target_user_data)
                 .build()
                 .user_data(REMOVE_USER_DATA);
@@ -99,13 +135,6 @@ mod imp {
             }
             ring.submit()?;
             Ok(())
-        }
-
-        fn rearm_poll(&self, token: Token, info: RegistrationInfo) -> io::Result<()> {
-            if info.interest.is_oneshot() {
-                return Ok(());
-            }
-            self.submit_poll_add(token, info.raw_fd, info.interest)
         }
 
         fn drain_wake_fd(&self) {
@@ -136,14 +165,14 @@ mod imp {
             interest: Interest,
         ) -> io::Result<()> {
             let raw_fd = source.as_raw_fd();
-            let mut regs = self.registrations.lock();
-            if regs.contains_key(&token) {
+            let mut state = self.state.lock();
+            if state.registrations.contains_key(&token) {
                 return Err(io::Error::new(
                     io::ErrorKind::AlreadyExists,
                     "token already registered",
                 ));
             }
-            if regs.values().any(|info| info.raw_fd == raw_fd) {
+            if state.registrations.values().any(|info| info.raw_fd == raw_fd) {
                 return Err(io::Error::new(
                     io::ErrorKind::AlreadyExists,
                     "fd already registered",
@@ -152,68 +181,62 @@ mod imp {
             if unsafe { libc::fcntl(raw_fd, libc::F_GETFD) } == -1 {
                 return Err(io::Error::last_os_error());
             }
-            regs.insert(token, RegistrationInfo { raw_fd, interest });
-            drop(regs);
-
-            if let Err(err) = self.submit_poll_add(token, raw_fd, interest) {
-                let mut regs = self.registrations.lock();
-                regs.remove(&token);
-                return Err(err);
-            }
+            let poll_user_data = state.allocate_poll_user_data()?;
+            self.submit_poll_add(raw_fd, interest, poll_user_data)?;
+            state.poll_ops.insert(poll_user_data, token);
+            state.registrations.insert(
+                token,
+                RegistrationInfo {
+                    raw_fd,
+                    interest,
+                    active_poll_user_data: Some(poll_user_data),
+                },
+            );
             Ok(())
         }
 
         fn modify(&self, token: Token, interest: Interest) -> io::Result<()> {
-            let (raw_fd, old_interest) = {
-                let regs = self.registrations.lock();
-                let info = regs.get(&token).ok_or_else(|| {
-                    io::Error::new(io::ErrorKind::NotFound, "token not registered")
-                })?;
-                (info.raw_fd, info.interest)
-            };
-            if unsafe { libc::fcntl(raw_fd, libc::F_GETFD) } == -1 {
+            let mut state = self.state.lock();
+            let info = state.registrations.get(&token).copied().ok_or_else(|| {
+                io::Error::new(io::ErrorKind::NotFound, "token not registered")
+            })?;
+            if unsafe { libc::fcntl(info.raw_fd, libc::F_GETFD) } == -1 {
                 let err = io::Error::last_os_error();
-                let mut regs = self.registrations.lock();
-                regs.remove(&token);
+                let stale_user_data = remove_registration_poll_ops(&mut state, token);
+                state.registrations.remove(&token);
+                for poll_user_data in stale_user_data {
+                    let _ = self.submit_poll_remove(poll_user_data);
+                }
                 return Err(err);
             }
 
-            // Best-effort remove existing poll, then re-add with new interest.
-            let _ = self.submit_poll_remove(token);
-            match self.submit_poll_add(token, raw_fd, interest) {
-                Ok(()) => {
-                    let mut regs = self.registrations.lock();
-                    let info = regs.get_mut(&token).ok_or_else(|| {
-                        io::Error::new(io::ErrorKind::NotFound, "token not registered")
-                    })?;
-                    info.interest = interest;
-                    Ok(())
-                }
-                Err(err) => {
-                    if interest != old_interest {
-                        let _ = self.submit_poll_add(token, raw_fd, old_interest);
-                    }
-                    if matches!(err.raw_os_error(), Some(libc::EBADF | libc::ENOENT)) {
-                        let mut regs = self.registrations.lock();
-                        regs.remove(&token);
-                    }
-                    Err(err)
-                }
+            if info.active_poll_user_data.is_some() && interest == info.interest {
+                return Ok(());
             }
+
+            let new_poll_user_data = state.allocate_poll_user_data()?;
+            self.submit_poll_add(info.raw_fd, interest, new_poll_user_data)?;
+            if let Some(old_poll_user_data) = info.active_poll_user_data {
+                let _ = self.submit_poll_remove(old_poll_user_data);
+            }
+            state.poll_ops.insert(new_poll_user_data, token);
+            let info = state.registrations.get_mut(&token).ok_or_else(|| {
+                io::Error::new(io::ErrorKind::NotFound, "token not registered")
+            })?;
+            info.interest = interest;
+            info.active_poll_user_data = Some(new_poll_user_data);
+            Ok(())
         }
 
         fn deregister(&self, token: Token) -> io::Result<()> {
-            let existed = {
-                let mut regs = self.registrations.lock();
-                regs.remove(&token)
-            };
-            if existed.is_none() {
-                return Err(io::Error::new(
-                    io::ErrorKind::NotFound,
-                    "token not registered",
-                ));
+            let mut state = self.state.lock();
+            state.registrations.remove(&token).ok_or_else(|| {
+                io::Error::new(io::ErrorKind::NotFound, "token not registered")
+            })?;
+            let stale_user_data = remove_registration_poll_ops(&mut state, token);
+            for poll_user_data in stale_user_data {
+                let _ = self.submit_poll_remove(poll_user_data);
             }
-            let _ = self.submit_poll_remove(token);
             Ok(())
         }
 
@@ -272,38 +295,42 @@ mod imp {
                     continue;
                 }
 
-                let Some(key) = user_data_to_token(user_data) else {
-                    continue;
+                let action = {
+                    let mut state = self.state.lock();
+                    let Some(token) = state.poll_ops.remove(&user_data) else {
+                        continue;
+                    };
+                    let Some(info) = state.registrations.get(&token).copied() else {
+                        continue;
+                    };
+                    if info.active_poll_user_data != Some(user_data) {
+                        continue;
+                    }
+                    if let Some(info) = state.registrations.get_mut(&token) {
+                        info.active_poll_user_data = None;
+                    }
+
+                    if let Some(errno) = completion_errno(res) {
+                        if is_poll_cancellation_errno(errno) {
+                            None
+                        } else if is_terminal_fd_errno(errno) {
+                            let stale_user_data = remove_registration_poll_ops(&mut state, token);
+                            state.registrations.remove(&token);
+                            for poll_user_data in stale_user_data {
+                                let _ = self.submit_poll_remove(poll_user_data);
+                            }
+                            None
+                        } else {
+                            Some(Event::errored(token))
+                        }
+                    } else {
+                        let interest = poll_mask_to_interest(res as u32);
+                        (!interest.is_empty()).then_some(Event::new(token, interest))
+                    }
                 };
 
-                if let Some(errno) = completion_errno(res) {
-                    // PollRemove cancellation completions use the original token's
-                    // user_data and must not be surfaced as readiness events.
-                    if is_poll_cancellation_errno(errno) {
-                        continue;
-                    }
-
-                    // Closed/invalid fds can otherwise churn permanent ERROR
-                    // completions; prune stale bookkeeping and move on.
-                    if is_terminal_fd_errno(errno) {
-                        let mut regs = self.registrations.lock();
-                        regs.remove(&key);
-                        continue;
-                    }
-
-                    if self.registrations.lock().contains_key(&key) {
-                        events.push(Event::errored(key));
-                    }
-                    continue;
-                }
-                let interest = poll_mask_to_interest(res as u32);
-
-                // Ignore stale completions for tokens that have been deregistered.
-                if let Some(info) = self.registrations.lock().get(&key).copied() {
-                    if !interest.is_empty() {
-                        events.push(Event::new(key, interest));
-                    }
-                    let _ = self.rearm_poll(key, info);
+                if let Some(event) = action {
+                    events.push(event);
                 }
             }
 
@@ -331,7 +358,7 @@ mod imp {
         }
 
         fn registration_count(&self) -> usize {
-            self.registrations.lock().len()
+            self.state.lock().registrations.len()
         }
     }
 
@@ -413,27 +440,17 @@ mod imp {
         io::Error::new(io::ErrorKind::WouldBlock, "submission queue full")
     }
 
-    fn token_to_user_data(token: Token) -> io::Result<u64> {
-        let user_data = u64::try_from(token.0).map_err(|_| {
-            io::Error::new(
-                io::ErrorKind::InvalidInput,
-                "token does not fit in io_uring user_data",
-            )
-        })?;
-        if user_data == WAKE_USER_DATA || user_data == REMOVE_USER_DATA {
-            return Err(io::Error::new(
-                io::ErrorKind::InvalidInput,
-                "token value is reserved for io_uring internal bookkeeping",
-            ));
-        }
-        Ok(user_data)
-    }
-
-    fn user_data_to_token(user_data: u64) -> Option<Token> {
-        if user_data == WAKE_USER_DATA || user_data == REMOVE_USER_DATA {
-            return None;
-        }
-        usize::try_from(user_data).ok().map(Token::new)
+    fn remove_registration_poll_ops(state: &mut ReactorState, token: Token) -> Vec<u64> {
+        let mut removed = Vec::new();
+        state.poll_ops.retain(|poll_user_data, mapped_token| {
+            if *mapped_token == token {
+                removed.push(*poll_user_data);
+                false
+            } else {
+                true
+            }
+        });
+        removed
     }
 
     fn create_eventfd() -> io::Result<OwnedFd> {
@@ -504,22 +521,20 @@ mod imp {
             assert!(roundtrip.is_empty());
         }
 
-        #[test]
-        fn test_token_to_user_data_rejects_reserved_values() {
-            let err = token_to_user_data(Token::new(usize::MAX))
-                .expect_err("WAKE_USER_DATA sentinel must be rejected");
-            assert_eq!(err.kind(), io::ErrorKind::InvalidInput);
-
-            let err = token_to_user_data(Token::new(usize::MAX - 1))
-                .expect_err("REMOVE_USER_DATA sentinel must be rejected");
-            assert_eq!(err.kind(), io::ErrorKind::InvalidInput);
+        fn active_poll_user_data_for_token(
+            reactor: &IoUringReactor,
+            token: Token,
+        ) -> Option<u64> {
+            reactor
+                .state
+                .lock()
+                .registrations
+                .get(&token)
+                .and_then(|info| info.active_poll_user_data)
         }
 
-        #[test]
-        fn test_user_data_to_token_ignores_internal_sentinels() {
-            assert!(user_data_to_token(WAKE_USER_DATA).is_none());
-            assert!(user_data_to_token(REMOVE_USER_DATA).is_none());
-            assert_eq!(user_data_to_token(7), Some(Token::new(7)));
+        fn tracked_poll_op_count(reactor: &IoUringReactor) -> usize {
+            reactor.state.lock().poll_ops.len()
         }
 
         #[test]
@@ -570,22 +585,17 @@ mod imp {
             };
 
             let (left, _right) = UnixStream::pair().expect("unix stream pair");
-
-            let err = reactor
-                .register(&left, Token::new(usize::MAX), Interest::READABLE)
-                .expect_err("reserved wake token should fail registration");
-            assert_eq!(err.kind(), io::ErrorKind::InvalidInput);
-
-            let err = reactor
-                .register(&left, Token::new(usize::MAX - 1), Interest::READABLE)
-                .expect_err("reserved remove token should fail registration");
-            assert_eq!(err.kind(), io::ErrorKind::InvalidInput);
-
-            assert_eq!(
-                reactor.registration_count(),
-                0,
-                "reserved token registration attempts must not leak bookkeeping entries"
+            reactor
+                .register(&left, Token::new(7), Interest::READABLE)
+                .expect("register should succeed");
+            assert!(
+                active_poll_user_data_for_token(&reactor, Token::new(7))
+                    .is_some_and(|user_data| user_data != WAKE_USER_DATA && user_data != REMOVE_USER_DATA),
+                "tracked poll user_data must avoid internal sentinel values"
             );
+            reactor
+                .deregister(Token::new(7))
+                .expect("deregister should succeed");
         }
 
         #[test]
@@ -654,7 +664,7 @@ mod imp {
             };
 
             reactor
-                .submit_poll_remove(Token::new(9090))
+                .submit_poll_remove(9090)
                 .expect("poll remove submission should succeed");
 
             let mut events = Events::with_capacity(4);
@@ -678,11 +688,13 @@ mod imp {
             reactor
                 .register(&left, key, Interest::READABLE)
                 .expect("register should succeed");
+            let active_poll_user_data =
+                active_poll_user_data_for_token(&reactor, key).expect("active poll user_data");
 
             // Cancel the in-flight poll op for this token. io_uring reports
             // the cancelled CQE with the original token user_data.
             reactor
-                .submit_poll_remove(key)
+                .submit_poll_remove(active_poll_user_data)
                 .expect("poll remove submission should succeed");
 
             let mut saw_error = false;
@@ -726,10 +738,9 @@ mod imp {
                 .register(&left, live, Interest::READABLE)
                 .expect("register live token should succeed");
 
-            let stale = Token::new(4242);
             reactor
-                .submit_poll_add(stale, reactor.wake_fd.as_raw_fd(), Interest::READABLE)
-                .expect("stale poll add should succeed");
+                .submit_poll_add(reactor.wake_fd.as_raw_fd(), Interest::READABLE, 4242)
+                .expect("unknown poll add should succeed");
             reactor.wake().expect("wake should succeed");
 
             let mut stale_seen = false;
@@ -738,7 +749,7 @@ mod imp {
                 reactor
                     .poll(&mut events, Some(Duration::from_millis(50)))
                     .expect("poll should succeed");
-                if events.iter().any(|event| event.token == stale) {
+                if !events.is_empty() {
                     stale_seen = true;
                     break;
                 }
@@ -746,7 +757,7 @@ mod imp {
 
             assert!(
                 !stale_seen,
-                "stale completion must not surface as a user event"
+                "unknown completion user_data must not surface as a user event"
             );
 
             reactor
@@ -772,6 +783,89 @@ mod imp {
                 .expect("poll timeout should not error");
             assert_eq!(count, 0, "timeout poll should return zero events");
             assert!(events.is_empty(), "timeout poll should not emit events");
+
+            reactor.deregister(key).expect("deregister should succeed");
+        }
+
+        #[test]
+        fn test_modify_same_interest_while_armed_is_noop() {
+            let Some(reactor) = new_or_skip() else {
+                return;
+            };
+
+            let (left, _right) = UnixStream::pair().expect("unix stream pair");
+            let key = Token::new(404);
+            reactor
+                .register(&left, key, Interest::READABLE)
+                .expect("register should succeed");
+
+            let original_user_data =
+                active_poll_user_data_for_token(&reactor, key).expect("active poll user_data");
+            let original_op_count = tracked_poll_op_count(&reactor);
+
+            reactor
+                .modify(key, Interest::READABLE)
+                .expect("same-interest modify should succeed");
+
+            assert_eq!(
+                active_poll_user_data_for_token(&reactor, key),
+                Some(original_user_data),
+                "same-interest modify while already armed must not churn the in-flight poll"
+            );
+            assert_eq!(
+                tracked_poll_op_count(&reactor),
+                original_op_count,
+                "same-interest modify must not create duplicate in-flight polls"
+            );
+
+            reactor.deregister(key).expect("deregister should succeed");
+        }
+
+        #[test]
+        fn test_poll_readiness_disarms_until_modify_rearms() {
+            let Some(reactor) = new_or_skip() else {
+                return;
+            };
+
+            let (left, mut right) = UnixStream::pair().expect("unix stream pair");
+            let key = Token::new(5150);
+            reactor
+                .register(&left, key, Interest::READABLE)
+                .expect("register should succeed");
+
+            std::io::Write::write_all(&mut right, b"x").expect("write should succeed");
+
+            let mut events = Events::with_capacity(8);
+            let count = reactor
+                .poll(&mut events, Some(Duration::from_millis(50)))
+                .expect("poll should surface readability");
+            assert_eq!(count, 1, "first readiness should surface exactly once");
+            assert_eq!(
+                active_poll_user_data_for_token(&reactor, key),
+                None,
+                "readiness completion must disarm the registration until the task rearms it"
+            );
+
+            events.clear();
+            let count = reactor
+                .poll(&mut events, Some(Duration::ZERO))
+                .expect("disarmed poll should still succeed");
+            assert_eq!(count, 0, "disarmed registration must not auto-rearm itself");
+            assert!(events.is_empty(), "disarmed registration must not emit duplicate events");
+
+            reactor
+                .modify(key, Interest::READABLE)
+                .expect("modify should rearm the readiness source");
+            assert!(
+                active_poll_user_data_for_token(&reactor, key).is_some(),
+                "modify should install a fresh active poll"
+            );
+
+            events.clear();
+            let count = reactor
+                .poll(&mut events, Some(Duration::from_millis(50)))
+                .expect("rearmed poll should observe unread data");
+            assert_eq!(count, 1, "rearm should surface the still-readable socket again");
 
             reactor.deregister(key).expect("deregister should succeed");
         }
