@@ -172,7 +172,11 @@ mod imp {
                     "token already registered",
                 ));
             }
-            if state.registrations.values().any(|info| info.raw_fd == raw_fd) {
+            if state
+                .registrations
+                .values()
+                .any(|info| info.raw_fd == raw_fd)
+            {
                 return Err(io::Error::new(
                     io::ErrorKind::AlreadyExists,
                     "fd already registered",
@@ -197,9 +201,10 @@ mod imp {
 
         fn modify(&self, token: Token, interest: Interest) -> io::Result<()> {
             let mut state = self.state.lock();
-            let info = state.registrations.get(&token).copied().ok_or_else(|| {
-                io::Error::new(io::ErrorKind::NotFound, "token not registered")
-            })?;
+            let info =
+                state.registrations.get(&token).copied().ok_or_else(|| {
+                    io::Error::new(io::ErrorKind::NotFound, "token not registered")
+                })?;
             if unsafe { libc::fcntl(info.raw_fd, libc::F_GETFD) } == -1 {
                 let err = io::Error::last_os_error();
                 let stale_user_data = remove_registration_poll_ops(&mut state, token);
@@ -220,9 +225,10 @@ mod imp {
                 let _ = self.submit_poll_remove(old_poll_user_data);
             }
             state.poll_ops.insert(new_poll_user_data, token);
-            let info = state.registrations.get_mut(&token).ok_or_else(|| {
-                io::Error::new(io::ErrorKind::NotFound, "token not registered")
-            })?;
+            let info = state
+                .registrations
+                .get_mut(&token)
+                .ok_or_else(|| io::Error::new(io::ErrorKind::NotFound, "token not registered"))?;
             info.interest = interest;
             info.active_poll_user_data = Some(new_poll_user_data);
             Ok(())
@@ -230,9 +236,10 @@ mod imp {
 
         fn deregister(&self, token: Token) -> io::Result<()> {
             let mut state = self.state.lock();
-            state.registrations.remove(&token).ok_or_else(|| {
-                io::Error::new(io::ErrorKind::NotFound, "token not registered")
-            })?;
+            state
+                .registrations
+                .remove(&token)
+                .ok_or_else(|| io::Error::new(io::ErrorKind::NotFound, "token not registered"))?;
             let stale_user_data = remove_registration_poll_ops(&mut state, token);
             for poll_user_data in stale_user_data {
                 let _ = self.submit_poll_remove(poll_user_data);
@@ -521,10 +528,7 @@ mod imp {
             assert!(roundtrip.is_empty());
         }
 
-        fn active_poll_user_data_for_token(
-            reactor: &IoUringReactor,
-            token: Token,
-        ) -> Option<u64> {
+        fn active_poll_user_data_for_token(reactor: &IoUringReactor, token: Token) -> Option<u64> {
             reactor
                 .state
                 .lock()
@@ -589,8 +593,9 @@ mod imp {
                 .register(&left, Token::new(7), Interest::READABLE)
                 .expect("register should succeed");
             assert!(
-                active_poll_user_data_for_token(&reactor, Token::new(7))
-                    .is_some_and(|user_data| user_data != WAKE_USER_DATA && user_data != REMOVE_USER_DATA),
+                active_poll_user_data_for_token(&reactor, Token::new(7)).is_some_and(|user_data| {
+                    user_data != WAKE_USER_DATA && user_data != REMOVE_USER_DATA
+                }),
                 "tracked poll user_data must avoid internal sentinel values"
             );
             reactor
@@ -851,7 +856,10 @@ mod imp {
                 .poll(&mut events, Some(Duration::ZERO))
                 .expect("disarmed poll should still succeed");
             assert_eq!(count, 0, "disarmed registration must not auto-rearm itself");
-            assert!(events.is_empty(), "disarmed registration must not emit duplicate events");
+            assert!(
+                events.is_empty(),
+                "disarmed registration must not emit duplicate events"
+            );
 
             reactor
                 .modify(key, Interest::READABLE)
@@ -865,7 +873,10 @@ mod imp {
             let count = reactor
                 .poll(&mut events, Some(Duration::from_millis(50)))
                 .expect("rearmed poll should observe unread data");
-            assert_eq!(count, 1, "rearm should surface the still-readable socket again");
+            assert_eq!(
+                count, 1,
+                "rearm should surface the still-readable socket again"
+            );
 
             reactor.deregister(key).expect("deregister should succeed");
         }

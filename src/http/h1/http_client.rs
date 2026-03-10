@@ -967,6 +967,7 @@ impl HttpClient {
         let key = parsed.pool_key();
         let acquired = self.acquire_connection(cx, parsed).await?;
         let mut guard = ConnectionGuard::new(self, key.clone(), acquired.pool_id);
+        let reused_connection = !acquired.fresh;
 
         // Check cancellation after connection acquisition.
         check_cx(cx)?;
@@ -983,9 +984,52 @@ impl HttpClient {
                 Ok(response)
             }
             Err(err) => {
+                let err = ClientError::from(err);
+                if reused_connection && should_retry_reused_connection_failure(method, &err) {
+                    drop(guard);
+                    return self
+                        .retry_single_request_on_fresh_connection(
+                            cx,
+                            method,
+                            parsed,
+                            extra_headers,
+                            body,
+                        )
+                        .await;
+                }
                 // guard drops the connection on return
-                Err(ClientError::from(err))
+                Err(err)
             }
+        }
+    }
+
+    async fn retry_single_request_on_fresh_connection(
+        &self,
+        cx: &Cx,
+        method: &Method,
+        parsed: &ParsedUrl,
+        extra_headers: &[(String, String)],
+        body: &[u8],
+    ) -> Result<Response, ClientError> {
+        let req = self.build_request(method, parsed, extra_headers, body, None, None);
+        let key = parsed.pool_key();
+        let acquired = self.acquire_connection(cx, parsed).await?;
+        let mut guard = ConnectionGuard::new(self, key.clone(), acquired.pool_id);
+
+        check_cx(cx)?;
+
+        match Http1Client::request_with_io(acquired.io, req).await {
+            Ok((response, io)) => {
+                guard.defused = true;
+                self.store_response_cookies(&parsed.host, &response.headers);
+                if connection_can_be_reused(&response, method) {
+                    self.release_connection(&key, acquired.pool_id, acquired.fresh, io);
+                } else {
+                    self.drop_connection(&key, acquired.pool_id);
+                }
+                Ok(response)
+            }
+            Err(err) => Err(ClientError::from(err)),
         }
     }
 
@@ -1352,6 +1396,7 @@ impl HttpClient {
 
         let key = parsed.pool_key();
         let now = self.pool_now();
+        self.cleanup_expired_idle_connections(now);
 
         let pooled_id = {
             let mut pool = self.pool.lock();
@@ -1442,6 +1487,25 @@ impl HttpClient {
             }
             if entries.is_empty() {
                 idle.remove(key);
+            }
+        }
+    }
+
+    fn cleanup_expired_idle_connections(&self, now: Time) {
+        let expired = self.pool.lock().cleanup_expired_entries(now);
+        if expired.is_empty() {
+            return;
+        }
+
+        let mut idle = self.idle_connections.lock();
+        for (key, id) in expired {
+            if let Some(entries) = idle.get_mut(&key) {
+                if let Some(position) = entries.iter().position(|(entry_id, _)| *entry_id == id) {
+                    entries.swap_remove(position);
+                }
+                if entries.is_empty() {
+                    idle.remove(&key);
+                }
             }
         }
     }
@@ -1924,6 +1988,38 @@ fn connection_can_be_reused(response: &Response, req_method: &Method) -> bool {
         Version::Http11 => !header_has_token(&response.headers, "connection", "close"),
         Version::Http10 => header_has_token(&response.headers, "connection", "keep-alive"),
     }
+}
+
+fn should_retry_reused_connection_failure(method: &Method, err: &ClientError) -> bool {
+    method_is_safe_to_retry_after_stale_reuse(method) && client_error_looks_like_stale_reuse(err)
+}
+
+fn method_is_safe_to_retry_after_stale_reuse(method: &Method) -> bool {
+    matches!(
+        method,
+        Method::Get | Method::Head | Method::Options | Method::Trace
+    )
+}
+
+fn client_error_looks_like_stale_reuse(err: &ClientError) -> bool {
+    match err {
+        ClientError::Io(io_err) => io_error_looks_like_stale_reuse(io_err),
+        ClientError::HttpError(crate::http::h1::codec::HttpError::Io(io_err)) => {
+            io_error_looks_like_stale_reuse(io_err)
+        }
+        _ => false,
+    }
+}
+
+fn io_error_looks_like_stale_reuse(err: &io::Error) -> bool {
+    matches!(
+        err.kind(),
+        io::ErrorKind::BrokenPipe
+            | io::ErrorKind::ConnectionAborted
+            | io::ErrorKind::ConnectionReset
+            | io::ErrorKind::NotConnected
+            | io::ErrorKind::UnexpectedEof
+    )
 }
 
 fn header_has_token(headers: &[(String, String)], name: &str, token: &str) -> bool {
@@ -2686,6 +2782,39 @@ mod tests {
     }
 
     #[test]
+    fn cleanup_expired_idle_connections_drops_stale_client_io() {
+        set_http_client_test_time(0);
+        let client = HttpClient::builder()
+            .with_time_getter(http_client_test_time)
+            .idle_timeout(std::time::Duration::from_nanos(100))
+            .build();
+        let key = PoolKey::http("example.com", None);
+        let id = client
+            .pool
+            .lock()
+            .register_connecting(key.clone(), Time::ZERO, 1);
+
+        client.release_connection(&key, Some(id), true, loopback_client_io());
+        assert_eq!(
+            client.idle_connections.lock().get(&key).map_or(0, Vec::len),
+            1,
+            "freshly released client IO should be tracked as idle"
+        );
+
+        set_http_client_test_time(150);
+        client.cleanup_expired_idle_connections(http_client_test_time());
+
+        assert!(
+            client.pool.lock().get_connection_meta(&key, id).is_none(),
+            "expired pool metadata must be pruned"
+        );
+        assert!(
+            client.idle_connections.lock().get(&key).is_none(),
+            "expired idle IO must be dropped alongside metadata"
+        );
+    }
+
+    #[test]
     fn parse_set_cookie_pair_extracts_first_pair() {
         let parsed = parse_set_cookie_pair("session=abc123; Path=/; HttpOnly");
         assert_eq!(parsed, Some(("session".to_string(), "abc123".to_string())));
@@ -3220,5 +3349,72 @@ mod tests {
         // The request should fail with a connect error (not a cancellation error).
         assert!(result.is_err());
         assert!(!result.unwrap_err().is_cancelled());
+    }
+
+    #[test]
+    fn safe_method_retries_once_after_stale_pooled_connection_close() {
+        use std::io::{Read, Write};
+        use std::time::Duration;
+
+        fn read_request_head(stream: &mut std::net::TcpStream) {
+            let mut buf = [0_u8; 1024];
+            let mut request = Vec::new();
+            loop {
+                let n = stream.read(&mut buf).expect("read request");
+                assert!(n > 0, "request must arrive before peer closes");
+                request.extend_from_slice(&buf[..n]);
+                if request.windows(4).any(|window| window == b"\r\n\r\n") {
+                    break;
+                }
+            }
+        }
+
+        let listener = TcpListener::bind("127.0.0.1:0").expect("bind listener");
+        let addr = listener.local_addr().expect("listener address");
+        let server = std::thread::spawn(move || {
+            let (mut first, _) = listener.accept().expect("accept first connection");
+            read_request_head(&mut first);
+            first
+                .write_all(
+                    b"HTTP/1.1 200 OK\r\nContent-Length: 2\r\nConnection: keep-alive\r\n\r\nok",
+                )
+                .expect("write first response");
+            first.flush().expect("flush first response");
+            std::thread::sleep(Duration::from_millis(50));
+            drop(first);
+
+            let (mut second, _) = listener.accept().expect("accept retry connection");
+            read_request_head(&mut second);
+            second
+                .write_all(
+                    b"HTTP/1.1 200 OK\r\nContent-Length: 5\r\nConnection: close\r\n\r\nfresh",
+                )
+                .expect("write retry response");
+            second.flush().expect("flush retry response");
+        });
+
+        let client = HttpClient::builder()
+            .max_connections_per_host(1)
+            .max_total_connections(1)
+            .build();
+        let cx = Cx::for_testing();
+        let url = format!("http://{addr}/healthz");
+
+        let first = block_on(client.get(&cx, &url)).expect("initial request should succeed");
+        assert_eq!(first.status, 200);
+        assert_eq!(first.body, b"ok");
+
+        std::thread::sleep(Duration::from_millis(100));
+
+        let second = block_on(client.get(&cx, &url)).expect("retry request should succeed");
+        assert_eq!(second.status, 200);
+        assert_eq!(second.body, b"fresh");
+
+        server.join().expect("server thread should join");
+        let stats = client.pool_stats();
+        assert!(
+            stats.connections_created >= 2,
+            "client should establish a fresh connection after stale pooled reuse fails"
+        );
     }
 }

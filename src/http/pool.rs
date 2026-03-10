@@ -456,12 +456,10 @@ impl Pool {
         }
     }
 
-    /// Cleans up expired idle connections.
-    ///
-    /// Returns the number of connections removed.
-    pub fn cleanup_expired(&mut self, now: Time) -> usize {
+    /// Removes expired idle connections and returns the retired `(key, id)` pairs.
+    pub fn cleanup_expired_entries(&mut self, now: Time) -> Vec<(PoolKey, u64)> {
         let idle_timeout = self.config.idle_timeout;
-        let mut removed = 0;
+        let mut removed = Vec::new();
         let mut empty_keys: SmallVec<[PoolKey; 4]> = SmallVec::new();
 
         for (key, host_pool) in &mut self.hosts {
@@ -476,7 +474,7 @@ impl Pool {
                 host_pool.connections.remove(&id);
                 self.stats.connections_closed += 1;
                 self.stats.connections_timed_out += 1;
-                removed += 1;
+                removed.push((key.clone(), id));
             }
 
             if host_pool.connections.is_empty() {
@@ -489,6 +487,13 @@ impl Pool {
         }
 
         removed
+    }
+
+    /// Cleans up expired idle connections.
+    ///
+    /// Returns the number of connections removed.
+    pub fn cleanup_expired(&mut self, now: Time) -> usize {
+        self.cleanup_expired_entries(now).len()
     }
 
     /// Gets metadata for a specific connection.
@@ -625,6 +630,25 @@ mod tests {
         let removed = pool.cleanup_expired(make_time(150));
         assert_eq!(removed, 1);
         assert!(pool.get_connection_meta(&key, id).is_none());
+    }
+
+    #[test]
+    fn cleanup_expired_entries_returns_removed_connection_ids() {
+        let config = PoolConfig::builder()
+            .idle_timeout(Duration::from_millis(100))
+            .build();
+        let mut pool = Pool::with_config(config);
+        let key = PoolKey::https("example.com", None);
+
+        let expired_id = pool.register_connecting(key.clone(), make_time(0), 2);
+        pool.mark_connected(&key, expired_id, make_time(0));
+        let live_id = pool.register_connecting(key.clone(), make_time(80), 2);
+        pool.mark_connected(&key, live_id, make_time(80));
+
+        let removed = pool.cleanup_expired_entries(make_time(150));
+        assert_eq!(removed, vec![(key.clone(), expired_id)]);
+        assert!(pool.get_connection_meta(&key, expired_id).is_none());
+        assert!(pool.get_connection_meta(&key, live_id).is_some());
     }
 
     #[test]

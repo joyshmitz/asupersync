@@ -516,12 +516,9 @@ impl IoDriverHandle {
         interest: Interest,
         waker: Waker,
     ) -> io::Result<IoRegistration> {
-        // We wake the reactor first to ensure that if another thread is blocking
-        // in `poll` (via turn_with), it wakes up and releases the lock.
-        // However, with the split-lock `turn_with` implementation, the lock
-        // is NOT held during poll, so this is strictly necessary only if
-        // we revert to holding the lock, but good practice for responsiveness.
-        // Actually, since we don't hold the lock during poll, we can just lock.
+        if self.is_polling.load(Ordering::Acquire) {
+            let _ = self.reactor.wake();
+        }
         let token = {
             let mut driver = self.inner.lock();
             driver.register(source, interest, waker)?
@@ -530,6 +527,8 @@ impl IoDriverHandle {
             token,
             Arc::downgrade(&self.inner),
             interest,
+            self.reactor.clone(),
+            self.is_polling.clone(),
         ))
     }
 
@@ -653,11 +652,12 @@ impl IoDriverHandle {
 ///
 /// Dropping this handle will automatically deregister the source and
 /// remove its waker from the driver.
-#[derive(Debug)]
 pub struct IoRegistration {
     token: Token,
     interest: Interest,
     driver: Weak<Mutex<IoDriver>>,
+    reactor: Arc<dyn Reactor>,
+    is_polling: Arc<AtomicBool>,
     /// Cached copy of the last waker stored in the driver slab.
     /// Used for `Waker::will_wake` comparison to avoid unnecessary
     /// atomic ref-count bumps and mutex acquisitions on the hot path.
@@ -670,13 +670,27 @@ pub struct IoRegistration {
 }
 
 impl IoRegistration {
-    fn new(token: Token, driver: Weak<Mutex<IoDriver>>, interest: Interest) -> Self {
+    fn new(
+        token: Token,
+        driver: Weak<Mutex<IoDriver>>,
+        interest: Interest,
+        reactor: Arc<dyn Reactor>,
+        is_polling: Arc<AtomicBool>,
+    ) -> Self {
         Self {
             token,
             interest,
             driver,
+            reactor,
+            is_polling,
             cached_waker: None,
             deregistered: false,
+        }
+    }
+
+    fn wake_polling_reactor(&self) {
+        if self.is_polling.load(Ordering::Acquire) {
+            let _ = self.reactor.wake();
         }
     }
 
@@ -703,6 +717,7 @@ impl IoRegistration {
 
     /// Updates the interest set for this registration.
     pub fn set_interest(&mut self, interest: Interest) -> io::Result<()> {
+        self.wake_polling_reactor();
         let Some(driver) = self.driver.upgrade() else {
             return Err(io::Error::new(
                 io::ErrorKind::NotConnected,
@@ -737,6 +752,7 @@ impl IoRegistration {
     /// Returns `Ok(true)` if the registration remains valid, `Ok(false)`
     /// if the slab slot was removed (caller should clear the registration).
     pub fn rearm(&mut self, interest: Interest, waker: &Waker) -> io::Result<bool> {
+        self.wake_polling_reactor();
         let Some(driver) = self.driver.upgrade() else {
             return Err(io::Error::new(
                 io::ErrorKind::NotConnected,
@@ -770,6 +786,7 @@ impl IoRegistration {
 
     /// Explicitly deregisters without waiting for drop.
     pub fn deregister(mut self) -> io::Result<()> {
+        self.wake_polling_reactor();
         if let Some(driver) = self.driver.upgrade() {
             let first = {
                 let mut guard = driver.lock();
@@ -818,6 +835,7 @@ impl Drop for IoRegistration {
         if self.deregistered {
             return;
         }
+        self.wake_polling_reactor();
         if let Some(driver) = self.driver.upgrade() {
             // Best-effort cleanup: retry once on non-NotFound errors to reduce
             // stale-registration risk if the first deregister attempt fails transiently.
@@ -833,6 +851,17 @@ impl Drop for IoRegistration {
                 let _ = guard.deregister(self.token);
             }
         }
+    }
+}
+
+impl std::fmt::Debug for IoRegistration {
+    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        f.debug_struct("IoRegistration")
+            .field("token", &self.token)
+            .field("interest", &self.interest)
+            .field("active", &self.is_active())
+            .field("deregistered", &self.deregistered)
+            .finish_non_exhaustive()
     }
 }
 
@@ -1152,6 +1181,88 @@ mod tests {
         }
 
         fn wake(&self) -> io::Result<()> {
+            Ok(())
+        }
+
+        fn registration_count(&self) -> usize {
+            0
+        }
+    }
+
+    struct WakeTrackingBlockingReactor {
+        started: StdMutex<bool>,
+        started_cv: Condvar,
+        release_poll: AtomicBool,
+        wake_calls: AtomicUsize,
+    }
+
+    impl WakeTrackingBlockingReactor {
+        fn new() -> Self {
+            Self {
+                started: StdMutex::new(false),
+                started_cv: Condvar::new(),
+                release_poll: AtomicBool::new(false),
+                wake_calls: AtomicUsize::new(0),
+            }
+        }
+
+        fn wait_until_poll_started(&self) {
+            let mut started_guard = self
+                .started
+                .lock()
+                .unwrap_or_else(std::sync::PoisonError::into_inner);
+            while !*started_guard {
+                started_guard = self.started_cv.wait(started_guard).expect("started wait");
+            }
+            drop(started_guard);
+        }
+
+        fn release_poll(&self) {
+            self.release_poll.store(true, Ordering::Release);
+        }
+
+        fn wake_calls(&self) -> usize {
+            self.wake_calls.load(Ordering::SeqCst)
+        }
+    }
+
+    impl Reactor for WakeTrackingBlockingReactor {
+        fn register(
+            &self,
+            _source: &dyn Source,
+            _token: Token,
+            _interest: Interest,
+        ) -> io::Result<()> {
+            Ok(())
+        }
+
+        fn modify(&self, _token: Token, _interest: Interest) -> io::Result<()> {
+            Ok(())
+        }
+
+        fn deregister(&self, _token: Token) -> io::Result<()> {
+            Ok(())
+        }
+
+        fn poll(&self, _events: &mut Events, _timeout: Option<Duration>) -> io::Result<usize> {
+            {
+                let mut started = self
+                    .started
+                    .lock()
+                    .unwrap_or_else(std::sync::PoisonError::into_inner);
+                *started = true;
+            }
+            self.started_cv.notify_all();
+            while !self.release_poll.load(Ordering::Acquire)
+                && self.wake_calls.load(Ordering::Acquire) == 0
+            {
+                std::thread::yield_now();
+            }
+            Ok(0)
+        }
+
+        fn wake(&self) -> io::Result<()> {
+            self.wake_calls.fetch_add(1, Ordering::SeqCst);
             Ok(())
         }
 
@@ -1732,6 +1843,89 @@ mod tests {
         join.join().expect("poll thread should join");
 
         crate::test_complete!("io_driver_handle_turn_with_skips_concurrent_poll");
+    }
+
+    #[test]
+    fn io_driver_handle_register_wakes_inflight_poll() {
+        init_test("io_driver_handle_register_wakes_inflight_poll");
+        let reactor = Arc::new(WakeTrackingBlockingReactor::new());
+        let reactor_handle: Arc<dyn Reactor> = reactor.clone();
+        let driver = IoDriverHandle::new(reactor_handle);
+        let driver_clone = driver.clone();
+
+        let join = std::thread::spawn(move || {
+            let result = driver_clone.try_turn_with(Some(Duration::ZERO), |_event, _interest| {});
+            crate::assert_with_log!(
+                matches!(result, Ok(Some(0))),
+                "leader poll completes",
+                true,
+                matches!(result, Ok(Some(0)))
+            );
+        });
+
+        reactor.wait_until_poll_started();
+
+        let source = TestFdSource;
+        let (waker, _) = create_test_waker();
+        let reg = driver
+            .register(&source, Interest::READABLE, waker)
+            .expect("register should succeed");
+        let wake_calls = reactor.wake_calls();
+        crate::assert_with_log!(
+            wake_calls >= 1,
+            "register wakes in-flight poll",
+            true,
+            wake_calls >= 1
+        );
+
+        reactor.release_poll();
+        join.join().expect("poll thread should join");
+        drop(reg);
+
+        crate::test_complete!("io_driver_handle_register_wakes_inflight_poll");
+    }
+
+    #[test]
+    fn io_registration_rearm_wakes_inflight_poll() {
+        init_test("io_registration_rearm_wakes_inflight_poll");
+        let reactor = Arc::new(WakeTrackingBlockingReactor::new());
+        let reactor_handle: Arc<dyn Reactor> = reactor.clone();
+        let driver = IoDriverHandle::new(reactor_handle);
+        let source = TestFdSource;
+        let (waker, _) = create_test_waker();
+        let mut reg = driver
+            .register(&source, Interest::READABLE, waker)
+            .expect("register should succeed");
+        let driver_clone = driver.clone();
+
+        let join = std::thread::spawn(move || {
+            let result = driver_clone.try_turn_with(Some(Duration::ZERO), |_event, _interest| {});
+            crate::assert_with_log!(
+                matches!(result, Ok(Some(0))),
+                "leader poll completes",
+                true,
+                matches!(result, Ok(Some(0)))
+            );
+        });
+
+        reactor.wait_until_poll_started();
+
+        let (new_waker, _) = create_test_waker();
+        reg.rearm(Interest::READABLE, &new_waker)
+            .expect("rearm should succeed");
+        let wake_calls = reactor.wake_calls();
+        crate::assert_with_log!(
+            wake_calls >= 1,
+            "rearm wakes in-flight poll",
+            true,
+            wake_calls >= 1
+        );
+
+        reactor.release_poll();
+        join.join().expect("poll thread should join");
+        drop(reg);
+
+        crate::test_complete!("io_registration_rearm_wakes_inflight_poll");
     }
 
     #[test]
