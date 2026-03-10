@@ -224,16 +224,13 @@ impl Notify {
                 .entries
                 .iter_mut()
                 .filter_map(|entry| {
-                    // Only mark active waiters as notified. Marking free slab slots
-                    // (`waker == None` and `!notified`) can pin tail entries and prevent shrinking.
-                    if entry.generation < new_generation
-                        && (entry.waker.is_some() || entry.notified)
-                    {
+                    // Only process active, unnotified waiters. Free slots and already-notified
+                    // waiters (waker == None) are ignored so we don't overwrite their generation
+                    // and break the notify_one baton-pass on drop.
+                    if entry.generation < new_generation && entry.waker.is_some() {
                         entry.generation = new_generation;
-                        if let Some(waker) = entry.waker.take() {
-                            entry.notified = true;
-                            return Some(waker);
-                        }
+                        entry.notified = true;
+                        return entry.waker.take();
                     }
                     None
                 })

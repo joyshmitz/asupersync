@@ -1285,20 +1285,29 @@ where
             }
         }
 
-        let is_next_in_line = state
-            .waiters
-            .front()
-            .is_none_or(|w| Some(w.id) == waiter_id);
+        let total = state.active + state.idle.len() + state.creating;
+        let available = state.idle.len() + self.config.max_size.saturating_sub(total);
 
-        let result = if is_next_in_line {
+        let pos = waiter_id.map_or_else(
+            || state.waiters.len(),
+            |id| {
+                state
+                    .waiters
+                    .iter()
+                    .position(|w| w.id == id)
+                    .unwrap_or(state.waiters.len())
+            },
+        );
+
+        let can_acquire = pos < available;
+
+        let result = if can_acquire {
             if let Some(idle) = state.idle.pop_front() {
                 state.active += 1;
                 state.total_acquisitions += 1;
                 if let Some(id) = waiter_id {
-                    if state.waiters.front().is_some_and(|w| w.id == id) {
-                        state.waiters.pop_front();
-                    } else {
-                        state.waiters.retain(|w| w.id != id);
+                    if let Some(idx) = state.waiters.iter().position(|w| w.id == id) {
+                        state.waiters.remove(idx);
                     }
                 }
                 Some((idle.resource, idle.created_at))
@@ -1327,20 +1336,26 @@ where
             return false;
         }
 
-        let is_next_in_line = state
-            .waiters
-            .front()
-            .is_none_or(|w| Some(w.id) == waiter_id);
-        if !is_next_in_line {
+        let available = state.idle.len() + self.config.max_size.saturating_sub(total);
+        let pos = waiter_id.map_or_else(
+            || state.waiters.len(),
+            |id| {
+                state
+                    .waiters
+                    .iter()
+                    .position(|w| w.id == id)
+                    .unwrap_or(state.waiters.len())
+            },
+        );
+
+        if pos >= available {
             return false;
         }
 
         state.creating += 1;
         if let Some(id) = waiter_id {
-            if state.waiters.front().is_some_and(|w| w.id == id) {
-                state.waiters.pop_front();
-            } else {
-                state.waiters.retain(|w| w.id != id);
+            if let Some(idx) = state.waiters.iter().position(|w| w.id == id) {
+                state.waiters.remove(idx);
             }
         }
         true

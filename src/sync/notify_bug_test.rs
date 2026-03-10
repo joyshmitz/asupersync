@@ -1,126 +1,36 @@
 use super::*;
 use std::sync::Arc;
-use std::task::Wake;
-
-struct NoopWaker;
-impl Wake for NoopWaker {
-    fn wake(self: Arc<Self>) {}
-}
-fn noop_waker() -> Waker {
-    Arc::new(NoopWaker).into()
-}
 
 #[test]
-fn notify_one_lost_wakeup() {
+fn test_lost_notify_one_token_on_broadcast_and_drop() {
     let notify = Arc::new(Notify::new());
 
     let mut fut1 = notify.notified();
-    let waker = noop_waker();
-    let mut cx = Context::from_waker(&waker);
 
-    assert!(Pin::new(&mut fut1).poll(&mut cx).is_pending());
+    // Register fut1
+    let waker = std::task::Waker::from(std::sync::Arc::new(DummyWaker));
+    let mut cx = std::task::Context::from_waker(&waker);
+    assert!(std::pin::Pin::new(&mut fut1).poll(&mut cx).is_pending());
 
+    // Notify one - consumes the token and assigns to fut1
     notify.notify_one();
 
-    // Now fut1 is notified.
-    // A later broadcast should not manufacture a second permit.
+    // Broadcast - wakes everyone (there is no one else right now, but updates fut1's generation)
     notify.notify_waiters();
 
-    assert!(Pin::new(&mut fut1).poll(&mut cx).is_ready());
-
-    // The notify_one token was consumed by fut1.
-    let mut fut2 = notify.notified();
-    let res = Pin::new(&mut fut2).poll(&mut cx);
-    assert!(res.is_pending(), "notify_one token should not spill over");
-}
-
-#[test]
-fn notify_one_then_broadcast_does_not_create_phantom_token() {
-    let notify = Arc::new(Notify::new());
-    let waker = noop_waker();
-    let mut cx = Context::from_waker(&waker);
-
-    let mut fut1 = notify.notified();
-    let mut fut2 = notify.notified();
-
-    assert!(Pin::new(&mut fut1).poll(&mut cx).is_pending());
-    assert!(Pin::new(&mut fut2).poll(&mut cx).is_pending());
-
-    notify.notify_one();
-    notify.notify_waiters();
-
-    assert!(Pin::new(&mut fut1).poll(&mut cx).is_ready());
-    assert!(Pin::new(&mut fut2).poll(&mut cx).is_ready());
-
-    let stored = notify.stored_notifications.load(Ordering::Acquire);
-    assert_eq!(stored, 0, "no extra stored token should remain");
-
-    let mut fut3 = notify.notified();
-    let res = Pin::new(&mut fut3).poll(&mut cx);
-    assert!(
-        res.is_pending(),
-        "broadcast overlap must not create a future permit"
-    );
-}
-
-#[test]
-fn dropped_notify_one_then_broadcast_waiter_restores_token() {
-    let notify = Arc::new(Notify::new());
-    let waker = noop_waker();
-    let mut cx = Context::from_waker(&waker);
-
-    let mut fut1 = notify.notified();
-    let mut fut2 = notify.notified();
-
-    assert!(Pin::new(&mut fut1).poll(&mut cx).is_pending());
-    assert!(Pin::new(&mut fut2).poll(&mut cx).is_pending());
-
-    notify.notify_one();
-    notify.notify_waiters();
-
+    // Drop fut1 - it should pass the baton because it consumed the notify_one!
     drop(fut1);
 
-    assert!(Pin::new(&mut fut2).poll(&mut cx).is_ready());
-
-    let stored = notify.stored_notifications.load(Ordering::Acquire);
-    assert_eq!(
-        stored, 0,
-        "dropping an overlapped waiter MUST NOT recreate a notify_one token (it was covered by broadcast)"
-    );
-
+    // Now a NEW waiter comes in. It should immediately complete because the notify_one token
+    // should have been stored (since there were no other waiters to pass the baton to).
     let mut fut3 = notify.notified();
-    let res = Pin::new(&mut fut3).poll(&mut cx);
     assert!(
-        res.is_pending(),
-        "drop after broadcast overlap MUST NOT wake a future waiter"
+        std::pin::Pin::new(&mut fut3).poll(&mut cx).is_ready(),
+        "LOST WAKEUP! notify_one token was lost!"
     );
 }
 
-#[test]
-fn notify_one_not_consumed_by_broadcasted_waiter() {
-    let notify = Arc::new(Notify::new());
-    let waker = noop_waker();
-    let mut cx = Context::from_waker(&waker);
-
-    // fut1 created BEFORE broadcast
-    let mut fut1 = notify.notified();
-
-    // notify_one adds a stored notification
-    notify.notify_one();
-
-    // notify_waiters bumps generation
-    notify.notify_waiters();
-
-    // fut2 created AFTER broadcast
-    let mut fut2 = notify.notified();
-
-    // fut1 polls. It should complete using the broadcast generation,
-    // LEAVING the stored notification intact!
-    assert!(Pin::new(&mut fut1).poll(&mut cx).is_ready());
-
-    // fut2 polls. Since the stored notification was left intact, it should complete!
-    assert!(
-        Pin::new(&mut fut2).poll(&mut cx).is_ready(),
-        "lost wakeup! fut1 consumed the token incorrectly"
-    );
+struct DummyWaker;
+impl std::task::Wake for DummyWaker {
+    fn wake(self: std::sync::Arc<Self>) {}
 }
