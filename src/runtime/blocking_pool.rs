@@ -386,47 +386,7 @@ impl BlockingPool {
     where
         F: FnOnce() + Send + 'static,
     {
-        let task_id = self.inner.next_task_id.fetch_add(1, Ordering::Relaxed);
-        let cancelled = Arc::new(AtomicBool::new(false));
-        let completion = Arc::new(BlockingTaskCompletion::new(self.inner.time_getter));
-        let handle = BlockingTaskHandle {
-            task_id,
-            cancelled: Arc::clone(&cancelled),
-            completion: Arc::clone(&completion),
-        };
-
-        // Contract: after shutdown, new tasks are rejected.
-        // Return an already-completed cancelled handle instead of queueing work.
-        if self.inner.shutdown.load(Ordering::Acquire) {
-            cancelled.store(true, Ordering::Release);
-            completion.signal_done();
-            return handle;
-        }
-
-        let task = BlockingTask {
-            id: task_id,
-            work: Box::new(f),
-            priority,
-            cancelled: Arc::clone(&cancelled),
-            completion: Arc::clone(&completion),
-        };
-
-        self.inner.queue.push(task);
-        self.inner.pending_count.fetch_add(1, Ordering::Relaxed);
-
-        // Wake a waiting thread or spawn a new one if needed
-        self.maybe_spawn_thread();
-        self.notify_one();
-
-        // Check shutdown again to close the TOCTOU window. If the pool started shutting
-        // down while we were pushing, workers might be exiting and ignoring the queue.
-        // We cancel the task to prevent deadlocks where a caller waits forever on a lost task.
-        if self.inner.shutdown.load(Ordering::Acquire) {
-            cancelled.store(true, Ordering::Release);
-            completion.signal_done();
-        }
-
-        handle
+        spawn_task_on_inner(&self.inner, f, priority)
     }
 
     /// Returns the number of pending tasks in the queue.
@@ -506,15 +466,6 @@ impl BlockingPool {
         spawn_thread_on_inner(&self.inner);
     }
 
-    fn maybe_spawn_thread(&self) {
-        maybe_spawn_thread_on_inner(&self.inner);
-    }
-
-    fn notify_one(&self) {
-        let _guard = self.inner.mutex.lock();
-        self.inner.condvar.notify_one();
-    }
-
     fn notify_all(&self) {
         let _guard = self.inner.mutex.lock();
         self.inner.condvar.notify_all();
@@ -543,49 +494,7 @@ impl BlockingPoolHandle {
     where
         F: FnOnce() + Send + 'static,
     {
-        let task_id = self.inner.next_task_id.fetch_add(1, Ordering::Relaxed);
-        let cancelled = Arc::new(AtomicBool::new(false));
-        let completion = Arc::new(BlockingTaskCompletion::new(self.inner.time_getter));
-        let handle = BlockingTaskHandle {
-            task_id,
-            cancelled: Arc::clone(&cancelled),
-            completion: Arc::clone(&completion),
-        };
-
-        // Keep behavior aligned with BlockingPool::spawn_with_priority.
-        if self.inner.shutdown.load(Ordering::Acquire) {
-            cancelled.store(true, Ordering::Release);
-            completion.signal_done();
-            return handle;
-        }
-
-        let task = BlockingTask {
-            id: task_id,
-            work: Box::new(f),
-            priority,
-            cancelled: Arc::clone(&cancelled),
-            completion: Arc::clone(&completion),
-        };
-
-        self.inner.queue.push(task);
-        self.inner.pending_count.fetch_add(1, Ordering::Relaxed);
-
-        // Wake a waiting thread or spawn a new one if needed
-        maybe_spawn_thread_on_inner(&self.inner);
-        {
-            let _guard = self.inner.mutex.lock();
-            self.inner.condvar.notify_one();
-        }
-
-        // Mirror BlockingPool::spawn_with_priority TOCTOU closure:
-        // if shutdown starts after enqueue, mark this task cancelled/completed
-        // so waiters are never left hanging on lost work.
-        if self.inner.shutdown.load(Ordering::Acquire) {
-            cancelled.store(true, Ordering::Release);
-            completion.signal_done();
-        }
-
-        handle
+        spawn_task_on_inner(&self.inner, f, priority)
     }
 
     /// Returns the number of pending tasks.
@@ -605,6 +514,49 @@ impl BlockingPoolHandle {
     pub fn is_shutdown(&self) -> bool {
         self.inner.shutdown.load(Ordering::Acquire)
     }
+}
+
+fn spawn_task_on_inner<F>(inner: &Arc<BlockingPoolInner>, f: F, priority: u8) -> BlockingTaskHandle
+where
+    F: FnOnce() + Send + 'static,
+{
+    let task_id = inner.next_task_id.fetch_add(1, Ordering::Relaxed);
+    let cancelled = Arc::new(AtomicBool::new(false));
+    let completion = Arc::new(BlockingTaskCompletion::new(inner.time_getter));
+    let handle = BlockingTaskHandle {
+        task_id,
+        cancelled: Arc::clone(&cancelled),
+        completion: Arc::clone(&completion),
+    };
+
+    // Contract: after shutdown, new tasks are rejected.
+    // Return an already-completed cancelled handle instead of queueing work.
+    if inner.shutdown.load(Ordering::Acquire) {
+        cancelled.store(true, Ordering::Release);
+        completion.signal_done();
+        return handle;
+    }
+
+    let task = BlockingTask {
+        id: task_id,
+        work: Box::new(f),
+        priority,
+        cancelled: Arc::clone(&cancelled),
+        completion: Arc::clone(&completion),
+    };
+
+    inner.queue.push(task);
+    inner.pending_count.fetch_add(1, Ordering::Relaxed);
+
+    // Once a task is accepted into the queue, shutdown must drain it rather than
+    // retroactively cancelling it.
+    maybe_spawn_thread_on_inner(inner);
+    {
+        let _guard = inner.mutex.lock();
+        inner.condvar.notify_one();
+    }
+
+    handle
 }
 
 /// Configuration options for the blocking pool.
@@ -917,7 +869,7 @@ fn blocking_worker_loop(inner: &BlockingPoolInner) -> bool {
 mod tests {
     use super::*;
     use std::collections::HashSet;
-    use std::sync::atomic::{AtomicI32, AtomicU64, AtomicUsize};
+    use std::sync::atomic::{AtomicBool, AtomicI32, AtomicU64, AtomicUsize};
     use std::sync::{Condvar as StdCondvar, Mutex as StdMutex, OnceLock};
 
     static DETERMINISTIC_HOOK_TEST_LOCK: OnceLock<StdMutex<()>> = OnceLock::new();
@@ -961,6 +913,18 @@ mod tests {
         SCRIPTED_SLEEP_CALLS.fetch_add(1, Ordering::Relaxed);
         let millis = duration.as_millis().min(u128::from(u64::MAX)) as u64;
         SCRIPTED_TIME_OFFSET_MS.fetch_add(millis, Ordering::Relaxed);
+    }
+
+    fn wait_for_pending_count(pool: &BlockingPool, expected: usize) {
+        let deadline = Instant::now() + Duration::from_secs(1);
+        while pool.pending_count() != expected {
+            assert!(
+                Instant::now() < deadline,
+                "timed out waiting for pending_count={expected}; actual={}",
+                pool.pending_count()
+            );
+            thread::yield_now();
+        }
     }
 
     #[test]
@@ -1773,6 +1737,62 @@ mod tests {
             counter.load(Ordering::Relaxed),
             5,
             "all queued tasks must execute before shutdown completes"
+        );
+    }
+
+    #[test]
+    fn handle_spawn_accepted_before_shutdown_still_runs() {
+        let pool = BlockingPool::new(1, 1);
+
+        let blocker_started = Arc::new(std::sync::Barrier::new(2));
+        let blocker_release = Arc::new(std::sync::Barrier::new(2));
+        let started = Arc::clone(&blocker_started);
+        let release = Arc::clone(&blocker_release);
+        let blocker = pool.spawn(move || {
+            started.wait();
+            release.wait();
+        });
+        blocker_started.wait();
+
+        let notify_guard = pool.inner.mutex.lock();
+        let ran = Arc::new(AtomicBool::new(false));
+        let ran_clone = Arc::clone(&ran);
+        let handle = pool.handle();
+        let spawn_thread = thread::spawn(move || {
+            handle.spawn(move || {
+                ran_clone.store(true, Ordering::Release);
+            })
+        });
+
+        wait_for_pending_count(&pool, 1);
+
+        // Simulate shutdown starting after enqueue but before the spawner can
+        // reach its post-enqueue bookkeeping.
+        pool.inner.shutdown.store(true, Ordering::Release);
+        drop(notify_guard);
+
+        let accepted = spawn_thread.join().expect("spawn thread panicked");
+        assert!(
+            !accepted.is_cancelled(),
+            "tasks accepted before shutdown must not be retroactively cancelled"
+        );
+
+        blocker_release.wait();
+        assert!(
+            blocker.wait_timeout(Duration::from_secs(5)),
+            "blocked worker task should finish after release"
+        );
+        assert!(
+            accepted.wait_timeout(Duration::from_secs(5)),
+            "accepted queued task should complete during shutdown drain"
+        );
+        assert!(
+            ran.load(Ordering::Acquire),
+            "accepted queued task must execute even after shutdown begins"
+        );
+        assert!(
+            pool.shutdown_and_wait(Duration::from_secs(5)),
+            "shutdown should still drain the already accepted task"
         );
     }
 }

@@ -67,10 +67,12 @@ struct BlockingOneshotState<T> {
     result: Option<std::thread::Result<T>>,
     waker: Option<Waker>,
     done: bool,
+    closed_without_result: bool,
 }
 
 struct BlockingOneshot<T> {
     state: Arc<Mutex<BlockingOneshotState<T>>>,
+    sent: bool,
 }
 
 impl<T> BlockingOneshot<T> {
@@ -79,20 +81,45 @@ impl<T> BlockingOneshot<T> {
             result: None,
             waker: None,
             done: false,
+            closed_without_result: false,
         }));
         (
             Self {
-                state: state.clone(),
+                state: Arc::clone(&state),
+                sent: false,
             },
             BlockingOneshotReceiver { state },
         )
     }
 
-    fn send(self, val: std::thread::Result<T>) {
+    fn send(mut self, val: std::thread::Result<T>) {
         let waker = {
             let mut guard = self.state.lock();
             guard.result = Some(val);
             guard.done = true;
+            guard.closed_without_result = false;
+            guard.waker.take()
+        };
+        self.sent = true;
+        if let Some(waker) = waker {
+            waker.wake();
+        }
+    }
+}
+
+impl<T> Drop for BlockingOneshot<T> {
+    fn drop(&mut self) {
+        if self.sent {
+            return;
+        }
+
+        let waker = {
+            let mut guard = self.state.lock();
+            if guard.done {
+                return;
+            }
+            guard.done = true;
+            guard.closed_without_result = true;
             guard.waker.take()
         };
         if let Some(waker) = waker {
@@ -120,11 +147,19 @@ impl<T> std::future::Future for BlockingOneshotReceiver<T> {
     ) -> std::task::Poll<Self::Output> {
         let mut guard = self.state.lock();
         if guard.done {
-            let result = guard.result.take().expect("result consumed twice");
-            match result {
-                Ok(val) => std::task::Poll::Ready(val),
-                Err(payload) => std::panic::resume_unwind(payload),
-            }
+            guard.result.take().map_or_else(
+                || {
+                    assert!(
+                        !guard.closed_without_result,
+                        "blocking operation ended without producing a result"
+                    );
+                    panic!("result consumed twice");
+                },
+                |result| match result {
+                    Ok(val) => std::task::Poll::Ready(val),
+                    Err(payload) => std::panic::resume_unwind(payload),
+                },
+            )
         } else {
             if !guard
                 .waker
@@ -427,6 +462,16 @@ mod tests {
     fn spawn_blocking_propagates_panic() {
         future::block_on(async {
             spawn_blocking(|| std::panic::panic_any("test panic")).await;
+        });
+    }
+
+    #[test]
+    #[should_panic(expected = "blocking operation ended without producing a result")]
+    fn blocking_oneshot_sender_drop_fails_closed() {
+        future::block_on(async {
+            let (tx, rx) = BlockingOneshot::<()>::new();
+            drop(tx);
+            rx.await;
         });
     }
 }
