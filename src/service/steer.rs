@@ -5,7 +5,11 @@
 //! A/B testing, and service selection patterns.
 
 use super::Service;
+use parking_lot::{Mutex, MutexGuard};
 use std::fmt;
+use std::future::Future;
+use std::pin::Pin;
+use std::sync::Arc;
 use std::task::{Context, Poll};
 
 // ─── Steer ────────────────────────────────────────────────────────────────
@@ -15,7 +19,7 @@ use std::task::{Context, Poll};
 /// The `picker` function is called with the request to select which
 /// backend receives it (by index into the `services` vec).
 pub struct Steer<S, F> {
-    services: Vec<S>,
+    services: Vec<Arc<Mutex<S>>>,
     picker: F,
 }
 
@@ -31,7 +35,13 @@ impl<S, F> Steer<S, F> {
     #[must_use]
     pub fn new(services: Vec<S>, picker: F) -> Self {
         assert!(!services.is_empty(), "steer requires at least one service");
-        Self { services, picker }
+        Self {
+            services: services
+                .into_iter()
+                .map(|service| Arc::new(Mutex::new(service)))
+                .collect(),
+            picker,
+        }
     }
 
     /// Get the number of inner services.
@@ -46,49 +56,170 @@ impl<S, F> Steer<S, F> {
         self.services.is_empty()
     }
 
-    /// Get a reference to the inner services.
+    /// Snapshot the current inner services by cloning them.
+    ///
+    /// This is intended for inspection and tests.
     #[must_use]
-    pub fn services(&self) -> &[S] {
-        &self.services
+    pub fn services(&self) -> Vec<S>
+    where
+        S: Clone,
+    {
+        self.services
+            .iter()
+            .map(|service| service.lock().clone())
+            .collect()
     }
 
-    /// Get a mutable reference to the inner services.
-    pub fn services_mut(&mut self) -> &mut [S] {
-        &mut self.services
+    /// Acquire mutable guards for the inner services.
+    ///
+    /// This is intended for tests and synchronous maintenance operations.
+    pub fn services_mut(&self) -> Vec<MutexGuard<'_, S>> {
+        self.services.iter().map(|service| service.lock()).collect()
+    }
+}
+
+impl<S, F: Clone> Clone for Steer<S, F> {
+    fn clone(&self) -> Self {
+        Self {
+            services: self.services.clone(),
+            picker: self.picker.clone(),
+        }
     }
 }
 
 impl<S: fmt::Debug, F> fmt::Debug for Steer<S, F> {
     fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
+        let services: Vec<String> = self
+            .services
+            .iter()
+            .map(|service| format!("{:?}", &*service.lock()))
+            .collect();
         f.debug_struct("Steer")
-            .field("services", &self.services)
+            .field("services", &services)
             .finish_non_exhaustive()
+    }
+}
+
+/// Future returned by [`Steer`].
+pub struct SteerFuture<S, Request>
+where
+    S: Service<Request>,
+{
+    state: SteerState<S, Request>,
+}
+
+enum SteerState<S, Request>
+where
+    S: Service<Request>,
+{
+    PollReady {
+        service: Arc<Mutex<S>>,
+        request: Option<Request>,
+    },
+    Calling {
+        future: S::Future,
+    },
+    Done,
+}
+
+impl<S, Request> SteerFuture<S, Request>
+where
+    S: Service<Request>,
+{
+    fn new(service: Arc<Mutex<S>>, request: Request) -> Self {
+        Self {
+            state: SteerState::PollReady {
+                service,
+                request: Some(request),
+            },
+        }
+    }
+}
+
+impl<S, Request> fmt::Debug for SteerFuture<S, Request>
+where
+    S: Service<Request>,
+{
+    fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
+        f.debug_struct("SteerFuture").finish_non_exhaustive()
+    }
+}
+
+impl<S, Request> Future for SteerFuture<S, Request>
+where
+    S: Service<Request>,
+    S::Future: Unpin,
+    Request: Unpin,
+{
+    type Output = Result<S::Response, SteerError<S::Error>>;
+
+    fn poll(self: Pin<&mut Self>, cx: &mut Context<'_>) -> Poll<Self::Output> {
+        let this = self.get_mut();
+
+        loop {
+            let state = std::mem::replace(&mut this.state, SteerState::Done);
+            match state {
+                SteerState::PollReady {
+                    service,
+                    mut request,
+                } => {
+                    let mut inner = service.lock();
+                    match inner.poll_ready(cx) {
+                        Poll::Pending => {
+                            drop(inner);
+                            this.state = SteerState::PollReady { service, request };
+                            return Poll::Pending;
+                        }
+                        Poll::Ready(Err(err)) => {
+                            return Poll::Ready(Err(SteerError::Inner(err)));
+                        }
+                        Poll::Ready(Ok(())) => {
+                            let req = request
+                                .take()
+                                .expect("SteerFuture polled after request taken");
+                            let future = inner.call(req);
+                            drop(inner);
+                            this.state = SteerState::Calling { future };
+                        }
+                    }
+                }
+                SteerState::Calling { mut future } => {
+                    let result = Pin::new(&mut future).poll(cx).map_err(SteerError::Inner);
+                    if result.is_pending() {
+                        this.state = SteerState::Calling { future };
+                    } else {
+                        this.state = SteerState::Done;
+                    }
+                    return result;
+                }
+                SteerState::Done => {
+                    panic!("SteerFuture polled after completion");
+                }
+            }
+        }
     }
 }
 
 impl<S, F, Request> Service<Request> for Steer<S, F>
 where
     S: Service<Request>,
+    S::Future: Unpin,
     F: Fn(&Request) -> usize,
+    Request: Unpin,
 {
     type Response = S::Response;
-    type Error = S::Error;
-    type Future = S::Future;
+    type Error = SteerError<S::Error>;
+    type Future = SteerFuture<S, Request>;
 
-    fn poll_ready(&mut self, cx: &mut Context<'_>) -> Poll<Result<(), Self::Error>> {
-        // All services must be ready.
-        for svc in &mut self.services {
-            match svc.poll_ready(cx) {
-                Poll::Ready(Ok(())) => {}
-                other => return other,
-            }
-        }
+    fn poll_ready(&mut self, _cx: &mut Context<'_>) -> Poll<Result<(), Self::Error>> {
+        // Route selection is request-dependent. Polling every backend here can
+        // strand reservations on services that never receive the request.
         Poll::Ready(Ok(()))
     }
 
     fn call(&mut self, req: Request) -> Self::Future {
         let idx = (self.picker)(&req) % self.services.len();
-        self.services[idx].call(req)
+        SteerFuture::new(Arc::clone(&self.services[idx]), req)
     }
 }
 
@@ -126,6 +257,11 @@ impl<E: std::error::Error + 'static> std::error::Error for SteerError<E> {
 #[cfg(test)]
 mod tests {
     use super::*;
+    use futures_lite::future::block_on;
+    use std::future::{Ready, ready};
+    use std::sync::Arc;
+    use std::sync::atomic::{AtomicUsize, Ordering};
+    use std::task::{Wake, Waker};
 
     fn init_test(name: &str) {
         crate::test_utils::init_test_logging();
@@ -136,6 +272,82 @@ mod tests {
     #[derive(Debug, Clone)]
     struct IdService {
         id: usize,
+    }
+
+    impl Service<usize> for IdService {
+        type Response = usize;
+        type Error = std::convert::Infallible;
+        type Future = Ready<Result<usize, std::convert::Infallible>>;
+
+        fn poll_ready(&mut self, _cx: &mut Context<'_>) -> Poll<Result<(), Self::Error>> {
+            Poll::Ready(Ok(()))
+        }
+
+        fn call(&mut self, _req: usize) -> Self::Future {
+            ready(Ok(self.id))
+        }
+    }
+
+    #[derive(Debug)]
+    struct ReservingService {
+        id: usize,
+        available: Arc<AtomicUsize>,
+        reserved: bool,
+    }
+
+    impl ReservingService {
+        fn new(id: usize, available: Arc<AtomicUsize>) -> Self {
+            Self {
+                id,
+                available,
+                reserved: false,
+            }
+        }
+
+        fn available(&self) -> usize {
+            self.available.load(Ordering::SeqCst)
+        }
+    }
+
+    impl Service<usize> for ReservingService {
+        type Response = usize;
+        type Error = &'static str;
+        type Future = Ready<Result<usize, Self::Error>>;
+
+        fn poll_ready(&mut self, _cx: &mut Context<'_>) -> Poll<Result<(), Self::Error>> {
+            if self.reserved {
+                return Poll::Ready(Ok(()));
+            }
+
+            let available = self.available.load(Ordering::SeqCst);
+            if available == 0 {
+                return Poll::Pending;
+            }
+
+            self.available.fetch_sub(1, Ordering::SeqCst);
+            self.reserved = true;
+            Poll::Ready(Ok(()))
+        }
+
+        fn call(&mut self, _req: usize) -> Self::Future {
+            if !std::mem::replace(&mut self.reserved, false) {
+                return ready(Err("not ready"));
+            }
+
+            self.available.fetch_add(1, Ordering::SeqCst);
+            ready(Ok(self.id))
+        }
+    }
+
+    struct NoopWaker;
+
+    impl Wake for NoopWaker {
+        fn wake(self: Arc<Self>) {}
+        fn wake_by_ref(self: &Arc<Self>) {}
+    }
+
+    fn noop_waker() -> Waker {
+        Arc::new(NoopWaker).into()
     }
 
     #[test]
@@ -166,8 +378,11 @@ mod tests {
     #[test]
     fn steer_services_mut() {
         let svcs = vec![IdService { id: 10 }];
-        let mut steer = Steer::new(svcs, |_req: &()| 0);
-        steer.services_mut()[0].id = 99;
+        let steer = Steer::new(svcs, |_req: &()| 0);
+        {
+            let mut guards = steer.services_mut();
+            guards[0].id = 99;
+        }
         assert_eq!(steer.services()[0].id, 99);
     }
 
@@ -182,10 +397,8 @@ mod tests {
     #[test]
     fn steer_picker_routes() {
         init_test("steer_picker_routes");
-        // Route even numbers to service 0, odd to service 1.
         let svcs = vec![IdService { id: 0 }, IdService { id: 1 }];
         let steer = Steer::new(svcs, |req: &usize| req % 2);
-        // Verify the picker logic.
         let picker = &steer.picker;
         assert_eq!(picker(&0), 0);
         assert_eq!(picker(&1), 1);
@@ -196,17 +409,11 @@ mod tests {
 
     #[test]
     fn steer_picker_wraps() {
-        // Index beyond services.len() should wrap.
         let svcs = vec![IdService { id: 0 }, IdService { id: 1 }];
         let steer = Steer::new(svcs, |(): &()| 5);
-        // 5 % 2 == 1, so service 1 would be selected.
         let idx = (steer.picker)(&()) % steer.len();
         assert_eq!(idx, 1);
     }
-
-    // ================================================================
-    // SteerError
-    // ================================================================
 
     #[test]
     fn steer_error_inner_display() {
@@ -235,5 +442,68 @@ mod tests {
         let err: SteerError<std::io::Error> = SteerError::NoServices;
         let dbg = format!("{err:?}");
         assert!(dbg.contains("NoServices"));
+    }
+
+    #[test]
+    fn steer_call_without_outer_poll_ready_still_routes_selected_backend() {
+        init_test("steer_call_without_outer_poll_ready_still_routes_selected_backend");
+        let mut steer = Steer::new(vec![IdService { id: 7 }], |_: &usize| 0);
+        let result = block_on(steer.call(0)).expect("selected backend should succeed");
+        assert_eq!(result, 7);
+        crate::test_complete!("steer_call_without_outer_poll_ready_still_routes_selected_backend");
+    }
+
+    #[test]
+    fn steer_call_only_reserves_selected_backend() {
+        init_test("steer_call_only_reserves_selected_backend");
+        let even_available = Arc::new(AtomicUsize::new(1));
+        let odd_available = Arc::new(AtomicUsize::new(1));
+        let mut steer = Steer::new(
+            vec![
+                ReservingService::new(0, Arc::clone(&even_available)),
+                ReservingService::new(1, Arc::clone(&odd_available)),
+            ],
+            |req: &usize| req % 2,
+        );
+
+        let waker = noop_waker();
+        let mut cx = Context::from_waker(&waker);
+        let ready = steer.poll_ready(&mut cx);
+        assert!(matches!(ready, Poll::Ready(Ok(()))));
+        assert_eq!(even_available.load(Ordering::SeqCst), 1);
+        assert_eq!(odd_available.load(Ordering::SeqCst), 1);
+
+        let result = block_on(steer.call(0)).expect("selected backend should succeed");
+        assert_eq!(result, 0);
+
+        let guards = steer.services_mut();
+        assert_eq!(guards[0].available(), 1);
+        assert_eq!(guards[1].available(), 1);
+        crate::test_complete!("steer_call_only_reserves_selected_backend");
+    }
+
+    #[test]
+    fn steer_selected_route_is_not_blocked_by_other_backends() {
+        init_test("steer_selected_route_is_not_blocked_by_other_backends");
+        let blocked_available = Arc::new(AtomicUsize::new(0));
+        let ready_available = Arc::new(AtomicUsize::new(1));
+        let mut steer = Steer::new(
+            vec![
+                ReservingService::new(0, Arc::clone(&blocked_available)),
+                ReservingService::new(1, Arc::clone(&ready_available)),
+            ],
+            |req: &usize| req % 2,
+        );
+
+        let waker = noop_waker();
+        let mut cx = Context::from_waker(&waker);
+        let ready = steer.poll_ready(&mut cx);
+        assert!(matches!(ready, Poll::Ready(Ok(()))));
+
+        let result = block_on(steer.call(1)).expect("ready route should succeed");
+        assert_eq!(result, 1);
+        assert_eq!(blocked_available.load(Ordering::SeqCst), 0);
+        assert_eq!(ready_available.load(Ordering::SeqCst), 1);
+        crate::test_complete!("steer_selected_route_is_not_blocked_by_other_backends");
     }
 }

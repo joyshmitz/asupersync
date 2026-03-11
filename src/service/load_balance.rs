@@ -14,6 +14,7 @@
 use parking_lot::Mutex;
 use std::fmt;
 use std::future::Future;
+use std::marker::PhantomData;
 use std::pin::Pin;
 use std::sync::Arc;
 use std::sync::atomic::{AtomicBool, AtomicU64, AtomicUsize, Ordering};
@@ -344,12 +345,12 @@ impl<E: std::error::Error + 'static> std::error::Error for LoadBalanceError<E> {
 /// Backends are managed as a dynamic set: use [`update_from_discover`](Self::update_from_discover)
 /// to apply topology changes from a [`Discover`] source.
 pub struct LoadBalancer<S, T: Strategy> {
-    backends: Mutex<Vec<Backend<S>>>,
+    backends: Mutex<Vec<Arc<Backend<S>>>>,
     strategy: T,
 }
 
 struct Backend<S> {
-    service: S,
+    service: Mutex<S>,
     load: Arc<LoadMetric>,
 }
 
@@ -371,9 +372,11 @@ impl<S, T: Strategy> LoadBalancer<S, T> {
             backends: Mutex::new(
                 backends
                     .into_iter()
-                    .map(|s| Backend {
-                        service: s,
-                        load: Arc::new(LoadMetric::new()),
+                    .map(|s| {
+                        Arc::new(Backend {
+                            service: Mutex::new(s),
+                            load: Arc::new(LoadMetric::new()),
+                        })
                     })
                     .collect(),
             ),
@@ -392,10 +395,10 @@ impl<S, T: Strategy> LoadBalancer<S, T> {
 
     /// Add a backend service.
     pub fn push(&self, service: S) {
-        self.backends.lock().push(Backend {
-            service,
+        self.backends.lock().push(Arc::new(Backend {
+            service: Mutex::new(service),
             load: Arc::new(LoadMetric::new()),
-        });
+        }));
     }
 
     /// Get the number of backends.
@@ -430,15 +433,17 @@ where
     /// Remove a backend by index, returning the service.
     pub fn remove(&self, index: usize) -> Option<S> {
         let mut backends = self.backends.lock();
-        if index < backends.len() {
-            Some(backends.remove(index).service)
+        let backend = if index < backends.len() {
+            Some(backends.remove(index))
         } else {
             None
-        }
+        };
+        drop(backends);
+        backend.map(|backend| backend.service.lock().clone())
     }
 }
 
-impl<S: Clone, T: Strategy> LoadBalancer<S, T> {
+impl<S, T: Strategy> LoadBalancer<S, T> {
     /// Pick a backend and dispatch a request through it.
     ///
     /// Returns an error if no backends are available or the strategy
@@ -457,36 +462,51 @@ impl<S: Clone, T: Strategy> LoadBalancer<S, T> {
         }
 
         let loads: Vec<u64> = backends.iter().map(|b| b.load.load()).collect();
+        let backend_handles = backends.clone();
         let idx = self
             .strategy
             .pick(&loads)
             .ok_or(LoadBalanceError::NoBackends)?;
+        drop(backends);
 
-        if idx >= backends.len() {
+        if idx >= backend_handles.len() {
             return Err(LoadBalanceError::NoBackends);
         }
 
         let mut first_error = None;
-        let mut selected = None;
+        let mut req = Some(req);
 
-        for offset in 0..backends.len() {
-            let candidate_idx = (idx + offset) % backends.len();
-            let mut svc = backends[candidate_idx].service.clone();
+        for offset in 0..backend_handles.len() {
+            let candidate_idx = (idx + offset) % backend_handles.len();
+            let backend = &backend_handles[candidate_idx];
+            let mut svc = backend.service.lock();
 
-            let (mut readiness, woke_during_poll) = poll_service_ready_once::<S, Request>(&mut svc);
+            let (mut readiness, woke_during_poll) =
+                poll_service_ready_once::<S, Request>(&mut *svc);
             if matches!(readiness, Poll::Pending) && woke_during_poll {
                 // Preserve same-turn readiness edges from backends that
                 // self-wake during `poll_ready` and become callable on the
                 // immediate follow-up poll, without spinning forever on a
                 // repeatedly self-waking-but-still-pending backend.
-                let (next_readiness, _) = poll_service_ready_once::<S, Request>(&mut svc);
+                let (next_readiness, _) = poll_service_ready_once::<S, Request>(&mut *svc);
                 readiness = next_readiness;
             }
 
             match readiness {
                 Poll::Ready(Ok(())) => {
-                    selected = Some((candidate_idx, svc));
-                    break;
+                    let load_guard = LoadMetricGuard::new(Arc::clone(&backend.load));
+                    let fut = svc.call(
+                        req.take()
+                            .expect("load-balanced request must be consumed once"),
+                    );
+                    let load_metric = load_guard.defuse();
+                    drop(svc);
+
+                    return Ok(LoadBalancedFuture {
+                        inner: fut,
+                        service_marker: PhantomData,
+                        load_metric: Some(load_metric),
+                    });
                 }
                 Poll::Ready(Err(err)) => {
                     if first_error.is_none() {
@@ -496,32 +516,17 @@ impl<S: Clone, T: Strategy> LoadBalancer<S, T> {
                 Poll::Pending => {}
             }
         }
-
-        let Some((selected_idx, mut svc)) = selected else {
-            if let Some(err) = first_error {
-                return Err(LoadBalanceError::Inner(err));
-            }
-            return Err(LoadBalanceError::NoReadyBackends);
-        };
-
-        let load_guard = LoadMetricGuard::new(Arc::clone(&backends[selected_idx].load));
-        drop(backends);
-
-        let fut = svc.call(req);
-        let load_metric = load_guard.defuse();
-
-        Ok(LoadBalancedFuture {
-            inner: fut,
-            service: svc,
-            load_metric: Some(load_metric),
-        })
+        if let Some(err) = first_error {
+            return Err(LoadBalanceError::Inner(err));
+        }
+        Err(LoadBalanceError::NoReadyBackends)
     }
 }
 
 /// Future returned by load-balanced dispatch.
 pub struct LoadBalancedFuture<F, S> {
     inner: F,
-    service: S,
+    service_marker: PhantomData<fn() -> S>,
     /// Load metric to decrement when the future completes or is dropped.
     load_metric: Option<Arc<LoadMetric>>,
 }
@@ -535,7 +540,6 @@ impl<F, S> fmt::Debug for LoadBalancedFuture<F, S> {
 impl<F, S> Future for LoadBalancedFuture<F, S>
 where
     F: Future + Unpin,
-    S: Unpin,
 {
     type Output = F::Output;
 
@@ -886,6 +890,44 @@ mod tests {
     }
 
     #[derive(Clone, Debug)]
+    struct SingleUseService {
+        remaining_calls: usize,
+        response: u32,
+    }
+
+    impl SingleUseService {
+        fn new(response: u32) -> Self {
+            Self {
+                remaining_calls: 1,
+                response,
+            }
+        }
+    }
+
+    impl Service<u32> for SingleUseService {
+        type Response = u32;
+        type Error = ();
+        type Future = std::future::Ready<Result<Self::Response, Self::Error>>;
+
+        fn poll_ready(&mut self, _cx: &mut Context<'_>) -> Poll<Result<(), Self::Error>> {
+            if self.remaining_calls > 0 {
+                Poll::Ready(Ok(()))
+            } else {
+                Poll::Pending
+            }
+        }
+
+        fn call(&mut self, _req: u32) -> Self::Future {
+            assert!(
+                self.remaining_calls > 0,
+                "single-use backend must not be called twice"
+            );
+            self.remaining_calls -= 1;
+            std::future::ready(Ok(self.response))
+        }
+    }
+
+    #[derive(Clone, Debug)]
     struct WakeDuringPollReadyService {
         woke_once: bool,
         armed: bool,
@@ -1113,6 +1155,29 @@ mod tests {
         crate::test_complete!("lb_call_balanced_skips_repeatedly_self_waking_pending_backend");
     }
 
+    #[test]
+    fn lb_call_balanced_preserves_backend_local_state() {
+        init_test("lb_call_balanced_preserves_backend_local_state");
+        let lb = LoadBalancer::new(RoundRobin::new(), vec![SingleUseService::new(55)]);
+
+        let mut first = lb
+            .call_balanced(7)
+            .expect("single-use backend should accept the first request");
+        let waker = noop_waker();
+        let mut cx = Context::from_waker(&waker);
+        let output = Pin::new(&mut first).poll(&mut cx);
+
+        assert!(matches!(output, Poll::Ready(Ok(55))));
+        assert_eq!(lb.loads(), vec![0]);
+
+        let err = lb
+            .call_balanced(8)
+            .expect_err("stored backend state should reject a second request");
+        assert!(matches!(err, LoadBalanceError::NoReadyBackends));
+        assert_eq!(lb.loads(), vec![0]);
+        crate::test_complete!("lb_call_balanced_preserves_backend_local_state");
+    }
+
     // ================================================================
     // LoadMetric
     // ================================================================
@@ -1158,9 +1223,9 @@ mod tests {
 
     #[test]
     fn balanced_future_debug() {
-        let fut = LoadBalancedFuture {
+        let fut = LoadBalancedFuture::<_, ()> {
             inner: std::future::ready(42),
-            service: (),
+            service_marker: PhantomData,
             load_metric: None,
         };
         let dbg = format!("{fut:?}");
