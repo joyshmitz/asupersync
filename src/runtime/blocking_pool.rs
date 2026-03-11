@@ -918,7 +918,7 @@ mod tests {
     use super::*;
     use std::collections::HashSet;
     use std::sync::atomic::{AtomicI32, AtomicU64, AtomicUsize};
-    use std::sync::{Mutex as StdMutex, OnceLock};
+    use std::sync::{Condvar as StdCondvar, Mutex as StdMutex, OnceLock};
 
     static DETERMINISTIC_HOOK_TEST_LOCK: OnceLock<StdMutex<()>> = OnceLock::new();
     static SCRIPTED_TIME_BASE: OnceLock<Instant> = OnceLock::new();
@@ -1650,6 +1650,58 @@ mod tests {
             SCRIPTED_TIME_CALLS.load(Ordering::Relaxed),
             2,
             "timeout path should only consult the synthetic clock for deadline and remaining time"
+        );
+    }
+
+    #[test]
+    fn worker_idle_retirement_uses_custom_time_getter() {
+        let _guard = deterministic_hook_test_guard();
+        reset_scripted_time_state();
+
+        let retired = Arc::new((StdMutex::new(false), StdCondvar::new()));
+        let retired_signal = Arc::clone(&retired);
+
+        let pool = BlockingPool::with_config(
+            0,
+            1,
+            BlockingPoolOptions {
+                idle_timeout: Duration::from_millis(5),
+                time_getter: stepped_timeout_time,
+                on_thread_stop: Some(Arc::new(move || {
+                    let (lock, condvar) = &*retired_signal;
+                    {
+                        let mut retired = lock.lock().expect("retirement flag poisoned");
+                        *retired = true;
+                    }
+                    condvar.notify_all();
+                })),
+                ..Default::default()
+            },
+        );
+
+        pool.spawn(|| {}).wait();
+
+        let (lock, condvar) = &*retired;
+        let retired = {
+            let retired = lock.lock().expect("retirement flag poisoned");
+            let (retired, _timeout) = condvar
+                .wait_timeout_while(retired, Duration::from_secs(1), |retired| !*retired)
+                .expect("retirement wait poisoned");
+            *retired
+        };
+
+        assert!(
+            retired,
+            "synthetic time getter should retire the idle worker without long wall sleeps"
+        );
+        assert_eq!(
+            pool.active_threads(),
+            0,
+            "idle retirement should decrement active thread count to zero"
+        );
+        assert!(
+            SCRIPTED_TIME_CALLS.load(Ordering::Relaxed) >= 2,
+            "idle retirement path should consult the scripted clock across multiple loop turns"
         );
     }
 
