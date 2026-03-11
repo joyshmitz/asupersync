@@ -223,7 +223,8 @@ impl UnixStreamInner {
                 write_waker,
             } = &mut *guard;
             if let Some(reg) = registration.as_mut() {
-                let combined_interest = reg.interest() | interest;
+                let combined_interest =
+                    registration_interest(read_waker.is_some(), write_waker.is_some(), interest);
                 let waker = combined_waker(read_waker.as_ref(), write_waker.as_ref());
                 // Single lock in io_driver: re-arm interest + refresh waker.
                 match reg.rearm(combined_interest, &waker) {
