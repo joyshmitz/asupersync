@@ -680,15 +680,15 @@ impl MacaroonToken {
     #[must_use]
     #[allow(clippy::cast_possible_truncation)]
     pub fn to_binary(&self) -> Vec<u8> {
-        let mut buf = Vec::new();
-        buf.push(MACAROON_SCHEMA_VERSION);
-
         // Helper to write a length-prefixed byte slice, asserting u16 bounds.
         fn write_len_prefixed(buf: &mut Vec<u8>, data: &[u8]) {
             let len = u16::try_from(data.len()).expect("macaroon field exceeds u16::MAX bytes");
             buf.extend_from_slice(&len.to_le_bytes());
             buf.extend_from_slice(data);
         }
+
+        let mut buf = Vec::new();
+        buf.push(MACAROON_SCHEMA_VERSION);
 
         // Identifier
         write_len_prefixed(&mut buf, self.identifier.as_bytes());
