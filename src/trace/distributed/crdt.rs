@@ -50,7 +50,7 @@ impl GCounter {
     /// Increments the counter for the given replica by `amount`.
     pub fn increment(&mut self, node: &NodeId, amount: u64) {
         if let Some(v) = self.counts.get_mut(node) {
-            *v += amount;
+            *v = v.saturating_add(amount);
         } else {
             self.counts.insert(node.clone(), amount);
         }
@@ -59,7 +59,9 @@ impl GCounter {
     /// Returns the global counter value (sum of all replicas).
     #[must_use]
     pub fn value(&self) -> u64 {
-        self.counts.values().sum()
+        self.counts
+            .values()
+            .fold(0u64, |acc, &v| acc.saturating_add(v))
     }
 
     /// Returns the count attributed to a specific replica.
@@ -121,9 +123,8 @@ impl PNCounter {
 
     /// Returns the net value (positive − negative). May be negative.
     #[must_use]
-    #[allow(clippy::cast_possible_wrap)]
-    pub fn value(&self) -> i64 {
-        self.positive.value() as i64 - self.negative.value() as i64
+    pub fn value(&self) -> i128 {
+        i128::from(self.positive.value()) - i128::from(self.negative.value())
     }
 }
 
@@ -236,7 +237,7 @@ impl<V: Ord + Clone> ORSet<V> {
     /// Adds a value, tagging the addition with the given node.
     pub fn add(&mut self, value: V, node: &NodeId) {
         let seq = if let Some(s) = self.sequences.get_mut(node) {
-            *s += 1;
+            *s = s.checked_add(1).expect("ORSet sequence counter overflow");
             *s
         } else {
             self.sequences.insert(node.clone(), 1);
