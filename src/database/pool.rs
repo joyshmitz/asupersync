@@ -565,12 +565,6 @@ impl<M: ConnectionManager> DbPool<M> {
                     // Calculate backoff delay (no jitter in synchronous context).
                     let delay = calculate_delay(policy, attempt, None);
                     (self.sleep_fn)(delay.min(remaining));
-
-                    // Re-check deadline after sleep.
-                    if (self.time_getter)() >= deadline {
-                        self.stats.total_timeouts.fetch_add(1, Ordering::Relaxed);
-                        return Err(DbPoolError::Timeout);
-                    }
                 }
             }
         }

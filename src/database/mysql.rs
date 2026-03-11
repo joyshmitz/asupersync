@@ -687,7 +687,7 @@ impl<'a> PacketReader<'a> {
     }
 
     fn read_bytes(&mut self, len: usize) -> Result<&'a [u8], MySqlError> {
-        if self.pos + len > self.data.len() {
+        if len > self.data.len().saturating_sub(self.pos) {
             return Err(MySqlError::Protocol("unexpected end of packet".to_string()));
         }
         let data = &self.data[self.pos..self.pos + len];
@@ -1454,7 +1454,7 @@ impl MySqlConnection {
             }
             _ => {
                 // Result set
-                match self.read_result_set(&data).await {
+                match self.read_result_set(cx, &data).await {
                     Ok(rows) => Outcome::Ok(rows),
                     Err(e) => Outcome::Err(e),
                 }
@@ -1465,7 +1465,11 @@ impl MySqlConnection {
     /// Read a complete result set.
     ///
     /// Enforces `max_result_rows` to prevent unbounded memory growth.
-    async fn read_result_set(&mut self, first_packet: &[u8]) -> Result<Vec<MySqlRow>, MySqlError> {
+    async fn read_result_set(
+        &mut self,
+        cx: &Cx,
+        first_packet: &[u8],
+    ) -> Result<Vec<MySqlRow>, MySqlError> {
         let mut reader = PacketReader::new(first_packet);
         let column_count = reader.read_lenenc_int()? as usize;
         let deprecate_eof = self.inner.capabilities & capability::CLIENT_DEPRECATE_EOF != 0;
@@ -1536,6 +1540,12 @@ impl MySqlConnection {
         let mut rows = Vec::new();
 
         loop {
+            if cx.is_cancel_requested() {
+                return Err(MySqlError::Cancelled(
+                    cx.cancel_reason()
+                        .unwrap_or_else(|| crate::types::CancelReason::user("cancelled")),
+                ));
+            }
             let (data, seq) = self.read_packet().await?;
             self.inner.sequence = seq.wrapping_add(1);
 
@@ -1749,7 +1759,7 @@ impl MySqlConnection {
             }
             _ => {
                 // Result set - consume it and return 0 affected rows
-                match self.read_result_set(&data).await {
+                match self.read_result_set(cx, &data).await {
                     Ok(_) => Outcome::Ok(0),
                     Err(e) => Outcome::Err(e),
                 }

@@ -1177,7 +1177,7 @@ impl<'a> MessageReader<'a> {
     }
 
     fn read_bytes(&mut self, len: usize) -> Result<&'a [u8], PgError> {
-        if self.pos + len > self.data.len() {
+        if len > self.data.len().saturating_sub(self.pos) {
             return Err(PgError::Protocol("unexpected end of message".to_string()));
         }
         let data = &self.data[self.pos..self.pos + len];
@@ -2298,7 +2298,7 @@ impl PgConnection {
             return Outcome::Err(PgError::ConnectionClosed);
         }
 
-        if let Err(e) = self.clear_orphaned_transaction().await {
+        if let Err(e) = self.clear_orphaned_transaction(cx).await {
             return Outcome::Err(e);
         }
 
@@ -2364,7 +2364,7 @@ impl PgConnection {
                     break;
                 }
                 b'E' => {
-                    return Outcome::Err(self.parse_error_and_drain(&data).await);
+                    return Outcome::Err(self.parse_error_and_drain(cx, &data).await);
                 }
                 b'N' => {
                     // NoticeResponse - ignore
@@ -2407,7 +2407,7 @@ impl PgConnection {
             return Outcome::Err(PgError::ConnectionClosed);
         }
 
-        if let Err(e) = self.clear_orphaned_transaction().await {
+        if let Err(e) = self.clear_orphaned_transaction(cx).await {
             return Outcome::Err(e);
         }
 
@@ -2457,7 +2457,7 @@ impl PgConnection {
                     break;
                 }
                 b'E' => {
-                    return Outcome::Err(self.parse_error_and_drain(&data).await);
+                    return Outcome::Err(self.parse_error_and_drain(cx, &data).await);
                 }
                 b'N' => {
                     // NoticeResponse - ignore
@@ -2573,7 +2573,7 @@ impl PgConnection {
         combined.extend_from_slice(&execute);
         combined.extend_from_slice(&sync);
 
-        if let Err(e) = self.clear_orphaned_transaction().await {
+        if let Err(e) = self.clear_orphaned_transaction(cx).await {
             return Outcome::Err(e);
         }
 
@@ -2649,7 +2649,7 @@ impl PgConnection {
         combined.extend_from_slice(&execute);
         combined.extend_from_slice(&sync);
 
-        if let Err(e) = self.clear_orphaned_transaction().await {
+        if let Err(e) = self.clear_orphaned_transaction(cx).await {
             return Outcome::Err(e);
         }
 
@@ -2685,7 +2685,7 @@ impl PgConnection {
             return Outcome::Err(PgError::ConnectionClosed);
         }
 
-        if let Err(e) = self.clear_orphaned_transaction().await {
+        if let Err(e) = self.clear_orphaned_transaction(cx).await {
             return Outcome::Err(e);
         }
 
@@ -2748,7 +2748,7 @@ impl PgConnection {
                     break;
                 }
                 b'E' => {
-                    return Outcome::Err(self.parse_error_and_drain(&data).await);
+                    return Outcome::Err(self.parse_error_and_drain(cx, &data).await);
                 }
                 b'N' => { /* NoticeResponse */ }
                 _ => { /* ignore */ }
@@ -2794,7 +2794,7 @@ impl PgConnection {
         combined.extend_from_slice(&execute);
         combined.extend_from_slice(&sync);
 
-        if let Err(e) = self.clear_orphaned_transaction().await {
+        if let Err(e) = self.clear_orphaned_transaction(cx).await {
             return Outcome::Err(e);
         }
 
@@ -2835,7 +2835,7 @@ impl PgConnection {
         combined.extend_from_slice(&execute);
         combined.extend_from_slice(&sync);
 
-        if let Err(e) = self.clear_orphaned_transaction().await {
+        if let Err(e) = self.clear_orphaned_transaction(cx).await {
             return Outcome::Err(e);
         }
 
@@ -2858,7 +2858,7 @@ impl PgConnection {
             return Outcome::Err(PgError::ConnectionClosed);
         }
 
-        if let Err(e) = self.clear_orphaned_transaction().await {
+        if let Err(e) = self.clear_orphaned_transaction(cx).await {
             return Outcome::Err(e);
         }
 
@@ -2891,7 +2891,7 @@ impl PgConnection {
                     break;
                 }
                 b'E' => {
-                    return Outcome::Err(self.parse_error_and_drain(&data).await);
+                    return Outcome::Err(self.parse_error_and_drain(cx, &data).await);
                 }
                 b'N' => {}
                 _ => {}
@@ -2910,7 +2910,7 @@ impl PgConnection {
     /// If `needs_rollback` is set, sends a ROLLBACK command and drains
     /// to `ReadyForQuery` before returning. This prevents the connection
     /// from being stuck in an aborted-transaction state.
-    async fn clear_orphaned_transaction(&mut self) -> Result<(), PgError> {
+    async fn clear_orphaned_transaction(&mut self, cx: &Cx) -> Result<(), PgError> {
         if !self.inner.needs_rollback {
             return Ok(());
         }
@@ -2929,7 +2929,7 @@ impl PgConnection {
             return Err(e);
         }
 
-        if let Err(e) = self.drain_to_ready().await {
+        if let Err(e) = self.drain_to_ready(cx).await {
             // Drain errors during rollback are suppressed since the rollback
             // itself is the priority operation and a drain failure at that
             // point is non-fatal.
@@ -3215,9 +3215,9 @@ impl PgConnection {
     /// Returns the parsed server error when draining succeeds. If draining fails,
     /// returns a protocol error that includes both the server error details and
     /// the drain failure so re-synchronization failures are never swallowed.
-    async fn parse_error_and_drain(&mut self, data: &[u8]) -> PgError {
+    async fn parse_error_and_drain(&mut self, cx: &Cx, data: &[u8]) -> PgError {
         let server_err = self.parse_error_response(data).unwrap_or_else(|e| e);
-        match self.drain_to_ready().await {
+        match self.drain_to_ready(cx).await {
             Ok(()) => server_err,
             Err(drain_err) => {
                 let _ = self.inner.stream.shutdown(std::net::Shutdown::Both);
@@ -3297,7 +3297,7 @@ impl PgConnection {
                     break;
                 }
                 b'E' => {
-                    return Outcome::Err(self.parse_error_and_drain(&data).await);
+                    return Outcome::Err(self.parse_error_and_drain(cx, &data).await);
                 }
                 b'N' => { /* NoticeResponse */ }
                 _ => {}
@@ -3341,7 +3341,7 @@ impl PgConnection {
                     break;
                 }
                 b'E' => {
-                    return Outcome::Err(self.parse_error_and_drain(&data).await);
+                    return Outcome::Err(self.parse_error_and_drain(cx, &data).await);
                 }
                 b'N' => {}
                 _ => {}
@@ -3355,8 +3355,11 @@ impl PgConnection {
     ///
     /// Returns `Ok(())` when `ReadyForQuery` is received, or `Err` if the
     /// connection hit an I/O error before reaching synchronization.
-    async fn drain_to_ready(&mut self) -> Result<(), PgError> {
+    async fn drain_to_ready(&mut self, cx: &Cx) -> Result<(), PgError> {
         loop {
+            if cx.is_cancel_requested() {
+                return Err(PgError::Cancelled(cancelled_reason(cx)));
+            }
             let (msg_type, data) = self.read_message().await?;
             if msg_type == b'Z' {
                 if !data.is_empty() {
@@ -4515,7 +4518,8 @@ mod tests {
         data.extend_from_slice(b"boom\0");
         data.push(0);
 
-        let err = run(conn.parse_error_and_drain(&data));
+        let cx = crate::cx::Cx::for_testing();
+        let err = run(conn.parse_error_and_drain(&cx, &data));
         match err {
             PgError::Server { code, message, .. } => {
                 assert_eq!(code, "XX000");
@@ -4536,7 +4540,8 @@ mod tests {
         data.extend_from_slice(b"boom\0");
         data.push(0);
 
-        let err = run(conn.parse_error_and_drain(&data));
+        let cx = crate::cx::Cx::for_testing();
+        let err = run(conn.parse_error_and_drain(&cx, &data));
         match err {
             PgError::Protocol(msg) => {
                 assert!(msg.contains("boom"), "missing original server error: {msg}");
