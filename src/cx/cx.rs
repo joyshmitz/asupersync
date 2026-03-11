@@ -1121,10 +1121,11 @@ impl<Caps> Cx<Caps> {
     /// If mask_depth > 0, cancel remains deferred until mask is unwound.
     #[allow(clippy::result_large_err)]
     pub fn checkpoint(&self) -> Result<(), crate::error::Error> {
+        let checkpoint_time = self.current_checkpoint_time();
         // Record progress checkpoint and check cancellation under a single lock
         let (cancel_requested, mask_depth, task, region, budget, budget_baseline, cancel_reason) = {
             let mut inner = self.inner.write();
-            inner.checkpoint_state.record();
+            inner.checkpoint_state.record_at(checkpoint_time);
             if inner.cancel_requested && inner.mask_depth == 0 {
                 inner.cancel_acknowledged = true;
             }
@@ -1190,10 +1191,13 @@ impl<Caps> Cx<Caps> {
     /// ```
     #[allow(clippy::result_large_err)]
     pub fn checkpoint_with(&self, msg: impl Into<String>) -> Result<(), crate::error::Error> {
+        let checkpoint_time = self.current_checkpoint_time();
         // Record progress checkpoint and check cancellation under a single lock
         let (cancel_requested, mask_depth, task, region, budget, budget_baseline, cancel_reason) = {
             let mut inner = self.inner.write();
-            inner.checkpoint_state.record_with_message(msg.into());
+            inner
+                .checkpoint_state
+                .record_with_message_at(msg.into(), checkpoint_time);
             if inner.cancel_requested && inner.mask_depth == 0 {
                 inner.cancel_acknowledged = true;
             }
@@ -1237,7 +1241,7 @@ impl<Caps> Cx<Caps> {
     /// Returns a snapshot of the current checkpoint state.
     ///
     /// The checkpoint state tracks progress reporting checkpoints:
-    /// - `last_checkpoint`: When the last checkpoint was recorded
+    /// - `last_checkpoint`: The runtime time when the last checkpoint was recorded
     /// - `last_message`: The message from the last `checkpoint_with()` call
     /// - `checkpoint_count`: Total number of checkpoints
     ///
@@ -1248,18 +1252,19 @@ impl<Caps> Cx<Caps> {
     /// ```ignore
     /// fn check_task_health(cx: &Cx) -> bool {
     ///     let state = cx.checkpoint_state();
-    ///     if let Some(last) = state.last_checkpoint {
-    ///         // Stalled if no checkpoint in 30 seconds
-    ///         last.elapsed() < Duration::from_secs(30)
-    ///     } else {
-    ///         // Never checkpointed, could be stuck
-    ///         false
-    ///     }
+    ///     state.last_checkpoint.is_some()
     /// }
     /// ```
     #[must_use]
     pub fn checkpoint_state(&self) -> crate::types::CheckpointState {
         self.inner.read().checkpoint_state.clone()
+    }
+
+    fn current_checkpoint_time(&self) -> Time {
+        self.handles
+            .timer_driver
+            .as_ref()
+            .map_or_else(wall_clock_now, TimerDriverHandle::now)
     }
 
     /// Internal: checks cancellation from extracted values.

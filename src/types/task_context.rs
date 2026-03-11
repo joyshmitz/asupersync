@@ -1,8 +1,7 @@
 //! Internal state shared between TaskRecord and Cx.
 
-use crate::types::{Budget, CancelReason, RegionId, TaskId};
+use crate::types::{Budget, CancelReason, RegionId, TaskId, Time};
 use std::task::Waker;
-use std::time::Instant;
 
 /// Maximum nesting depth for `Cx::masked()` sections.
 ///
@@ -23,8 +22,8 @@ pub const MAX_MASK_DEPTH: u32 = 64;
 /// - Observability and debugging
 #[derive(Debug, Clone)]
 pub struct CheckpointState {
-    /// The timestamp of the last checkpoint.
-    pub last_checkpoint: Option<Instant>,
+    /// The runtime time of the last checkpoint.
+    pub last_checkpoint: Option<Time>,
     /// The message from the last `checkpoint_with()` call.
     pub last_message: Option<String>,
     /// The total number of checkpoints recorded.
@@ -50,11 +49,11 @@ impl CheckpointState {
 
     /// Records a checkpoint without a message.
     pub fn record(&mut self) {
-        self.record_at(Instant::now());
+        self.record_at(crate::time::wall_now());
     }
 
-    /// Records a checkpoint at an explicit instant.
-    pub fn record_at(&mut self, at: Instant) {
+    /// Records a checkpoint at an explicit runtime time.
+    pub fn record_at(&mut self, at: Time) {
         self.last_checkpoint = Some(at);
         self.last_message = None;
         self.checkpoint_count += 1;
@@ -62,11 +61,11 @@ impl CheckpointState {
 
     /// Records a checkpoint with a message.
     pub fn record_with_message(&mut self, message: String) {
-        self.record_with_message_at(message, Instant::now());
+        self.record_with_message_at(message, crate::time::wall_now());
     }
 
-    /// Records a checkpoint with a message at an explicit instant.
-    pub fn record_with_message_at(&mut self, message: String, at: Instant) {
+    /// Records a checkpoint with a message at an explicit runtime time.
+    pub fn record_with_message_at(&mut self, message: String, at: Time) {
         self.last_checkpoint = Some(at);
         self.last_message = Some(message);
         self.checkpoint_count += 1;
@@ -198,7 +197,7 @@ mod tests {
     fn test_checkpoint_state_record_at() {
         init_test("test_checkpoint_state_record_at");
         let mut state = CheckpointState::new();
-        let at = Instant::now();
+        let at = Time::from_nanos(123);
 
         state.record_at(at);
 
@@ -260,7 +259,7 @@ mod tests {
     fn test_checkpoint_state_record_with_message_at() {
         init_test("test_checkpoint_state_record_with_message_at");
         let mut state = CheckpointState::new();
-        let at = Instant::now();
+        let at = Time::from_nanos(456);
 
         state.record_with_message_at("hello".to_string(), at);
 

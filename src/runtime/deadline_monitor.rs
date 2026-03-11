@@ -82,8 +82,8 @@ pub struct DeadlineWarning {
     pub deadline: Time,
     /// Time remaining until deadline.
     pub remaining: Duration,
-    /// When the last checkpoint was recorded.
-    pub last_checkpoint: Option<Instant>,
+    /// When the last checkpoint was recorded in runtime time.
+    pub last_checkpoint: Option<Time>,
     /// Message from the last checkpoint.
     pub last_checkpoint_message: Option<String>,
     /// Warning reason.
@@ -149,9 +149,10 @@ struct MonitoredTask {
     task_id: TaskId,
     region_id: RegionId,
     deadline: Time,
-    last_progress: Instant,
+    last_progress_wall: Instant,
     last_progress_time: Time,
-    last_checkpoint_seen: Option<Instant>,
+    last_checkpoint_seen: Option<Time>,
+    last_checkpoint_count_seen: u64,
     warned: bool,
     violated: bool,
     seen_gen: u64,
@@ -338,7 +339,7 @@ impl DeadlineMonitor {
                 .unwrap_or_default();
             let wall_elapsed = self
                 .last_scan_instant
-                .map(|last| duration_to_nanos(now_instant.duration_since(last)))
+                .map(|last| duration_to_nanos(now_instant.saturating_duration_since(last)))
                 .unwrap_or_default();
             if logical_elapsed < interval_nanos && wall_elapsed < interval_nanos {
                 return;
@@ -363,6 +364,7 @@ impl DeadlineMonitor {
             };
 
             let last_checkpoint = inner_guard.checkpoint_state.last_checkpoint;
+            let checkpoint_count = inner_guard.checkpoint_state.checkpoint_count;
             let task_type_raw = inner_guard
                 .task_type
                 .clone()
@@ -403,18 +405,10 @@ impl DeadlineMonitor {
                     task_id: task.id,
                     region_id: task.owner,
                     deadline,
-                    last_progress: last_checkpoint.unwrap_or(now_instant),
-                    // A newly observed checkpoint proves progress happened at
-                    // or before this scan, but not the exact logical instant.
-                    // Recording `now` keeps the logical-time fallback
-                    // conservative while still letting later scans detect
-                    // stalls when lab time advances without wall time.
-                    last_progress_time: if last_checkpoint.is_some() {
-                        now
-                    } else {
-                        task.created_at()
-                    },
+                    last_progress_wall: now_instant,
+                    last_progress_time: last_checkpoint.unwrap_or_else(|| task.created_at()),
                     last_checkpoint_seen: last_checkpoint,
+                    last_checkpoint_count_seen: checkpoint_count,
                     warned: false,
                     violated: false,
                     seen_gen: scan_generation,
@@ -424,18 +418,19 @@ impl DeadlineMonitor {
                 entry.seen_gen = scan_generation;
                 entry.region_id = task.owner;
                 entry.deadline = deadline;
-                if let Some(checkpoint) = last_checkpoint {
-                    if entry
-                        .last_checkpoint_seen
-                        .is_none_or(|prev| checkpoint > prev)
+                if checkpoint_count > entry.last_checkpoint_count_seen {
+                    if let (Some(prev), Some(checkpoint)) =
+                        (entry.last_checkpoint_seen, last_checkpoint)
                     {
-                        if let Some(prev) = entry.last_checkpoint_seen {
-                            checkpoint_interval = Some(checkpoint.duration_since(prev));
+                        if checkpoint > prev {
+                            checkpoint_interval =
+                                Some(Duration::from_nanos(checkpoint.duration_since(prev)));
                         }
-                        entry.last_checkpoint_seen = Some(checkpoint);
-                        entry.last_progress = checkpoint;
-                        entry.last_progress_time = now;
                     }
+                    entry.last_checkpoint_seen = last_checkpoint;
+                    entry.last_checkpoint_count_seen = checkpoint_count;
+                    entry.last_progress_wall = now_instant;
+                    entry.last_progress_time = last_checkpoint.unwrap_or(now);
                 }
 
                 let deadline_exceeded = now > deadline;
@@ -445,7 +440,8 @@ impl DeadlineMonitor {
                 }
 
                 if !entry.warned {
-                    let wall_no_progress = now_instant.duration_since(entry.last_progress)
+                    let wall_no_progress = now_instant
+                        .saturating_duration_since(entry.last_progress_wall)
                         >= self.config.checkpoint_timeout;
                     let logical_no_progress = now.duration_since(entry.last_progress_time)
                         >= duration_to_nanos(self.config.checkpoint_timeout);
@@ -606,18 +602,12 @@ mod tests {
             .expect("deadline monitor test instant overflow")
     }
 
-    fn test_now_minus(duration: Duration) -> Instant {
-        test_now()
-            .checked_sub(duration)
-            .expect("deadline monitor test instant underflow")
-    }
-
     fn make_task(
         task_id: TaskId,
         region_id: RegionId,
         created_at: Time,
         deadline: Time,
-        last_checkpoint: Option<Instant>,
+        last_checkpoint: Option<Time>,
         last_message: Option<&str>,
         task_type: Option<&str>,
     ) -> TaskRecord {
@@ -626,6 +616,7 @@ mod tests {
         let mut inner = CxInner::new(region_id, task_id, budget);
         inner.checkpoint_state.last_checkpoint = last_checkpoint;
         inner.checkpoint_state.last_message = last_message.map(std::string::ToString::to_string);
+        inner.checkpoint_state.checkpoint_count = u64::from(last_checkpoint.is_some());
         inner.task_type = task_type.map(std::string::ToString::to_string);
         record.set_cx_inner(Arc::new(RwLock::new(inner)));
         record
@@ -656,7 +647,7 @@ mod tests {
             RegionId::new_for_test(1, 0),
             Time::from_secs(0),
             Time::from_secs(100),
-            Some(test_now()),
+            Some(Time::from_secs(90)),
             None,
             None,
         );
@@ -696,13 +687,12 @@ mod tests {
             warnings_ref.lock().push(warning.reason);
         });
 
-        let stale = test_now_minus(Duration::from_secs(30));
         let task = make_task(
             TaskId::new_for_test(2, 0),
             RegionId::new_for_test(1, 0),
             Time::from_secs(0),
             Time::from_secs(1000),
-            Some(stale),
+            Some(Time::from_secs(0)),
             Some("stuck"),
             None,
         );
@@ -790,7 +780,7 @@ mod tests {
             RegionId::new_for_test(1, 0),
             Time::from_secs(0),
             Time::from_secs(1_000),
-            Some(test_now()),
+            Some(Time::from_secs(10)),
             Some("checkpointed"),
             None,
         );
@@ -814,6 +804,64 @@ mod tests {
             recorded
         );
         crate::test_complete!("warns_on_no_progress_after_checkpoint_when_logical_time_advances");
+    }
+
+    #[test]
+    fn repeated_checkpoint_count_resets_progress_without_time_advance() {
+        init_test("repeated_checkpoint_count_resets_progress_without_time_advance");
+        let _clock_guard = lock_test_clock();
+        set_test_time(0);
+        let config = MonitorConfig {
+            check_interval: Duration::ZERO,
+            warning_threshold_fraction: 0.0,
+            checkpoint_timeout: Duration::from_millis(1),
+            adaptive: AdaptiveDeadlineConfig::default(),
+            enabled: true,
+        };
+        let mut monitor = DeadlineMonitor::with_time_getter(config, test_now);
+
+        let warnings: Arc<Mutex<Vec<WarningReason>>> = Arc::new(Mutex::new(Vec::new()));
+        let warnings_ref = warnings.clone();
+        monitor.on_warning(move |warning| {
+            warnings_ref.lock().push(warning.reason);
+        });
+
+        let task = make_task(
+            TaskId::new_for_test(23, 0),
+            RegionId::new_for_test(1, 0),
+            Time::from_secs(0),
+            Time::from_secs(1_000),
+            Some(Time::from_secs(5)),
+            Some("checkpointed"),
+            None,
+        );
+
+        monitor.check(Time::from_secs(5), std::iter::once(&task));
+        let first_count = warnings.lock().len();
+        crate::assert_with_log!(
+            first_count == 0,
+            "no warning on initial checkpoint observation",
+            0usize,
+            first_count
+        );
+
+        if let Some(inner) = task.cx_inner.as_ref() {
+            let mut guard = inner.write();
+            guard.checkpoint_state.checkpoint_count += 1;
+            guard.checkpoint_state.last_message = Some("checkpointed again".to_string());
+        }
+
+        set_test_time(Duration::from_millis(2).as_nanos() as u64);
+        monitor.check(Time::from_secs(5), std::iter::once(&task));
+
+        let recorded = warnings.lock().clone();
+        crate::assert_with_log!(
+            recorded.is_empty(),
+            "checkpoint count refresh suppresses false stale warning",
+            true,
+            recorded.is_empty()
+        );
+        crate::test_complete!("repeated_checkpoint_count_resets_progress_without_time_advance");
     }
 
     #[test]
@@ -975,18 +1023,17 @@ mod tests {
             warnings_ref.lock().push(warning.reason);
         });
 
-        let stale = test_now_minus(Duration::from_secs(20));
         let task = make_task(
             TaskId::new_for_test(4, 0),
             RegionId::new_for_test(1, 0),
             Time::from_secs(0),
-            Time::from_secs(10),
-            Some(stale),
+            Time::from_secs(20),
+            Some(Time::from_secs(0)),
             None,
             None,
         );
 
-        monitor.check(Time::from_secs(9), std::iter::once(&task));
+        monitor.check(Time::from_secs(11), std::iter::once(&task));
 
         let recorded = {
             let recorded = warnings.lock();
@@ -1027,7 +1074,7 @@ mod tests {
             RegionId::new_for_test(1, 0),
             Time::from_secs(0),
             Time::from_secs(1000),
-            Some(test_now()),
+            Some(Time::from_secs(10)),
             Some("recent checkpoint"),
             None,
         );
@@ -1037,6 +1084,94 @@ mod tests {
         let empty = warnings.lock().is_empty();
         crate::assert_with_log!(empty, "no warnings", true, empty);
         crate::test_complete!("no_warning_with_recent_checkpoint");
+    }
+
+    #[test]
+    fn no_warning_when_checkpoint_time_is_ahead_of_monitor_clock() {
+        init_test("no_warning_when_checkpoint_time_is_ahead_of_monitor_clock");
+        let _clock_guard = lock_test_clock();
+        set_test_time(0);
+        let config = MonitorConfig {
+            check_interval: Duration::ZERO,
+            warning_threshold_fraction: 0.0,
+            checkpoint_timeout: Duration::from_secs(1),
+            adaptive: AdaptiveDeadlineConfig::default(),
+            enabled: true,
+        };
+        let mut monitor = DeadlineMonitor::with_time_getter(config, test_now);
+
+        let warnings: Arc<Mutex<Vec<DeadlineWarning>>> = Arc::new(Mutex::new(Vec::new()));
+        let warnings_ref = warnings.clone();
+        monitor.on_warning(move |warning| {
+            warnings_ref.lock().push(warning);
+        });
+
+        let future_checkpoint = Time::from_secs(130);
+
+        let task = make_task(
+            TaskId::new_for_test(51, 0),
+            RegionId::new_for_test(1, 0),
+            Time::from_secs(0),
+            Time::from_secs(1_000),
+            Some(future_checkpoint),
+            Some("forward skew"),
+            None,
+        );
+
+        monitor.check(Time::from_secs(10), std::iter::once(&task));
+
+        let empty = warnings.lock().is_empty();
+        crate::assert_with_log!(
+            empty,
+            "future checkpoint should not panic or force stale warning",
+            true,
+            empty
+        );
+        crate::test_complete!("no_warning_when_checkpoint_time_is_ahead_of_monitor_clock");
+    }
+
+    #[test]
+    fn check_interval_tolerates_time_getter_going_backwards() {
+        init_test("check_interval_tolerates_time_getter_going_backwards");
+        let _clock_guard = lock_test_clock();
+        set_test_time(1_000_000_000);
+        let config = MonitorConfig {
+            check_interval: Duration::from_millis(10),
+            warning_threshold_fraction: 0.0,
+            checkpoint_timeout: Duration::from_mins(1),
+            adaptive: AdaptiveDeadlineConfig::default(),
+            enabled: true,
+        };
+        let mut monitor = DeadlineMonitor::with_time_getter(config, test_now);
+
+        let warnings: Arc<Mutex<Vec<DeadlineWarning>>> = Arc::new(Mutex::new(Vec::new()));
+        let warnings_ref = warnings.clone();
+        monitor.on_warning(move |warning| {
+            warnings_ref.lock().push(warning);
+        });
+
+        let task = make_task(
+            TaskId::new_for_test(52, 0),
+            RegionId::new_for_test(1, 0),
+            Time::from_secs(0),
+            Time::from_secs(1_000),
+            Some(Time::from_secs(1)),
+            Some("baseline"),
+            None,
+        );
+
+        monitor.check(Time::from_secs(1), std::iter::once(&task));
+        set_test_time(100_000_000);
+        monitor.check(Time::from_secs(2), std::iter::once(&task));
+
+        let empty = warnings.lock().is_empty();
+        crate::assert_with_log!(
+            empty,
+            "backward monitor clock should not panic",
+            true,
+            empty
+        );
+        crate::test_complete!("check_interval_tolerates_time_getter_going_backwards");
     }
 
     #[test]
@@ -1064,7 +1199,7 @@ mod tests {
             RegionId::new_for_test(1, 0),
             Time::from_secs(0),
             Time::from_secs(1000),
-            Some(test_now()),
+            Some(Time::from_secs(0)),
             Some("checkpoint message"),
             None,
         );
@@ -1281,13 +1416,12 @@ mod tests {
         let metrics = Arc::new(TestMetrics::default());
         monitor.set_metrics_provider(metrics.clone());
 
-        let stale = test_now_minus(Duration::from_secs(10));
         let task = make_task(
             TaskId::new_for_test(9, 0),
             RegionId::new_for_test(1, 0),
             Time::from_secs(0),
             Time::from_secs(10),
-            Some(stale),
+            Some(Time::from_secs(0)),
             Some("stuck"),
             Some("gamma"),
         );
@@ -1331,9 +1465,8 @@ mod tests {
         let metrics = Arc::new(TestMetrics::default());
         monitor.set_metrics_provider(metrics.clone());
 
-        let first = test_now_minus(Duration::from_secs(5));
-        set_test_time(Duration::from_secs(1).as_nanos() as u64);
-        let second = test_now();
+        let first = Time::from_millis(100);
+        let second = Time::from_millis(700);
         let task = make_task(
             TaskId::new_for_test(10, 0),
             RegionId::new_for_test(1, 0),
@@ -1349,6 +1482,7 @@ mod tests {
         if let Some(inner) = task.cx_inner.as_ref() {
             let mut guard = inner.write();
             guard.checkpoint_state.last_checkpoint = Some(second);
+            guard.checkpoint_state.checkpoint_count += 1;
         }
 
         monitor.check(Time::from_secs(2), std::iter::once(&task));

@@ -260,7 +260,7 @@ mod tests {
 
     /// Upper bound on non-test, non-exempt ambient authority violations.
     /// Bump this ONLY after documenting the new usage in KNOWN_FINDINGS.
-    const AMBIENT_VIOLATION_CEILING: usize = 120;
+    const AMBIENT_VIOLATION_CEILING: usize = 118;
 
     fn src_root() -> PathBuf {
         Path::new(env!("CARGO_MANIFEST_DIR")).join("src")

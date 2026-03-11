@@ -123,7 +123,10 @@ impl<S: Clone> Clone for RateLimit<S> {
         Self {
             inner: self.inner.clone(),
             tokens: self.tokens,
-            reserved_tokens: self.reserved_tokens,
+            // Readiness reservations are handle-local and must not be inherited
+            // by a fresh clone, or a clone can spend another handle's poll_ready
+            // reservation without performing its own readiness check.
+            reserved_tokens: 0,
             last_refill: self.last_refill,
             rate: self.rate,
             period: self.period,
@@ -348,7 +351,6 @@ impl<E: std::error::Error + 'static> std::error::Error for RateLimitError<E> {
 impl<S, Request> Service<Request> for RateLimit<S>
 where
     S: Service<Request>,
-    S::Future: Unpin,
 {
     type Response = S::Response;
     type Error = RateLimitError<S::Error>;
@@ -398,57 +400,70 @@ impl Drop for ReservedTokenGuard<'_> {
 
 /// Future returned by [`RateLimit`] service.
 #[pin_project(project = RateLimitFutureProj)]
-pub enum RateLimitFuture<F, E> {
-    /// Inner service future that is still pending.
-    Inner(#[pin] F),
-    /// Immediate rate-limit error that should resolve without polling an inner future.
-    Error(Option<RateLimitError<E>>),
+pub struct RateLimitFuture<F, E> {
+    #[pin]
+    state: RateLimitFutureState<F, E>,
+}
+
+#[pin_project(project = RateLimitFutureStateProj)]
+enum RateLimitFutureState<F, E> {
+    Inner {
+        #[pin]
+        inner: F,
+    },
+    Error {
+        error: Option<RateLimitError<E>>,
+    },
 }
 
 impl<F, E> RateLimitFuture<F, E> {
     /// Creates a new rate-limited future.
     #[must_use]
     pub fn new(inner: F) -> Self {
-        Self::Inner(inner)
+        Self {
+            state: RateLimitFutureState::Inner { inner },
+        }
     }
 
     /// Creates a future that resolves to an immediate rate-limit error.
     #[must_use]
     pub fn immediate_error(error: RateLimitError<E>) -> Self {
-        Self::Error(Some(error))
+        Self {
+            state: RateLimitFutureState::Error { error: Some(error) },
+        }
     }
 }
 
 impl<F, T, E> Future for RateLimitFuture<F, E>
 where
-    F: Future<Output = Result<T, E>> + Unpin,
+    F: Future<Output = Result<T, E>>,
 {
     type Output = Result<T, RateLimitError<E>>;
 
     #[inline]
     fn poll(self: Pin<&mut Self>, cx: &mut Context<'_>) -> Poll<Self::Output> {
-        match self.project() {
-            RateLimitFutureProj::Inner(inner) => match inner.poll(cx) {
+        match self.project().state.project() {
+            RateLimitFutureStateProj::Inner { inner } => match inner.poll(cx) {
                 Poll::Ready(Ok(response)) => Poll::Ready(Ok(response)),
-                Poll::Ready(Err(e)) => Poll::Ready(Err(RateLimitError::Inner(e))),
+                Poll::Ready(Err(error)) => Poll::Ready(Err(RateLimitError::Inner(error))),
                 Poll::Pending => Poll::Pending,
             },
-            RateLimitFutureProj::Error(error) => Poll::Ready(Err(error
+            RateLimitFutureStateProj::Error { error } => Poll::Ready(Err(error
                 .take()
-                .expect("rate-limit future immediate error already taken"))),
+                .unwrap_or(RateLimitError::RateLimitExceeded))),
         }
     }
 }
 
 impl<F: std::fmt::Debug, E> std::fmt::Debug for RateLimitFuture<F, E> {
     fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
-        match self {
-            Self::Inner(inner) => f
+        match &self.state {
+            RateLimitFutureState::Inner { inner } => f
                 .debug_struct("RateLimitFuture")
                 .field("state", &"Inner")
                 .field("inner", inner)
                 .finish(),
-            Self::Error(_) => f
+            RateLimitFutureState::Error { .. } => f
                 .debug_struct("RateLimitFuture")
                 .field("state", &"ImmediateError")
                 .finish(),
@@ -942,10 +957,55 @@ mod tests {
     #[test]
     fn rate_limit_service_clone() {
         let svc = RateLimit::new(42_i32, 10, Duration::from_secs(1));
-        let cloned = svc;
+        let cloned = svc.clone();
         assert_eq!(*cloned.inner(), 42);
         assert_eq!(cloned.rate(), 10);
         assert_eq!(cloned.available_tokens(), 10);
+    }
+
+    #[test]
+    fn rate_limit_clone_does_not_inherit_reserved_tokens() {
+        init_test("rate_limit_clone_does_not_inherit_reserved_tokens");
+        let mut svc = RateLimit::new(EchoService, 1, Duration::from_secs(1));
+        let waker = noop_waker();
+        let mut cx = Context::from_waker(&waker);
+
+        let ready = svc.poll_ready(&mut cx);
+        let ok = matches!(ready, Poll::Ready(Ok(())));
+        crate::assert_with_log!(ok, "ready ok", true, ok);
+        crate::assert_with_log!(svc.reserved_tokens == 1, "reserved", 1, svc.reserved_tokens);
+
+        let mut cloned = svc.clone();
+        crate::assert_with_log!(
+            cloned.reserved_tokens == 0,
+            "clone reserved tokens reset",
+            0,
+            cloned.reserved_tokens
+        );
+
+        let mut clone_future = cloned.call(7);
+        let clone_result = Pin::new(&mut clone_future).poll(&mut cx);
+        let clone_limited = matches!(
+            clone_result,
+            Poll::Ready(Err(RateLimitError::RateLimitExceeded))
+        );
+        crate::assert_with_log!(
+            clone_limited,
+            "clone cannot spend original reservation",
+            true,
+            clone_limited
+        );
+
+        let mut original_future = svc.call(7);
+        let original_result = Pin::new(&mut original_future).poll(&mut cx);
+        let original_ok = matches!(original_result, Poll::Ready(Ok(7)));
+        crate::assert_with_log!(
+            original_ok,
+            "original reservation still works",
+            true,
+            original_ok
+        );
+        crate::test_complete!("rate_limit_clone_does_not_inherit_reserved_tokens");
     }
 
     #[test]
