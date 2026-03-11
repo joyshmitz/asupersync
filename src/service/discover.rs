@@ -27,6 +27,7 @@ use parking_lot::Mutex;
 use std::collections::HashSet;
 use std::fmt;
 use std::net::{SocketAddr, ToSocketAddrs};
+use std::sync::Arc;
 use std::time::Duration;
 
 fn wall_clock_now() -> Time {
@@ -35,6 +36,15 @@ fn wall_clock_now() -> Time {
 
 fn duration_to_nanos(duration: Duration) -> u64 {
     duration.as_nanos().min(u128::from(u64::MAX)) as u64
+}
+
+type ResolveFn =
+    Arc<dyn Fn(&str, u16) -> Result<HashSet<SocketAddr>, std::io::Error> + Send + Sync + 'static>;
+
+fn default_resolve(hostname: &str, port: u16) -> Result<HashSet<SocketAddr>, std::io::Error> {
+    let host_port = format!("{hostname}:{port}");
+    let addrs: HashSet<SocketAddr> = host_port.to_socket_addrs()?.collect();
+    Ok(addrs)
 }
 
 // ─── Change type ────────────────────────────────────────────────────────────
@@ -176,7 +186,7 @@ impl std::error::Error for DnsDiscoveryError {
 }
 
 /// DNS-based service discovery configuration.
-#[derive(Debug, Clone)]
+#[derive(Clone)]
 pub struct DnsDiscoveryConfig {
     /// Hostname to resolve (e.g., "api.example.com").
     pub hostname: String,
@@ -185,6 +195,8 @@ pub struct DnsDiscoveryConfig {
     /// How often to re-resolve the hostname.
     pub poll_interval: Duration,
     time_getter: fn() -> Time,
+    resolver: ResolveFn,
+    resolver_label: &'static str,
 }
 
 impl DnsDiscoveryConfig {
@@ -195,6 +207,10 @@ impl DnsDiscoveryConfig {
             port,
             poll_interval: Duration::from_secs(30),
             time_getter: wall_clock_now,
+            resolver: Arc::new(
+                default_resolve as fn(&str, u16) -> Result<HashSet<SocketAddr>, std::io::Error>,
+            ),
+            resolver_label: "system",
         }
     }
 
@@ -207,15 +223,38 @@ impl DnsDiscoveryConfig {
 
     /// Set a custom time source for deterministic retry cooldowns.
     #[must_use]
-    pub const fn with_time_getter(mut self, time_getter: fn() -> Time) -> Self {
+    pub fn with_time_getter(mut self, time_getter: fn() -> Time) -> Self {
         self.time_getter = time_getter;
+        self
+    }
+
+    /// Set a custom resolver for deterministic tests or non-standard lookup sources.
+    #[must_use]
+    pub fn with_resolver<R>(mut self, resolver: R) -> Self
+    where
+        R: Fn(&str, u16) -> Result<HashSet<SocketAddr>, std::io::Error> + Send + Sync + 'static,
+    {
+        self.resolver = Arc::new(resolver);
+        self.resolver_label = "custom";
         self
     }
 
     /// Returns the time source used by this config.
     #[must_use]
-    pub const fn time_getter(&self) -> fn() -> Time {
+    pub fn time_getter(&self) -> fn() -> Time {
         self.time_getter
+    }
+}
+
+impl fmt::Debug for DnsDiscoveryConfig {
+    fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
+        f.debug_struct("DnsDiscoveryConfig")
+            .field("hostname", &self.hostname)
+            .field("port", &self.port)
+            .field("poll_interval", &self.poll_interval)
+            .field("time_getter", &"<fn>")
+            .field("resolver", &self.resolver_label)
+            .finish()
     }
 }
 
@@ -318,9 +357,7 @@ impl DnsServiceDiscovery {
 
     /// Perform DNS resolution synchronously.
     fn resolve(&self) -> Result<HashSet<SocketAddr>, std::io::Error> {
-        let host_port = format!("{}:{}", self.config.hostname, self.config.port);
-        let addrs: HashSet<SocketAddr> = host_port.to_socket_addrs()?.collect();
-        Ok(addrs)
+        (self.config.resolver)(&self.config.hostname, self.config.port)
     }
 
     /// Check if a re-resolution is needed based on the poll interval.
@@ -391,10 +428,14 @@ impl fmt::Debug for DnsServiceDiscovery {
 mod tests {
     use super::*;
     use std::cell::Cell;
+    use std::collections::VecDeque;
+    use std::sync::{Arc, Mutex as StdMutex};
 
     thread_local! {
         static TEST_NOW: Cell<u64> = const { Cell::new(0) };
     }
+
+    type ResolverResult = Result<HashSet<SocketAddr>, std::io::Error>;
 
     fn set_test_time(nanos: u64) {
         TEST_NOW.with(|now| now.set(nanos));
@@ -407,6 +448,23 @@ mod tests {
     fn init_test(name: &str) {
         crate::test_utils::init_test_logging();
         crate::test_phase!(name);
+    }
+
+    fn socket_set(addrs: &[&str]) -> HashSet<SocketAddr> {
+        addrs.iter().map(|addr| addr.parse().unwrap()).collect()
+    }
+
+    fn scripted_resolver(
+        script: Vec<ResolverResult>,
+    ) -> impl Fn(&str, u16) -> ResolverResult + Send + Sync + 'static {
+        let script = Arc::new(StdMutex::new(VecDeque::from(script)));
+        move |_, _| {
+            script
+                .lock()
+                .expect("resolver script lock poisoned")
+                .pop_front()
+                .expect("resolver script exhausted")
+        }
     }
 
     // ================================================================
@@ -561,30 +619,32 @@ mod tests {
     }
 
     #[test]
-    fn dns_discovery_resolves_localhost() {
-        init_test("dns_discovery_resolves_localhost");
-        let discovery = DnsServiceDiscovery::from_host("localhost", 8080);
+    fn dns_discovery_default_resolver_accepts_ip_literal() {
+        init_test("dns_discovery_default_resolver_accepts_ip_literal");
+        let discovery = DnsServiceDiscovery::from_host("127.0.0.1", 8080);
 
         let changes = discovery.poll_discover().unwrap();
-        // localhost should resolve to at least one address.
-        assert!(!changes.is_empty());
-        assert!(changes.iter().all(|c| matches!(c, Change::Insert(_))));
+        assert_eq!(
+            changes,
+            vec![Change::Insert("127.0.0.1:8080".parse().unwrap())]
+        );
         assert_eq!(discovery.resolve_count(), 1);
 
-        // All endpoints should have port 8080.
-        for change in &changes {
-            if let Change::Insert(addr) = change {
-                assert_eq!(addr.port(), 8080);
-            }
-        }
-        crate::test_complete!("dns_discovery_resolves_localhost");
+        crate::test_complete!("dns_discovery_default_resolver_accepts_ip_literal");
     }
 
     #[test]
     fn dns_discovery_no_change_within_interval() {
         init_test("dns_discovery_no_change_within_interval");
+        let addrs = socket_set(&["127.0.0.1:80"]);
         let discovery = DnsServiceDiscovery::new(
-            DnsDiscoveryConfig::new("localhost", 80).poll_interval(Duration::from_mins(5)),
+            DnsDiscoveryConfig::new("service.test", 80)
+                .poll_interval(Duration::from_mins(5))
+                .with_resolver(move |hostname, port| {
+                    assert_eq!(hostname, "service.test");
+                    assert_eq!(port, 80);
+                    Ok(addrs.clone())
+                }),
         );
 
         let _ = discovery.poll_discover().unwrap();
@@ -598,8 +658,14 @@ mod tests {
     #[test]
     fn dns_discovery_invalidate_forces_resolve() {
         init_test("dns_discovery_invalidate_forces_resolve");
+        let resolver = scripted_resolver(vec![
+            Ok(socket_set(&["127.0.0.1:80"])),
+            Ok(socket_set(&["127.0.0.1:80"])),
+        ]);
         let discovery = DnsServiceDiscovery::new(
-            DnsDiscoveryConfig::new("localhost", 80).poll_interval(Duration::from_mins(5)),
+            DnsDiscoveryConfig::new("service.test", 80)
+                .poll_interval(Duration::from_mins(5))
+                .with_resolver(resolver),
         );
 
         let _ = discovery.poll_discover().unwrap();
@@ -612,13 +678,23 @@ mod tests {
     }
 
     #[test]
-    fn dns_discovery_endpoints() {
-        init_test("dns_discovery_endpoints");
-        let discovery = DnsServiceDiscovery::from_host("localhost", 80);
+    fn dns_discovery_endpoints_follow_custom_resolver() {
+        init_test("dns_discovery_endpoints_follow_custom_resolver");
+        let addrs = socket_set(&["127.0.0.1:80", "127.0.0.2:80"]);
+        let discovery = DnsServiceDiscovery::new(
+            DnsDiscoveryConfig::new("service.test", 80)
+                .with_resolver(move |_, _| Ok(addrs.clone())),
+        );
         assert!(discovery.endpoints().is_empty());
         let _ = discovery.poll_discover().unwrap();
-        assert!(!discovery.endpoints().is_empty());
-        crate::test_complete!("dns_discovery_endpoints");
+        assert_eq!(
+            discovery.endpoints(),
+            vec![
+                "127.0.0.1:80".parse().unwrap(),
+                "127.0.0.2:80".parse().unwrap(),
+            ]
+        );
+        crate::test_complete!("dns_discovery_endpoints_follow_custom_resolver");
     }
 
     #[test]
@@ -649,7 +725,7 @@ mod tests {
 
     #[test]
     fn dns_discovery_endpoints_are_sorted() {
-        let discovery = DnsServiceDiscovery::from_host("localhost", 80);
+        let discovery = DnsServiceDiscovery::from_host("127.0.0.1", 80);
         discovery.state.lock().current = [
             "127.0.0.3:80".parse().unwrap(),
             "127.0.0.1:80".parse().unwrap(),
@@ -670,29 +746,32 @@ mod tests {
 
     #[test]
     fn dns_discovery_debug() {
-        let discovery = DnsServiceDiscovery::from_host("localhost", 80);
+        let discovery = DnsServiceDiscovery::from_host("127.0.0.1", 80);
         let dbg = format!("{discovery:?}");
         assert!(dbg.contains("DnsServiceDiscovery"));
-        assert!(dbg.contains("localhost"));
+        assert!(dbg.contains("127.0.0.1"));
     }
 
     #[test]
-    fn dns_discovery_invalid_hostname() {
-        init_test("dns_discovery_invalid_hostname");
-        let discovery =
-            DnsServiceDiscovery::from_host("this.hostname.definitely.does.not.exist.invalid", 80);
+    fn dns_discovery_resolver_error_propagates() {
+        init_test("dns_discovery_resolver_error_propagates");
+        let discovery = DnsServiceDiscovery::new(
+            DnsDiscoveryConfig::new("service.test", 80)
+                .with_resolver(|_, _| Err(std::io::Error::other("resolver failed"))),
+        );
         let result = discovery.poll_discover();
         assert!(result.is_err());
         assert_eq!(discovery.error_count(), 1);
-        crate::test_complete!("dns_discovery_invalid_hostname");
+        crate::test_complete!("dns_discovery_resolver_error_propagates");
     }
 
     #[test]
     fn dns_discovery_failed_resolution_respects_poll_interval() {
         init_test("dns_discovery_failed_resolution_respects_poll_interval");
         let discovery = DnsServiceDiscovery::new(
-            DnsDiscoveryConfig::new("this.hostname.definitely.does.not.exist.invalid", 80)
-                .poll_interval(Duration::from_mins(5)),
+            DnsDiscoveryConfig::new("service.test", 80)
+                .poll_interval(Duration::from_mins(5))
+                .with_resolver(|_, _| Err(std::io::Error::other("resolver failed"))),
         );
 
         let result = discovery.poll_discover();
@@ -713,10 +792,15 @@ mod tests {
     fn dns_discovery_time_getter_respects_poll_interval_without_sleep() {
         init_test("dns_discovery_time_getter_respects_poll_interval_without_sleep");
         set_test_time(0);
+        let resolver = scripted_resolver(vec![
+            Ok(socket_set(&["127.0.0.1:80"])),
+            Ok(socket_set(&["127.0.0.1:80"])),
+        ]);
         let discovery = DnsServiceDiscovery::new(
-            DnsDiscoveryConfig::new("localhost", 80)
+            DnsDiscoveryConfig::new("service.test", 80)
                 .poll_interval(Duration::from_secs(30))
-                .with_time_getter(test_time),
+                .with_time_getter(test_time)
+                .with_resolver(resolver),
         );
 
         let first = discovery.poll_discover().unwrap();
@@ -739,12 +823,11 @@ mod tests {
     fn dns_discovery_time_getter_controls_failed_resolution_cooldown() {
         init_test("dns_discovery_time_getter_controls_failed_resolution_cooldown");
         set_test_time(0);
-        // Use a syntactically invalid host so resolution fails deterministically
-        // without relying on external DNS behavior.
         let discovery = DnsServiceDiscovery::new(
-            DnsDiscoveryConfig::new("[::1", 80)
+            DnsDiscoveryConfig::new("service.test", 80)
                 .poll_interval(Duration::from_secs(30))
-                .with_time_getter(test_time),
+                .with_time_getter(test_time)
+                .with_resolver(|_, _| Err(std::io::Error::other("resolver failed"))),
         );
 
         assert!(discovery.poll_discover().is_err());
@@ -765,8 +848,9 @@ mod tests {
     fn dns_discovery_invalidate_forces_retry_after_failed_resolution() {
         init_test("dns_discovery_invalidate_forces_retry_after_failed_resolution");
         let discovery = DnsServiceDiscovery::new(
-            DnsDiscoveryConfig::new("this.hostname.definitely.does.not.exist.invalid", 80)
-                .poll_interval(Duration::from_mins(5)),
+            DnsDiscoveryConfig::new("service.test", 80)
+                .poll_interval(Duration::from_mins(5))
+                .with_resolver(|_, _| Err(std::io::Error::other("resolver failed"))),
         );
 
         let first = discovery.poll_discover();
@@ -797,10 +881,15 @@ mod tests {
         // start of poll_discover(), so the cooldown is anchored to the
         // decision point.
         set_test_time(1_000_000_000); // 1s
+        let resolver = scripted_resolver(vec![
+            Ok(socket_set(&["127.0.0.1:80"])),
+            Ok(socket_set(&["127.0.0.1:80"])),
+        ]);
         let discovery = DnsServiceDiscovery::new(
-            DnsDiscoveryConfig::new("localhost", 80)
+            DnsDiscoveryConfig::new("service.test", 80)
                 .poll_interval(Duration::from_secs(10))
-                .with_time_getter(test_time),
+                .with_time_getter(test_time)
+                .with_resolver(resolver),
         );
 
         let first = discovery.poll_discover().unwrap();

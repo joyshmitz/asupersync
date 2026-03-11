@@ -7,7 +7,9 @@
 
 use asupersync::service::Layer;
 use asupersync::service::buffer::BufferLayer;
-use asupersync::service::discover::{Change, Discover, DnsServiceDiscovery, StaticList};
+use asupersync::service::discover::{
+    Change, Discover, DnsDiscoveryConfig, DnsServiceDiscovery, StaticList,
+};
 use asupersync::service::filter::{Filter, FilterError, FilterLayer};
 use asupersync::service::hedge::{Hedge, HedgeConfig, HedgeLayer};
 use asupersync::service::load_balance::{
@@ -15,12 +17,31 @@ use asupersync::service::load_balance::{
 };
 use asupersync::service::reconnect::{MakeService, Reconnect, ReconnectLayer};
 use asupersync::service::steer::{Steer, SteerError};
+use std::collections::{HashSet, VecDeque};
 use std::net::SocketAddr;
+use std::sync::{Arc, Mutex};
 use std::time::Duration;
 
 fn init_test(name: &str) {
     asupersync::test_utils::init_test_logging();
     asupersync::test_phase!(name);
+}
+
+fn socket_set(addrs: &[&str]) -> HashSet<SocketAddr> {
+    addrs.iter().map(|addr| addr.parse().unwrap()).collect()
+}
+
+fn scripted_resolver(
+    script: Vec<Result<HashSet<SocketAddr>, std::io::Error>>,
+) -> impl Fn(&str, u16) -> Result<HashSet<SocketAddr>, std::io::Error> + Send + Sync + 'static {
+    let script = Arc::new(Mutex::new(VecDeque::from(script)));
+    move |_, _| {
+        script
+            .lock()
+            .expect("resolver script lock poisoned")
+            .pop_front()
+            .expect("resolver script exhausted")
+    }
 }
 
 // ════════════════════════════════════════════════════════════════════════
@@ -62,7 +83,13 @@ fn static_discovery_feeds_load_balancer() {
 fn dns_discovery_provides_endpoints() {
     init_test("dns_discovery_provides_endpoints");
 
-    let discovery = DnsServiceDiscovery::from_host("localhost", 9090);
+    let discovery = DnsServiceDiscovery::new(
+        DnsDiscoveryConfig::new("service.test", 9090).with_resolver(|hostname, port| {
+            assert_eq!(hostname, "service.test");
+            assert_eq!(port, 9090);
+            Ok(socket_set(&["127.0.0.1:9090", "127.0.0.2:9090"]))
+        }),
+    );
     let changes = discovery.poll_discover().unwrap();
     assert!(!changes.is_empty());
 
@@ -385,8 +412,12 @@ fn discovery_invalidate_and_repoll() {
     init_test("discovery_invalidate_and_repoll");
 
     let discovery = DnsServiceDiscovery::new(
-        asupersync::service::discover::DnsDiscoveryConfig::new("localhost", 80)
-            .poll_interval(Duration::from_secs(3600)),
+        DnsDiscoveryConfig::new("service.test", 80)
+            .poll_interval(Duration::from_secs(3600))
+            .with_resolver(scripted_resolver(vec![
+                Ok(socket_set(&["127.0.0.1:80", "127.0.0.2:80"])),
+                Ok(socket_set(&["127.0.0.1:80", "127.0.0.2:80"])),
+            ])),
     );
 
     let initial = discovery.poll_discover().unwrap();
