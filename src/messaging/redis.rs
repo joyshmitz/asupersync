@@ -264,13 +264,22 @@ impl RespValue {
     #[allow(clippy::too_many_lines)]
     #[allow(clippy::use_self)]
     fn try_decode(buf: &[u8]) -> Result<Option<(Self, usize)>, RedisError> {
+        /// Maximum nesting depth for RESP arrays to prevent stack overflow
+        /// from malicious deeply-nested responses.
+        const MAX_NESTING_DEPTH: usize = 64;
+
         enum Decoded {
             NeedMore,
             Ok { value: RespValue, next: usize },
         }
 
         #[allow(clippy::too_many_lines)]
-        fn decode_at(buf: &[u8], i: usize) -> Result<Decoded, RedisError> {
+        fn decode_at(buf: &[u8], i: usize, depth: usize) -> Result<Decoded, RedisError> {
+            if depth > MAX_NESTING_DEPTH {
+                return Err(RedisError::Protocol(format!(
+                    "RESP nesting depth exceeds maximum ({MAX_NESTING_DEPTH})"
+                )));
+            }
             if i >= buf.len() {
                 return Ok(Decoded::NeedMore);
             }
@@ -371,7 +380,7 @@ impl RespValue {
                     let mut items = Vec::with_capacity(n);
                     let mut pos = end + 2;
                     for _ in 0..n {
-                        match decode_at(buf, pos)? {
+                        match decode_at(buf, pos, depth + 1)? {
                             Decoded::NeedMore => return Ok(Decoded::NeedMore),
                             Decoded::Ok { value, next } => {
                                 items.push(value);
@@ -390,7 +399,7 @@ impl RespValue {
             }
         }
 
-        match decode_at(buf, 0)? {
+        match decode_at(buf, 0, 0)? {
             Decoded::NeedMore => Ok(None),
             Decoded::Ok { value, next } => Ok(Some((value, next))),
         }
@@ -809,9 +818,9 @@ impl RedisClient {
     ) -> Result<(), RedisError> {
         if let Some(ttl) = ttl {
             let mut tmp = [0u8; 20];
-            let secs = u64_decimal_bytes(ttl.as_secs(), &mut tmp);
+            let millis = u64_decimal_bytes(ttl.as_millis() as u64, &mut tmp);
             let resp = self
-                .cmd_bytes(cx, &[b"SET", key.as_bytes(), value, b"EX", secs])
+                .cmd_bytes(cx, &[b"SET", key.as_bytes(), value, b"PX", millis])
                 .await?;
             if !resp.is_ok() {
                 return Err(RedisError::Protocol(format!(
@@ -1613,11 +1622,15 @@ impl RedisPubSub {
         } else {
             self.conn.write_command(cx, &[b"PING"]).await?;
         }
-        match self.next_event(cx).await? {
-            PubSubEvent::Pong(_) => Ok(()),
-            other => Err(RedisError::Protocol(format!(
-                "pubsub PING expected pong event, got {other:?}"
-            ))),
+        // Loop until we receive PONG, since subscription messages can
+        // interleave between PING and its response.
+        loop {
+            match self.next_event(cx).await? {
+                PubSubEvent::Pong(_) => return Ok(()),
+                PubSubEvent::Message(_) | PubSubEvent::Subscription { .. } => {
+                    // Discard interleaved messages while waiting for PONG.
+                }
+            }
         }
     }
 
@@ -2039,5 +2052,40 @@ mod tests {
         .expect_err("unknown event should fail");
 
         assert!(matches!(err, RedisError::Protocol(_)));
+    }
+
+    #[test]
+    fn resp_decode_rejects_excessive_nesting() {
+        // Build a deeply nested array: *1\r\n repeated 100 times, then :0\r\n
+        let mut buf = Vec::new();
+        for _ in 0..100 {
+            buf.extend_from_slice(b"*1\r\n");
+        }
+        buf.extend_from_slice(b":0\r\n");
+
+        let err = RespValue::try_decode(&buf).expect_err("should reject deep nesting");
+        assert!(matches!(err, RedisError::Protocol(msg) if msg.contains("nesting depth")));
+    }
+
+    #[test]
+    fn resp_decode_allows_moderate_nesting() {
+        // 10 levels deep should be fine
+        let mut buf = Vec::new();
+        for _ in 0..10 {
+            buf.extend_from_slice(b"*1\r\n");
+        }
+        buf.extend_from_slice(b":42\r\n");
+
+        let result = RespValue::try_decode(&buf).expect("should succeed");
+        assert!(result.is_some());
+    }
+
+    #[test]
+    fn set_ttl_uses_milliseconds() {
+        // Verify that sub-second TTLs don't truncate to zero by using PX
+        let ttl = Duration::from_millis(500);
+        let mut tmp = [0u8; 20];
+        let millis = u64_decimal_bytes(ttl.as_millis() as u64, &mut tmp);
+        assert_eq!(millis, b"500");
     }
 }
