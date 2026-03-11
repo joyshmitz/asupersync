@@ -249,6 +249,7 @@ impl IoUringFile {
             buf,
             offset,
             update_position: true,
+            done: false,
         }
     }
 
@@ -262,6 +263,7 @@ impl IoUringFile {
             buf,
             offset,
             update_position: false,
+            done: false,
         }
     }
 
@@ -276,6 +278,7 @@ impl IoUringFile {
             buf,
             offset,
             update_position: true,
+            done: false,
         }
     }
 
@@ -289,6 +292,7 @@ impl IoUringFile {
             buf,
             offset,
             update_position: false,
+            done: false,
         }
     }
 
@@ -419,10 +423,14 @@ impl IoUringFile {
     /// Blocking read using io_uring (for poll-based async trait).
     fn blocking_read_at(&self, buf: &mut [u8], offset: u64) -> io::Result<usize> {
         let fd = self.inner.fd.as_raw_fd();
-        let entry = opcode::Read::new(types::Fd(fd), buf.as_mut_ptr(), buf.len() as u32)
-            .offset(offset)
-            .build()
-            .user_data(OP_READ);
+        let entry = opcode::Read::new(
+            types::Fd(fd),
+            buf.as_mut_ptr(),
+            u32::try_from(buf.len()).unwrap_or(u32::MAX),
+        )
+        .offset(offset)
+        .build()
+        .user_data(OP_READ);
 
         let result = self.submit_and_wait(&entry)?;
         if result < 0 {
@@ -435,10 +443,14 @@ impl IoUringFile {
     /// Blocking write using io_uring (for poll-based async trait).
     fn blocking_write_at(&self, buf: &[u8], offset: u64) -> io::Result<usize> {
         let fd = self.inner.fd.as_raw_fd();
-        let entry = opcode::Write::new(types::Fd(fd), buf.as_ptr(), buf.len() as u32)
-            .offset(offset)
-            .build()
-            .user_data(OP_WRITE);
+        let entry = opcode::Write::new(
+            types::Fd(fd),
+            buf.as_ptr(),
+            u32::try_from(buf.len()).unwrap_or(u32::MAX),
+        )
+        .offset(offset)
+        .build()
+        .user_data(OP_WRITE);
 
         let result = self.submit_and_wait(&entry)?;
         if result < 0 {
@@ -480,6 +492,7 @@ pub struct ReadFuture<'a> {
     buf: &'a mut [u8],
     offset: u64,
     update_position: bool,
+    done: bool,
 }
 
 impl std::future::Future for ReadFuture<'_> {
@@ -489,6 +502,9 @@ impl std::future::Future for ReadFuture<'_> {
         // For now, use blocking io_uring operations.
         // True async requires integration with the runtime's event loop.
         let this = self.get_mut();
+        if this.done {
+            panic!("ReadFuture polled after completion");
+        }
         let n = this.file.blocking_read_at(this.buf, this.offset)?;
 
         if this.update_position {
@@ -498,6 +514,7 @@ impl std::future::Future for ReadFuture<'_> {
                 .fetch_add(n as u64, Ordering::Relaxed);
         }
 
+        this.done = true;
         Poll::Ready(Ok(n))
     }
 }
@@ -508,6 +525,7 @@ pub struct WriteFuture<'a> {
     buf: &'a [u8],
     offset: u64,
     update_position: bool,
+    done: bool,
 }
 
 impl std::future::Future for WriteFuture<'_> {
@@ -515,6 +533,9 @@ impl std::future::Future for WriteFuture<'_> {
 
     fn poll(self: Pin<&mut Self>, _cx: &mut Context<'_>) -> Poll<Self::Output> {
         let this = self.get_mut();
+        if this.done {
+            panic!("WriteFuture polled after completion");
+        }
         let n = this.file.blocking_write_at(this.buf, this.offset)?;
 
         if this.update_position {
@@ -524,6 +545,7 @@ impl std::future::Future for WriteFuture<'_> {
                 .fetch_add(n as u64, Ordering::Relaxed);
         }
 
+        this.done = true;
         Poll::Ready(Ok(n))
     }
 }
@@ -684,10 +706,14 @@ mod tests {
         *file.inner.read_state.lock() = OpState::Pending { waker: None };
         {
             let fd = file.inner.fd.as_raw_fd();
-            let entry = opcode::Read::new(types::Fd(fd), buf.as_mut_ptr(), buf.len() as u32)
-                .offset(0)
-                .build()
-                .user_data(OP_READ);
+            let entry = opcode::Read::new(
+                types::Fd(fd),
+                buf.as_mut_ptr(),
+                u32::try_from(buf.len()).unwrap_or(u32::MAX),
+            )
+            .offset(0)
+            .build()
+            .user_data(OP_READ);
 
             let mut ring = file.inner.ring.lock();
             // SAFETY: `buf` lives until after `file` is dropped, and Drop will

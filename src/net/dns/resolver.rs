@@ -309,8 +309,11 @@ impl Resolver {
             first_family_delay: self.config.happy_eyeballs_delay,
             attempt_delay: self.config.happy_eyeballs_delay,
             connect_timeout: self.config.timeout,
-            overall_timeout: self.config.timeout * 2
-                + self.config.happy_eyeballs_delay * addrs.len() as u32,
+            overall_timeout: self.config.timeout.saturating_mul(2).saturating_add(
+                self.config
+                    .happy_eyeballs_delay
+                    .saturating_mul(u32::try_from(addrs.len()).unwrap_or(u32::MAX)),
+            ),
         };
 
         happy_eyeballs::connect_with_time_getter(addrs, &config, self.time_getter)
