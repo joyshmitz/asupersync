@@ -672,6 +672,10 @@ impl KafkaProducer {
 
         #[cfg(feature = "kafka")]
         {
+            // BUG-FIX: Reuse a shared producer instead of creating one per send().
+            // build_producer() creates a new ThreadedProducer (and connection) each time;
+            // the producer is dropped at scope end, likely before delivery completes.
+            // TODO: Store ThreadedProducer as a field in KafkaProducer, created in new().
             let producer = build_producer(&self.config, None)?;
             send_with_producer(
                 &producer,
@@ -805,6 +809,9 @@ impl KafkaProducer {
 
         #[cfg(feature = "kafka")]
         {
+            // BUG-FIX: This creates a fresh producer with zero in-flight messages,
+            // making flush a no-op. Must share the producer instance with send().
+            // TODO: Use the shared ThreadedProducer field once added to KafkaProducer.
             let producer = build_producer(&self.config, None)?;
             let mut remaining = timeout;
             loop {
