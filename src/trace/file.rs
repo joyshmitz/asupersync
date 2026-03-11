@@ -1178,9 +1178,7 @@ impl TraceEventIterator {
     fn next_compressed(&mut self) -> TraceFileResult<ReplayEvent> {
         // Refill buffer if needed
         if self.buffer_pos >= self.decompressed_buffer.len() {
-            if let Err(e) = self.refill_buffer() {
-                return Err(e);
-            }
+            self.refill_buffer()?;
         }
 
         // Read event length from buffer

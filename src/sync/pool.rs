@@ -1131,7 +1131,8 @@ where
     /// - [`WarmupStrategy::RequireMinimum`]: Returns an error if fewer than
     ///   [`PoolConfig::min_size`] resources were created.
     /// - [`WarmupStrategy::BestEffort`]: Never returns an error from warmup.
-    /// - [`PoolConfig::warmup_timeout`]: Applies to the entire warmup phase.
+    /// - [`PoolConfig::warmup_timeout`]: Applies to the entire warmup phase,
+    ///   not each individual create attempt.
     pub async fn warmup(&self) -> Result<usize, PoolError> {
         let mut created = 0;
         let mut last_error = None;

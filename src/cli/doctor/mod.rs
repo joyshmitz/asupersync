@@ -8694,12 +8694,10 @@ fn validate_remediation_scorecard_thresholds(
 }
 
 fn scorecard_confidence_shift(trust_delta: i16) -> String {
-    if trust_delta > 0 {
-        "improved".to_string()
-    } else if trust_delta < 0 {
-        "degraded".to_string()
-    } else {
-        "stable".to_string()
+    match trust_delta.cmp(&0) {
+        std::cmp::Ordering::Greater => "improved".to_string(),
+        std::cmp::Ordering::Less => "degraded".to_string(),
+        std::cmp::Ordering::Equal => "stable".to_string(),
     }
 }
 
@@ -11207,6 +11205,7 @@ fn build_stress_checkpoint_metrics(
             .saturating_sub(12)
             .saturating_add((scenario_bias + checkpoint_index) % 6);
 
+        #[allow(clippy::useless_let_if_seq)]
         if scenario.workload_class == "cancel_recovery_pressure"
             && raw_index + 1 == checkpoint_count
             && raw_index >= warmup_count
@@ -16975,9 +16974,8 @@ pub fn analyze_workspace_lock_contention(
         let source_root = member_root.join("src");
         let rust_files = collect_rust_files(&source_root).unwrap_or_default();
         for file in rust_files {
-            let source = match fs::read_to_string(&file) {
-                Ok(source) => source,
-                Err(_) => continue,
+            let Ok(source) = fs::read_to_string(&file) else {
+                continue;
             };
             let relative_path = relative_to(root, &file);
             let accumulator = hotspots.entry(relative_path.clone()).or_default();
@@ -17982,6 +17980,7 @@ mod tests {
 
     fn make_single_member_workspace_report(source: &str) -> WorkspaceScanReport {
         let temp = tempdir().expect("temp dir");
+        #[allow(deprecated)]
         let root = temp.into_path();
         write_file(
             &root.join("Cargo.toml"),
@@ -18436,7 +18435,7 @@ impl RuntimeState {
     #[test]
     fn emit_lock_contention_structured_events_are_valid_and_deterministic() {
         let report = make_single_member_workspace_report(
-            r#"
+            r"
 impl RuntimeState {
     fn lock_path(&self) {
         let _tasks = self.tasks.lock();
@@ -18445,7 +18444,7 @@ impl RuntimeState {
         let lock_wait_ns = 0;
     }
 }
-"#,
+",
         );
         let analysis = analyze_workspace_lock_contention(&report);
         let first = emit_lock_contention_structured_events(

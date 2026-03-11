@@ -1046,6 +1046,9 @@ impl IdempotencyStore {
 
     /// Checks whether a request with the given key has been seen before.
     ///
+    /// Expired records fail closed here instead of relying on callers to
+    /// remember a separate `evict_expired()` pass before deduplication.
+    ///
     /// This does NOT insert the key — call [`record`](Self::record) to do that.
     ///
     /// Expired records fail closed here instead of relying on callers to
