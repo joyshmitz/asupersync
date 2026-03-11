@@ -368,6 +368,7 @@ impl Caveat {
 
 /// A 32-byte HMAC signature for a Macaroon token.
 #[derive(Clone, Copy, Hash)]
+#[allow(clippy::derived_hash_with_manual_eq)] // PartialEq is deliberately constant-time
 pub struct MacaroonSignature {
     bytes: [u8; AUTH_KEY_SIZE],
 }
