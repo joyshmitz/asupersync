@@ -79,6 +79,8 @@ impl HedgeConfig {
 /// Error from the hedge middleware.
 #[derive(Debug)]
 pub enum HedgeError<E> {
+    /// The caller attempted `call()` without a preceding successful `poll_ready()`.
+    NotReady,
     /// The inner service returned an error.
     Inner(E),
     /// Both primary and hedge requests failed.
@@ -93,6 +95,7 @@ pub enum HedgeError<E> {
 impl<E: fmt::Display> fmt::Display for HedgeError<E> {
     fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
         match self {
+            Self::NotReady => write!(f, "poll_ready required before call"),
             Self::Inner(e) => write!(f, "service error: {e}"),
             Self::BothFailed { primary, .. } => {
                 write!(f, "both primary and hedge failed: {primary}")
@@ -104,6 +107,7 @@ impl<E: fmt::Display> fmt::Display for HedgeError<E> {
 impl<E: std::error::Error + 'static> std::error::Error for HedgeError<E> {
     fn source(&self) -> Option<&(dyn std::error::Error + 'static)> {
         match self {
+            Self::NotReady => None,
             Self::Inner(e) | Self::BothFailed { primary: e, .. } => Some(e),
         }
     }
@@ -116,10 +120,14 @@ impl<E: std::error::Error + 'static> std::error::Error for HedgeError<E> {
 /// When a request takes longer than the configured delay, a second
 /// (hedge) request is sent to the same service. The first response
 /// to arrive is returned.
+///
+/// Each successful `poll_ready` authorizes exactly one subsequent `call`.
 pub struct Hedge<S> {
     inner: S,
     config: HedgeConfig,
     stats: HedgeStats,
+    /// Tracks whether this clone has observed readiness for one call.
+    ready_observed: bool,
 }
 
 struct HedgeStats {
@@ -143,6 +151,7 @@ impl<S> Hedge<S> {
                 hedged: AtomicU64::new(0),
                 hedge_wins: AtomicU64::new(0),
             },
+            ready_observed: false,
         }
     }
 
@@ -243,6 +252,8 @@ impl<S: Clone> Clone for Hedge<S> {
                 hedged: AtomicU64::new(0),
                 hedge_wins: AtomicU64::new(0),
             },
+            // Readiness tickets are handle-local and must not be cloned.
+            ready_observed: false,
         }
     }
 }
@@ -258,13 +269,30 @@ where
     type Future = HedgeFuture<S::Future>;
 
     fn poll_ready(&mut self, cx: &mut Context<'_>) -> Poll<Result<(), Self::Error>> {
-        self.inner.poll_ready(cx).map_err(HedgeError::Inner)
+        match self.inner.poll_ready(cx) {
+            Poll::Ready(Ok(())) => {
+                self.ready_observed = true;
+                Poll::Ready(Ok(()))
+            }
+            Poll::Ready(Err(e)) => {
+                self.ready_observed = false;
+                Poll::Ready(Err(HedgeError::Inner(e)))
+            }
+            Poll::Pending => {
+                self.ready_observed = false;
+                Poll::Pending
+            }
+        }
     }
 
     fn call(&mut self, req: Request) -> Self::Future {
+        if !std::mem::replace(&mut self.ready_observed, false) {
+            return HedgeFuture::not_ready();
+        }
+
         let fut = self.inner.call(req);
         self.record_request();
-        HedgeFuture { inner: fut }
+        HedgeFuture::inner(fut)
     }
 }
 
@@ -273,12 +301,34 @@ where
 /// In Phase 0, this simply wraps the primary future. Full hedging
 /// with timers requires async runtime support (Phase 1).
 pub struct HedgeFuture<F> {
-    inner: F,
+    state: HedgeFutureState<F>,
+}
+
+enum HedgeFutureState<F> {
+    NotReady,
+    Inner(F),
+    Done,
 }
 
 impl<F> fmt::Debug for HedgeFuture<F> {
     fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
         f.debug_struct("HedgeFuture").finish()
+    }
+}
+
+impl<F> HedgeFuture<F> {
+    #[must_use]
+    fn not_ready() -> Self {
+        Self {
+            state: HedgeFutureState::NotReady,
+        }
+    }
+
+    #[must_use]
+    fn inner(inner: F) -> Self {
+        Self {
+            state: HedgeFutureState::Inner(inner),
+        }
     }
 }
 
@@ -289,9 +339,20 @@ where
     type Output = Result<T, HedgeError<E>>;
 
     fn poll(mut self: Pin<&mut Self>, cx: &mut Context<'_>) -> Poll<Self::Output> {
-        Pin::new(&mut self.inner)
-            .poll(cx)
-            .map_err(HedgeError::Inner)
+        match &mut self.state {
+            HedgeFutureState::NotReady => {
+                self.state = HedgeFutureState::Done;
+                Poll::Ready(Err(HedgeError::NotReady))
+            }
+            HedgeFutureState::Inner(inner) => {
+                let polled = Pin::new(inner).poll(cx);
+                if polled.is_ready() {
+                    self.state = HedgeFutureState::Done;
+                }
+                polled.map_err(HedgeError::Inner)
+            }
+            HedgeFutureState::Done => panic!("HedgeFuture polled after completion"),
+        }
     }
 }
 
@@ -301,10 +362,24 @@ where
 mod tests {
     use super::*;
     use std::panic::{AssertUnwindSafe, catch_unwind};
+    use std::sync::Arc;
+    use std::sync::atomic::{AtomicUsize, Ordering};
+    use std::task::{Context, Wake, Waker};
 
     fn init_test(name: &str) {
         crate::test_utils::init_test_logging();
         crate::test_phase!(name);
+    }
+
+    struct NoopWaker;
+
+    impl Wake for NoopWaker {
+        fn wake(self: Arc<Self>) {}
+        fn wake_by_ref(self: &Arc<Self>) {}
+    }
+
+    fn noop_waker() -> Waker {
+        Arc::new(NoopWaker).into()
     }
 
     // ================================================================
@@ -372,6 +447,12 @@ mod tests {
     #[derive(Clone, Debug)]
     struct PanicOnCallService;
 
+    #[derive(Clone, Debug)]
+    struct RequiresReadyService {
+        ready: bool,
+        calls: Arc<AtomicUsize>,
+    }
+
     impl Service<u32> for PanicOnCallService {
         type Response = ();
         type Error = ();
@@ -383,6 +464,27 @@ mod tests {
 
         fn call(&mut self, _req: u32) -> Self::Future {
             panic!("panic during hedge call construction");
+        }
+    }
+
+    impl Service<u32> for RequiresReadyService {
+        type Response = u32;
+        type Error = &'static str;
+        type Future = std::future::Ready<Result<Self::Response, Self::Error>>;
+
+        fn poll_ready(&mut self, _cx: &mut Context<'_>) -> Poll<Result<(), Self::Error>> {
+            self.ready = true;
+            Poll::Ready(Ok(()))
+        }
+
+        fn call(&mut self, req: u32) -> Self::Future {
+            self.calls.fetch_add(1, Ordering::Relaxed);
+            let was_ready = std::mem::replace(&mut self.ready, false);
+            if was_ready {
+                std::future::ready(Ok(req))
+            } else {
+                std::future::ready(Err("not ready"))
+            }
         }
     }
 
@@ -421,6 +523,10 @@ mod tests {
             PanicOnCallService,
             HedgeConfig::new(Duration::from_millis(100)),
         );
+        let waker = noop_waker();
+        let mut cx = Context::from_waker(&waker);
+        let ready = hedge.poll_ready(&mut cx);
+        assert!(matches!(ready, Poll::Ready(Ok(()))));
 
         let panic = catch_unwind(AssertUnwindSafe(|| {
             let _f = hedge.call(7);
@@ -431,6 +537,82 @@ mod tests {
         let total = hedge.total_requests();
         crate::assert_with_log!(total == 0, "total requests", 0, total);
         crate::test_complete!("hedge_call_panic_does_not_overcount_total_requests");
+    }
+
+    #[test]
+    fn hedge_call_without_poll_ready_fails_closed() {
+        let calls = Arc::new(AtomicUsize::new(0));
+        let mut hedge = Hedge::new(
+            RequiresReadyService {
+                ready: false,
+                calls: Arc::clone(&calls),
+            },
+            HedgeConfig::new(Duration::from_millis(100)),
+        );
+        let waker = noop_waker();
+        let mut cx = Context::from_waker(&waker);
+
+        let mut fut = hedge.call(7);
+        let result = Pin::new(&mut fut).poll(&mut cx);
+        assert!(matches!(result, Poll::Ready(Err(HedgeError::NotReady))));
+        assert_eq!(calls.load(Ordering::Relaxed), 0);
+        assert_eq!(hedge.total_requests(), 0);
+    }
+
+    #[test]
+    fn hedge_ready_window_is_consumed_by_call() {
+        let calls = Arc::new(AtomicUsize::new(0));
+        let mut hedge = Hedge::new(
+            RequiresReadyService {
+                ready: false,
+                calls: Arc::clone(&calls),
+            },
+            HedgeConfig::new(Duration::from_millis(100)),
+        );
+        let waker = noop_waker();
+        let mut cx = Context::from_waker(&waker);
+
+        let first_ready = hedge.poll_ready(&mut cx);
+        assert!(matches!(first_ready, Poll::Ready(Ok(()))));
+
+        let mut first = hedge.call(11);
+        let first_result = Pin::new(&mut first).poll(&mut cx);
+        assert!(matches!(first_result, Poll::Ready(Ok(11))));
+
+        let mut second = hedge.call(22);
+        let second_result = Pin::new(&mut second).poll(&mut cx);
+        assert!(matches!(
+            second_result,
+            Poll::Ready(Err(HedgeError::NotReady))
+        ));
+
+        assert_eq!(calls.load(Ordering::Relaxed), 1);
+        assert_eq!(hedge.total_requests(), 1);
+    }
+
+    #[test]
+    fn hedge_clone_does_not_inherit_ready_window() {
+        let calls = Arc::new(AtomicUsize::new(0));
+        let mut hedge = Hedge::new(
+            RequiresReadyService {
+                ready: false,
+                calls: Arc::clone(&calls),
+            },
+            HedgeConfig::new(Duration::from_millis(100)),
+        );
+        let waker = noop_waker();
+        let mut cx = Context::from_waker(&waker);
+
+        let ready = hedge.poll_ready(&mut cx);
+        assert!(matches!(ready, Poll::Ready(Ok(()))));
+
+        let mut clone = hedge.clone();
+        let mut fut = clone.call(99);
+        let result = Pin::new(&mut fut).poll(&mut cx);
+        assert!(matches!(result, Poll::Ready(Err(HedgeError::NotReady))));
+
+        assert_eq!(calls.load(Ordering::Relaxed), 0);
+        assert_eq!(clone.total_requests(), 0);
     }
 
     #[test]
@@ -490,6 +672,12 @@ mod tests {
     }
 
     #[test]
+    fn error_not_ready_display() {
+        let err: HedgeError<std::io::Error> = HedgeError::NotReady;
+        assert_eq!(format!("{err}"), "poll_ready required before call");
+    }
+
+    #[test]
     fn error_both_failed_display() {
         let err: HedgeError<std::io::Error> = HedgeError::BothFailed {
             primary: std::io::Error::other("p"),
@@ -503,6 +691,9 @@ mod tests {
         use std::error::Error;
         let err: HedgeError<std::io::Error> = HedgeError::Inner(std::io::Error::other("fail"));
         assert!(err.source().is_some());
+
+        let not_ready: HedgeError<std::io::Error> = HedgeError::NotReady;
+        assert!(not_ready.source().is_none());
     }
 
     #[test]
@@ -518,9 +709,7 @@ mod tests {
 
     #[test]
     fn hedge_future_debug() {
-        let fut = HedgeFuture {
-            inner: std::future::ready(Ok::<i32, std::io::Error>(42)),
-        };
+        let fut = HedgeFuture::inner(std::future::ready(Ok::<i32, std::io::Error>(42)));
         let dbg = format!("{fut:?}");
         assert!(dbg.contains("HedgeFuture"));
     }

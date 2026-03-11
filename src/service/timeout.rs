@@ -252,6 +252,8 @@ impl<F> TimeoutFuture<F> {
                         self.sleep.deadline(),
                     ))))
                 } else {
+                    // Register the waker with the underlying sleep future
+                    let _ = Pin::new(&mut self.sleep).poll(cx);
                     Poll::Pending
                 }
             }
@@ -299,10 +301,13 @@ where
 #[cfg(test)]
 mod tests {
     use super::*;
+    use crate::Cx;
+    use crate::time::{TimerDriverHandle, VirtualClock};
+    use crate::types::{Budget, RegionId, TaskId};
     use std::future::{pending, ready};
     use std::sync::Arc;
-    use std::sync::atomic::{AtomicU64, Ordering};
-    use std::task::{Wake, Waker};
+    use std::sync::atomic::{AtomicU64, AtomicUsize, Ordering};
+    use std::task::{Context, Poll, Wake, Waker};
 
     /// A no-op waker for testing.
     struct NoopWaker;
@@ -314,6 +319,28 @@ mod tests {
 
     fn noop_waker() -> Waker {
         Arc::new(NoopWaker).into()
+    }
+
+    struct CountingWaker(AtomicUsize);
+
+    impl CountingWaker {
+        fn new() -> Arc<Self> {
+            Arc::new(Self(AtomicUsize::new(0)))
+        }
+
+        fn count(&self) -> usize {
+            self.0.load(Ordering::SeqCst)
+        }
+    }
+
+    impl Wake for CountingWaker {
+        fn wake(self: Arc<Self>) {
+            self.0.fetch_add(1, Ordering::SeqCst);
+        }
+
+        fn wake_by_ref(self: &Arc<Self>) {
+            self.0.fetch_add(1, Ordering::SeqCst);
+        }
     }
 
     // A simple test service that returns the request
@@ -428,6 +455,41 @@ mod tests {
         let result: Poll<Result<(), TimeoutError<()>>> =
             future.poll_with_time(Time::from_secs(5), &mut cx);
         assert!(result.is_pending());
+    }
+
+    #[test]
+    fn timeout_future_poll_with_time_registers_timeout_waker() {
+        let clock = Arc::new(VirtualClock::starting_at(Time::ZERO));
+        let timer = TimerDriverHandle::with_virtual_clock(clock.clone());
+        let runtime_cx = Cx::new_with_drivers(
+            RegionId::new_for_test(1, 0),
+            TaskId::new_for_test(1, 0),
+            Budget::INFINITE,
+            None,
+            None,
+            None,
+            Some(timer.clone()),
+            None,
+        );
+        let _guard = Cx::set_current(Some(runtime_cx));
+
+        let waker = CountingWaker::new();
+        let waker_handle = waker.clone();
+        let task_waker: Waker = waker.into();
+        let mut cx = Context::from_waker(&task_waker);
+
+        let mut future = TimeoutFuture::new(pending::<Result<(), ()>>(), Time::from_millis(5));
+        let first = future.poll_with_time(Time::ZERO, &mut cx);
+        assert!(first.is_pending());
+        assert_eq!(timer.pending_count(), 1);
+
+        clock.advance(Time::from_millis(5).as_nanos());
+        let fired = timer.process_timers();
+        assert_eq!(fired, 1);
+        assert!(waker_handle.count() > 0);
+
+        let second = future.poll_with_time(Time::from_millis(5), &mut cx);
+        assert!(matches!(second, Poll::Ready(Err(TimeoutError::Elapsed(_)))));
     }
 
     #[test]
