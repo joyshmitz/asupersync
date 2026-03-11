@@ -969,7 +969,15 @@ impl AuthPolicy {
         };
         match self {
             Self::AnyBearer => !token.is_empty(),
-            Self::ExactBearer(tokens) => tokens.iter().any(|expected| expected == token),
+            Self::ExactBearer(tokens) => tokens.iter().any(|expected| {
+                // Constant-time comparison to prevent timing side-channel attacks.
+                expected.len() == token.len()
+                    && expected
+                        .bytes()
+                        .zip(token.bytes())
+                        .fold(0u8, |acc, (a, b)| acc | (a ^ b))
+                        == 0
+            }),
         }
     }
 }
@@ -1166,6 +1174,8 @@ impl<H: Handler> Handler for NormalizePathMiddleware<H> {
                     if trimmed.is_empty() {
                         trimmed = "/".to_string();
                     }
+                    // Sanitize CRLF to prevent HTTP response header injection.
+                    let trimmed = trimmed.replace(['\r', '\n'], "");
                     return Response::empty(StatusCode::MOVED_PERMANENTLY)
                         .header("location", trimmed);
                 }
@@ -1174,6 +1184,8 @@ impl<H: Handler> Handler for NormalizePathMiddleware<H> {
             TrailingSlash::RedirectAlways => {
                 if !path.ends_with('/') && !path.contains('.') {
                     let with_slash = format!("{path}/");
+                    // Sanitize CRLF to prevent HTTP response header injection.
+                    let with_slash = with_slash.replace(['\r', '\n'], "");
                     return Response::empty(StatusCode::MOVED_PERMANENTLY)
                         .header("location", with_slash);
                 }
