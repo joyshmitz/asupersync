@@ -3203,7 +3203,8 @@ impl ThreeLaneWorker {
                             // Cancel still goes to PriorityScheduler for ordering.
                             // Cancel lane is not stolen by steal_ready_batch_into.
                             let mut local_ready_guard = self.local_ready.lock();
-                            if let Some(pos) = local_ready_guard.iter().position(|t| *t == task_id) {
+                            if let Some(pos) = local_ready_guard.iter().position(|t| *t == task_id)
+                            {
                                 local_ready_guard.swap_remove(pos);
                             }
                             drop(local_ready_guard);
