@@ -448,18 +448,21 @@ fn idempotency_store_conflict_detection() {
     let comp_a = ComputationName::new("compute_a");
     let comp_b = ComputationName::new("compute_b");
 
-    assert!(matches!(store.check(&key, &comp_a), DedupDecision::New));
+    assert!(matches!(
+        store.check(&key, &comp_a, Time::ZERO),
+        DedupDecision::New
+    ));
     store.record(key, RemoteTaskId::from_raw(1), comp_a.clone(), Time::ZERO);
 
     // Same key, same computation → duplicate.
     assert!(matches!(
-        store.check(&key, &comp_a),
+        store.check(&key, &comp_a, Time::from_secs(1)),
         DedupDecision::Duplicate(_)
     ));
 
     // Same key, different computation → conflict.
     assert!(matches!(
-        store.check(&key, &comp_b),
+        store.check(&key, &comp_b, Time::from_secs(1)),
         DedupDecision::Conflict
     ));
 }

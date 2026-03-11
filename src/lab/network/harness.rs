@@ -263,12 +263,15 @@ impl SimNode {
             from: req.origin_node.clone(),
         });
 
-        // Keep dedup decisions aligned with virtual time progression so
-        // expired keys do not linger as stale duplicates.
+        // Bulk-evict stale keys for memory hygiene. `check()` also rejects
+        // the accessed key once its TTL has elapsed, so callers cannot
+        // accidentally revive expired dedup state by skipping this pass.
         let _ = self.dedup.evict_expired(now);
 
         // Check idempotency
-        let dedup = self.dedup.check(&req.idempotency_key, &req.computation);
+        let dedup = self
+            .dedup
+            .check(&req.idempotency_key, &req.computation, now);
         match dedup {
             crate::remote::DedupDecision::Duplicate(record) => {
                 self.event_log.push(NodeEvent::DuplicateSpawn {

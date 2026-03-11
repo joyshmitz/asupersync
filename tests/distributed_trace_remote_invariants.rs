@@ -1079,7 +1079,7 @@ fn idempotency_store_duplicate_returns_cached_outcome() {
     let now = Time::from_secs(1);
 
     assert!(matches!(
-        store.check(&key, &computation),
+        store.check(&key, &computation, now),
         DedupDecision::New
     ));
     assert!(store.record(key, RemoteTaskId::from_raw(7), computation.clone(), now));
@@ -1087,7 +1087,7 @@ fn idempotency_store_duplicate_returns_cached_outcome() {
     let outcome = RemoteOutcome::Success(vec![1, 2, 3]);
     assert!(store.complete(&key, outcome));
 
-    match store.check(&key, &computation) {
+    match store.check(&key, &computation, Time::from_secs(2)) {
         DedupDecision::Duplicate(record) => {
             assert_eq!(record.remote_task_id, RemoteTaskId::from_raw(7));
             match record.outcome {
@@ -1100,7 +1100,7 @@ fn idempotency_store_duplicate_returns_cached_outcome() {
         other => panic!("expected duplicate, got {other:?}"),
     }
 
-    let conflict = store.check(&key, &ComputationName::new("other"));
+    let conflict = store.check(&key, &ComputationName::new("other"), Time::from_secs(2));
     assert!(matches!(conflict, DedupDecision::Conflict));
 }
 

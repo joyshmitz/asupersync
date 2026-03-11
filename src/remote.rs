@@ -1047,15 +1047,30 @@ impl IdempotencyStore {
     /// Checks whether a request with the given key has been seen before.
     ///
     /// This does NOT insert the key — call [`record`](Self::record) to do that.
+    ///
+    /// Expired records fail closed here instead of relying on callers to
+    /// remember a separate `evict_expired()` pass before deduplication.
     #[must_use]
-    pub fn check(&self, key: &IdempotencyKey, computation: &ComputationName) -> DedupDecision {
-        self.entries.get(key).map_or(DedupDecision::New, |record| {
-            if record.computation == *computation {
-                DedupDecision::Duplicate(record.clone())
-            } else {
-                DedupDecision::Conflict
-            }
-        })
+    pub fn check(
+        &mut self,
+        key: &IdempotencyKey,
+        computation: &ComputationName,
+        now: Time,
+    ) -> DedupDecision {
+        let Some(record) = self.entries.get(key).cloned() else {
+            return DedupDecision::New;
+        };
+
+        if now >= record.expires_at {
+            let _ = self.entries.remove(key);
+            return DedupDecision::New;
+        }
+
+        if record.computation == *computation {
+            DedupDecision::Duplicate(record)
+        } else {
+            DedupDecision::Conflict
+        }
     }
 
     /// Records a new idempotent request.
@@ -3156,7 +3171,7 @@ mod tests {
         assert!(store.is_empty());
 
         let key = IdempotencyKey::from_raw(1);
-        let decision = store.check(&key, &ComputationName::new("encode"));
+        let decision = store.check(&key, &ComputationName::new("encode"), Time::from_secs(10));
         assert!(matches!(decision, DedupDecision::New));
 
         let inserted = store.record(
@@ -3178,7 +3193,7 @@ mod tests {
         store.record(key, RemoteTaskId::next(), comp.clone(), Time::from_secs(10));
 
         // Same key, same computation → Duplicate
-        let decision = store.check(&key, &comp);
+        let decision = store.check(&key, &comp, Time::from_secs(20));
         assert!(matches!(decision, DedupDecision::Duplicate(_)));
 
         // Trying to record again returns false
@@ -3200,7 +3215,7 @@ mod tests {
         );
 
         // Same key, DIFFERENT computation → Conflict
-        let decision = store.check(&key, &ComputationName::new("decode"));
+        let decision = store.check(&key, &ComputationName::new("decode"), Time::from_secs(20));
         assert!(matches!(decision, DedupDecision::Conflict));
     }
 
@@ -3221,7 +3236,7 @@ mod tests {
         assert!(updated);
 
         // Check returns duplicate with outcome
-        let decision = store.check(&key, &ComputationName::new("work"));
+        let decision = store.check(&key, &ComputationName::new("work"), Time::from_secs(20));
         assert!(matches!(decision, DedupDecision::Duplicate(_)));
         if let DedupDecision::Duplicate(record) = decision {
             assert!(record.outcome.is_some());
@@ -3266,12 +3281,39 @@ mod tests {
         assert_eq!(store.len(), 1);
 
         // Key 2 is still there
-        let decision = store.check(&IdempotencyKey::from_raw(2), &ComputationName::new("b"));
+        let decision = store.check(
+            &IdempotencyKey::from_raw(2),
+            &ComputationName::new("b"),
+            Time::from_secs(80),
+        );
         assert!(matches!(decision, DedupDecision::Duplicate(_)));
 
         // Key 1 is gone
-        let decision = store.check(&IdempotencyKey::from_raw(1), &ComputationName::new("a"));
+        let decision = store.check(
+            &IdempotencyKey::from_raw(1),
+            &ComputationName::new("a"),
+            Time::from_secs(80),
+        );
         assert!(matches!(decision, DedupDecision::New));
+    }
+
+    #[test]
+    fn idempotency_store_check_treats_expired_records_as_new() {
+        let mut store = IdempotencyStore::new(Duration::from_mins(1));
+        let key = IdempotencyKey::from_raw(3);
+        store.record(
+            key,
+            RemoteTaskId::next(),
+            ComputationName::new("encode"),
+            Time::from_secs(10),
+        );
+
+        let decision = store.check(&key, &ComputationName::new("decode"), Time::from_secs(80));
+        assert!(
+            matches!(decision, DedupDecision::New),
+            "expired keys must not survive as stale conflicts"
+        );
+        assert!(store.is_empty(), "expired entry should be removed lazily");
     }
 
     #[test]
@@ -3593,7 +3635,7 @@ mod tests {
         assert!(store.is_empty());
 
         // Re-check: the key should be New again
-        let decision = store.check(&key, &comp);
+        let decision = store.check(&key, &comp, Time::from_secs(80));
         assert!(matches!(decision, DedupDecision::New));
     }
 
@@ -3608,7 +3650,7 @@ mod tests {
         store.record(key, RemoteTaskId::next(), comp.clone(), Time::from_secs(10));
         store.complete(&key, RemoteOutcome::Failed("disk full".into()));
 
-        let decision = store.check(&key, &comp);
+        let decision = store.check(&key, &comp, Time::from_secs(20));
         assert!(
             matches!(
                 decision,
@@ -3640,7 +3682,7 @@ mod tests {
         // Second complete: Success (overwrites)
         store.complete(&key, RemoteOutcome::Success(vec![1, 2, 3]));
 
-        let decision = store.check(&key, &comp);
+        let decision = store.check(&key, &comp, Time::from_secs(20));
         assert!(
             matches!(
                 decision,
