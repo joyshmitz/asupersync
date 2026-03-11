@@ -1131,9 +1131,11 @@ where
     /// - [`WarmupStrategy::RequireMinimum`]: Returns an error if fewer than
     ///   [`PoolConfig::min_size`] resources were created.
     /// - [`WarmupStrategy::BestEffort`]: Never returns an error from warmup.
+    /// - [`PoolConfig::warmup_timeout`]: Applies to the entire warmup phase.
     pub async fn warmup(&self) -> Result<usize, PoolError> {
         let mut created = 0;
         let mut last_error = None;
+        let warmup_deadline = crate::time::wall_now() + self.config.warmup_timeout;
 
         let target = self.config.warmup_connections;
         for _ in 0..target {
@@ -1144,7 +1146,18 @@ where
                 break; // max_size reached (possibly by concurrent activity)
             };
 
-            match self.create_resource().await {
+            let now = crate::time::wall_now();
+            let remaining = Duration::from_nanos(warmup_deadline.duration_since(now));
+            let create_result = if remaining.is_zero() {
+                Err(PoolError::Timeout)
+            } else {
+                match crate::time::timeout(now, remaining, self.create_resource()).await {
+                    Ok(result) => result,
+                    Err(_elapsed) => Err(PoolError::Timeout),
+                }
+            };
+
+            match create_result {
                 Ok(resource) => {
                     // Commit the slot as idle — not active.
                     // CreateSlotReservation::drop is disarmed because we
@@ -1153,6 +1166,13 @@ where
                     self.commit_create_slot_as_idle(resource);
                     created += 1;
                 }
+                Err(PoolError::Timeout) => match self.config.warmup_failure_strategy {
+                    WarmupStrategy::FailFast => return Err(PoolError::Timeout),
+                    WarmupStrategy::BestEffort | WarmupStrategy::RequireMinimum => {
+                        last_error = Some(PoolError::Timeout);
+                        break;
+                    }
+                },
                 Err(e) => {
                     // slot is dropped here → releases the creating count
                     match self.config.warmup_failure_strategy {
@@ -2536,6 +2556,34 @@ mod tests {
         Box::pin(async { Ok(42u32) })
     }
 
+    struct TimeoutAfterNSuccessesFactory {
+        successes: u32,
+        next_attempt: std::sync::atomic::AtomicU32,
+    }
+
+    impl AsyncResourceFactory for TimeoutAfterNSuccessesFactory {
+        type Resource = u32;
+        type Error = Box<dyn std::error::Error + Send + Sync>;
+
+        fn create(
+            &self,
+        ) -> Pin<Box<dyn Future<Output = Result<Self::Resource, Self::Error>> + Send + '_>>
+        {
+            let attempt = self
+                .next_attempt
+                .fetch_add(1, std::sync::atomic::Ordering::SeqCst);
+            let successes = self.successes;
+            Box::pin(async move {
+                if attempt < successes {
+                    Ok(attempt)
+                } else {
+                    std::future::pending::<Result<u32, Box<dyn std::error::Error + Send + Sync>>>()
+                        .await
+                }
+            })
+        }
+    }
+
     #[test]
     fn generic_pool_stats_initial() {
         init_test("generic_pool_stats_initial");
@@ -3298,6 +3346,133 @@ mod tests {
         assert_eq!(stats.idle, 0, "no idle resources");
 
         crate::test_complete!("warmup_zero_is_noop");
+    }
+
+    #[test]
+    fn warmup_timeout_fail_fast_returns_timeout() {
+        init_test("warmup_timeout_fail_fast_returns_timeout");
+
+        let factory = TimeoutAfterNSuccessesFactory {
+            successes: 0,
+            next_attempt: std::sync::atomic::AtomicU32::new(0),
+        };
+        let config = PoolConfig::with_max_size(2)
+            .warmup_connections(1)
+            .warmup_timeout(Duration::from_millis(25))
+            .warmup_failure_strategy(WarmupStrategy::FailFast);
+        let pool = GenericPool::new(factory, config);
+
+        let result = futures_lite::future::block_on(pool.warmup());
+        assert!(
+            matches!(result, Err(PoolError::Timeout)),
+            "stalled warmup should return PoolError::Timeout under FailFast"
+        );
+
+        let stats = pool.stats();
+        assert_eq!(stats.total, 0, "timed out warmup must release create slot");
+        assert_eq!(
+            stats.idle, 0,
+            "timed out warmup must not leak idle resources"
+        );
+
+        crate::test_complete!("warmup_timeout_fail_fast_returns_timeout");
+    }
+
+    #[test]
+    fn warmup_timeout_best_effort_returns_partial_progress() {
+        init_test("warmup_timeout_best_effort_returns_partial_progress");
+
+        let factory = TimeoutAfterNSuccessesFactory {
+            successes: 1,
+            next_attempt: std::sync::atomic::AtomicU32::new(0),
+        };
+        let config = PoolConfig::with_max_size(3)
+            .warmup_connections(2)
+            .warmup_timeout(Duration::from_millis(25))
+            .warmup_failure_strategy(WarmupStrategy::BestEffort);
+        let pool = GenericPool::new(factory, config);
+
+        let created =
+            futures_lite::future::block_on(pool.warmup()).expect("BestEffort should keep progress");
+        assert_eq!(
+            created, 1,
+            "warmup should report resources created before timeout"
+        );
+
+        let stats = pool.stats();
+        assert_eq!(
+            stats.idle, 1,
+            "successful warmup resource should remain idle"
+        );
+        assert_eq!(
+            stats.total, 1,
+            "timeout must not retain the stalled create slot"
+        );
+
+        crate::test_complete!("warmup_timeout_best_effort_returns_partial_progress");
+    }
+
+    #[test]
+    fn warmup_timeout_require_minimum_errors_when_min_not_reached() {
+        init_test("warmup_timeout_require_minimum_errors_when_min_not_reached");
+
+        let factory = TimeoutAfterNSuccessesFactory {
+            successes: 1,
+            next_attempt: std::sync::atomic::AtomicU32::new(0),
+        };
+        let config = PoolConfig::with_max_size(3)
+            .min_size(2)
+            .warmup_connections(3)
+            .warmup_timeout(Duration::from_millis(25))
+            .warmup_failure_strategy(WarmupStrategy::RequireMinimum);
+        let pool = GenericPool::new(factory, config);
+
+        let result = futures_lite::future::block_on(pool.warmup());
+        assert!(
+            matches!(result, Err(PoolError::Timeout)),
+            "RequireMinimum should surface timeout when min_size is not reached"
+        );
+
+        let stats = pool.stats();
+        assert_eq!(
+            stats.idle, 1,
+            "successful creates before timeout should remain usable"
+        );
+        assert_eq!(stats.total, 1, "timed out create slot must be released");
+
+        crate::test_complete!("warmup_timeout_require_minimum_errors_when_min_not_reached");
+    }
+
+    #[test]
+    fn warmup_timeout_require_minimum_keeps_progress_once_min_reached() {
+        init_test("warmup_timeout_require_minimum_keeps_progress_once_min_reached");
+
+        let factory = TimeoutAfterNSuccessesFactory {
+            successes: 1,
+            next_attempt: std::sync::atomic::AtomicU32::new(0),
+        };
+        let config = PoolConfig::with_max_size(3)
+            .min_size(1)
+            .warmup_connections(3)
+            .warmup_timeout(Duration::from_millis(25))
+            .warmup_failure_strategy(WarmupStrategy::RequireMinimum);
+        let pool = GenericPool::new(factory, config);
+
+        let created = futures_lite::future::block_on(pool.warmup())
+            .expect("RequireMinimum should keep partial progress once min_size is met");
+        assert_eq!(
+            created, 1,
+            "warmup should retain successful creates before timeout"
+        );
+
+        let stats = pool.stats();
+        assert_eq!(
+            stats.idle, 1,
+            "resource created before timeout should remain idle"
+        );
+        assert_eq!(stats.total, 1, "timed out create slot must be released");
+
+        crate::test_complete!("warmup_timeout_require_minimum_keeps_progress_once_min_reached");
     }
 
     #[test]
