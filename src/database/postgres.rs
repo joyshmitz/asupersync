@@ -2119,7 +2119,13 @@ impl PgConnection {
         let client_first = scram.client_first_message();
         let mut buf = MessageBuffer::new();
         buf.write_cstring("SCRAM-SHA-256");
-        buf.write_i32(client_first.len() as i32);
+        let client_first_len = i32::try_from(client_first.len()).map_err(|_| {
+            PgError::Protocol(format!(
+                "SCRAM client-first message too large: {} bytes",
+                client_first.len()
+            ))
+        })?;
+        buf.write_i32(client_first_len);
         buf.write_bytes(&client_first);
         let msg = buf.build_message(b'p');
         self.write_all(&msg).await?;
@@ -3078,6 +3084,13 @@ impl PgConnection {
         }
         let num_values = num_values_i16 as usize;
 
+        if num_values != columns.len() {
+            return Err(PgError::Protocol(format!(
+                "DataRow column count mismatch: expected {}, got {num_values}",
+                columns.len()
+            )));
+        }
+
         let mut values = Vec::with_capacity(num_values);
 
         for i in 0..num_values {
@@ -3153,20 +3166,56 @@ impl PgConnection {
     /// Parse a binary-format value.
     fn parse_binary_value(&self, data: &[u8], type_oid: u32) -> Result<PgValue, PgError> {
         Ok(match type_oid {
-            oid::BOOL => PgValue::Bool(data.first() == Some(&1)),
-            oid::INT2 if data.len() >= 2 => PgValue::Int2(i16::from_be_bytes([data[0], data[1]])),
-            oid::INT4 | oid::OID if data.len() >= 4 => {
+            oid::BOOL if data.len() == 1 => PgValue::Bool(data[0] != 0),
+            oid::BOOL => {
+                return Err(PgError::Protocol(format!(
+                    "BOOL requires exactly 1 byte, got {}",
+                    data.len()
+                )));
+            }
+            oid::INT2 if data.len() == 2 => PgValue::Int2(i16::from_be_bytes([data[0], data[1]])),
+            oid::INT2 => {
+                return Err(PgError::Protocol(format!(
+                    "INT2 requires exactly 2 bytes, got {}",
+                    data.len()
+                )));
+            }
+            oid::INT4 | oid::OID if data.len() == 4 => {
                 PgValue::Int4(i32::from_be_bytes([data[0], data[1], data[2], data[3]]))
             }
-            oid::INT8 if data.len() >= 8 => PgValue::Int8(i64::from_be_bytes([
+            oid::INT4 | oid::OID => {
+                return Err(PgError::Protocol(format!(
+                    "INT4/OID requires exactly 4 bytes, got {}",
+                    data.len()
+                )));
+            }
+            oid::INT8 if data.len() == 8 => PgValue::Int8(i64::from_be_bytes([
                 data[0], data[1], data[2], data[3], data[4], data[5], data[6], data[7],
             ])),
-            oid::FLOAT4 if data.len() >= 4 => {
+            oid::INT8 => {
+                return Err(PgError::Protocol(format!(
+                    "INT8 requires exactly 8 bytes, got {}",
+                    data.len()
+                )));
+            }
+            oid::FLOAT4 if data.len() == 4 => {
                 PgValue::Float4(f32::from_be_bytes([data[0], data[1], data[2], data[3]]))
             }
-            oid::FLOAT8 if data.len() >= 8 => PgValue::Float8(f64::from_be_bytes([
+            oid::FLOAT4 => {
+                return Err(PgError::Protocol(format!(
+                    "FLOAT4 requires exactly 4 bytes, got {}",
+                    data.len()
+                )));
+            }
+            oid::FLOAT8 if data.len() == 8 => PgValue::Float8(f64::from_be_bytes([
                 data[0], data[1], data[2], data[3], data[4], data[5], data[6], data[7],
             ])),
+            oid::FLOAT8 => {
+                return Err(PgError::Protocol(format!(
+                    "FLOAT8 requires exactly 8 bytes, got {}",
+                    data.len()
+                )));
+            }
             oid::BYTEA => PgValue::Bytes(data.to_vec()),
             _ => {
                 // Try to interpret as text

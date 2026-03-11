@@ -3356,28 +3356,24 @@ impl ThreeLaneLocalWaker {
     #[inline]
     fn schedule(&self) {
         if self.wake_state.notify() {
-            let mut local_ready_guard = self.local_ready.lock();
             let is_cancelling = self.fast_cancel.load(Ordering::Relaxed);
-            let mut priority = 0;
 
             if is_cancelling {
+                let mut priority = 0;
                 if let Some(inner) = self.cx_inner.upgrade() {
                     let guard = inner.read();
                     if let Some(reason) = &guard.cancel_reason {
                         priority = reason.cleanup_budget().priority;
                     }
                 }
-            }
-
-            if is_cancelling {
                 // Route to local cancel lane (PriorityScheduler).
+                // Lock ordering: only `local` is acquired here (no local_ready).
                 let mut local = self.local.lock();
                 local.schedule_cancel(self.task_id, priority);
             } else {
-                // We already hold the lock for the correct queue, no need for TLS.
-                local_ready_guard.push(self.task_id);
+                // Push to non-stealable local_ready queue.
+                self.local_ready.lock().push(self.task_id);
             }
-            drop(local_ready_guard);
             self.parker.unpark();
         }
     }
