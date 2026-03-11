@@ -402,7 +402,8 @@ impl Redirect {
 
 impl IntoResponse for Redirect {
     fn into_response(self) -> Response {
-        Response::empty(self.status).header("location", self.location)
+        let location = self.location.replace(['\r', '\n'], "");
+        Response::empty(self.status).header("location", location)
     }
 }
 

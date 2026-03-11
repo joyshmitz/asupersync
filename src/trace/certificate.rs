@@ -139,25 +139,40 @@ impl TraceCertificate {
     /// Obligation balance: acquires minus releases.
     /// Should be zero at quiescence.
     #[must_use]
-    #[allow(clippy::cast_possible_wrap)]
     pub fn obligation_balance(&self) -> i64 {
-        self.obligation_acquires as i64 - self.obligation_releases as i64
+        if self.obligation_acquires >= self.obligation_releases {
+            i64::try_from(self.obligation_acquires - self.obligation_releases).unwrap_or(i64::MAX)
+        } else {
+            i64::try_from(self.obligation_releases - self.obligation_acquires)
+                .unwrap_or(i64::MAX)
+                .wrapping_neg()
+        }
     }
 
     /// Cancel balance: requests minus acks.
     /// Should be zero at quiescence (all cancels acknowledged).
     #[must_use]
-    #[allow(clippy::cast_possible_wrap)]
     pub fn cancel_balance(&self) -> i64 {
-        self.cancel_requests as i64 - self.cancel_acks as i64
+        if self.cancel_requests >= self.cancel_acks {
+            i64::try_from(self.cancel_requests - self.cancel_acks).unwrap_or(i64::MAX)
+        } else {
+            i64::try_from(self.cancel_acks - self.cancel_requests)
+                .unwrap_or(i64::MAX)
+                .wrapping_neg()
+        }
     }
 
     /// Task balance: spawns minus completes.
     /// Should be zero at quiescence.
     #[must_use]
-    #[allow(clippy::cast_possible_wrap)]
     pub fn task_balance(&self) -> i64 {
-        self.spawns as i64 - self.completes as i64
+        if self.spawns >= self.completes {
+            i64::try_from(self.spawns - self.completes).unwrap_or(i64::MAX)
+        } else {
+            i64::try_from(self.completes - self.spawns)
+                .unwrap_or(i64::MAX)
+                .wrapping_neg()
+        }
     }
 }
 

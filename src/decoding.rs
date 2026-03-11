@@ -417,7 +417,7 @@ impl DecodingPipeline {
                 .iter()
                 .map(|plan| {
                     required_symbols(
-                        plan.k as u16,
+                        u16::try_from(plan.k).unwrap_or(u16::MAX),
                         self.config.repair_overhead,
                         self.config.min_overhead,
                     )
@@ -473,7 +473,7 @@ impl DecodingPipeline {
                 .iter()
                 .map(|plan| {
                     required_symbols(
-                        plan.k as u16,
+                        u16::try_from(plan.k).unwrap_or(u16::MAX),
                         self.config.repair_overhead,
                         self.config.min_overhead,
                     )
@@ -649,12 +649,12 @@ fn plan_blocks(
 
 fn required_symbols(k: u16, overhead: f64, min_overhead: usize) -> usize {
     let raw = (f64::from(k) * overhead).ceil();
-    if raw.is_sign_negative() {
-        return 0;
+    if !raw.is_finite() || raw.is_sign_negative() {
+        return min_overhead;
     }
     #[allow(clippy::cast_sign_loss)]
-    let threshold = raw as usize + min_overhead;
-    threshold
+    let base = raw as usize;
+    base.saturating_add(min_overhead)
 }
 
 #[allow(clippy::too_many_lines)]
@@ -741,7 +741,7 @@ fn decode_block(
                 },
                 RaptorDecodeError::SymbolSizeMismatch { expected, actual } => {
                     DecodingError::SymbolSizeMismatch {
-                        expected: expected as u16,
+                        expected: u16::try_from(expected).unwrap_or(u16::MAX),
                         actual,
                     }
                 }

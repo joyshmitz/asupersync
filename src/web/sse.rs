@@ -102,7 +102,7 @@ impl SseEvent {
     /// Set the retry interval from a [`Duration`].
     #[must_use]
     pub fn retry_duration(mut self, duration: Duration) -> Self {
-        self.retry = Some(duration.as_millis() as u64);
+        self.retry = Some(duration.as_millis().min(u64::MAX as u128) as u64);
         self
     }
 
@@ -125,8 +125,9 @@ impl SseEvent {
             }
         }
 
-        // Event type.
+        // Event type (sanitize to prevent SSE field injection).
         if let Some(ref event) = self.event {
+            let event = event.replace(['\r', '\n'], "");
             let _ = writeln!(buf, "event:{event}");
         }
 
@@ -137,8 +138,9 @@ impl SseEvent {
             }
         }
 
-        // ID.
+        // ID (sanitize to prevent SSE field injection).
         if let Some(ref id) = self.id {
+            let id = id.replace(['\r', '\n'], "");
             let _ = writeln!(buf, "id:{id}");
         }
 
