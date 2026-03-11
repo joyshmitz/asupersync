@@ -221,12 +221,22 @@ impl RespValue {
         match self {
             Self::SimpleString(s) => {
                 buf.push(b'+');
-                buf.extend_from_slice(s.as_bytes());
+                // RESP simple strings must not contain CR or LF.
+                for &b in s.as_bytes() {
+                    if b != b'\r' && b != b'\n' {
+                        buf.push(b);
+                    }
+                }
                 buf.extend_from_slice(b"\r\n");
             }
             Self::Error(e) => {
                 buf.push(b'-');
-                buf.extend_from_slice(e.as_bytes());
+                // RESP error strings must not contain CR or LF.
+                for &b in e.as_bytes() {
+                    if b != b'\r' && b != b'\n' {
+                        buf.push(b);
+                    }
+                }
                 buf.extend_from_slice(b"\r\n");
             }
             Self::Integer(i) => {
@@ -541,6 +551,8 @@ pub struct RedisConfig {
     pub port: u16,
     /// Database index.
     pub database: u8,
+    /// Username for AUTH (Redis 6+ ACL).
+    pub username: Option<String>,
     /// Password for AUTH.
     pub password: Option<String>,
 }
@@ -551,6 +563,7 @@ impl std::fmt::Debug for RedisConfig {
             .field("host", &self.host)
             .field("port", &self.port)
             .field("database", &self.database)
+            .field("username", &self.username)
             .field("password", &self.password.as_ref().map(|_| "[REDACTED]"))
             .finish()
     }
@@ -562,6 +575,7 @@ impl Default for RedisConfig {
             host: "127.0.0.1".to_string(),
             port: 6379,
             database: 0,
+            username: None,
             password: None,
         }
     }
@@ -576,8 +590,17 @@ impl RedisConfig {
 
         let mut config = Self::default();
 
-        let url = if let Some((password, rest)) = url.rsplit_once('@') {
-            config.password = Some(password.to_string());
+        let url = if let Some((userinfo, rest)) = url.rsplit_once('@') {
+            // Split userinfo into username:password per Redis URL convention.
+            if let Some((username, password)) = userinfo.split_once(':') {
+                if !username.is_empty() {
+                    config.username = Some(username.to_string());
+                }
+                config.password = Some(password.to_string());
+            } else {
+                // No colon: treat the entire userinfo as the password.
+                config.password = Some(userinfo.to_string());
+            }
             rest
         } else {
             url
@@ -638,10 +661,16 @@ impl RedisConnection {
         cx.trace("redis: initializing connection (AUTH/SELECT)");
 
         let password = self.config.password.clone();
+        let username = self.config.username.clone();
         if let Some(password) = password {
-            let resp = self
-                .exec_no_init(cx, &[b"AUTH", password.as_bytes()])
-                .await?;
+            // Redis 6+ ACL: AUTH username password; pre-6: AUTH password.
+            let resp = if let Some(ref username) = username {
+                self.exec_no_init(cx, &[b"AUTH", username.as_bytes(), password.as_bytes()])
+                    .await?
+            } else {
+                self.exec_no_init(cx, &[b"AUTH", password.as_bytes()])
+                    .await?
+            };
             if !resp.is_ok() {
                 return Err(RedisError::Protocol(format!(
                     "AUTH expected +OK, got {resp:?}"
