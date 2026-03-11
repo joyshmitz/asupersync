@@ -1256,7 +1256,14 @@ impl LabRuntime {
             builder.from_trace(&trace_events)
         };
 
-        Some(builder.build())
+        match builder.build() {
+            Ok(pack) => Some(pack),
+            Err(err) => {
+                let _ = &err;
+                crate::tracing_compat::error!("failed to build crash pack for lab report: {err}");
+                None
+            }
+        }
     }
 
     fn auto_divergent_prefix(&self) -> Vec<ReplayEvent> {

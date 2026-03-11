@@ -172,6 +172,9 @@ pub struct ReplayCheckpoint {
     /// Number of events that have been processed.
     pub events_processed: u64,
 
+    /// Total number of events in the trace this checkpoint came from.
+    pub total_events: u64,
+
     /// The seed from the trace metadata (for validation).
     pub seed: u64,
 
@@ -184,9 +187,10 @@ pub struct ReplayCheckpoint {
 
 impl ReplayCheckpoint {
     /// Creates a new checkpoint.
-    fn new(events_processed: u64, metadata: &TraceMetadata) -> Self {
+    fn new(events_processed: u64, total_events: u64, metadata: &TraceMetadata) -> Self {
         Self {
             events_processed,
+            total_events,
             seed: metadata.seed,
             metadata_hash: Self::hash_metadata(metadata),
             // Keep checkpoint artifacts stable for identical replay state instead of
@@ -209,6 +213,13 @@ impl ReplayCheckpoint {
             return Err(StreamingReplayError::CheckpointMismatch(
                 "metadata hash mismatch".to_string(),
             ));
+        }
+
+        if self.total_events != total_events {
+            return Err(StreamingReplayError::CheckpointMismatch(format!(
+                "event count mismatch: checkpoint has {}, trace has {}",
+                self.total_events, total_events
+            )));
         }
 
         if self.events_processed > total_events {
@@ -242,7 +253,9 @@ impl ReplayCheckpoint {
         let mut hasher = SimpleHasher(0);
         metadata.seed.hash(&mut hasher);
         metadata.version.hash(&mut hasher);
+        metadata.recorded_at.hash(&mut hasher);
         metadata.config_hash.hash(&mut hasher);
+        metadata.description.hash(&mut hasher);
         hasher.finish()
     }
 
@@ -540,7 +553,7 @@ impl StreamingReplayer {
     /// continue replay from this point.
     #[must_use]
     pub fn checkpoint(&self) -> ReplayCheckpoint {
-        ReplayCheckpoint::new(self.events_consumed, &self.metadata)
+        ReplayCheckpoint::new(self.events_consumed, self.total_events, &self.metadata)
     }
 
     /// Steps forward according to the current mode.
@@ -783,6 +796,7 @@ mod tests {
 
         let checkpoint = replayer.checkpoint();
         assert_eq!(checkpoint.events_processed, 50);
+        assert_eq!(checkpoint.total_events, 100);
 
         // Serialize and deserialize checkpoint
         let checkpoint_bytes = checkpoint.to_bytes().unwrap();
@@ -831,6 +845,69 @@ mod tests {
     }
 
     #[test]
+    fn checkpoint_validation_rejects_same_seed_metadata_drift() {
+        let temp1 = NamedTempFile::new().unwrap();
+        let temp2 = NamedTempFile::new().unwrap();
+
+        let metadata1 = TraceMetadata {
+            version: super::super::replay::REPLAY_SCHEMA_VERSION,
+            seed: 42,
+            recorded_at: 100,
+            config_hash: 0xCAFE,
+            description: Some("trace-a".into()),
+        };
+        let metadata2 = TraceMetadata {
+            version: super::super::replay::REPLAY_SCHEMA_VERSION,
+            seed: 42,
+            recorded_at: 200,
+            config_hash: 0xCAFE,
+            description: Some("trace-b".into()),
+        };
+        write_trace(temp1.path(), &metadata1, &sample_events(4)).unwrap();
+        write_trace(temp2.path(), &metadata2, &sample_events(4)).unwrap();
+
+        let mut replayer = StreamingReplayer::open(temp1.path()).unwrap();
+        for _ in 0..2 {
+            replayer.next_event().unwrap();
+        }
+        let checkpoint = replayer.checkpoint();
+
+        let result = StreamingReplayer::resume(temp2.path(), checkpoint);
+        assert!(matches!(
+            result,
+            Err(StreamingReplayError::CheckpointMismatch(_))
+        ));
+    }
+
+    #[test]
+    fn checkpoint_validation_rejects_event_count_drift() {
+        let temp1 = NamedTempFile::new().unwrap();
+        let temp2 = NamedTempFile::new().unwrap();
+
+        let metadata = TraceMetadata {
+            version: super::super::replay::REPLAY_SCHEMA_VERSION,
+            seed: 7,
+            recorded_at: 500,
+            config_hash: 0xBEEF,
+            description: Some("same-metadata".into()),
+        };
+        write_trace(temp1.path(), &metadata, &sample_events(4)).unwrap();
+        write_trace(temp2.path(), &metadata, &sample_events(6)).unwrap();
+
+        let mut replayer = StreamingReplayer::open(temp1.path()).unwrap();
+        for _ in 0..2 {
+            replayer.next_event().unwrap();
+        }
+        let checkpoint = replayer.checkpoint();
+
+        let result = StreamingReplayer::resume(temp2.path(), checkpoint);
+        assert!(matches!(
+            result,
+            Err(StreamingReplayError::CheckpointMismatch(_))
+        ));
+    }
+
+    #[test]
     fn checkpoint_bytes_are_stable_for_same_position() {
         let temp = NamedTempFile::new().unwrap();
         let path = temp.path();
@@ -853,6 +930,7 @@ mod tests {
         let checkpoint_b = replayer.checkpoint();
 
         assert_eq!(checkpoint_a.events_processed, 3);
+        assert_eq!(checkpoint_a.total_events, 5);
         assert_eq!(checkpoint_a.created_at, 1_003);
         assert_eq!(checkpoint_a.created_at, checkpoint_b.created_at);
         assert_eq!(

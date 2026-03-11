@@ -35,7 +35,8 @@
 //!     virtual_time: Time::from_secs(5),
 //! })
 //! .fingerprint(0xCAFE_BABE)
-//! .build();
+//! .build()
+//! .expect("crash pack builder should have failure metadata");
 //!
 //! assert_eq!(pack.manifest.schema_version, CRASHPACK_SCHEMA_VERSION);
 //! ```
@@ -50,6 +51,7 @@ use crate::trace::replay::ReplayEvent;
 use crate::trace::scoring::EvidenceEntry;
 use crate::types::{CancelKind, RegionId, TaskId, Time};
 use serde::{Deserialize, Serialize};
+use std::fmt;
 
 // =============================================================================
 // Schema Version
@@ -566,6 +568,23 @@ pub struct CrashPackBuilder {
     replay: Option<ReplayCommand>,
 }
 
+/// Error returned when a [`CrashPackBuilder`] is incomplete.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum CrashPackBuildError {
+    /// The builder did not receive the required [`FailureInfo`].
+    MissingFailure,
+}
+
+impl fmt::Display for CrashPackBuildError {
+    fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
+        match self {
+            Self::MissingFailure => f.write_str("crash pack builder requires failure metadata"),
+        }
+    }
+}
+
+impl std::error::Error for CrashPackBuildError {}
+
 impl CrashPackBuilder {
     /// Set the triggering failure.
     #[must_use]
@@ -665,12 +684,8 @@ impl CrashPackBuilder {
     /// content: non-empty sections are listed as attachments so that tooling
     /// can inspect the table of contents without full deserialization.
     ///
-    /// # Panics
-    ///
-    /// Panics if `failure` has not been set.
-    #[must_use]
-    pub fn build(self) -> CrashPack {
-        let failure = self.failure.expect("CrashPackBuilder requires a failure");
+    pub fn build(self) -> Result<CrashPack, CrashPackBuildError> {
+        let failure = self.failure.ok_or(CrashPackBuildError::MissingFailure)?;
 
         // Sort supervision log with a total order for determinism.
         // Equal virtual times are expected in practice; include stable
@@ -731,7 +746,7 @@ impl CrashPackBuilder {
         let mut manifest = CrashPackManifest::new(self.config, self.fingerprint, self.event_count);
         manifest.attachments = attachments;
 
-        CrashPack {
+        Ok(CrashPack {
             manifest,
             failure,
             canonical_prefix: self.canonical_prefix,
@@ -740,7 +755,7 @@ impl CrashPackBuilder {
             supervision_log,
             oracle_violations: self.oracle_violations,
             replay: self.replay,
-        }
+        })
     }
 }
 
@@ -1145,12 +1160,30 @@ mod tests {
     }
 
     #[test]
+    fn builder_missing_failure_returns_error() {
+        init_test("builder_missing_failure_returns_error");
+
+        let err = CrashPack::builder(sample_config())
+            .build()
+            .expect_err("builder should fail closed without failure metadata");
+
+        assert_eq!(err, CrashPackBuildError::MissingFailure);
+        assert_eq!(
+            err.to_string(),
+            "crash pack builder requires failure metadata"
+        );
+
+        crate::test_complete!("builder_missing_failure_returns_error");
+    }
+
+    #[test]
     fn schema_version_is_set() {
         init_test("schema_version_is_set");
 
         let pack = CrashPack::builder(sample_config())
             .failure(sample_failure())
-            .build();
+            .build()
+            .expect("crash pack builder should have failure metadata");
 
         assert_eq!(pack.manifest.schema_version, CRASHPACK_SCHEMA_VERSION);
         assert_eq!(pack.manifest.schema_version, 1);
@@ -1167,7 +1200,8 @@ mod tests {
             .fingerprint(0xCAFE_BABE)
             .event_count(500)
             .oracle_violations(vec!["inv-1".into(), "inv-2".into()])
-            .build();
+            .build()
+            .expect("crash pack builder should have failure metadata");
 
         assert_eq!(pack.manifest.config.seed, 42);
         assert_eq!(pack.manifest.config.config_hash, 0xDEAD);
@@ -1210,7 +1244,8 @@ mod tests {
         })
         .failure(sample_failure())
         .fingerprint(0x1234)
-        .build();
+        .build()
+        .expect("crash pack builder should have failure metadata");
 
         assert_eq!(pack.seed(), 999);
         assert_eq!(pack.fingerprint(), 0x1234);
@@ -1230,7 +1265,8 @@ mod tests {
                 "z-violation".into(), // duplicate
                 "m-violation".into(),
             ])
-            .build();
+            .build()
+            .expect("crash pack builder should have failure metadata");
 
         assert_eq!(
             pack.oracle_violations,
@@ -1267,7 +1303,8 @@ mod tests {
                 decision: "stop".into(),
                 context: Some("budget exhausted".into()),
             })
-            .build();
+            .build()
+            .expect("crash pack builder should have failure metadata");
 
         assert_eq!(pack.supervision_log.len(), 3);
         // Should be sorted by virtual_time
@@ -1309,14 +1346,16 @@ mod tests {
             .supervision_snapshot(s1.clone())
             .supervision_snapshot(s2.clone())
             .supervision_snapshot(s3.clone())
-            .build();
+            .build()
+            .expect("crash pack builder should have failure metadata");
 
         let pack_b = CrashPack::builder(CrashPackConfig::default())
             .failure(sample_failure())
             .supervision_snapshot(s3.clone())
             .supervision_snapshot(s1.clone())
             .supervision_snapshot(s2.clone())
-            .build();
+            .build()
+            .expect("crash pack builder should have failure metadata");
 
         // Same logical entries must yield identical ordering regardless of insertion order.
         assert_eq!(pack_a.supervision_log, pack_b.supervision_log);
@@ -1332,13 +1371,15 @@ mod tests {
         let pack1 = CrashPack::builder(sample_config())
             .failure(sample_failure())
             .fingerprint(0xABCD)
-            .build();
+            .build()
+            .expect("crash pack builder should have failure metadata");
 
         // Build a second pack at a different wall-clock time
         let pack2 = CrashPack::builder(sample_config())
             .failure(sample_failure())
             .fingerprint(0xABCD)
-            .build();
+            .build()
+            .expect("crash pack builder should have failure metadata");
 
         // created_at will differ, but equality should still hold
         assert_eq!(pack1, pack2);
@@ -1353,12 +1394,14 @@ mod tests {
         let pack1 = CrashPack::builder(sample_config())
             .failure(sample_failure())
             .fingerprint(0x1111)
-            .build();
+            .build()
+            .expect("crash pack builder should have failure metadata");
 
         let pack2 = CrashPack::builder(sample_config())
             .failure(sample_failure())
             .fingerprint(0x2222)
-            .build();
+            .build()
+            .expect("crash pack builder should have failure metadata");
 
         assert_ne!(pack1, pack2);
 
@@ -1373,13 +1416,15 @@ mod tests {
             .failure(sample_failure())
             .fingerprint(0xABCD)
             .divergent_prefix(vec![ReplayEvent::RngSeed { seed: 1 }])
-            .build();
+            .build()
+            .expect("crash pack builder should have failure metadata");
 
         let pack2 = CrashPack::builder(sample_config())
             .failure(sample_failure())
             .fingerprint(0xABCD)
             .divergent_prefix(vec![ReplayEvent::RngSeed { seed: 2 }])
-            .build();
+            .build()
+            .expect("crash pack builder should have failure metadata");
 
         assert_ne!(pack1, pack2);
 
@@ -1392,7 +1437,8 @@ mod tests {
 
         let pack = CrashPack::builder(CrashPackConfig::default())
             .failure(sample_failure())
-            .build();
+            .build()
+            .expect("crash pack builder should have failure metadata");
 
         assert!(pack.canonical_prefix.is_empty());
         assert!(pack.divergent_prefix.is_empty());
@@ -1468,7 +1514,8 @@ mod tests {
         let pack = CrashPack::builder(CrashPackConfig::default())
             .failure(sample_failure())
             .divergent_prefix(prefix)
-            .build();
+            .build()
+            .expect("crash pack builder should have failure metadata");
 
         assert!(pack.has_divergent_prefix());
         assert_eq!(pack.divergent_prefix.len(), 2);
@@ -1490,7 +1537,8 @@ mod tests {
         let pack = CrashPack::builder(CrashPackConfig::default())
             .failure(sample_failure())
             .canonical_prefix(vec![layer])
-            .build();
+            .build()
+            .expect("crash pack builder should have failure metadata");
 
         assert_eq!(pack.canonical_prefix.len(), 1);
 
@@ -1532,7 +1580,8 @@ mod tests {
         let pack = CrashPack::builder(sample_config())
             .failure(sample_failure())
             .from_trace(&events)
-            .build();
+            .build()
+            .expect("crash pack builder should have failure metadata");
 
         assert_eq!(pack.manifest.event_count, 3);
         assert_ne!(pack.manifest.fingerprint, 0);
@@ -1560,11 +1609,13 @@ mod tests {
         let pack_a = CrashPack::builder(sample_config())
             .failure(sample_failure())
             .from_trace(&trace_a)
-            .build();
+            .build()
+            .expect("crash pack builder should have failure metadata");
         let pack_b = CrashPack::builder(sample_config())
             .failure(sample_failure())
             .from_trace(&trace_b)
-            .build();
+            .build()
+            .expect("crash pack builder should have failure metadata");
 
         assert_eq!(pack_a.fingerprint(), pack_b.fingerprint());
         assert_eq!(pack_a.canonical_prefix, pack_b.canonical_prefix);
@@ -1591,11 +1642,13 @@ mod tests {
         let pack_a = CrashPack::builder(sample_config())
             .failure(sample_failure())
             .from_trace(&trace_a)
-            .build();
+            .build()
+            .expect("crash pack builder should have failure metadata");
         let pack_b = CrashPack::builder(sample_config())
             .failure(sample_failure())
             .from_trace(&trace_b)
-            .build();
+            .build()
+            .expect("crash pack builder should have failure metadata");
 
         assert_ne!(pack_a.fingerprint(), pack_b.fingerprint());
         assert_ne!(pack_a, pack_b);
@@ -1617,7 +1670,8 @@ mod tests {
         let pack = CrashPack::builder(CrashPackConfig::default())
             .failure(sample_failure())
             .from_trace(&events)
-            .build();
+            .build()
+            .expect("crash pack builder should have failure metadata");
 
         // Independently compute Foata layers and compare.
         let foata = canonicalize(&events);
@@ -1639,7 +1693,8 @@ mod tests {
         let pack = CrashPack::builder(CrashPackConfig::default())
             .failure(sample_failure())
             .from_trace(&[])
-            .build();
+            .build()
+            .expect("crash pack builder should have failure metadata");
 
         assert!(pack.canonical_prefix.is_empty());
         assert_eq!(pack.manifest.event_count, 0);
@@ -1669,13 +1724,15 @@ mod tests {
         let reference = CrashPack::builder(CrashPackConfig::default())
             .failure(sample_failure())
             .from_trace(&perms[0])
-            .build();
+            .build()
+            .expect("crash pack builder should have failure metadata");
 
         for (i, perm) in perms.iter().enumerate().skip(1) {
             let pack = CrashPack::builder(CrashPackConfig::default())
                 .failure(sample_failure())
                 .from_trace(perm)
-                .build();
+                .build()
+                .expect("crash pack builder should have failure metadata");
             assert_eq!(
                 pack.fingerprint(),
                 reference.fingerprint(),
@@ -1714,11 +1771,13 @@ mod tests {
         let pack_a = CrashPack::builder(sample_config())
             .failure(sample_failure())
             .from_trace(&trace_a)
-            .build();
+            .build()
+            .expect("crash pack builder should have failure metadata");
         let pack_b = CrashPack::builder(sample_config())
             .failure(sample_failure())
             .from_trace(&trace_b)
-            .build();
+            .build()
+            .expect("crash pack builder should have failure metadata");
 
         assert_eq!(pack_a.fingerprint(), pack_b.fingerprint());
         assert_eq!(pack_a.canonical_prefix, pack_b.canonical_prefix);
@@ -1742,7 +1801,8 @@ mod tests {
         })
         .failure(sample_failure())
         .fingerprint(0xCAFE_BABE)
-        .build();
+        .build()
+        .expect("crash pack builder should have failure metadata");
 
         let name1 = artifact_filename(&pack);
         let name2 = artifact_filename(&pack);
@@ -1765,7 +1825,8 @@ mod tests {
         })
         .failure(sample_failure())
         .fingerprint(0xAAAA)
-        .build();
+        .build()
+        .expect("crash pack builder should have failure metadata");
 
         let pack_b = CrashPack::builder(CrashPackConfig {
             seed: 2,
@@ -1773,7 +1834,8 @@ mod tests {
         })
         .failure(sample_failure())
         .fingerprint(0xBBBB)
-        .build();
+        .build()
+        .expect("crash pack builder should have failure metadata");
 
         assert_ne!(artifact_filename(&pack_a), artifact_filename(&pack_b));
 
@@ -1791,7 +1853,8 @@ mod tests {
         })
         .failure(sample_failure())
         .fingerprint(0x1234)
-        .build();
+        .build()
+        .expect("crash pack builder should have failure metadata");
 
         let pack_b = CrashPack::builder(CrashPackConfig {
             seed: 42,
@@ -1800,7 +1863,8 @@ mod tests {
         })
         .failure(sample_failure())
         .fingerprint(0x1234)
-        .build();
+        .build()
+        .expect("crash pack builder should have failure metadata");
 
         assert_ne!(artifact_filename(&pack_a), artifact_filename(&pack_b));
 
@@ -1819,7 +1883,8 @@ mod tests {
         let pack = CrashPack::builder(sample_config())
             .failure(sample_failure())
             .fingerprint(0x1234)
-            .build();
+            .build()
+            .expect("crash pack builder should have failure metadata");
 
         let artifact = writer.write(&pack).unwrap();
         assert_eq!(writer.count(), 1);
@@ -1833,7 +1898,8 @@ mod tests {
         })
         .failure(sample_failure())
         .fingerprint(0x5678)
-        .build();
+        .build()
+        .expect("crash pack builder should have failure metadata");
 
         let artifact2 = writer.write(&pack2).unwrap();
         assert_eq!(writer.count(), 2);
@@ -1852,7 +1918,8 @@ mod tests {
             .fingerprint(0xDEAD)
             .event_count(42)
             .oracle_violations(vec!["inv-1".into()])
-            .build();
+            .build()
+            .expect("crash pack builder should have failure metadata");
 
         writer.write(&pack).unwrap();
         let written = writer.written();
@@ -1887,7 +1954,8 @@ mod tests {
         })
         .failure(sample_failure())
         .fingerprint(0xBEEF)
-        .build();
+        .build()
+        .expect("crash pack builder should have failure metadata");
 
         let artifact = writer.write(&pack).unwrap();
         let expected_name = artifact_filename(&pack);
@@ -1916,7 +1984,8 @@ mod tests {
 
         let pack = CrashPack::builder(CrashPackConfig::default())
             .failure(sample_failure())
-            .build();
+            .build()
+            .expect("crash pack builder should have failure metadata");
 
         let result = writer.write(&pack);
         assert!(result.is_err());
@@ -1945,7 +2014,8 @@ mod tests {
         // Writing requires an explicit CrashPackWriter.
         let pack = CrashPack::builder(sample_config())
             .failure(sample_failure())
-            .build();
+            .build()
+            .expect("crash pack builder should have failure metadata");
 
         // pack exists in memory - no writer means no writes
         assert_eq!(pack.seed(), 42);
@@ -1971,7 +2041,8 @@ mod tests {
         })
         .failure(sample_failure())
         .fingerprint(0xFACE)
-        .build();
+        .build()
+        .expect("crash pack builder should have failure metadata");
 
         let id1 = writer.write(&pack).unwrap();
         let id2 = writer.write(&pack).unwrap();
@@ -2045,7 +2116,8 @@ mod tests {
             .from_trace(&events)
             .divergent_prefix(vec![ReplayEvent::RngSeed { seed: 42 }])
             .oracle_violations(vec!["inv-1".into()])
-            .build();
+            .build()
+            .expect("crash pack builder should have failure metadata");
 
         assert_eq!(pack.manifest.attachments.len(), 3);
         assert!(
@@ -2080,7 +2152,8 @@ mod tests {
 
         let pack = CrashPack::builder(CrashPackConfig::default())
             .failure(sample_failure())
-            .build();
+            .build()
+            .expect("crash pack builder should have failure metadata");
 
         assert!(pack.manifest.attachments.is_empty());
 
@@ -2122,7 +2195,8 @@ mod tests {
                 decision: "restart".into(),
                 context: None,
             })
-            .build();
+            .build()
+            .expect("crash pack builder should have failure metadata");
 
         // Canonical prefix: 2 layers with 3 total events
         let cp = pack
@@ -2286,7 +2360,8 @@ mod tests {
                 decision: "restart".into(),
                 context: None,
             })
-            .build();
+            .build()
+            .expect("crash pack builder should have failure metadata");
 
         let writer = MemoryCrashPackWriter::new();
         writer.write(&pack).unwrap();
@@ -2452,7 +2527,8 @@ mod tests {
             .failure(sample_failure())
             .fingerprint(0xCAFE)
             .replay(replay_cmd.clone())
-            .build();
+            .build()
+            .expect("crash pack builder should have failure metadata");
 
         assert_eq!(pack.replay.as_ref(), Some(&replay_cmd));
 
@@ -2478,7 +2554,8 @@ mod tests {
 
         let pack = CrashPack::builder(CrashPackConfig::default())
             .failure(sample_failure())
-            .build();
+            .build()
+            .expect("crash pack builder should have failure metadata");
 
         assert!(pack.replay.is_none());
 
@@ -2501,7 +2578,8 @@ mod tests {
             ..Default::default()
         })
         .failure(sample_failure())
-        .build();
+        .build()
+        .expect("crash pack builder should have failure metadata");
 
         let cmd = pack.replay_command(Some("output.json"));
         assert!(cmd.command_line.contains("--seed"));
@@ -2603,12 +2681,14 @@ mod tests {
         let pack1 = CrashPack::builder(golden_config())
             .failure(golden_failure_info())
             .from_trace(&events)
-            .build();
+            .build()
+            .expect("crash pack builder should have failure metadata");
 
         let pack2 = CrashPack::builder(golden_config())
             .failure(golden_failure_info())
             .from_trace(&events)
-            .build();
+            .build()
+            .expect("crash pack builder should have failure metadata");
 
         // Determinism: same inputs → same pack (modulo created_at).
         assert_eq!(pack1, pack2);
@@ -2627,7 +2707,8 @@ mod tests {
         let pack = CrashPack::builder(golden_config())
             .failure(golden_failure_info())
             .from_trace(&events)
-            .build();
+            .build()
+            .expect("crash pack builder should have failure metadata");
 
         // The fingerprint must be non-zero and consistent.
         let fp = pack.fingerprint();
@@ -2638,6 +2719,7 @@ mod tests {
             .failure(golden_failure_info())
             .from_trace(&events)
             .build()
+            .expect("crash pack builder should have failure metadata")
             .fingerprint();
         assert_eq!(fp, fp2);
 
@@ -2655,7 +2737,8 @@ mod tests {
         let pack = CrashPack::builder(golden_config())
             .failure(golden_failure_info())
             .from_trace(&events)
-            .build();
+            .build()
+            .expect("crash pack builder should have failure metadata");
 
         // Expected Foata structure for the golden scenario:
         //   Layer 0: region_created(R1) — no predecessors
@@ -2698,11 +2781,13 @@ mod tests {
         let pack_a = CrashPack::builder(golden_config())
             .failure(golden_failure_info())
             .from_trace(&events_a)
-            .build();
+            .build()
+            .expect("crash pack builder should have failure metadata");
         let pack_b = CrashPack::builder(golden_config())
             .failure(golden_failure_info())
             .from_trace(&events_b)
-            .build();
+            .build()
+            .expect("crash pack builder should have failure metadata");
 
         // Same equivalence class → same crash pack.
         assert_eq!(pack_a.fingerprint(), pack_b.fingerprint());
@@ -2764,7 +2849,8 @@ mod tests {
             .failure(golden_failure_info())
             .from_trace(&golden_failure_events())
             .divergent_prefix(replay_events.clone())
-            .build();
+            .build()
+            .expect("crash pack builder should have failure metadata");
 
         assert!(pack.has_divergent_prefix());
         assert_eq!(pack.divergent_prefix.len(), 7);
@@ -2827,7 +2913,8 @@ mod tests {
             .failure(golden_failure_info())
             .from_trace(&events)
             .oracle_violations(vec!["invariant-x".into()])
-            .build();
+            .build()
+            .expect("crash pack builder should have failure metadata");
 
         let writer = MemoryCrashPackWriter::new();
         writer.write(&pack).unwrap();
@@ -2883,7 +2970,8 @@ mod tests {
             .failure(golden_failure_info())
             .from_trace(&golden_failure_events())
             .divergent_prefix(result.prefix.events)
-            .build();
+            .build()
+            .expect("crash pack builder should have failure metadata");
 
         assert!(pack.has_divergent_prefix());
         assert_eq!(pack.divergent_prefix.len(), threshold);
@@ -2953,7 +3041,8 @@ mod tests {
             .failure(failure)
             .from_trace(&events)
             .oracle_violations(vec!["balance-invariant".to_string()])
-            .build();
+            .build()
+            .expect("crash pack builder should have failure metadata");
 
         // -- Verify the crash pack --
         assert_eq!(pack.seed(), 42);
@@ -3185,7 +3274,8 @@ mod tests {
             .failure(failure)
             .divergent_prefix(result.prefix.events)
             .fingerprint(0xABCD)
-            .build();
+            .build()
+            .expect("crash pack builder should have failure metadata");
 
         assert!(pack.has_divergent_prefix());
         assert_eq!(
@@ -3242,6 +3332,7 @@ mod tests {
             .from_trace(&events)
             .oracle_violations(vec!["balance-invariant".to_string()])
             .build()
+            .expect("crash pack builder should have failure metadata")
     }
 
     // --- wave 75 trait coverage ---
