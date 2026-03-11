@@ -288,18 +288,21 @@ impl Stealer {
     }
 
     /// Steals a task from the queue.
+    ///
+    /// Lock ordering: arena → deque (same as `schedule_local_push` and
+    /// `steal_batch`).  Acquiring the deque first would invert the order
+    /// and risk ABBA deadlock when another thread calls
+    /// `schedule_local_push` on the same queue.
     #[inline]
     #[must_use]
-    #[allow(clippy::significant_drop_tightening)]
     pub fn steal(&self) -> Option<TaskId> {
-        let mut stack = self.inner.lock();
-        if stack.is_empty() {
-            return None;
-        }
-
-        let result = self.tasks.with_tasks_arena_mut(|arena| {
-            let mut i = 0;
+        self.tasks.with_tasks_arena_mut(|arena| {
+            let mut stack = self.inner.lock();
             let len = stack.len();
+            if len == 0 {
+                return None;
+            }
+            let mut i = 0;
             while i < len && i < Self::SKIPPED_LOCALS_INLINE_CAP {
                 let task_id = stack[i];
                 if let Some(record) = arena.get(task_id.arena_index()) {
@@ -310,9 +313,7 @@ impl Stealer {
                 i += 1;
             }
             None
-        });
-        drop(stack);
-        result
+        })
     }
 
     /// Steals a batch of tasks.
@@ -353,7 +354,7 @@ mod tests {
     use super::*;
     use crate::types::TaskId;
     use std::collections::HashSet;
-    use std::sync::atomic::{AtomicUsize, Ordering};
+    use std::sync::atomic::{AtomicBool, AtomicUsize, Ordering};
     use std::sync::{Arc, Barrier};
     use std::thread;
 
@@ -1014,5 +1015,54 @@ mod tests {
             None,
             "duplicate schedule must not enqueue twice"
         );
+    }
+
+    /// Regression test: concurrent steal + schedule_local_push must not
+    /// deadlock.  Before the fix, `steal()` acquired deque → arena while
+    /// `schedule_local_push()` acquired arena → deque (ABBA).
+    #[test]
+    fn concurrent_steal_and_schedule_local_push_no_deadlock() {
+        let state = LocalQueue::test_state(99);
+        let queue = LocalQueue::new(Arc::clone(&state));
+
+        // Seed the queue with stealable tasks.
+        for id in 0..50 {
+            queue.push(task(id));
+        }
+
+        let stealer = queue.stealer();
+        let schedule_queue = queue.clone();
+        let barrier = Arc::new(Barrier::new(3));
+        let done = Arc::new(AtomicBool::new(false));
+
+        // Thread 1: repeatedly steals from the queue.
+        let b1 = Arc::clone(&barrier);
+        let d1 = Arc::clone(&done);
+        let t1 = thread::spawn(move || {
+            b1.wait();
+            while !d1.load(Ordering::Relaxed) {
+                let _ = stealer.steal();
+                thread::yield_now();
+            }
+        });
+
+        // Thread 2: repeatedly calls schedule_local_push on the same queue.
+        let b2 = Arc::clone(&barrier);
+        let d2 = Arc::clone(&done);
+        let t2 = thread::spawn(move || {
+            let _guard = LocalQueue::set_current(schedule_queue);
+            b2.wait();
+            for round in 0..200 {
+                let id = 50 + (round % 50);
+                LocalQueue::schedule_local(task(id));
+                thread::yield_now();
+            }
+            d2.store(true, Ordering::Relaxed);
+        });
+
+        barrier.wait();
+        // If this test hangs, the ABBA deadlock is present.
+        t1.join().expect("steal thread should complete without deadlock");
+        t2.join().expect("schedule_local thread should complete without deadlock");
     }
 }
