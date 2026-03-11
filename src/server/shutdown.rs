@@ -8,16 +8,36 @@
 use crate::cx::Cx;
 use crate::signal::{ShutdownController, ShutdownReceiver};
 use crate::sync::Notify;
-use crate::time::wall_now;
+use crate::time::{TimerDriverHandle, sleep_until, wall_now};
 use crate::types::Time;
+use std::future::poll_fn;
+use std::pin::Pin;
 use std::sync::Arc;
 use std::sync::atomic::{AtomicBool, AtomicU8, AtomicU64, Ordering};
+use std::task::Poll;
 use std::time::Duration;
 
-fn default_time_getter() -> Time {
-    Cx::current()
-        .and_then(|cx| cx.timer_driver())
-        .map_or_else(wall_now, |timer| timer.now())
+#[derive(Clone)]
+enum ShutdownTimeSource {
+    WallClock,
+    TimerDriver(TimerDriverHandle),
+    Custom(fn() -> Time),
+}
+
+impl ShutdownTimeSource {
+    fn capture_from_current() -> Self {
+        Cx::current()
+            .and_then(|cx| cx.timer_driver())
+            .map_or(Self::WallClock, Self::TimerDriver)
+    }
+
+    fn now(&self) -> Time {
+        match self {
+            Self::WallClock => wall_now(),
+            Self::TimerDriver(driver) => driver.now(),
+            Self::Custom(time_getter) => time_getter(),
+        }
+    }
 }
 
 /// Phases of a graceful server shutdown.
@@ -78,7 +98,7 @@ struct SignalState {
     phase: AtomicU8,
     controller: ShutdownController,
     phase_notify: Notify,
-    time_getter: fn() -> Time,
+    time_source: ShutdownTimeSource,
     has_drain_deadline: AtomicBool,
     drain_deadline: AtomicU64,
     has_drain_start: AtomicBool,
@@ -121,18 +141,22 @@ impl ShutdownSignal {
     /// Creates a new shutdown signal in the [`Running`](ShutdownPhase::Running) phase.
     #[must_use]
     pub fn new() -> Self {
-        Self::with_time_getter(default_time_getter)
+        Self::with_time_source(ShutdownTimeSource::capture_from_current())
     }
 
     /// Creates a new shutdown signal with a custom time source.
     #[must_use]
     pub fn with_time_getter(time_getter: fn() -> Time) -> Self {
+        Self::with_time_source(ShutdownTimeSource::Custom(time_getter))
+    }
+
+    fn with_time_source(time_source: ShutdownTimeSource) -> Self {
         Self {
             state: Arc::new(SignalState {
                 phase: AtomicU8::new(ShutdownPhase::Running as u8),
                 controller: ShutdownController::new(),
                 phase_notify: Notify::new(),
-                time_getter,
+                time_source,
                 has_drain_deadline: AtomicBool::new(false),
                 drain_deadline: AtomicU64::new(0),
                 has_drain_start: AtomicBool::new(false),
@@ -142,13 +166,20 @@ impl ShutdownSignal {
     }
 
     pub(crate) fn current_time(&self) -> Time {
-        (self.state.time_getter)()
+        self.state.time_source.now()
     }
 
-    /// Returns the time source used for shutdown bookkeeping.
-    #[must_use]
-    pub fn time_getter(&self) -> fn() -> Time {
-        self.state.time_getter
+    pub(crate) async fn wait_until(&self, deadline: Time) {
+        let mut sleep = sleep_until(deadline);
+        poll_fn(|cx| {
+            if sleep.poll_with_time(self.current_time()).is_ready() {
+                return Poll::Ready(());
+            }
+
+            let _ = Pin::new(&mut sleep).poll(cx);
+            Poll::Pending
+        })
+        .await;
     }
 
     /// Returns the current shutdown phase.
@@ -328,7 +359,11 @@ impl std::fmt::Debug for ShutdownSignal {
 #[cfg(test)]
 mod tests {
     use super::*;
+    use crate::cx::Cx;
     use crate::test_utils::init_test_logging;
+    use crate::time::{TimerDriverHandle, VirtualClock};
+    use crate::types::{Budget, RegionId, TaskId};
+    use std::sync::Arc;
     use std::sync::atomic::{AtomicU64, Ordering};
 
     static TEST_NOW: AtomicU64 = AtomicU64::new(0);
@@ -455,6 +490,53 @@ mod tests {
             stats.duration
         );
         crate::test_complete!("with_time_getter_controls_deadline_and_duration");
+    }
+
+    #[test]
+    fn new_captures_timer_driver_from_current_context() {
+        init_test("new_captures_timer_driver_from_current_context");
+        let virtual_clock = Arc::new(VirtualClock::starting_at(Time::from_secs(42)));
+        let timer_driver = TimerDriverHandle::with_virtual_clock(Arc::clone(&virtual_clock));
+        let cx = Cx::new_with_drivers(
+            RegionId::new_for_test(7, 0),
+            TaskId::new_for_test(9, 0),
+            Budget::INFINITE,
+            None,
+            None,
+            None,
+            Some(timer_driver),
+            None,
+        );
+
+        let signal = {
+            let _guard = Cx::set_current(Some(cx));
+            ShutdownSignal::new()
+        };
+
+        let initiated = signal.begin_drain(Duration::from_secs(3));
+        crate::assert_with_log!(initiated, "initiated", true, initiated);
+        crate::assert_with_log!(
+            signal.drain_start() == Some(Time::from_secs(42)),
+            "captured driver sets drain start",
+            Some(Time::from_secs(42)),
+            signal.drain_start()
+        );
+        crate::assert_with_log!(
+            signal.drain_deadline() == Some(Time::from_secs(45)),
+            "captured driver sets drain deadline",
+            Some(Time::from_secs(45)),
+            signal.drain_deadline()
+        );
+
+        virtual_clock.advance(7_000_000_000);
+        let stats = signal.collect_stats(1, 0);
+        crate::assert_with_log!(
+            stats.duration == Duration::from_secs(7),
+            "captured driver sets stats duration",
+            Duration::from_secs(7),
+            stats.duration
+        );
+        crate::test_complete!("new_captures_timer_driver_from_current_context");
     }
 
     #[test]

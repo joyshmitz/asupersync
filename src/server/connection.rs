@@ -6,33 +6,16 @@
 use crate::combinator::select::{Either, Select};
 use crate::server::shutdown::{ShutdownPhase, ShutdownSignal};
 use crate::sync::Notify;
-use crate::time::sleep_until;
 use crate::types::Time;
 use parking_lot::Mutex;
 use std::collections::HashMap;
-use std::future::poll_fn;
 use std::net::SocketAddr;
-use std::pin::Pin;
 use std::sync::Arc;
 use std::sync::atomic::{AtomicBool, AtomicU64, Ordering};
-use std::task::Poll;
 use std::time::Duration;
 
 fn wall_clock_now() -> Time {
     crate::time::wall_now()
-}
-
-async fn sleep_until_with_time_getter(deadline: Time, time_getter: fn() -> Time) {
-    let mut sleep = sleep_until(deadline);
-    poll_fn(|cx| {
-        if sleep.poll_with_time(time_getter()).is_ready() {
-            return Poll::Ready(());
-        }
-
-        let _ = Pin::new(&mut sleep).poll(cx);
-        Poll::Pending
-    })
-    .await;
 }
 
 /// Unique identifier for a tracked connection.
@@ -309,8 +292,7 @@ impl ConnectionManager {
             }
 
             if let Some(deadline) = self.shutdown_signal.drain_deadline() {
-                let sleep =
-                    sleep_until_with_time_getter(deadline, self.shutdown_signal.time_getter());
+                let sleep = self.shutdown_signal.wait_until(deadline);
                 let mut sleep = std::pin::pin!(sleep);
                 match Select::new(notified, sleep.as_mut()).await {
                     Either::Left(()) | Either::Right(()) => {}
