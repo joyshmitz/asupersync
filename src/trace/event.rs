@@ -281,14 +281,16 @@ impl TraceEventKind {
                 "region, parent"
             }
             Self::RegionCancelled => "region, reason",
-            Self::ObligationReserve
-            | Self::ObligationCommit
-            | Self::ObligationAbort
-            | Self::ObligationLeak => {
+            Self::ObligationReserve => "obligation, task, region, kind, state",
+            Self::ObligationCommit | Self::ObligationLeak => {
+                "obligation, task, region, kind, state, duration_ns"
+            }
+            Self::ObligationAbort => {
                 "obligation, task, region, kind, state, duration_ns, abort_reason"
             }
             Self::TimeAdvance => "old, new",
-            Self::TimerScheduled | Self::TimerFired | Self::TimerCancelled => "timer_id, deadline",
+            Self::TimerScheduled => "timer_id, deadline",
+            Self::TimerFired | Self::TimerCancelled => "timer_id",
             Self::IoRequested => "token, interest",
             Self::IoReady => "token, readiness",
             Self::IoResult => "token, bytes",
@@ -2937,6 +2939,103 @@ mod tests {
         let payload = serde_json::to_string(&schema).expect("serialize schema");
         let decoded = decode_browser_trace_schema(&payload).expect("decode schema");
         assert_eq!(schema, decoded);
+    }
+
+    #[test]
+    fn browser_trace_schema_timer_required_fields_match_payload_shape() {
+        let schema = browser_trace_schema_v1();
+        let scheduled = schema
+            .event_specs
+            .iter()
+            .find(|entry| entry.event_kind == "timer_scheduled")
+            .expect("timer_scheduled entry should exist");
+        let fired = schema
+            .event_specs
+            .iter()
+            .find(|entry| entry.event_kind == "timer_fired")
+            .expect("timer_fired entry should exist");
+        let cancelled = schema
+            .event_specs
+            .iter()
+            .find(|entry| entry.event_kind == "timer_cancelled")
+            .expect("timer_cancelled entry should exist");
+
+        assert_eq!(
+            scheduled.required_fields,
+            vec!["deadline".to_string(), "timer_id".to_string()]
+        );
+        assert_eq!(fired.required_fields, vec!["timer_id".to_string()]);
+        assert_eq!(cancelled.required_fields, vec!["timer_id".to_string()]);
+    }
+
+    #[test]
+    fn browser_trace_schema_obligation_required_fields_match_payload_shape() {
+        let schema = browser_trace_schema_v1();
+        let reserve = schema
+            .event_specs
+            .iter()
+            .find(|entry| entry.event_kind == "obligation_reserve")
+            .expect("obligation_reserve entry should exist");
+        let commit = schema
+            .event_specs
+            .iter()
+            .find(|entry| entry.event_kind == "obligation_commit")
+            .expect("obligation_commit entry should exist");
+        let abort = schema
+            .event_specs
+            .iter()
+            .find(|entry| entry.event_kind == "obligation_abort")
+            .expect("obligation_abort entry should exist");
+        let leak = schema
+            .event_specs
+            .iter()
+            .find(|entry| entry.event_kind == "obligation_leak")
+            .expect("obligation_leak entry should exist");
+
+        assert_eq!(
+            reserve.required_fields,
+            vec![
+                "kind".to_string(),
+                "obligation".to_string(),
+                "region".to_string(),
+                "state".to_string(),
+                "task".to_string(),
+            ]
+        );
+        assert_eq!(
+            commit.required_fields,
+            vec![
+                "duration_ns".to_string(),
+                "kind".to_string(),
+                "obligation".to_string(),
+                "region".to_string(),
+                "state".to_string(),
+                "task".to_string(),
+            ]
+        );
+        assert_eq!(
+            abort.required_fields,
+            vec![
+                "abort_reason".to_string(),
+                "duration_ns".to_string(),
+                "kind".to_string(),
+                "obligation".to_string(),
+                "region".to_string(),
+                "state".to_string(),
+                "task".to_string(),
+            ]
+        );
+        assert_eq!(
+            leak.required_fields,
+            vec![
+                "duration_ns".to_string(),
+                "kind".to_string(),
+                "obligation".to_string(),
+                "region".to_string(),
+                "state".to_string(),
+                "task".to_string(),
+            ]
+        );
     }
 
     #[test]
