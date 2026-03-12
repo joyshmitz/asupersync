@@ -277,6 +277,30 @@ impl Notify {
         waiters.scan_start = waiters.entries.len();
         self.stored_notifications.fetch_add(1, Ordering::Release);
     }
+
+    /// Passes a `notify_one` baton only to a currently active waiter.
+    ///
+    /// Unlike [`Notify::pass_baton`], this does not store a replacement
+    /// notification when no waiter is present. This is used when a later
+    /// broadcast already covered the original waiter set, but a post-broadcast
+    /// waiter may still need the in-flight `notify_one` baton.
+    fn pass_baton_if_waiter_exists(mut waiters: parking_lot::MutexGuard<'_, WaiterSlab>) {
+        let start = waiters.scan_start;
+        for i in start..waiters.entries.len() {
+            let entry = &mut waiters.entries[i];
+            if !entry.notified && entry.waker.is_some() {
+                entry.notified = true;
+                if let Some(waker) = entry.waker.take() {
+                    waiters.active -= 1;
+                    waiters.scan_start = i + 1;
+                    drop(waiters);
+                    waker.wake();
+                    return;
+                }
+            }
+        }
+        waiters.scan_start = waiters.entries.len();
+    }
 }
 
 impl Default for Notify {
@@ -384,9 +408,19 @@ impl Notified<'_> {
             };
 
             if is_gen_changed {
+                let should_pass_notify_one_baton = if index < waiters.entries.len() {
+                    let entry = &waiters.entries[index];
+                    entry.notified && entry.generation == self.initial_generation
+                } else {
+                    false
+                };
                 waiters.remove(index);
                 self.waiter_index = None;
-                drop(waiters);
+                if should_pass_notify_one_baton {
+                    Notify::pass_baton_if_waiter_exists(waiters);
+                } else {
+                    drop(waiters);
+                }
 
                 return self.mark_done();
             }
@@ -447,6 +481,8 @@ impl Drop for Notified<'_> {
         if self.state == NotifiedState::Waiting {
             if let Some(index) = self.waiter_index.take() {
                 let mut waiters = self.notify.waiters.lock();
+                let generation_advanced =
+                    self.notify.generation.load(Ordering::Acquire) != self.initial_generation;
 
                 let (was_notified, notified_generation) = if index < waiters.entries.len() {
                     let entry = &waiters.entries[index];
@@ -467,22 +503,27 @@ impl Drop for Notified<'_> {
                     }
 
                     // It was woken by notify_one, but cancelled!
-                    // Pass the notification to the next waiter to prevent a lost wakeup.
-                    self.notify.pass_baton(waiters);
+                    // If a later broadcast already covered the original waiter set,
+                    // only hand the baton to a post-broadcast waiter. Otherwise use
+                    // the normal baton semantics, which store the notification when
+                    // no waiter exists.
+                    if generation_advanced {
+                        Notify::pass_baton_if_waiter_exists(waiters);
+                    } else {
+                        self.notify.pass_baton(waiters);
+                    }
                 }
             }
         }
     }
 }
 
-
-
 #[cfg(test)]
 mod tests {
     use super::*;
     use crate::test_utils::init_test_logging;
-    use std::sync::Arc;
     use std::sync::mpsc;
+    use std::sync::Arc;
     use std::task::Wake;
     use std::thread;
     use std::time::Duration;
@@ -557,30 +598,64 @@ mod tests {
     fn notify_one_lost_if_followed_by_broadcast_and_cancel() {
         init_test("notify_one_lost_if_followed_by_broadcast_and_cancel");
         let notify = Notify::new();
-        
+
         let mut waiter_a = notify.notified();
         let mut waiter_b = notify.notified();
-        
+
         assert!(poll_once(&mut waiter_a).is_pending());
         assert!(poll_once(&mut waiter_b).is_pending());
-        
+
         // notify_one wakes A
         notify.notify_one();
-        
+
         // notify_waiters wakes B (and updates A's generation)
         notify.notify_waiters();
-        
+
         // waiter_c starts waiting AFTER the broadcast
         let mut waiter_c = notify.notified();
         assert!(poll_once(&mut waiter_c).is_pending());
-        
-        // A is dropped (cancelled). 
+
+        // A is dropped (cancelled).
         // It should pass the notify_one baton to C!
         drop(waiter_a);
-        
+
         // Let's check if C got it.
-        assert!(poll_once(&mut waiter_c).is_ready(), "Waiter C should be woken by the passed baton!");
+        assert!(
+            poll_once(&mut waiter_c).is_ready(),
+            "Waiter C should be woken by the passed baton!"
+        );
         crate::test_complete!("notify_one_lost_if_followed_by_broadcast_and_cancel");
+    }
+
+    #[test]
+    fn notify_one_lost_if_followed_by_broadcast_and_poll() {
+        init_test("notify_one_lost_if_followed_by_broadcast_and_poll");
+        let notify = Notify::new();
+
+        let mut waiter_a = notify.notified();
+        let mut waiter_b = notify.notified();
+
+        assert!(poll_once(&mut waiter_a).is_pending());
+        assert!(poll_once(&mut waiter_b).is_pending());
+
+        // notify_one wakes A.
+        notify.notify_one();
+
+        // broadcast wakes B.
+        notify.notify_waiters();
+
+        // C starts waiting after the broadcast and should inherit the
+        // original notify_one baton when A consumes readiness.
+        let mut waiter_c = notify.notified();
+        assert!(poll_once(&mut waiter_c).is_pending());
+
+        assert!(poll_once(&mut waiter_a).is_ready());
+        assert!(
+            poll_once(&mut waiter_c).is_ready(),
+            "Waiter C should be woken by the passed baton after A is polled"
+        );
+
+        crate::test_complete!("notify_one_lost_if_followed_by_broadcast_and_poll");
     }
 
     #[test]
