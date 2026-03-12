@@ -23,12 +23,17 @@ const TRY_STREAM_COOPERATIVE_BUDGET: usize = 1024;
 pub struct TryCollect<S, C> {
     stream: S,
     collection: C,
+    completed: bool,
 }
 
 impl<S, C> TryCollect<S, C> {
     /// Creates a new `TryCollect` future.
     pub(crate) fn new(stream: S, collection: C) -> Self {
-        Self { stream, collection }
+        Self {
+            stream,
+            collection,
+            completed: false,
+        }
     }
 }
 
@@ -42,6 +47,7 @@ where
     type Output = Result<C, E>;
 
     fn poll(mut self: Pin<&mut Self>, cx: &mut Context<'_>) -> Poll<Result<C, E>> {
+        assert!(!self.completed, "TryCollect polled after completion");
         let mut processed_this_poll = 0usize;
         loop {
             match Pin::new(&mut self.stream).poll_next(cx) {
@@ -54,9 +60,11 @@ where
                     }
                 }
                 Poll::Ready(Some(Err(e))) => {
+                    self.completed = true;
                     return Poll::Ready(Err(e));
                 }
                 Poll::Ready(None) => {
+                    self.completed = true;
                     return Poll::Ready(Ok(std::mem::take(&mut self.collection)));
                 }
                 Poll::Pending => return Poll::Pending,
@@ -137,12 +145,17 @@ where
 pub struct TryForEach<S, F> {
     stream: S,
     f: F,
+    completed: bool,
 }
 
 impl<S, F> TryForEach<S, F> {
     /// Creates a new `TryForEach` future.
     pub(crate) fn new(stream: S, f: F) -> Self {
-        Self { stream, f }
+        Self {
+            stream,
+            f,
+            completed: false,
+        }
     }
 }
 
@@ -156,11 +169,13 @@ where
     type Output = Result<(), E>;
 
     fn poll(mut self: Pin<&mut Self>, cx: &mut Context<'_>) -> Poll<Result<(), E>> {
+        assert!(!self.completed, "TryForEach polled after completion");
         let mut processed_this_poll = 0usize;
         loop {
             match Pin::new(&mut self.stream).poll_next(cx) {
                 Poll::Ready(Some(item)) => {
                     if let Err(e) = (self.f)(item) {
+                        self.completed = true;
                         return Poll::Ready(Err(e));
                     }
                     processed_this_poll += 1;
@@ -169,7 +184,10 @@ where
                         return Poll::Pending;
                     }
                 }
-                Poll::Ready(None) => return Poll::Ready(Ok(())),
+                Poll::Ready(None) => {
+                    self.completed = true;
+                    return Poll::Ready(Ok(()));
+                }
                 Poll::Pending => return Poll::Pending,
             }
         }

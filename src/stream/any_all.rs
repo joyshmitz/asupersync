@@ -25,12 +25,13 @@ pub struct Any<S, P> {
     #[pin]
     stream: S,
     predicate: P,
+    completed: bool,
 }
 
 impl<S, P> Any<S, P> {
     /// Creates a new `Any` future.
     pub(crate) fn new(stream: S, predicate: P) -> Self {
-        Self { stream, predicate }
+        Self { stream, predicate, completed: false }
     }
 }
 
@@ -43,11 +44,13 @@ where
 
     fn poll(self: Pin<&mut Self>, cx: &mut Context<'_>) -> Poll<bool> {
         let mut this = self.project();
+        assert!(!*this.completed, "Any polled after completion");
         let mut scanned_this_poll = 0usize;
         loop {
             match this.stream.as_mut().poll_next(cx) {
                 Poll::Ready(Some(item)) => {
                     if (this.predicate)(&item) {
+                        *this.completed = true;
                         return Poll::Ready(true);
                     }
 
@@ -57,7 +60,10 @@ where
                         return Poll::Pending;
                     }
                 }
-                Poll::Ready(None) => return Poll::Ready(false),
+                Poll::Ready(None) => {
+                    *this.completed = true;
+                    return Poll::Ready(false);
+                }
                 Poll::Pending => return Poll::Pending,
             }
         }
@@ -74,12 +80,13 @@ pub struct All<S, P> {
     #[pin]
     stream: S,
     predicate: P,
+    completed: bool,
 }
 
 impl<S, P> All<S, P> {
     /// Creates a new `All` future.
     pub(crate) fn new(stream: S, predicate: P) -> Self {
-        Self { stream, predicate }
+        Self { stream, predicate, completed: false }
     }
 }
 
@@ -92,11 +99,13 @@ where
 
     fn poll(self: Pin<&mut Self>, cx: &mut Context<'_>) -> Poll<bool> {
         let mut this = self.project();
+        assert!(!*this.completed, "All polled after completion");
         let mut scanned_this_poll = 0usize;
         loop {
             match this.stream.as_mut().poll_next(cx) {
                 Poll::Ready(Some(item)) => {
                     if !(this.predicate)(&item) {
+                        *this.completed = true;
                         return Poll::Ready(false);
                     }
 
@@ -106,7 +115,10 @@ where
                         return Poll::Pending;
                     }
                 }
-                Poll::Ready(None) => return Poll::Ready(true),
+                Poll::Ready(None) => {
+                    *this.completed = true;
+                    return Poll::Ready(true);
+                }
                 Poll::Pending => return Poll::Pending,
             }
         }

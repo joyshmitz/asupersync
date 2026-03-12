@@ -23,12 +23,13 @@ pub struct ForEach<S, F> {
     #[pin]
     stream: S,
     f: F,
+    completed: bool,
 }
 
 impl<S, F> ForEach<S, F> {
     /// Creates a new `ForEach` future.
     pub(crate) fn new(stream: S, f: F) -> Self {
-        Self { stream, f }
+        Self { stream, f, completed: false }
     }
 }
 
@@ -42,6 +43,7 @@ where
     #[inline]
     fn poll(self: Pin<&mut Self>, cx: &mut Context<'_>) -> Poll<()> {
         let mut this = self.project();
+        assert!(!*this.completed, "ForEach polled after completion");
         let mut processed_this_poll = 0usize;
         loop {
             match this.stream.as_mut().poll_next(cx) {
@@ -53,7 +55,10 @@ where
                         return Poll::Pending;
                     }
                 }
-                Poll::Ready(None) => return Poll::Ready(()),
+                Poll::Ready(None) => {
+                    *this.completed = true;
+                    return Poll::Ready(());
+                }
                 Poll::Pending => return Poll::Pending,
             }
         }
@@ -72,6 +77,7 @@ pub struct ForEachAsync<S, F, Fut> {
     f: F,
     #[pin]
     pending: Option<Fut>,
+    completed: bool,
 }
 
 impl<S, F, Fut> ForEachAsync<S, F, Fut> {
@@ -80,6 +86,7 @@ impl<S, F, Fut> ForEachAsync<S, F, Fut> {
             stream,
             f,
             pending: None,
+            completed: false,
         }
     }
 }
@@ -94,6 +101,7 @@ where
 
     fn poll(self: Pin<&mut Self>, cx: &mut Context<'_>) -> Poll<()> {
         let mut this = self.project();
+        assert!(!*this.completed, "ForEachAsync polled after completion");
         let mut processed_this_poll = 0usize;
         loop {
             // Complete pending future first
@@ -116,7 +124,10 @@ where
                 Poll::Ready(Some(item)) => {
                     this.pending.set(Some((this.f)(item)));
                 }
-                Poll::Ready(None) => return Poll::Ready(()),
+                Poll::Ready(None) => {
+                    *this.completed = true;
+                    return Poll::Ready(());
+                }
                 Poll::Pending => return Poll::Pending,
             }
         }

@@ -24,12 +24,13 @@ pub struct Count<S> {
     #[pin]
     stream: S,
     count: usize,
+    completed: bool,
 }
 
 impl<S> Count<S> {
     /// Creates a new `Count` future.
     pub(crate) fn new(stream: S) -> Self {
-        Self { stream, count: 0 }
+        Self { stream, count: 0, completed: false }
     }
 }
 
@@ -42,6 +43,7 @@ where
     #[inline]
     fn poll(self: Pin<&mut Self>, cx: &mut Context<'_>) -> Poll<usize> {
         let mut this = self.project();
+        assert!(!*this.completed, "Count polled after completion");
         let mut counted_this_poll = 0usize;
         loop {
             match this.stream.as_mut().poll_next(cx) {
@@ -53,7 +55,10 @@ where
                         return Poll::Pending;
                     }
                 }
-                Poll::Ready(None) => return Poll::Ready(*this.count),
+                Poll::Ready(None) => {
+                    *this.completed = true;
+                    return Poll::Ready(*this.count);
+                }
                 Poll::Pending => return Poll::Pending,
             }
         }

@@ -21,12 +21,17 @@ const COLLECT_COOPERATIVE_BUDGET: usize = 1024;
 pub struct Collect<S, C> {
     stream: S,
     collection: C,
+    completed: bool,
 }
 
 impl<S, C> Collect<S, C> {
     /// Creates a new `Collect` future.
     pub(crate) fn new(stream: S, collection: C) -> Self {
-        Self { stream, collection }
+        Self {
+            stream,
+            collection,
+            completed: false,
+        }
     }
 }
 
@@ -41,6 +46,7 @@ where
 
     #[inline]
     fn poll(mut self: Pin<&mut Self>, cx: &mut Context<'_>) -> Poll<C> {
+        assert!(!self.completed, "Collect polled after completion");
         let mut collected_this_poll = 0usize;
         loop {
             match Pin::new(&mut self.stream).poll_next(cx) {
@@ -53,6 +59,7 @@ where
                     }
                 }
                 Poll::Ready(None) => {
+                    self.completed = true;
                     return Poll::Ready(std::mem::take(&mut self.collection));
                 }
                 Poll::Pending => return Poll::Pending,
