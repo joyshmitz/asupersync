@@ -15,6 +15,7 @@ use std::task::{Context, Poll};
 pub struct Chain<S1, S2> {
     first: Option<S1>,
     second: S2,
+    done: bool,
 }
 
 impl<S1, S2> Chain<S1, S2> {
@@ -23,6 +24,7 @@ impl<S1, S2> Chain<S1, S2> {
         Self {
             first: Some(first),
             second,
+            done: false,
         }
     }
 
@@ -63,6 +65,10 @@ where
 
     #[inline]
     fn poll_next(mut self: Pin<&mut Self>, cx: &mut Context<'_>) -> Poll<Option<Self::Item>> {
+        if self.done {
+            return Poll::Ready(None);
+        }
+
         if let Some(first) = self.first.as_mut() {
             match Pin::new(first).poll_next(cx) {
                 Poll::Ready(Some(item)) => return Poll::Ready(Some(item)),
@@ -73,10 +79,20 @@ where
             }
         }
 
-        Pin::new(&mut self.second).poll_next(cx)
+        match Pin::new(&mut self.second).poll_next(cx) {
+            Poll::Ready(None) => {
+                self.done = true;
+                Poll::Ready(None)
+            }
+            other => other,
+        }
     }
 
     fn size_hint(&self) -> (usize, Option<usize>) {
+        if self.done {
+            return (0, Some(0));
+        }
+
         let second_hint = self.second.size_hint();
         let Some(first) = self.first.as_ref() else {
             return second_hint;
@@ -159,6 +175,27 @@ mod tests {
         fn size_hint(&self) -> (usize, Option<usize>) {
             let remaining = self.items.len().saturating_sub(self.index);
             (remaining, Some(remaining))
+        }
+    }
+
+    #[derive(Debug)]
+    struct EmptyThenPanics {
+        polls: Arc<AtomicUsize>,
+    }
+
+    impl EmptyThenPanics {
+        fn new(polls: Arc<AtomicUsize>) -> Self {
+            Self { polls }
+        }
+    }
+
+    impl Stream for EmptyThenPanics {
+        type Item = i32;
+
+        fn poll_next(self: Pin<&mut Self>, _cx: &mut Context<'_>) -> Poll<Option<Self::Item>> {
+            let polls = self.polls.fetch_add(1, Ordering::SeqCst);
+            assert_eq!(polls, 0, "chain second stream repolled after completion");
+            Poll::Ready(None)
         }
     }
 
@@ -341,6 +378,24 @@ mod tests {
         }
         assert_eq!(collected, vec![1, 2, 3, 4, 5, 6]);
         crate::test_complete!("chain_multiple_chains");
+    }
+
+    #[test]
+    fn chain_does_not_repoll_exhausted_second_stream() {
+        init_test("chain_does_not_repoll_exhausted_second_stream");
+        let polls = Arc::new(AtomicUsize::new(0));
+        let mut stream = Chain::new(
+            iter(Vec::<i32>::new()),
+            EmptyThenPanics::new(Arc::clone(&polls)),
+        );
+        let waker = noop_waker();
+        let mut cx = Context::from_waker(&waker);
+
+        assert_eq!(Pin::new(&mut stream).poll_next(&mut cx), Poll::Ready(None));
+        assert_eq!(Pin::new(&mut stream).poll_next(&mut cx), Poll::Ready(None));
+        assert_eq!(polls.load(Ordering::SeqCst), 1);
+        assert_eq!(stream.size_hint(), (0, Some(0)));
+        crate::test_complete!("chain_does_not_repoll_exhausted_second_stream");
     }
 
     #[test]

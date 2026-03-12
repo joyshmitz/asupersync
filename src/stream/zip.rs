@@ -69,7 +69,6 @@ where
         if *this.exhausted {
             return Poll::Ready(None);
         }
-
         if this.queued1.is_none() {
             match this.stream1.as_mut().poll_next(cx) {
                 Poll::Ready(Some(item)) => *this.queued1 = Some(item),

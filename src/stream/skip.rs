@@ -20,11 +20,16 @@ pub struct Skip<S> {
     #[pin]
     stream: S,
     remaining: usize,
+    exhausted: bool,
 }
 
 impl<S> Skip<S> {
     pub(crate) fn new(stream: S, remaining: usize) -> Self {
-        Self { stream, remaining }
+        Self {
+            stream,
+            remaining,
+            exhausted: false,
+        }
     }
 }
 
@@ -34,6 +39,10 @@ impl<S: Stream> Stream for Skip<S> {
     #[inline]
     fn poll_next(self: Pin<&mut Self>, cx: &mut Context<'_>) -> Poll<Option<Self::Item>> {
         let mut this = self.project();
+        if *this.exhausted {
+            return Poll::Ready(None);
+        }
+
         let mut skipped_this_poll = 0usize;
         while *this.remaining > 0 {
             match this.stream.as_mut().poll_next(cx) {
@@ -47,15 +56,27 @@ impl<S: Stream> Stream for Skip<S> {
                         return Poll::Pending;
                     }
                 }
-                Poll::Ready(None) => return Poll::Ready(None),
+                Poll::Ready(None) => {
+                    *this.exhausted = true;
+                    return Poll::Ready(None);
+                }
                 Poll::Pending => return Poll::Pending,
             }
         }
 
-        this.stream.poll_next(cx)
+        match this.stream.poll_next(cx) {
+            Poll::Ready(None) => {
+                *this.exhausted = true;
+                Poll::Ready(None)
+            }
+            other => other,
+        }
     }
 
     fn size_hint(&self) -> (usize, Option<usize>) {
+        if self.exhausted {
+            return (0, Some(0));
+        }
         let (lower, upper) = self.stream.size_hint();
         let lower = lower.saturating_sub(self.remaining);
         let upper = upper.map(|x| x.saturating_sub(self.remaining));
@@ -72,6 +93,7 @@ pub struct SkipWhile<S, F> {
     stream: S,
     predicate: F,
     done: bool,
+    exhausted: bool,
 }
 
 impl<S, F> SkipWhile<S, F> {
@@ -80,6 +102,7 @@ impl<S, F> SkipWhile<S, F> {
             stream,
             predicate,
             done: false,
+            exhausted: false,
         }
     }
 }
@@ -94,8 +117,18 @@ where
     #[inline]
     fn poll_next(self: Pin<&mut Self>, cx: &mut Context<'_>) -> Poll<Option<Self::Item>> {
         let mut this = self.project();
+        if *this.exhausted {
+            return Poll::Ready(None);
+        }
+
         if *this.done {
-            return this.stream.poll_next(cx);
+            return match this.stream.poll_next(cx) {
+                Poll::Ready(None) => {
+                    *this.exhausted = true;
+                    Poll::Ready(None)
+                }
+                other => other,
+            };
         }
 
         let mut skipped_this_poll = 0usize;
@@ -114,13 +147,19 @@ where
                         return Poll::Pending;
                     }
                 }
-                Poll::Ready(None) => return Poll::Ready(None),
+                Poll::Ready(None) => {
+                    *this.exhausted = true;
+                    return Poll::Ready(None);
+                }
                 Poll::Pending => return Poll::Pending,
             }
         }
     }
 
     fn size_hint(&self) -> (usize, Option<usize>) {
+        if self.exhausted {
+            return (0, Some(0));
+        }
         let (lower, upper) = self.stream.size_hint();
         if self.done {
             (lower, upper)
@@ -163,10 +202,41 @@ mod tests {
     impl Stream for AlwaysReadyCounter {
         type Item = usize;
 
-        fn poll_next(mut self: Pin<&mut Self>, _cx: &mut Context<'_>) -> Poll<Option<Self::Item>> {
-            let item = self.next;
-            self.next = self.next.saturating_add(1);
+        fn poll_next(self: Pin<&mut Self>, _cx: &mut Context<'_>) -> Poll<Option<Self::Item>> {
+            let this = self.get_mut();
+            let item = this.next;
+            this.next = this.next.saturating_add(1);
             Poll::Ready(Some(item))
+        }
+    }
+
+    #[derive(Debug)]
+    struct ItemThenNoneThenPanics<T> {
+        item: Option<T>,
+        completed: bool,
+    }
+
+    impl<T> ItemThenNoneThenPanics<T> {
+        fn new(item: T) -> Self {
+            Self {
+                item: Some(item),
+                completed: false,
+            }
+        }
+    }
+
+    impl<T: Unpin> Stream for ItemThenNoneThenPanics<T> {
+        type Item = T;
+
+        fn poll_next(self: Pin<&mut Self>, _cx: &mut Context<'_>) -> Poll<Option<Self::Item>> {
+            let this = self.get_mut();
+            if let Some(item) = this.item.take() {
+                return Poll::Ready(Some(item));
+            }
+
+            assert!(!this.completed, "inner stream repolled after completion");
+            this.completed = true;
+            Poll::Ready(None)
         }
     }
 
@@ -256,6 +326,16 @@ mod tests {
     }
 
     #[test]
+    fn test_skip_does_not_repoll_exhausted_upstream() {
+        let mut s = Skip::new(ItemThenNoneThenPanics::new(0usize), 1);
+        let waker = noop_waker();
+        let mut cx = Context::from_waker(&waker);
+
+        assert_eq!(Pin::new(&mut s).poll_next(&mut cx), Poll::Ready(None));
+        assert_eq!(Pin::new(&mut s).poll_next(&mut cx), Poll::Ready(None));
+    }
+
+    #[test]
     fn test_skip_while_yields_after_budget_when_predicate_stays_true() {
         let mut s = SkipWhile::new(AlwaysReadyCounter::default(), |_: &usize| true);
         let waker = noop_waker();
@@ -265,5 +345,26 @@ mod tests {
         assert!(matches!(first, Poll::Pending));
         assert_eq!(s.stream.next, SKIP_COOPERATIVE_BUDGET);
         assert!(!s.done);
+    }
+
+    #[test]
+    fn test_skip_while_does_not_repoll_exhausted_upstream_while_skipping() {
+        let mut s = SkipWhile::new(ItemThenNoneThenPanics::new(0usize), |_: &usize| true);
+        let waker = noop_waker();
+        let mut cx = Context::from_waker(&waker);
+
+        assert_eq!(Pin::new(&mut s).poll_next(&mut cx), Poll::Ready(None));
+        assert_eq!(Pin::new(&mut s).poll_next(&mut cx), Poll::Ready(None));
+    }
+
+    #[test]
+    fn test_skip_while_does_not_repoll_exhausted_upstream_after_done() {
+        let mut s = SkipWhile::new(ItemThenNoneThenPanics::new(5usize), |x: &usize| *x < 5);
+        let waker = noop_waker();
+        let mut cx = Context::from_waker(&waker);
+
+        assert_eq!(Pin::new(&mut s).poll_next(&mut cx), Poll::Ready(Some(5)));
+        assert_eq!(Pin::new(&mut s).poll_next(&mut cx), Poll::Ready(None));
+        assert_eq!(Pin::new(&mut s).poll_next(&mut cx), Poll::Ready(None));
     }
 }

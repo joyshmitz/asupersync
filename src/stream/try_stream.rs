@@ -7,6 +7,41 @@ use std::future::Future;
 use std::pin::Pin;
 use std::task::{Context, Poll};
 
+/// Error returned by try-stream terminal combinators.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub enum TryStreamError<E> {
+    /// The wrapped stream or closure returned an error.
+    Inner(E),
+    /// The same future was polled again after it already returned `Ready`.
+    PolledAfterCompletion,
+}
+
+impl<E: std::fmt::Display> std::fmt::Display for TryStreamError<E> {
+    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        match self {
+            Self::Inner(err) => err.fmt(f),
+            Self::PolledAfterCompletion => {
+                write!(f, "try_stream future polled after completion")
+            }
+        }
+    }
+}
+
+impl<E: std::error::Error + 'static> std::error::Error for TryStreamError<E> {
+    fn source(&self) -> Option<&(dyn std::error::Error + 'static)> {
+        match self {
+            Self::Inner(err) => Some(err),
+            Self::PolledAfterCompletion => None,
+        }
+    }
+}
+
+impl<E> From<E> for TryStreamError<E> {
+    fn from(value: E) -> Self {
+        Self::Inner(value)
+    }
+}
+
 /// Cooperative budget for success-path items drained in a single poll.
 ///
 /// Without this bound, an always-ready success-heavy stream can monopolize one
@@ -44,10 +79,12 @@ where
     S: Stream<Item = Result<T, E>> + Unpin,
     C: Default + Extend<T>,
 {
-    type Output = Result<C, E>;
+    type Output = Result<C, TryStreamError<E>>;
 
-    fn poll(mut self: Pin<&mut Self>, cx: &mut Context<'_>) -> Poll<Result<C, E>> {
-        assert!(!self.completed, "TryCollect polled after completion");
+    fn poll(mut self: Pin<&mut Self>, cx: &mut Context<'_>) -> Poll<Self::Output> {
+        if self.completed {
+            return Poll::Ready(Err(TryStreamError::PolledAfterCompletion));
+        }
         let mut processed_this_poll = 0usize;
         loop {
             match Pin::new(&mut self.stream).poll_next(cx) {
@@ -61,7 +98,7 @@ where
                 }
                 Poll::Ready(Some(Err(e))) => {
                     self.completed = true;
-                    return Poll::Ready(Err(e));
+                    return Poll::Ready(Err(TryStreamError::Inner(e)));
                 }
                 Poll::Ready(None) => {
                     self.completed = true;
@@ -106,20 +143,25 @@ where
     S: Stream<Item = Result<T, E>> + Unpin,
     F: FnMut(Acc, T) -> Result<Acc, E>,
 {
-    type Output = Result<Acc, E>;
+    type Output = Result<Acc, TryStreamError<E>>;
 
-    fn poll(mut self: Pin<&mut Self>, cx: &mut Context<'_>) -> Poll<Result<Acc, E>> {
-        assert!(!self.completed, "TryFold polled after completion");
+    fn poll(mut self: Pin<&mut Self>, cx: &mut Context<'_>) -> Poll<Self::Output> {
+        if self.completed {
+            return Poll::Ready(Err(TryStreamError::PolledAfterCompletion));
+        }
         let mut processed_this_poll = 0usize;
         loop {
             match Pin::new(&mut self.stream).poll_next(cx) {
                 Poll::Ready(Some(Ok(item))) => {
-                    let acc = self.acc.take().expect("TryFold polled after completion");
+                    let acc = self
+                        .acc
+                        .take()
+                        .expect("TryFold accumulator missing before completion");
                     match (self.f)(acc, item) {
                         Ok(new_acc) => self.acc = Some(new_acc),
                         Err(e) => {
                             self.completed = true;
-                            return Poll::Ready(Err(e));
+                            return Poll::Ready(Err(TryStreamError::Inner(e)));
                         }
                     }
                     processed_this_poll += 1;
@@ -130,14 +172,14 @@ where
                 }
                 Poll::Ready(Some(Err(e))) => {
                     self.completed = true;
-                    return Poll::Ready(Err(e));
+                    return Poll::Ready(Err(TryStreamError::Inner(e)));
                 }
                 Poll::Ready(None) => {
                     self.completed = true;
                     return Poll::Ready(Ok(self
                         .acc
                         .take()
-                        .expect("TryFold polled after completion")));
+                        .expect("TryFold accumulator missing on completion")));
                 }
                 Poll::Pending => return Poll::Pending,
             }
@@ -176,17 +218,19 @@ where
     S: Stream + Unpin,
     F: FnMut(S::Item) -> Result<(), E>,
 {
-    type Output = Result<(), E>;
+    type Output = Result<(), TryStreamError<E>>;
 
-    fn poll(mut self: Pin<&mut Self>, cx: &mut Context<'_>) -> Poll<Result<(), E>> {
-        assert!(!self.completed, "TryForEach polled after completion");
+    fn poll(mut self: Pin<&mut Self>, cx: &mut Context<'_>) -> Poll<Self::Output> {
+        if self.completed {
+            return Poll::Ready(Err(TryStreamError::PolledAfterCompletion));
+        }
         let mut processed_this_poll = 0usize;
         loop {
             match Pin::new(&mut self.stream).poll_next(cx) {
                 Poll::Ready(Some(item)) => {
                     if let Err(e) = (self.f)(item) {
                         self.completed = true;
-                        return Poll::Ready(Err(e));
+                        return Poll::Ready(Err(TryStreamError::Inner(e)));
                     }
                     processed_this_poll += 1;
                     if processed_this_poll >= TRY_STREAM_COOPERATIVE_BUDGET {
@@ -306,6 +350,26 @@ mod tests {
         }
     }
 
+    #[derive(Debug)]
+    struct PollCountingEmptyValueStream {
+        polls: Arc<AtomicUsize>,
+    }
+
+    impl PollCountingEmptyValueStream {
+        fn new(polls: Arc<AtomicUsize>) -> Self {
+            Self { polls }
+        }
+    }
+
+    impl Stream for PollCountingEmptyValueStream {
+        type Item = i32;
+
+        fn poll_next(self: Pin<&mut Self>, _cx: &mut Context<'_>) -> Poll<Option<Self::Item>> {
+            self.polls.fetch_add(1, Ordering::SeqCst);
+            Poll::Ready(None)
+        }
+    }
+
     fn init_test(name: &str) {
         crate::test_utils::init_test_logging();
         crate::test_phase!(name);
@@ -339,9 +403,12 @@ mod tests {
         let mut cx = Context::from_waker(&waker);
 
         match Pin::new(&mut future).poll(&mut cx) {
-            Poll::Ready(Err(e)) => {
+            Poll::Ready(Err(TryStreamError::Inner(e))) => {
                 let ok = e == "error";
                 crate::assert_with_log!(ok, "error", "error", e);
+            }
+            Poll::Ready(Err(TryStreamError::PolledAfterCompletion)) => {
+                panic!("unexpected PolledAfterCompletion")
             }
             Poll::Ready(Ok(_)) => panic!("expected Err"),
             Poll::Pending => panic!("expected Ready"),
@@ -396,9 +463,12 @@ mod tests {
         let mut cx = Context::from_waker(&waker);
 
         match Pin::new(&mut future).poll(&mut cx) {
-            Poll::Ready(Err(e)) => {
+            Poll::Ready(Err(TryStreamError::Inner(e))) => {
                 let ok = e == "stream error";
                 crate::assert_with_log!(ok, "stream error", "stream error", e);
+            }
+            Poll::Ready(Err(TryStreamError::PolledAfterCompletion)) => {
+                panic!("unexpected PolledAfterCompletion")
             }
             Poll::Ready(Ok(_)) => panic!("expected Err"),
             Poll::Pending => panic!("expected Ready"),
@@ -421,9 +491,12 @@ mod tests {
         let mut cx = Context::from_waker(&waker);
 
         match Pin::new(&mut future).poll(&mut cx) {
-            Poll::Ready(Err(e)) => {
+            Poll::Ready(Err(TryStreamError::Inner(e))) => {
                 let ok = e == "closure error";
                 crate::assert_with_log!(ok, "closure error", "closure error", e);
+            }
+            Poll::Ready(Err(TryStreamError::PolledAfterCompletion)) => {
+                panic!("unexpected PolledAfterCompletion")
             }
             Poll::Ready(Ok(_)) => panic!("expected Err"),
             Poll::Pending => panic!("expected Ready"),
@@ -447,7 +520,7 @@ mod tests {
         crate::assert_with_log!(
             first == Poll::Ready(Ok(7)),
             "first poll returns final accumulator",
-            Poll::Ready(Ok::<i32, &'static str>(7)),
+            Poll::Ready(Ok::<i32, TryStreamError<&'static str>>(7)),
             first
         );
         crate::assert_with_log!(
@@ -457,14 +530,15 @@ mod tests {
             polls.load(Ordering::SeqCst)
         );
 
-        let repoll = std::panic::catch_unwind(std::panic::AssertUnwindSafe(|| {
-            let _ = Pin::new(&mut future).poll(&mut cx);
-        }));
+        let second = Pin::new(&mut future).poll(&mut cx);
         crate::assert_with_log!(
-            repoll.is_err(),
-            "second poll panics immediately",
-            true,
-            repoll.is_err()
+            matches!(
+                second,
+                Poll::Ready(Err(TryStreamError::<&'static str>::PolledAfterCompletion))
+            ),
+            "second poll fails closed",
+            "Poll::Ready(Err(TryStreamError::PolledAfterCompletion))",
+            second
         );
         crate::assert_with_log!(
             polls.load(Ordering::SeqCst) == 1,
@@ -473,6 +547,50 @@ mod tests {
             polls.load(Ordering::SeqCst)
         );
         crate::test_complete!("try_fold_repoll_after_completion_does_not_repoll_stream");
+    }
+
+    #[test]
+    fn try_collect_repoll_after_completion_does_not_repoll_stream() {
+        init_test("try_collect_repoll_after_completion_does_not_repoll_stream");
+        let polls = Arc::new(AtomicUsize::new(0));
+        let mut future = TryCollect::new(
+            PollCountingEmptyTryStream::new(polls.clone()),
+            Vec::<i32>::new(),
+        );
+        let waker = noop_waker();
+        let mut cx = Context::from_waker(&waker);
+
+        let first = Pin::new(&mut future).poll(&mut cx);
+        crate::assert_with_log!(
+            first == Poll::Ready(Ok::<Vec<i32>, TryStreamError<&'static str>>(Vec::new())),
+            "first poll completes empty collect",
+            Poll::Ready(Ok::<Vec<i32>, TryStreamError<&'static str>>(Vec::new())),
+            first
+        );
+        crate::assert_with_log!(
+            polls.load(Ordering::SeqCst) == 1,
+            "first poll touches upstream once",
+            1,
+            polls.load(Ordering::SeqCst)
+        );
+
+        let second = Pin::new(&mut future).poll(&mut cx);
+        crate::assert_with_log!(
+            matches!(
+                second,
+                Poll::Ready(Err(TryStreamError::<&'static str>::PolledAfterCompletion))
+            ),
+            "second poll fails closed",
+            "Poll::Ready(Err(TryStreamError::PolledAfterCompletion))",
+            second
+        );
+        crate::assert_with_log!(
+            polls.load(Ordering::SeqCst) == 1,
+            "second poll does not touch upstream",
+            1,
+            polls.load(Ordering::SeqCst)
+        );
+        crate::test_complete!("try_collect_repoll_after_completion_does_not_repoll_stream");
     }
 
     #[test]
@@ -513,16 +631,62 @@ mod tests {
         let mut cx = Context::from_waker(&waker);
 
         match Pin::new(&mut future).poll(&mut cx) {
-            Poll::Ready(Err(e)) => {
+            Poll::Ready(Err(TryStreamError::Inner(e))) => {
                 let err_ok = e == "error at 2";
                 crate::assert_with_log!(err_ok, "error", "error at 2", e);
                 let ok = results == vec![1];
                 crate::assert_with_log!(ok, "results", vec![1], results);
             }
+            Poll::Ready(Err(TryStreamError::PolledAfterCompletion)) => {
+                panic!("unexpected PolledAfterCompletion")
+            }
             Poll::Ready(Ok(())) => panic!("expected Err"),
             Poll::Pending => panic!("expected Ready"),
         }
         crate::test_complete!("try_for_each_error");
+    }
+
+    #[test]
+    fn try_for_each_repoll_after_completion_does_not_repoll_stream() {
+        init_test("try_for_each_repoll_after_completion_does_not_repoll_stream");
+        let polls = Arc::new(AtomicUsize::new(0));
+        let mut future = TryForEach::new(PollCountingEmptyValueStream::new(polls.clone()), |_| {
+            Ok::<(), &'static str>(())
+        });
+        let waker = noop_waker();
+        let mut cx = Context::from_waker(&waker);
+
+        let first = Pin::new(&mut future).poll(&mut cx);
+        crate::assert_with_log!(
+            first == Poll::Ready(Ok::<(), TryStreamError<&'static str>>(())),
+            "first poll completes empty for_each",
+            Poll::Ready(Ok::<(), TryStreamError<&'static str>>(())),
+            first
+        );
+        crate::assert_with_log!(
+            polls.load(Ordering::SeqCst) == 1,
+            "first poll touches upstream once",
+            1,
+            polls.load(Ordering::SeqCst)
+        );
+
+        let second = Pin::new(&mut future).poll(&mut cx);
+        crate::assert_with_log!(
+            matches!(
+                second,
+                Poll::Ready(Err(TryStreamError::<&'static str>::PolledAfterCompletion))
+            ),
+            "second poll fails closed",
+            "Poll::Ready(Err(TryStreamError::PolledAfterCompletion))",
+            second
+        );
+        crate::assert_with_log!(
+            polls.load(Ordering::SeqCst) == 1,
+            "second poll does not touch upstream",
+            1,
+            polls.load(Ordering::SeqCst)
+        );
+        crate::test_complete!("try_for_each_repoll_after_completion_does_not_repoll_stream");
     }
 
     #[test]
@@ -565,11 +729,11 @@ mod tests {
         let second = Pin::new(&mut future).poll(&mut cx);
         crate::assert_with_log!(
             second
-                == Poll::Ready(Ok::<Vec<usize>, &'static str>(
+                == Poll::Ready(Ok::<Vec<usize>, TryStreamError<&'static str>>(
                     (0..TRY_STREAM_COOPERATIVE_BUDGET + 5).collect(),
                 )),
             "second poll completes collection",
-            Poll::Ready(Ok::<Vec<usize>, &'static str>(
+            Poll::Ready(Ok::<Vec<usize>, TryStreamError<&'static str>>(
                 (0..TRY_STREAM_COOPERATIVE_BUDGET + 5).collect::<Vec<_>>()
             )),
             second
@@ -618,11 +782,11 @@ mod tests {
         let second = Pin::new(&mut future).poll(&mut cx);
         crate::assert_with_log!(
             second
-                == Poll::Ready(Ok::<usize, &'static str>(
+                == Poll::Ready(Ok::<usize, TryStreamError<&'static str>>(
                     (0..TRY_STREAM_COOPERATIVE_BUDGET + 5).sum(),
                 )),
             "second poll completes fold",
-            Poll::Ready(Ok::<usize, &'static str>(
+            Poll::Ready(Ok::<usize, TryStreamError<&'static str>>(
                 (0..TRY_STREAM_COOPERATIVE_BUDGET + 5).sum::<usize>()
             )),
             second
@@ -676,9 +840,9 @@ mod tests {
 
         let second = Pin::new(&mut future).poll(&mut cx);
         crate::assert_with_log!(
-            second == Poll::Ready(Ok::<(), &'static str>(())),
+            second == Poll::Ready(Ok::<(), TryStreamError<&'static str>>(())),
             "second poll completes for_each",
-            Poll::Ready(Ok::<(), ()>(())),
+            Poll::Ready(Ok::<(), TryStreamError<&'static str>>(())),
             second
         );
         crate::assert_with_log!(

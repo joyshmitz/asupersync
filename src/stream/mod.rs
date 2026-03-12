@@ -130,7 +130,7 @@ pub use stream::Stream;
 pub use take::{Take, TakeWhile};
 pub use then::Then;
 pub use throttle::Throttle;
-pub use try_stream::{TryCollect, TryFold, TryForEach};
+pub use try_stream::{TryCollect, TryFold, TryForEach, TryStreamError};
 pub use watch_stream::WatchStream;
 pub use zip::Zip;
 
