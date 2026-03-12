@@ -748,9 +748,7 @@ impl RateLimiter {
                         waited: Duration::from_millis(wait_ms),
                     })
                 }
-                Some(Err(RejectionReason::Consumed)) => {
-                    Err(RateLimitError::Cancelled)
-                }
+                Some(Err(RejectionReason::Consumed)) => Err(RateLimitError::Cancelled),
                 None => Ok(false),
             }
         } else {
@@ -777,10 +775,7 @@ impl RateLimiter {
             if previous_result == Some(Ok(())) {
                 // Refund tokens if already granted but not consumed by the caller
                 let mut state = self.state.lock();
-                state.tokens = state
-                    .tokens
-                    .saturating_add(cost)
-                    .min(self.policy.burst);
+                state.tokens = state.tokens.saturating_add(cost).min(self.policy.burst);
                 // We could decrement total_allowed here, but the operation was technically
                 // allowed from the rate limiter's perspective, just not consumed.
                 drop(state);

@@ -1093,8 +1093,10 @@ mod tests {
         init_test("immediate_error_repolls_fail_closed_after_completion");
         let waker = noop_waker();
         let mut cx = Context::from_waker(&waker);
-        let mut future: RateLimitFuture<std::future::Ready<Result<i32, &'static str>>, &'static str> =
-            RateLimitFuture::immediate_error(RateLimitError::NotReady);
+        let mut future: RateLimitFuture<
+            std::future::Ready<Result<i32, &'static str>>,
+            &'static str,
+        > = RateLimitFuture::immediate_error(RateLimitError::NotReady);
 
         let first = Pin::new(&mut future).poll(&mut cx);
         crate::assert_with_log!(

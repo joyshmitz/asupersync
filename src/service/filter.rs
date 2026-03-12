@@ -41,6 +41,8 @@ impl<S, P: Clone> Layer<S> for FilterLayer<P> {
 pub enum FilterError<E> {
     /// The caller attempted `call()` without a preceding successful `poll_ready()`.
     NotReady,
+    /// The filter future was polled after it had already completed.
+    PolledAfterCompletion,
     /// The request was rejected by the predicate.
     Rejected,
     /// The inner service returned an error.
@@ -51,6 +53,7 @@ impl<E: fmt::Display> fmt::Display for FilterError<E> {
     fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
         match self {
             Self::NotReady => write!(f, "poll_ready required before call"),
+            Self::PolledAfterCompletion => write!(f, "filter future polled after completion"),
             Self::Rejected => write!(f, "request rejected by filter"),
             Self::Inner(e) => write!(f, "service error: {e}"),
         }
@@ -60,7 +63,7 @@ impl<E: fmt::Display> fmt::Display for FilterError<E> {
 impl<E: std::error::Error + 'static> std::error::Error for FilterError<E> {
     fn source(&self) -> Option<&(dyn std::error::Error + 'static)> {
         match self {
-            Self::NotReady | Self::Rejected => None,
+            Self::NotReady | Self::PolledAfterCompletion | Self::Rejected => None,
             Self::Inner(e) => Some(e),
         }
     }
@@ -158,34 +161,67 @@ where
 
     fn call(&mut self, req: Request) -> Self::Future {
         if !self.ready_observed {
-            return FilterFuture::NotReady;
+            return FilterFuture::not_ready();
         }
 
         if (self.predicate)(&req) {
             self.ready_observed = false;
-            FilterFuture::Inner(self.inner.call(req))
+            FilterFuture::inner(self.inner.call(req))
         } else {
-            FilterFuture::Rejected
+            FilterFuture::rejected()
         }
     }
 }
 
 /// Future returned by [`Filter`].
-pub enum FilterFuture<F> {
+pub struct FilterFuture<F> {
+    state: FilterFutureState<F>,
+}
+
+enum FilterFutureState<F> {
     /// The caller skipped `poll_ready()` or reused a consumed readiness window.
     NotReady,
     /// The request was accepted and forwarded.
     Inner(F),
     /// The request was rejected.
     Rejected,
+    /// The future has already completed.
+    Done,
+}
+
+impl<F> FilterFuture<F> {
+    /// Creates a future that immediately returns a readiness misuse error.
+    #[must_use]
+    pub fn not_ready() -> Self {
+        Self {
+            state: FilterFutureState::NotReady,
+        }
+    }
+
+    /// Creates a future that wraps the inner service's future.
+    #[must_use]
+    pub fn inner(future: F) -> Self {
+        Self {
+            state: FilterFutureState::Inner(future),
+        }
+    }
+
+    /// Creates a future that immediately returns a rejection error.
+    #[must_use]
+    pub fn rejected() -> Self {
+        Self {
+            state: FilterFutureState::Rejected,
+        }
+    }
 }
 
 impl<F> fmt::Debug for FilterFuture<F> {
     fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
-        match self {
-            Self::NotReady => f.debug_tuple("FilterFuture::NotReady").finish(),
-            Self::Inner(_) => f.debug_tuple("FilterFuture::Inner").finish(),
-            Self::Rejected => f.debug_tuple("FilterFuture::Rejected").finish(),
+        match &self.state {
+            FilterFutureState::NotReady => f.debug_tuple("FilterFuture::NotReady").finish(),
+            FilterFutureState::Inner(_) => f.debug_tuple("FilterFuture::Inner").finish(),
+            FilterFutureState::Rejected => f.debug_tuple("FilterFuture::Rejected").finish(),
+            FilterFutureState::Done => f.debug_tuple("FilterFuture::Done").finish(),
         }
     }
 }
@@ -197,10 +233,29 @@ where
     type Output = Result<T, FilterError<E>>;
 
     fn poll(self: Pin<&mut Self>, cx: &mut Context<'_>) -> Poll<Self::Output> {
-        match self.get_mut() {
-            Self::NotReady => Poll::Ready(Err(FilterError::NotReady)),
-            Self::Inner(fut) => Pin::new(fut).poll(cx).map_err(FilterError::Inner),
-            Self::Rejected => Poll::Ready(Err(FilterError::Rejected)),
+        let this = self.get_mut();
+
+        match &mut this.state {
+            FilterFutureState::NotReady => {
+                this.state = FilterFutureState::Done;
+                Poll::Ready(Err(FilterError::NotReady))
+            }
+            FilterFutureState::Inner(fut) => {
+                let result = Pin::new(fut).poll(cx);
+                if result.is_ready() {
+                    this.state = FilterFutureState::Done;
+                }
+                match result {
+                    Poll::Ready(Ok(value)) => Poll::Ready(Ok(value)),
+                    Poll::Ready(Err(err)) => Poll::Ready(Err(FilterError::Inner(err))),
+                    Poll::Pending => Poll::Pending,
+                }
+            }
+            FilterFutureState::Rejected => {
+                this.state = FilterFutureState::Done;
+                Poll::Ready(Err(FilterError::Rejected))
+            }
+            FilterFutureState::Done => Poll::Ready(Err(FilterError::PolledAfterCompletion)),
         }
     }
 }
@@ -608,6 +663,12 @@ mod tests {
     }
 
     #[test]
+    fn filter_error_polled_after_completion_display() {
+        let err: FilterError<std::io::Error> = FilterError::PolledAfterCompletion;
+        assert!(format!("{err}").contains("polled after completion"));
+    }
+
+    #[test]
     fn filter_error_not_ready_display() {
         let err: FilterError<std::io::Error> = FilterError::NotReady;
         assert!(format!("{err}").contains("poll_ready required"));
@@ -625,6 +686,9 @@ mod tests {
         let err: FilterError<std::io::Error> = FilterError::NotReady;
         assert!(err.source().is_none());
 
+        let err: FilterError<std::io::Error> = FilterError::PolledAfterCompletion;
+        assert!(err.source().is_none());
+
         let err: FilterError<std::io::Error> = FilterError::Rejected;
         assert!(err.source().is_none());
 
@@ -639,30 +703,84 @@ mod tests {
         assert!(dbg.contains("Rejected"));
     }
 
+    #[test]
+    fn filter_error_polled_after_completion_debug() {
+        let err: FilterError<std::io::Error> = FilterError::PolledAfterCompletion;
+        let dbg = format!("{err:?}");
+        assert!(dbg.contains("PolledAfterCompletion"));
+    }
+
     // ================================================================
     // FilterFuture
     // ================================================================
 
     #[test]
     fn filter_future_inner_debug() {
-        let fut: FilterFuture<std::future::Ready<Result<i32, ()>>> =
-            FilterFuture::Inner(std::future::ready(Ok(42)));
+        let fut = FilterFuture::inner(std::future::ready(Ok::<i32, ()>(42)));
         let dbg = format!("{fut:?}");
         assert!(dbg.contains("Inner"));
     }
 
     #[test]
     fn filter_future_not_ready_debug() {
-        let fut: FilterFuture<std::future::Ready<Result<i32, ()>>> = FilterFuture::NotReady;
+        let fut: FilterFuture<std::future::Ready<Result<i32, ()>>> = FilterFuture::not_ready();
         let dbg = format!("{fut:?}");
         assert!(dbg.contains("NotReady"));
     }
 
     #[test]
     fn filter_future_rejected_debug() {
-        let fut: FilterFuture<std::future::Ready<Result<i32, ()>>> = FilterFuture::Rejected;
+        let fut: FilterFuture<std::future::Ready<Result<i32, ()>>> = FilterFuture::rejected();
         let dbg = format!("{fut:?}");
         assert!(dbg.contains("Rejected"));
+    }
+
+    #[test]
+    fn filter_future_not_ready_repoll_fails_closed() {
+        let mut fut: FilterFuture<std::future::Ready<Result<i32, ()>>> = FilterFuture::not_ready();
+        let waker = noop_waker();
+        let mut cx = Context::from_waker(&waker);
+
+        let first = Pin::new(&mut fut).poll(&mut cx);
+        assert!(matches!(first, Poll::Ready(Err(FilterError::NotReady))));
+
+        let second = Pin::new(&mut fut).poll(&mut cx);
+        assert!(matches!(
+            second,
+            Poll::Ready(Err(FilterError::PolledAfterCompletion))
+        ));
+    }
+
+    #[test]
+    fn filter_future_rejected_repoll_fails_closed() {
+        let mut fut: FilterFuture<std::future::Ready<Result<i32, ()>>> = FilterFuture::rejected();
+        let waker = noop_waker();
+        let mut cx = Context::from_waker(&waker);
+
+        let first = Pin::new(&mut fut).poll(&mut cx);
+        assert!(matches!(first, Poll::Ready(Err(FilterError::Rejected))));
+
+        let second = Pin::new(&mut fut).poll(&mut cx);
+        assert!(matches!(
+            second,
+            Poll::Ready(Err(FilterError::PolledAfterCompletion))
+        ));
+    }
+
+    #[test]
+    fn filter_future_inner_repoll_fails_closed() {
+        let mut fut = FilterFuture::inner(std::future::ready(Ok::<i32, ()>(42)));
+        let waker = noop_waker();
+        let mut cx = Context::from_waker(&waker);
+
+        let first = Pin::new(&mut fut).poll(&mut cx);
+        assert!(matches!(first, Poll::Ready(Ok(42))));
+
+        let second = Pin::new(&mut fut).poll(&mut cx);
+        assert!(matches!(
+            second,
+            Poll::Ready(Err(FilterError::PolledAfterCompletion))
+        ));
     }
 
     // ================================================================

@@ -423,9 +423,7 @@ where
                 }
             },
             ReconnectFutureState::Error(error) => Poll::Ready(Err(error)),
-            ReconnectFutureState::Done => {
-                Poll::Ready(Err(ReconnectError::PolledAfterCompletion))
-            }
+            ReconnectFutureState::Done => Poll::Ready(Err(ReconnectError::PolledAfterCompletion)),
         }
     }
 }

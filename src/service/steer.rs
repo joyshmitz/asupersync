@@ -17,7 +17,8 @@ use std::task::{Context, Poll};
 /// A service that routes requests to one of several inner services.
 ///
 /// The `picker` function is called with the request to select which
-/// backend receives it (by index into the `services` vec).
+/// backend receives it (by index into the `services` vec). Out-of-range
+/// indexes fail closed instead of being silently wrapped.
 pub struct Steer<S, F> {
     services: Vec<Arc<Mutex<S>>>,
     picker: F,
@@ -27,7 +28,8 @@ impl<S, F> Steer<S, F> {
     /// Create a new steer combinator.
     ///
     /// `picker` is called with a reference to the request and must return
-    /// an index into `services`.
+    /// an index into `services`. Returning an out-of-range index causes
+    /// [`SteerError::InvalidRoute`] when the returned future is polled.
     ///
     /// # Panics
     ///
@@ -112,6 +114,10 @@ enum SteerState<S, Request>
 where
     S: Service<Request>,
 {
+    InvalidRoute {
+        index: usize,
+        service_count: usize,
+    },
     PollReady {
         service: Arc<Mutex<S>>,
         request: Option<Request>,
@@ -126,6 +132,15 @@ impl<S, Request> SteerFuture<S, Request>
 where
     S: Service<Request>,
 {
+    fn invalid_route(index: usize, service_count: usize) -> Self {
+        Self {
+            state: SteerState::InvalidRoute {
+                index,
+                service_count,
+            },
+        }
+    }
+
     fn new(service: Arc<Mutex<S>>, request: Request) -> Self {
         Self {
             state: SteerState::PollReady {
@@ -159,6 +174,15 @@ where
         loop {
             let state = std::mem::replace(&mut this.state, SteerState::Done);
             match state {
+                SteerState::InvalidRoute {
+                    index,
+                    service_count,
+                } => {
+                    return Poll::Ready(Err(SteerError::InvalidRoute {
+                        index,
+                        service_count,
+                    }));
+                }
                 SteerState::PollReady {
                     service,
                     mut request,
@@ -218,7 +242,10 @@ where
     }
 
     fn call(&mut self, req: Request) -> Self::Future {
-        let idx = (self.picker)(&req) % self.services.len();
+        let idx = (self.picker)(&req);
+        if idx >= self.services.len() {
+            return SteerFuture::invalid_route(idx, self.services.len());
+        }
         SteerFuture::new(Arc::clone(&self.services[idx]), req)
     }
 }
@@ -230,6 +257,13 @@ where
 pub enum SteerError<E> {
     /// Inner service error.
     Inner(E),
+    /// The picker returned an index outside the available service range.
+    InvalidRoute {
+        /// The out-of-range index chosen by the picker.
+        index: usize,
+        /// The number of available services.
+        service_count: usize,
+    },
     /// No services available.
     NoServices,
     /// The steer future was polled after it had already completed.
@@ -240,6 +274,13 @@ impl<E: fmt::Display> fmt::Display for SteerError<E> {
     fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
         match self {
             Self::Inner(e) => write!(f, "steer service error: {e}"),
+            Self::InvalidRoute {
+                index,
+                service_count,
+            } => write!(
+                f,
+                "steer picker selected invalid service index {index} (service count {service_count})"
+            ),
             Self::NoServices => write!(f, "no services available"),
             Self::PolledAfterCompletion => write!(f, "steer future polled after completion"),
         }
@@ -250,7 +291,7 @@ impl<E: std::error::Error + 'static> std::error::Error for SteerError<E> {
     fn source(&self) -> Option<&(dyn std::error::Error + 'static)> {
         match self {
             Self::Inner(e) => Some(e),
-            Self::NoServices | Self::PolledAfterCompletion => None,
+            Self::InvalidRoute { .. } | Self::NoServices | Self::PolledAfterCompletion => None,
         }
     }
 }
@@ -359,6 +400,32 @@ mod tests {
         }
     }
 
+    #[derive(Debug, Clone)]
+    struct CountingCallService {
+        calls: Arc<AtomicUsize>,
+    }
+
+    impl CountingCallService {
+        fn new(calls: Arc<AtomicUsize>) -> Self {
+            Self { calls }
+        }
+    }
+
+    impl Service<()> for CountingCallService {
+        type Response = usize;
+        type Error = std::convert::Infallible;
+        type Future = Ready<Result<usize, Self::Error>>;
+
+        fn poll_ready(&mut self, _cx: &mut Context<'_>) -> Poll<Result<(), Self::Error>> {
+            Poll::Ready(Ok(()))
+        }
+
+        fn call(&mut self, _req: ()) -> Self::Future {
+            self.calls.fetch_add(1, Ordering::SeqCst);
+            ready(Ok(0))
+        }
+    }
+
     struct NoopWaker;
 
     impl Wake for NoopWaker {
@@ -428,11 +495,14 @@ mod tests {
     }
 
     #[test]
-    fn steer_picker_wraps() {
-        let svcs = vec![IdService { id: 0 }, IdService { id: 1 }];
-        let steer = Steer::new(svcs, |(): &()| 5);
-        let idx = (steer.picker)(&()) % steer.len();
-        assert_eq!(idx, 1);
+    fn steer_invalid_route_display() {
+        let err: SteerError<std::io::Error> = SteerError::InvalidRoute {
+            index: 5,
+            service_count: 2,
+        };
+        let msg = format!("{err}");
+        assert!(msg.contains("invalid service index 5"));
+        assert!(msg.contains("service count 2"));
     }
 
     #[test]
@@ -458,6 +528,12 @@ mod tests {
         use std::error::Error;
         let err: SteerError<std::io::Error> = SteerError::Inner(std::io::Error::other("fail"));
         assert!(err.source().is_some());
+
+        let invalid_route: SteerError<std::io::Error> = SteerError::InvalidRoute {
+            index: 5,
+            service_count: 2,
+        };
+        assert!(invalid_route.source().is_none());
 
         let err2: SteerError<std::io::Error> = SteerError::NoServices;
         assert!(err2.source().is_none());
@@ -519,6 +595,32 @@ mod tests {
     }
 
     #[test]
+    fn steer_invalid_picker_index_fails_closed_without_dispatching() {
+        init_test("steer_invalid_picker_index_fails_closed_without_dispatching");
+        let first_calls = Arc::new(AtomicUsize::new(0));
+        let second_calls = Arc::new(AtomicUsize::new(0));
+        let mut steer = Steer::new(
+            vec![
+                CountingCallService::new(Arc::clone(&first_calls)),
+                CountingCallService::new(Arc::clone(&second_calls)),
+            ],
+            |(): &()| 5,
+        );
+
+        let result = block_on(steer.call(()));
+        assert!(matches!(
+            result,
+            Err(SteerError::InvalidRoute {
+                index: 5,
+                service_count: 2
+            })
+        ));
+        assert_eq!(first_calls.load(Ordering::SeqCst), 0);
+        assert_eq!(second_calls.load(Ordering::SeqCst), 0);
+        crate::test_complete!("steer_invalid_picker_index_fails_closed_without_dispatching");
+    }
+
+    #[test]
     fn steer_selected_route_is_not_blocked_by_other_backends() {
         init_test("steer_selected_route_is_not_blocked_by_other_backends");
         let blocked_available = Arc::new(AtomicUsize::new(0));
@@ -567,6 +669,28 @@ mod tests {
 
         let first = Pin::new(&mut future).poll(&mut cx);
         assert!(matches!(first, Poll::Ready(Err(SteerError::Inner("boom")))));
+
+        let second = Pin::new(&mut future).poll(&mut cx);
+        assert!(matches!(
+            second,
+            Poll::Ready(Err(SteerError::PolledAfterCompletion))
+        ));
+    }
+
+    #[test]
+    fn steer_future_second_poll_fails_closed_after_invalid_route() {
+        let mut future = Steer::new(vec![IdService { id: 7 }], |_: &usize| 3).call(0);
+        let waker = noop_waker();
+        let mut cx = Context::from_waker(&waker);
+
+        let first = Pin::new(&mut future).poll(&mut cx);
+        assert!(matches!(
+            first,
+            Poll::Ready(Err(SteerError::InvalidRoute {
+                index: 3,
+                service_count: 1
+            }))
+        ));
 
         let second = Pin::new(&mut future).poll(&mut cx);
         assert!(matches!(

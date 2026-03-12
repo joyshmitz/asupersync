@@ -690,7 +690,12 @@ mod tests {
         let mut future = svc.call(7);
         let first = Pin::new(&mut future).poll(&mut cx);
         let first_not_ready = matches!(first, Poll::Ready(Err(ConcurrencyLimitError::NotReady)));
-        crate::assert_with_log!(first_not_ready, "first poll not ready", true, first_not_ready);
+        crate::assert_with_log!(
+            first_not_ready,
+            "first poll not ready",
+            true,
+            first_not_ready
+        );
 
         let second = Pin::new(&mut future).poll(&mut cx);
         let second_fails_closed = matches!(
