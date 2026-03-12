@@ -1758,16 +1758,18 @@ impl<S: GenServer> NamedGenServerHandle<S> {
     /// This is the normal shutdown path: the name becomes available for
     /// re-registration after this call.
     ///
-    /// # Panics
+    /// # Errors
     ///
-    /// Panics if the lease was already resolved (double release/abort).
+    /// Returns [`crate::cx::NameLeaseError::AlreadyResolved`] if the lease was
+    /// already resolved or moved out via [`take_lease`](Self::take_lease).
     pub fn stop_and_release(&mut self) -> Result<(), crate::cx::NameLeaseError> {
-        self.handle.stop();
         self.lease
             .as_mut()
-            .expect("lease already resolved")
+            .ok_or(crate::cx::NameLeaseError::AlreadyResolved)?
             .release()
-            .map(|_proof| ())
+            .map(|_proof| {
+                self.handle.stop();
+            })
     }
 
     /// Abort the name lease without stopping the server.
@@ -1775,13 +1777,14 @@ impl<S: GenServer> NamedGenServerHandle<S> {
     /// Use this for cancellation / error paths where the name registration
     /// itself should be rolled back.
     ///
-    /// # Panics
+    /// # Errors
     ///
-    /// Panics if the lease was already resolved.
+    /// Returns [`crate::cx::NameLeaseError::AlreadyResolved`] if the lease was
+    /// already resolved or moved out via [`take_lease`](Self::take_lease).
     pub fn abort_lease(&mut self) -> Result<(), crate::cx::NameLeaseError> {
         self.lease
             .as_mut()
-            .expect("lease already resolved")
+            .ok_or(crate::cx::NameLeaseError::AlreadyResolved)?
             .abort()
             .map(|_proof| ())
     }
@@ -5056,6 +5059,159 @@ mod tests {
         let _ = lease.abort();
 
         crate::test_complete!("named_server_take_lease_manual_management");
+    }
+
+    /// Named server: stop_and_release fails closed after take_lease removed the lease.
+    #[test]
+    fn named_server_stop_and_release_after_take_lease_returns_already_resolved() {
+        crate::test_utils::init_test_logging();
+        crate::test_phase!(
+            "named_server_stop_and_release_after_take_lease_returns_already_resolved"
+        );
+
+        let budget = Budget::new().with_poll_quota(100_000);
+        let mut runtime = crate::lab::LabRuntime::new(crate::lab::LabConfig::new(42));
+        let region = runtime.state.create_root_region(budget);
+        let cx = Cx::for_testing();
+        let scope = crate::cx::Scope::<FailFast>::new(region, budget);
+        let mut registry = crate::cx::NameRegistry::new();
+
+        #[allow(clippy::items_after_statements)]
+        #[derive(Debug)]
+        struct Noop3;
+
+        #[allow(clippy::items_after_statements)]
+        impl GenServer for Noop3 {
+            type Call = ();
+            type Reply = ();
+            type Cast = ();
+            type Info = SystemMsg;
+
+            fn handle_call(
+                &mut self,
+                _cx: &Cx,
+                _req: (),
+                reply: Reply<()>,
+            ) -> Pin<Box<dyn Future<Output = ()> + Send + '_>> {
+                let _ = reply.send(());
+                Box::pin(async {})
+            }
+
+            fn handle_cast(
+                &mut self,
+                _cx: &Cx,
+                _msg: (),
+            ) -> Pin<Box<dyn Future<Output = ()> + Send + '_>> {
+                Box::pin(async {})
+            }
+        }
+
+        let now = crate::types::Time::ZERO;
+        let (mut handle, stored) = scope
+            .spawn_named_gen_server(
+                &mut runtime.state,
+                &cx,
+                &mut registry,
+                "take_then_stop",
+                Noop3,
+                8,
+                now,
+            )
+            .unwrap();
+        runtime.state.store_spawned_task(handle.task_id(), stored);
+
+        let mut lease = handle.take_lease().expect("lease should be present");
+        assert_eq!(
+            handle.handle.state.load(),
+            ActorState::Created,
+            "taking the lease alone must not stop the server"
+        );
+        assert_eq!(
+            handle.stop_and_release().unwrap_err(),
+            crate::cx::NameLeaseError::AlreadyResolved
+        );
+        assert_eq!(
+            handle.handle.state.load(),
+            ActorState::Created,
+            "failed stop_and_release after take_lease must not mutate actor state"
+        );
+        let _ = lease.abort();
+
+        crate::test_complete!(
+            "named_server_stop_and_release_after_take_lease_returns_already_resolved"
+        );
+    }
+
+    /// Named server: abort_lease fails closed after stop_and_release resolved the lease.
+    #[test]
+    fn named_server_abort_lease_after_stop_and_release_returns_already_resolved() {
+        crate::test_utils::init_test_logging();
+        crate::test_phase!(
+            "named_server_abort_lease_after_stop_and_release_returns_already_resolved"
+        );
+
+        let budget = Budget::new().with_poll_quota(100_000);
+        let mut runtime = crate::lab::LabRuntime::new(crate::lab::LabConfig::new(42));
+        let region = runtime.state.create_root_region(budget);
+        let cx = Cx::for_testing();
+        let scope = crate::cx::Scope::<FailFast>::new(region, budget);
+        let mut registry = crate::cx::NameRegistry::new();
+
+        #[allow(clippy::items_after_statements)]
+        #[derive(Debug)]
+        struct Noop4;
+
+        #[allow(clippy::items_after_statements)]
+        impl GenServer for Noop4 {
+            type Call = ();
+            type Reply = ();
+            type Cast = ();
+            type Info = SystemMsg;
+
+            fn handle_call(
+                &mut self,
+                _cx: &Cx,
+                _req: (),
+                reply: Reply<()>,
+            ) -> Pin<Box<dyn Future<Output = ()> + Send + '_>> {
+                let _ = reply.send(());
+                Box::pin(async {})
+            }
+
+            fn handle_cast(
+                &mut self,
+                _cx: &Cx,
+                _msg: (),
+            ) -> Pin<Box<dyn Future<Output = ()> + Send + '_>> {
+                Box::pin(async {})
+            }
+        }
+
+        let now = crate::types::Time::ZERO;
+        let (mut handle, stored) = scope
+            .spawn_named_gen_server(
+                &mut runtime.state,
+                &cx,
+                &mut registry,
+                "stop_then_abort",
+                Noop4,
+                8,
+                now,
+            )
+            .unwrap();
+        runtime.state.store_spawned_task(handle.task_id(), stored);
+
+        handle
+            .stop_and_release()
+            .expect("initial release should succeed");
+        assert_eq!(
+            handle.abort_lease().unwrap_err(),
+            crate::cx::NameLeaseError::AlreadyResolved
+        );
+
+        crate::test_complete!(
+            "named_server_abort_lease_after_stop_and_release_returns_already_resolved"
+        );
     }
 
     #[test]

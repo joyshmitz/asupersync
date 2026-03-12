@@ -2632,6 +2632,46 @@ worker_threads = 16
     }
 
     #[test]
+    fn join_handle_pending_then_completion_then_repoll_panics_and_stays_finished() {
+        init_test_logging();
+
+        let state = Arc::new(Mutex::new(JoinState::new()));
+        let mut join = std::pin::pin!(JoinHandle::new(Arc::clone(&state)));
+        let waker = noop_waker();
+        let mut cx = Context::from_waker(&waker);
+
+        let first = join.as_mut().poll(&mut cx);
+        assert!(matches!(first, Poll::Pending));
+        assert!(
+            !join.as_ref().get_ref().is_finished(),
+            "join handle should not be finished while task is still pending"
+        );
+
+        complete_task(&state, Ok(11_u8));
+
+        let second = join.as_mut().poll(&mut cx);
+        assert!(matches!(second, Poll::Ready(11)));
+        assert!(
+            join.as_ref().get_ref().is_finished(),
+            "join handle should become finished after ready output is observed"
+        );
+
+        let third = std::panic::catch_unwind(std::panic::AssertUnwindSafe(|| {
+            let _ = join.as_mut().poll(&mut cx);
+        }));
+        let message =
+            panic_payload_to_string(third.expect_err("third poll must fail closed by panicking"));
+        assert!(
+            message.contains("runtime::JoinHandle polled after completion"),
+            "post-completion repoll should panic with completion misuse message, got {message}"
+        );
+        assert!(
+            join.as_ref().get_ref().is_finished(),
+            "join handle should remain finished after post-completion misuse"
+        );
+    }
+
+    #[test]
     fn join_handle_second_poll_panics_after_task_panic_and_stays_finished() {
         init_test_logging();
 

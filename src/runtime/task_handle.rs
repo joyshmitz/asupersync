@@ -65,6 +65,8 @@ pub struct TaskHandle<T> {
     receiver: oneshot::Receiver<Result<T, JoinError>>,
     /// Weak reference to the task's context state for cancellation.
     inner: Weak<RwLock<CxInner>>,
+    /// Whether this handle already consumed a terminal join result.
+    terminal_consumed: bool,
 }
 
 impl<T> TaskHandle<T> {
@@ -78,6 +80,7 @@ impl<T> TaskHandle<T> {
             task_id,
             receiver,
             inner,
+            terminal_consumed: false,
         }
     }
 
@@ -100,7 +103,7 @@ impl<T> TaskHandle<T> {
     #[inline]
     #[must_use]
     pub fn is_finished(&self) -> bool {
-        self.receiver.is_ready() || self.receiver.is_closed()
+        self.terminal_consumed || self.receiver.is_ready() || self.receiver.is_closed()
     }
 
     /// Waits for the task to complete and returns its result.
@@ -132,10 +135,12 @@ impl<T> TaskHandle<T> {
     #[must_use]
     pub fn join<'a>(&'a mut self, _cx: &'a Cx) -> JoinFuture<'a, T> {
         let cx_inner = self.inner.clone();
+        let receiver = &mut self.receiver;
+        let terminal_state = &mut self.terminal_consumed;
         JoinFuture {
-            inner: self.receiver.recv_uninterruptible(),
+            inner: receiver.recv_uninterruptible(),
             cx_inner,
-            terminal: false,
+            terminal_state,
             drop_abort_defused: false,
             drop_reason: None,
         }
@@ -154,10 +159,12 @@ impl<T> TaskHandle<T> {
         reason: CancelReason,
     ) -> JoinFuture<'a, T> {
         let cx_inner = self.inner.clone();
+        let receiver = &mut self.receiver;
+        let terminal_state = &mut self.terminal_consumed;
         JoinFuture {
-            inner: self.receiver.recv_uninterruptible(),
+            inner: receiver.recv_uninterruptible(),
             cx_inner,
-            terminal: false,
+            terminal_state,
             drop_abort_defused: false,
             drop_reason: Some(reason),
         }
@@ -170,13 +177,28 @@ impl<T> TaskHandle<T> {
     /// - `Ok(Some(result))` if the task has completed
     /// - `Ok(None)` if the task is still running
     /// - `Err(JoinError)` if the task was cancelled or panicked
+    /// - `Err(JoinError::PolledAfterCompletion)` if a terminal result was already consumed
     #[inline]
     pub fn try_join(&mut self) -> Result<Option<T>, JoinError> {
-        match self.receiver.try_recv() {
-            Ok(result) => Ok(Some(result?)),
-            Err(oneshot::TryRecvError::Empty) => Ok(None),
-            Err(oneshot::TryRecvError::Closed) => Err(JoinError::Cancelled(self.closed_reason())),
+        if self.terminal_consumed {
+            return Err(JoinError::PolledAfterCompletion);
         }
+        match self.receiver.try_recv() {
+            Ok(result) => {
+                self.terminal_consumed = true;
+                result.map(Some)
+            }
+            Err(oneshot::TryRecvError::Empty) => Ok(None),
+            Err(oneshot::TryRecvError::Closed) => {
+                self.terminal_consumed = true;
+                Err(JoinError::Cancelled(self.closed_reason()))
+            }
+        }
+    }
+
+    #[cfg(test)]
+    fn terminal_consumed_for_test(&self) -> bool {
+        self.terminal_consumed
     }
 
     /// Aborts the task (requests cancellation).
@@ -226,7 +248,7 @@ impl<T> TaskHandle<T> {
 pub struct JoinFuture<'a, T> {
     inner: oneshot::RecvUninterruptibleFuture<'a, Result<T, JoinError>>,
     cx_inner: Weak<RwLock<CxInner>>,
-    terminal: bool,
+    terminal_state: &'a mut bool,
     drop_abort_defused: bool,
     drop_reason: Option<CancelReason>,
 }
@@ -274,17 +296,17 @@ impl<T> std::future::Future for JoinFuture<'_, T> {
         cx: &mut std::task::Context<'_>,
     ) -> std::task::Poll<Self::Output> {
         let this = &mut *self;
-        if this.terminal {
+        if *this.terminal_state {
             return std::task::Poll::Ready(Err(JoinError::PolledAfterCompletion));
         }
         // JoinError needs to be mapped if recv fails with RecvError
         match std::pin::Pin::new(&mut this.inner).poll(cx) {
             std::task::Poll::Ready(Ok(res)) => {
-                this.terminal = true;
+                *this.terminal_state = true;
                 std::task::Poll::Ready(res)
             }
             std::task::Poll::Ready(Err(crate::channel::oneshot::RecvError::Closed)) => {
-                this.terminal = true;
+                *this.terminal_state = true;
                 let reason = this.closed_reason();
                 std::task::Poll::Ready(Err(JoinError::Cancelled(reason)))
             }
@@ -300,7 +322,7 @@ impl<T> Drop for JoinFuture<'_, T> {
     fn drop(&mut self) {
         // Abort the task if we stop waiting for it.
         // This makes TaskHandle::join cancel-safe and race-safe.
-        if !self.terminal && !self.drop_abort_defused {
+        if !*self.terminal_state && !self.drop_abort_defused {
             // If a result is already ready, don't stamp a spurious cancel
             // reason when dropping an unpolled join future.
             if self.inner.receiver_finished() {
@@ -803,8 +825,12 @@ mod tests {
         let (tx, rx) = oneshot::channel::<Result<i32, JoinError>>();
         tx.send(&cx, Ok(99)).expect("send");
         let mut handle = TaskHandle::new(task_id, rx, std::sync::Weak::new());
-        let result = handle.try_join();
-        assert_eq!(result.unwrap(), Some(99));
+        let first = handle.try_join();
+        assert_eq!(first.unwrap(), Some(99));
+        assert!(handle.terminal_consumed_for_test());
+
+        let second = handle.try_join();
+        assert!(matches!(second, Err(JoinError::PolledAfterCompletion)));
     }
 
     #[test]
@@ -813,7 +839,27 @@ mod tests {
         let (tx, rx) = oneshot::channel::<Result<i32, JoinError>>();
         drop(tx);
         let mut handle = TaskHandle::new(task_id, rx, std::sync::Weak::new());
-        let result = handle.try_join();
-        assert!(matches!(result, Err(JoinError::Cancelled(_))));
+        let first = handle.try_join();
+        assert!(matches!(first, Err(JoinError::Cancelled(_))));
+        assert!(handle.terminal_consumed_for_test());
+
+        let second = handle.try_join();
+        assert!(matches!(second, Err(JoinError::PolledAfterCompletion)));
+    }
+
+    #[test]
+    fn try_join_after_join_completion_fails_closed() {
+        let cx = test_cx();
+        let task_id = TaskId::from_arena(ArenaIndex::new(23, 0));
+        let (tx, rx) = oneshot::channel::<Result<i32, JoinError>>();
+        tx.send(&cx, Ok(123)).expect("send");
+        let mut handle = TaskHandle::new(task_id, rx, std::sync::Weak::new());
+
+        let result = block_on(handle.join(&cx));
+        assert_eq!(result.unwrap(), 123);
+        assert!(handle.terminal_consumed_for_test());
+
+        let second = handle.try_join();
+        assert!(matches!(second, Err(JoinError::PolledAfterCompletion)));
     }
 }

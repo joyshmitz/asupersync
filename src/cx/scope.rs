@@ -1002,14 +1002,20 @@ impl<P: Policy> Scope<'_, P> {
 
         match winner {
             Either::Left(res) => {
-                if let Err(JoinError::Panicked(p)) = h2.join(cx).await {
+                let loser_res = h2.join(cx).await;
+                if let Err(JoinError::Panicked(p)) = res {
+                    Err(JoinError::Panicked(p))
+                } else if let Err(JoinError::Panicked(p)) = loser_res {
                     Err(JoinError::Panicked(p))
                 } else {
                     res
                 }
             }
             Either::Right(res) => {
-                if let Err(JoinError::Panicked(p)) = h1.join(cx).await {
+                let loser_res = h1.join(cx).await;
+                if let Err(JoinError::Panicked(p)) = res {
+                    Err(JoinError::Panicked(p))
+                } else if let Err(JoinError::Panicked(p)) = loser_res {
                     Err(JoinError::Panicked(p))
                 } else {
                     res
@@ -1127,14 +1133,20 @@ impl<P: Policy> Scope<'_, P> {
 
                 match race_outcome {
                     Either::Left(res) => {
-                        if let Err(JoinError::Panicked(p)) = h2.join(cx).await {
+                        let loser_res = h2.join(cx).await;
+                        if let Err(JoinError::Panicked(p)) = res {
+                            Err(JoinError::Panicked(p))
+                        } else if let Err(JoinError::Panicked(p)) = loser_res {
                             Err(JoinError::Panicked(p))
                         } else {
                             res
                         }
                     }
                     Either::Right(res) => {
-                        if let Err(JoinError::Panicked(p)) = h1.join(cx).await {
+                        let loser_res = h1.join(cx).await;
+                        if let Err(JoinError::Panicked(p)) = res {
+                            Err(JoinError::Panicked(p))
+                        } else if let Err(JoinError::Panicked(p)) = loser_res {
                             Err(JoinError::Panicked(p))
                         } else {
                             res
