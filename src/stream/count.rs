@@ -23,14 +23,14 @@ const COUNT_COOPERATIVE_BUDGET: usize = 1024;
 pub struct Count<S> {
     #[pin]
     stream: S,
-    count: usize,
+    total: usize,
     completed: bool,
 }
 
 impl<S> Count<S> {
     /// Creates a new `Count` future.
     pub(crate) fn new(stream: S) -> Self {
-        Self { stream, count: 0, completed: false }
+        Self { stream, total: 0, completed: false }
     }
 }
 
@@ -48,7 +48,7 @@ where
         loop {
             match this.stream.as_mut().poll_next(cx) {
                 Poll::Ready(Some(_)) => {
-                    *this.count += 1;
+                    *this.total += 1;
                     counted_this_poll += 1;
                     if counted_this_poll >= COUNT_COOPERATIVE_BUDGET {
                         cx.waker().wake_by_ref();
@@ -57,7 +57,7 @@ where
                 }
                 Poll::Ready(None) => {
                     *this.completed = true;
-                    return Poll::Ready(*this.count);
+                    return Poll::Ready(*this.total);
                 }
                 Poll::Pending => return Poll::Pending,
             }
@@ -193,10 +193,10 @@ mod tests {
             first
         );
         crate::assert_with_log!(
-            future.count == COUNT_COOPERATIVE_BUDGET,
+            future.total == COUNT_COOPERATIVE_BUDGET,
             "count preserved across yield",
             COUNT_COOPERATIVE_BUDGET,
-            future.count
+            future.total
         );
         crate::assert_with_log!(
             future.stream.next == COUNT_COOPERATIVE_BUDGET,

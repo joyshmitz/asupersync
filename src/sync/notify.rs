@@ -177,6 +177,7 @@ impl Notify {
     /// will be delivered to the next task that calls `notified().await`.
     ///
     /// If multiple tasks are waiting, exactly one will be woken.
+    #[allow(clippy::significant_drop_tightening)] // Lock must be held through stored_notifications increment to prevent lost wakeups
     pub fn notify_one(&self) {
         let mut waiters = self.waiters.lock();
 
