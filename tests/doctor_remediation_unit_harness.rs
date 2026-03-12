@@ -1411,7 +1411,7 @@ fn guided_session_idempotency_returns_noop() {
             scenario_id: "guided-remediation-idempotent-second".to_string(),
             approved_checkpoints: all_checkpoint_ids(&recipe),
             simulate_apply_failure: false,
-            previous_idempotency_key: Some(first.patch_plan.idempotency_key.clone()),
+            previous_idempotency_key: Some(first.patch_plan.idempotency_key),
         },
     )
     .expect("second session");

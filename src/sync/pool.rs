@@ -4081,6 +4081,16 @@ mod tests {
         crate::test_complete!("pool_factory_error_releases_create_slot");
     }
 
+    struct DropTrackedResource {
+        drops: Arc<std::sync::atomic::AtomicUsize>,
+    }
+
+    impl Drop for DropTrackedResource {
+        fn drop(&mut self) {
+            self.drops.fetch_add(1, std::sync::atomic::Ordering::SeqCst);
+        }
+    }
+
     #[test]
     fn pool_close_while_create_in_flight_returns_closed() {
         init_test("pool_close_while_create_in_flight_returns_closed");
@@ -4088,12 +4098,15 @@ mod tests {
         let (entered_tx, entered_rx) = std::sync::mpsc::channel();
         let (unblock_tx, unblock_rx) = std::sync::mpsc::channel();
         let unblock_rx = Arc::new(std::sync::Mutex::new(unblock_rx));
+        let drop_count = Arc::new(std::sync::atomic::AtomicUsize::new(0));
 
         let factory = {
             let unblock_rx = Arc::clone(&unblock_rx);
+            let drop_count = Arc::clone(&drop_count);
             move || {
                 let unblock_rx = Arc::clone(&unblock_rx);
                 let entered_tx = entered_tx.clone();
+                let drop_count = Arc::clone(&drop_count);
                 Box::pin(async move {
                     entered_tx.send(()).expect("factory entered");
                     unblock_rx
@@ -4101,12 +4114,17 @@ mod tests {
                         .expect("factory unblock receiver lock")
                         .recv()
                         .expect("factory unblock signal");
-                    Ok::<u32, Box<dyn std::error::Error + Send + Sync>>(7)
+                    Ok::<DropTrackedResource, Box<dyn std::error::Error + Send + Sync>>(
+                        DropTrackedResource { drops: drop_count },
+                    )
                 })
                     as std::pin::Pin<
                         Box<
                             dyn Future<
-                                    Output = Result<u32, Box<dyn std::error::Error + Send + Sync>>,
+                                    Output = Result<
+                                        DropTrackedResource,
+                                        Box<dyn std::error::Error + Send + Sync>,
+                                    >,
                                 > + Send,
                         >,
                     >
@@ -4119,8 +4137,8 @@ mod tests {
 
         let worker = std::thread::spawn(move || {
             let cx_handle: crate::cx::Cx = crate::cx::Cx::for_testing();
-            let result = futures_lite::future::block_on(acquire_pool.acquire(&cx_handle))
-                .map(|resource| *resource);
+            let result =
+                futures_lite::future::block_on(acquire_pool.acquire(&cx_handle)).map(|_| ());
             result_tx.send(result).expect("send acquire result");
         });
 
@@ -4158,6 +4176,12 @@ mod tests {
             "closed pool does not expose created resource",
             true,
             reacquire.is_none()
+        );
+        crate::assert_with_log!(
+            drop_count.load(std::sync::atomic::Ordering::SeqCst) == 1,
+            "freshly created resource is dropped when close wins create race",
+            1usize,
+            drop_count.load(std::sync::atomic::Ordering::SeqCst)
         );
 
         crate::test_complete!("pool_close_while_create_in_flight_returns_closed");

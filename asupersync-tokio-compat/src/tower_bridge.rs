@@ -123,15 +123,16 @@ where
         })
         .await?;
 
-        // Phase 2: Await the response future with Cx installed.
-        let _cx_guard = asupersync::Cx::set_current(Some(cx.clone()));
+        // Phase 2: Await the response future with Cx installed on each poll,
+        // and support cancellation.
+        let result = crate::runtime::with_tokio_context(cx, || async move {
+            response_future.await.map_err(BridgeError::Service)
+        }).await;
 
-        // Check cancellation before awaiting.
-        if cx.is_cancel_requested() {
-            return Err(BridgeError::Cancelled);
+        match result {
+            Some(res) => res,
+            None => Err(BridgeError::Cancelled),
         }
-
-        response_future.await.map_err(BridgeError::Service)
     }
 }
 

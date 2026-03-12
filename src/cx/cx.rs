@@ -240,6 +240,7 @@ thread_local! {
 #[cfg_attr(feature = "test-internals", visibility::make(pub))]
 pub(crate) struct CurrentCxGuard {
     prev: Option<FullCx>,
+    _not_send: std::marker::PhantomData<*mut ()>,
 }
 
 impl Drop for CurrentCxGuard {
@@ -272,7 +273,10 @@ impl FullCx {
             *guard = cx;
             prev
         });
-        CurrentCxGuard { prev }
+        CurrentCxGuard {
+            prev,
+            _not_send: std::marker::PhantomData,
+        }
     }
 }
 

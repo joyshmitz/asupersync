@@ -11188,33 +11188,45 @@ fn build_stress_checkpoint_metrics(
     for raw_index in 0..checkpoint_count {
         let checkpoint_index =
             u32::try_from(raw_index + 1).map_err(|_| "checkpoint index overflow".to_string())?;
-        let mut latency_p95_ms = budget
-            .max_latency_p95_ms
-            .saturating_sub(12)
-            .saturating_add((seed_bias + scenario_bias + checkpoint_index + profile_bias) % 8);
-        let mut memory_mb = budget
-            .max_memory_mb
-            .saturating_sub(16)
-            .saturating_add((scenario_bias + checkpoint_index + profile_bias) % 10);
-        let mut error_rate_basis_points = budget
-            .max_error_rate_basis_points
-            .saturating_sub(18)
-            .saturating_add((seed_bias + checkpoint_index) % 7);
-        let mut drift_basis_points = budget
-            .max_drift_basis_points
-            .saturating_sub(12)
-            .saturating_add((scenario_bias + checkpoint_index) % 6);
-
-        #[allow(clippy::useless_let_if_seq)]
-        if scenario.workload_class == "cancel_recovery_pressure"
+        let cancel_recovery = scenario.workload_class == "cancel_recovery_pressure"
             && raw_index + 1 == checkpoint_count
-            && raw_index >= warmup_count
-        {
-            latency_p95_ms = budget.max_latency_p95_ms.saturating_add(17);
-            memory_mb = budget.max_memory_mb.saturating_add(9);
-            error_rate_basis_points = budget.max_error_rate_basis_points.saturating_add(35);
-            drift_basis_points = budget.max_drift_basis_points.saturating_add(24);
-        }
+            && raw_index >= warmup_count;
+
+        let latency_p95_ms = if cancel_recovery {
+            budget.max_latency_p95_ms.saturating_add(17)
+        } else {
+            budget
+                .max_latency_p95_ms
+                .saturating_sub(12)
+                .saturating_add((seed_bias + scenario_bias + checkpoint_index + profile_bias) % 8)
+        };
+
+        let memory_mb = if cancel_recovery {
+            budget.max_memory_mb.saturating_add(9)
+        } else {
+            budget
+                .max_memory_mb
+                .saturating_sub(16)
+                .saturating_add((scenario_bias + checkpoint_index + profile_bias) % 10)
+        };
+
+        let error_rate_basis_points = if cancel_recovery {
+            budget.max_error_rate_basis_points.saturating_add(35)
+        } else {
+            budget
+                .max_error_rate_basis_points
+                .saturating_sub(18)
+                .saturating_add((seed_bias + checkpoint_index) % 7)
+        };
+
+        let drift_basis_points = if cancel_recovery {
+            budget.max_drift_basis_points.saturating_add(24)
+        } else {
+            budget
+                .max_drift_basis_points
+                .saturating_sub(12)
+                .saturating_add((scenario_bias + checkpoint_index) % 6)
+        };
 
         let within_budget = latency_p95_ms <= budget.max_latency_p95_ms
             && memory_mb <= budget.max_memory_mb

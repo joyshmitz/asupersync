@@ -522,6 +522,12 @@ pub fn find_first_corruption(path: impl AsRef<Path>) -> io::Result<Option<u64>> 
 // Internal Functions
 // =============================================================================
 
+/// Maximum metadata length (1 MB). Anything larger indicates corruption.
+const MAX_METADATA_LEN: usize = 1_048_576;
+
+/// Maximum single event length (16 MB). Anything larger indicates corruption.
+const MAX_EVENT_LEN: usize = 16_777_216;
+
 fn verify_header(
     reader: &mut BufReader<File>,
     result: &mut VerificationResult,
@@ -604,6 +610,16 @@ fn verify_metadata(
     }
     let meta_len = u32::from_le_bytes(meta_len_bytes) as usize;
 
+    // Guard against corrupted metadata length to prevent OOM.
+    if meta_len > MAX_METADATA_LEN {
+        result.add_issue(IntegrityIssue::InvalidMetadata {
+            message: format!(
+                "metadata length {meta_len} exceeds maximum {MAX_METADATA_LEN}"
+            ),
+        });
+        return !options.fail_fast;
+    }
+
     // Read metadata bytes
     let mut meta_bytes = vec![0u8; meta_len];
     if reader.read_exact(&mut meta_bytes).is_err() {
@@ -646,6 +662,7 @@ fn read_event_count(reader: &mut BufReader<File>) -> io::Result<u64> {
     Ok(u64::from_le_bytes(count_bytes))
 }
 
+#[allow(clippy::too_many_lines)]
 fn verify_events(
     reader: &mut BufReader<File>,
     result: &mut VerificationResult,
@@ -681,6 +698,21 @@ fn verify_events(
         }
 
         let len = u32::from_le_bytes(len_bytes) as usize;
+
+        // Guard against corrupted event length to prevent OOM.
+        if len > MAX_EVENT_LEN {
+            result.add_issue(IntegrityIssue::InvalidEvent {
+                index: event_index,
+                message: format!(
+                    "event length {len} exceeds maximum {MAX_EVENT_LEN}"
+                ),
+            });
+            if options.fail_fast {
+                break;
+            }
+            event_index += 1;
+            continue;
+        }
 
         // Read event bytes
         let mut event_bytes = vec![0u8; len];

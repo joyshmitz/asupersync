@@ -626,15 +626,23 @@ pub struct RecordMetadata {
 pub struct KafkaProducer {
     config: ProducerConfig,
     closed: AtomicBool,
+    #[cfg(feature = "kafka")]
+    producer: ThreadedProducer<KafkaContext>,
 }
 
 impl KafkaProducer {
     /// Create a new Kafka producer.
     pub fn new(config: ProducerConfig) -> Result<Self, KafkaError> {
         config.validate()?;
+        
+        #[cfg(feature = "kafka")]
+        let producer = build_producer(&config, None)?;
+        
         Ok(Self {
             config,
             closed: AtomicBool::new(false),
+            #[cfg(feature = "kafka")]
+            producer,
         })
     }
 
@@ -672,13 +680,8 @@ impl KafkaProducer {
 
         #[cfg(feature = "kafka")]
         {
-            // BUG-FIX: Reuse a shared producer instead of creating one per send().
-            // build_producer() creates a new ThreadedProducer (and connection) each time;
-            // the producer is dropped at scope end, likely before delivery completes.
-            // TODO: Store ThreadedProducer as a field in KafkaProducer, created in new().
-            let producer = build_producer(&self.config, None)?;
             send_with_producer(
-                &producer,
+                &self.producer,
                 cx,
                 &self.config,
                 topic,
@@ -734,9 +737,8 @@ impl KafkaProducer {
 
         #[cfg(feature = "kafka")]
         {
-            let producer = build_producer(&self.config, None)?;
             send_with_producer(
-                &producer,
+                &self.producer,
                 cx,
                 &self.config,
                 topic,
@@ -809,18 +811,14 @@ impl KafkaProducer {
 
         #[cfg(feature = "kafka")]
         {
-            // BUG-FIX: This creates a fresh producer with zero in-flight messages,
-            // making flush a no-op. Must share the producer instance with send().
-            // TODO: Use the shared ThreadedProducer field once added to KafkaProducer.
-            let producer = build_producer(&self.config, None)?;
             let mut remaining = timeout;
             loop {
                 cx.checkpoint().map_err(|_| KafkaError::Cancelled)?;
-                if producer.in_flight_count() == 0 {
+                if self.producer.in_flight_count() == 0 {
                     break;
                 }
                 let tick = remaining.min(Duration::from_millis(10));
-                producer.poll(tick);
+                self.producer.poll(tick);
                 if remaining <= tick {
                     return Err(KafkaError::Broker("flush timeout elapsed".to_string()));
                 }

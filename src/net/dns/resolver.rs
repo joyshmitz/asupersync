@@ -597,10 +597,11 @@ mod tests {
     fn resolver_invalid_host() {
         init_test("resolver_invalid_host");
 
-        // Empty hostname
-        let _result = Resolver::query_ip_sync("");
-        // This may or may not error depending on platform
-        // Just ensure it doesn't panic
+        let resolver = Resolver::new();
+        let result = future::block_on(async { resolver.lookup_ip("").await });
+        let invalid_host = matches!(result, Err(DnsError::InvalidHost(host)) if host.is_empty());
+        crate::assert_with_log!(invalid_host, "empty hostname rejected", true, invalid_host);
+
         crate::test_complete!("resolver_invalid_host");
     }
 
@@ -610,8 +611,6 @@ mod tests {
         let resolver1 = Resolver::new();
         let resolver2 = resolver1.clone();
 
-        // Lookup on resolver1
-        let _ = Resolver::query_ip_sync("localhost");
         resolver1.cache.put_ip(
             "test.example",
             &LookupIp::new(vec!["192.0.2.1".parse().unwrap()], Duration::from_mins(5)),

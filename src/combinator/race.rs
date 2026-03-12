@@ -500,12 +500,12 @@ pub fn race2_to_result<T, E>(
         return Err(RaceError::Panicked(p));
     }
 
-    if let Outcome::Ok(v) = winner_outcome {
-        return Ok(v);
-    }
-
     if let Outcome::Panicked(p) = loser_outcome {
         return Err(RaceError::Panicked(p));
+    }
+
+    if let Outcome::Ok(v) = winner_outcome {
+        return Ok(v);
     }
 
     match winner_outcome {
@@ -622,10 +622,6 @@ pub fn race_all_to_result<T, E>(result: RaceAllResult<T, E>) -> Result<T, RaceAl
         });
     }
 
-    if let Outcome::Ok(v) = result.winner_outcome {
-        return Ok(v);
-    }
-
     for (i, loser_outcome) in result.loser_outcomes {
         if let Outcome::Panicked(p) = loser_outcome {
             return Err(RaceAllError::Panicked {
@@ -633,6 +629,10 @@ pub fn race_all_to_result<T, E>(result: RaceAllResult<T, E>) -> Result<T, RaceAl
                 index: i,
             });
         }
+    }
+
+    if let Outcome::Ok(v) = result.winner_outcome {
+        return Ok(v);
     }
 
     match result.winner_outcome {

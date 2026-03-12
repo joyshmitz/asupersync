@@ -200,6 +200,11 @@ impl Notify {
             return;
         }
 
+        // If we found nothing, it means there are no active, unnotified waiters
+        // from `start` to the end. We can safely advance `scan_start` to the end
+        // to avoid O(N^2) scans in pathological broadcast then sequential notify workloads.
+        waiters.scan_start = waiters.entries.len();
+
         // No waiters found, store the notification.
         //
         // Important: keep the waiter lock held while incrementing `stored_notifications` so a
@@ -224,9 +229,7 @@ impl Notify {
                 .entries
                 .iter_mut()
                 .filter_map(|entry| {
-                    // Only process active, unnotified waiters. Free slots and already-notified
-                    // waiters (waker == None) are ignored so we don't overwrite their generation
-                    // and break the notify_one baton-pass on drop.
+                    // Only process active, unnotified waiters. Free slots are ignored.
                     if entry.generation < new_generation && entry.waker.is_some() {
                         entry.generation = new_generation;
                         entry.notified = true;
@@ -256,17 +259,21 @@ impl Notify {
     /// Passes a `notify_one` baton to the next active waiter, or stores it if none exist.
     /// This must be called with the waiters lock held.
     fn pass_baton(&self, mut waiters: parking_lot::MutexGuard<'_, WaiterSlab>) {
-        for entry in &mut waiters.entries {
+        let start = waiters.scan_start;
+        for i in start..waiters.entries.len() {
+            let entry = &mut waiters.entries[i];
             if !entry.notified && entry.waker.is_some() {
                 entry.notified = true;
                 if let Some(waker) = entry.waker.take() {
                     waiters.active -= 1;
+                    waiters.scan_start = i + 1;
                     drop(waiters);
                     waker.wake();
                     return;
                 }
             }
         }
+        waiters.scan_start = waiters.entries.len();
         self.stored_notifications.fetch_add(1, Ordering::Release);
     }
 }
@@ -467,9 +474,7 @@ impl Drop for Notified<'_> {
     }
 }
 
-#[cfg(test)]
-#[path = "notify_bug_test.rs"]
-mod notify_bug_test;
+
 
 #[cfg(test)]
 mod tests {
@@ -545,6 +550,36 @@ mod tests {
         let ready = poll_once(&mut fut).is_ready();
         crate::assert_with_log!(ready, "ready immediately", true, ready);
         crate::test_complete!("notify_before_wait_is_consumed");
+    }
+
+    #[test]
+    fn notify_one_lost_if_followed_by_broadcast_and_cancel() {
+        init_test("notify_one_lost_if_followed_by_broadcast_and_cancel");
+        let notify = Notify::new();
+        
+        let mut waiter_a = notify.notified();
+        let mut waiter_b = notify.notified();
+        
+        assert!(poll_once(&mut waiter_a).is_pending());
+        assert!(poll_once(&mut waiter_b).is_pending());
+        
+        // notify_one wakes A
+        notify.notify_one();
+        
+        // notify_waiters wakes B (and updates A's generation)
+        notify.notify_waiters();
+        
+        // waiter_c starts waiting AFTER the broadcast
+        let mut waiter_c = notify.notified();
+        assert!(poll_once(&mut waiter_c).is_pending());
+        
+        // A is dropped (cancelled). 
+        // It should pass the notify_one baton to C!
+        drop(waiter_a);
+        
+        // Let's check if C got it.
+        assert!(poll_once(&mut waiter_c).is_ready(), "Waiter C should be woken by the passed baton!");
+        crate::test_complete!("notify_one_lost_if_followed_by_broadcast_and_cancel");
     }
 
     #[test]
