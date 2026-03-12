@@ -25,8 +25,10 @@ const REARMED_ACCEPT_BACKOFF_BASE: Duration = Duration::from_millis(2);
 const REARMED_ACCEPT_BACKOFF_CAP: Duration = Duration::from_millis(32);
 const ACCEPT_STORM_WINDOW: Duration = Duration::from_millis(25);
 
-fn wall_clock_now() -> Time {
-    crate::time::wall_now()
+fn listener_now() -> Time {
+    Cx::current()
+        .and_then(|current| current.timer_driver())
+        .map_or_else(crate::time::wall_now, |driver| driver.now())
 }
 
 /// A TCP listener.
@@ -52,7 +54,7 @@ struct AcceptStormState {
 
 impl TcpListener {
     pub(crate) fn from_std(inner: net::TcpListener) -> io::Result<Self> {
-        Self::from_std_with_time_getter(inner, wall_clock_now)
+        Self::from_std_with_time_getter(inner, listener_now)
     }
 
     pub(crate) fn from_std_with_time_getter(
@@ -610,6 +612,52 @@ mod tests {
             listener.accept_storm.lock().consecutive_would_block,
             1,
             "outside-window would-block should reset the storm counter"
+        );
+    }
+
+    #[test]
+    fn accept_storm_window_from_std_uses_runtime_timer_driver() {
+        let raw = net::TcpListener::bind("127.0.0.1:0").expect("bind");
+        let clock = Arc::new(crate::time::VirtualClock::new());
+        let timer = crate::time::TimerDriverHandle::with_virtual_clock(clock.clone());
+        let cx = Cx::new_with_drivers(
+            RegionId::new_for_test(0, 0),
+            TaskId::new_for_test(0, 0),
+            Budget::INFINITE,
+            None,
+            None,
+            None,
+            Some(timer),
+            None,
+        );
+        let _guard = Cx::set_current(Some(cx));
+        let listener = TcpListener::from_std(raw).expect("wrap");
+
+        assert_eq!(
+            listener.note_accept_would_block(),
+            REARMED_ACCEPT_BACKOFF_BASE
+        );
+
+        clock.advance(Duration::from_millis(5).as_nanos() as u64);
+        assert_eq!(
+            listener.note_accept_would_block(),
+            REARMED_ACCEPT_BACKOFF_BASE
+        );
+        assert_eq!(
+            listener.accept_storm.lock().consecutive_would_block,
+            2,
+            "from_std should use Cx timer-driver time when available"
+        );
+
+        clock.advance(Duration::from_millis(50).as_nanos() as u64);
+        assert_eq!(
+            listener.note_accept_would_block(),
+            REARMED_ACCEPT_BACKOFF_BASE
+        );
+        assert_eq!(
+            listener.accept_storm.lock().consecutive_would_block,
+            1,
+            "from_std should reset outside the storm window using runtime time"
         );
     }
 

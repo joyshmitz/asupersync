@@ -44,8 +44,8 @@
 use crossbeam_queue::SegQueue;
 use parking_lot::{Condvar, Mutex};
 use std::fmt;
-use std::sync::Arc;
 use std::sync::atomic::{AtomicBool, AtomicU64, AtomicUsize, Ordering};
+use std::sync::Arc;
 use std::thread::{self, JoinHandle as ThreadJoinHandle};
 use std::time::{Duration, Instant};
 
@@ -685,6 +685,18 @@ fn spawn_thread_on_inner(inner: &Arc<BlockingPoolInner>) {
 
                 if !self.retired_with_claim {
                     self.inner.active_threads.fetch_sub(1, Ordering::Relaxed);
+
+                    // A spawn that linearized before shutdown may enqueue work
+                    // while this worker is already on the exit path. If this
+                    // was the last active worker, hand the task off before the
+                    // pool goes quiescent and strands the accepted work.
+                    if self.inner.pending_count.load(Ordering::Acquire) > 0
+                        && !self.inner.queue.is_empty()
+                    {
+                        maybe_spawn_thread_on_inner(self.inner);
+                        let _guard = self.inner.mutex.lock();
+                        self.inner.condvar.notify_one();
+                    }
                 }
             }
         }
@@ -1758,5 +1770,103 @@ mod tests {
             5,
             "all queued tasks must execute before shutdown completes"
         );
+    }
+
+    #[test]
+    fn handle_spawn_accepted_before_shutdown_still_runs() {
+        let exiting = Arc::new((StdMutex::new(false), StdCondvar::new()));
+        let exit_gate = Arc::new((StdMutex::new(false), StdCondvar::new()));
+
+        let exiting_signal = Arc::clone(&exiting);
+        let exit_gate_signal = Arc::clone(&exit_gate);
+        let pool = BlockingPool::with_config(
+            0,
+            1,
+            BlockingPoolOptions {
+                on_thread_stop: Some(Arc::new(move || {
+                    let (lock, condvar) = &*exiting_signal;
+                    {
+                        let mut exiting = lock.lock().expect("exit signal poisoned");
+                        *exiting = true;
+                    }
+                    condvar.notify_all();
+
+                    let (gate_lock, gate_condvar) = &*exit_gate_signal;
+                    let mut release = gate_lock.lock().expect("exit gate poisoned");
+                    while !*release {
+                        release = gate_condvar.wait(release).expect("exit gate poisoned");
+                    }
+                    drop(release);
+                })),
+                ..Default::default()
+            },
+        );
+
+        // Start the single worker so shutdown has a live thread to race with.
+        pool.spawn(|| {}).wait();
+
+        pool.shutdown();
+
+        let (exiting_lock, exiting_condvar) = &*exiting;
+        let (exiting, _timeout) = exiting_condvar
+            .wait_timeout_while(
+                exiting_lock.lock().expect("exit signal poisoned"),
+                Duration::from_secs(1),
+                |exiting| !*exiting,
+            )
+            .expect("exit signal wait poisoned");
+        assert!(
+            *exiting,
+            "worker should enter the stop callback before the late task is enqueued"
+        );
+        drop(exiting);
+
+        // Simulate a task that was accepted just before shutdown and only
+        // reaches the shared queue while the last worker is already exiting.
+        let ran = Arc::new(AtomicUsize::new(0));
+        let ran_clone = Arc::clone(&ran);
+        let task_id = pool.inner.next_task_id.fetch_add(1, Ordering::Relaxed);
+        let cancelled = Arc::new(AtomicBool::new(false));
+        let completion = Arc::new(BlockingTaskCompletion::new(pool.inner.time_getter));
+        let handle = BlockingTaskHandle {
+            task_id,
+            cancelled: Arc::clone(&cancelled),
+            completion: Arc::clone(&completion),
+        };
+        let task = BlockingTask {
+            id: task_id,
+            work: Box::new(move || {
+                ran_clone.fetch_add(1, Ordering::Relaxed);
+            }),
+            priority: 128,
+            cancelled: Arc::clone(&cancelled),
+            completion: Arc::clone(&completion),
+        };
+
+        pool.inner.queue.push(task);
+        pool.inner.pending_count.fetch_add(1, Ordering::Relaxed);
+        maybe_spawn_thread_on_inner(&pool.inner);
+        {
+            let _guard = pool.inner.mutex.lock();
+            pool.inner.condvar.notify_one();
+        }
+
+        let (gate_lock, gate_condvar) = &*exit_gate;
+        {
+            let mut release = gate_lock.lock().expect("exit gate poisoned");
+            *release = true;
+        }
+        gate_condvar.notify_all();
+
+        assert!(
+            handle.wait_timeout(Duration::from_secs(5)),
+            "accepted work must still complete even if shutdown starts while the last worker exits"
+        );
+        assert_eq!(
+            ran.load(Ordering::Relaxed),
+            1,
+            "late accepted task should run exactly once"
+        );
+        assert!(pool.shutdown_and_wait(Duration::from_secs(5)));
     }
 }

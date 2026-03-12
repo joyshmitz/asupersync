@@ -131,6 +131,12 @@ fn path_to_cstring(path: &Path) -> io::Result<CString> {
         .map_err(|_| io::Error::new(io::ErrorKind::InvalidInput, "path contains null bytes"))
 }
 
+fn polled_after_completion_error(operation: &str) -> io::Error {
+    io::Error::other(format!(
+        "io_uring {operation} future polled after completion"
+    ))
+}
+
 impl Drop for IoUringFile {
     fn drop(&mut self) {
         // Best-effort safety: if any ops are in flight on this ring, make sure we
@@ -304,6 +310,7 @@ impl IoUringFile {
         SyncFuture {
             file: self,
             datasync: true,
+            done: false,
         }
     }
 
@@ -315,6 +322,7 @@ impl IoUringFile {
         SyncFuture {
             file: self,
             datasync: false,
+            done: false,
         }
     }
 
@@ -503,19 +511,21 @@ impl std::future::Future for ReadFuture<'_> {
         // True async requires integration with the runtime's event loop.
         let this = self.get_mut();
         if this.done {
-            panic!("ReadFuture polled after completion");
+            return Poll::Ready(Err(polled_after_completion_error("read")));
         }
-        let n = this.file.blocking_read_at(this.buf, this.offset)?;
+        let result = this.file.blocking_read_at(this.buf, this.offset);
 
-        if this.update_position {
-            this.file
-                .inner
-                .position
-                .fetch_add(n as u64, Ordering::Relaxed);
+        if let Ok(n) = result {
+            if this.update_position {
+                this.file
+                    .inner
+                    .position
+                    .fetch_add(n as u64, Ordering::Relaxed);
+            }
         }
 
         this.done = true;
-        Poll::Ready(Ok(n))
+        Poll::Ready(result)
     }
 }
 
@@ -534,19 +544,21 @@ impl std::future::Future for WriteFuture<'_> {
     fn poll(self: Pin<&mut Self>, _cx: &mut Context<'_>) -> Poll<Self::Output> {
         let this = self.get_mut();
         if this.done {
-            panic!("WriteFuture polled after completion");
+            return Poll::Ready(Err(polled_after_completion_error("write")));
         }
-        let n = this.file.blocking_write_at(this.buf, this.offset)?;
+        let result = this.file.blocking_write_at(this.buf, this.offset);
 
-        if this.update_position {
-            this.file
-                .inner
-                .position
-                .fetch_add(n as u64, Ordering::Relaxed);
+        if let Ok(n) = result {
+            if this.update_position {
+                this.file
+                    .inner
+                    .position
+                    .fetch_add(n as u64, Ordering::Relaxed);
+            }
         }
 
         this.done = true;
-        Poll::Ready(Ok(n))
+        Poll::Ready(result)
     }
 }
 
@@ -554,6 +566,7 @@ impl std::future::Future for WriteFuture<'_> {
 pub struct SyncFuture<'a> {
     file: &'a IoUringFile,
     datasync: bool,
+    done: bool,
 }
 
 impl std::future::Future for SyncFuture<'_> {
@@ -561,8 +574,13 @@ impl std::future::Future for SyncFuture<'_> {
 
     fn poll(self: Pin<&mut Self>, _cx: &mut Context<'_>) -> Poll<Self::Output> {
         let this = self.get_mut();
-        this.file.blocking_sync(this.datasync)?;
-        Poll::Ready(Ok(()))
+        if this.done {
+            return Poll::Ready(Err(polled_after_completion_error("sync")));
+        }
+
+        let result = this.file.blocking_sync(this.datasync);
+        this.done = true;
+        Poll::Ready(result)
     }
 }
 
@@ -622,11 +640,31 @@ mod tests {
     use std::ffi::OsString;
     #[cfg(unix)]
     use std::os::unix::ffi::OsStringExt;
+    use std::sync::Arc;
     use tempfile::tempdir;
 
     fn init_test(name: &str) {
         crate::test_utils::init_test_logging();
         crate::test_phase!(name);
+    }
+
+    #[derive(Debug)]
+    struct TestNoopWaker;
+
+    impl std::task::Wake for TestNoopWaker {
+        fn wake(self: Arc<Self>) {}
+    }
+
+    fn noop_waker() -> Waker {
+        Waker::from(Arc::new(TestNoopWaker))
+    }
+
+    fn assert_polled_after_completion(err: io::Error, operation: &str) {
+        assert_eq!(err.kind(), io::ErrorKind::Other);
+        assert_eq!(
+            err.to_string(),
+            format!("io_uring {operation} future polled after completion")
+        );
     }
 
     #[cfg(unix)]
@@ -848,6 +886,111 @@ mod tests {
             file.sync_all().await.unwrap();
         });
         crate::test_complete!("test_uring_file_sync_data");
+    }
+
+    #[test]
+    fn test_uring_read_future_second_poll_fails_closed() {
+        init_test("test_uring_read_future_second_poll_fails_closed");
+        let dir = tempdir().unwrap();
+        let path = dir.path().join("uring_read_repoll.txt");
+        std::fs::write(&path, b"hello").unwrap();
+
+        let file = IoUringFile::open(&path).unwrap();
+        let mut buf = [0u8; 5];
+        let mut future = file.read(&mut buf);
+        let waker = noop_waker();
+        let mut cx = Context::from_waker(&waker);
+
+        let first = Pin::new(&mut future).poll(&mut cx);
+        assert!(matches!(first, Poll::Ready(Ok(5))));
+        assert_eq!(file.position(), 5);
+
+        match Pin::new(&mut future).poll(&mut cx) {
+            Poll::Ready(Err(err)) => assert_polled_after_completion(err, "read"),
+            other => panic!("expected fail-closed read repoll, got {other:?}"),
+        }
+        drop(future);
+        assert_eq!(&buf, b"hello");
+        assert_eq!(file.position(), 5);
+        crate::test_complete!("test_uring_read_future_second_poll_fails_closed");
+    }
+
+    #[test]
+    fn test_uring_write_future_second_poll_fails_closed() {
+        init_test("test_uring_write_future_second_poll_fails_closed");
+        let dir = tempdir().unwrap();
+        let path = dir.path().join("uring_write_repoll.txt");
+
+        let file = IoUringFile::open_with_flags(
+            &path,
+            libc::O_RDWR | libc::O_CREAT | libc::O_TRUNC,
+            0o644,
+        )
+        .unwrap();
+        let mut future = file.write(b"abc");
+        let waker = noop_waker();
+        let mut cx = Context::from_waker(&waker);
+
+        let first = Pin::new(&mut future).poll(&mut cx);
+        assert!(matches!(first, Poll::Ready(Ok(3))));
+        assert_eq!(file.position(), 3);
+
+        match Pin::new(&mut future).poll(&mut cx) {
+            Poll::Ready(Err(err)) => assert_polled_after_completion(err, "write"),
+            other => panic!("expected fail-closed write repoll, got {other:?}"),
+        }
+        assert_eq!(file.position(), 3);
+
+        let mut buf = [0u8; 3];
+        let n = futures_lite::future::block_on(file.read_at(&mut buf, 0)).unwrap();
+        assert_eq!(n, 3);
+        assert_eq!(&buf, b"abc");
+        crate::test_complete!("test_uring_write_future_second_poll_fails_closed");
+    }
+
+    #[test]
+    fn test_uring_sync_future_second_poll_fails_closed() {
+        init_test("test_uring_sync_future_second_poll_fails_closed");
+        let dir = tempdir().unwrap();
+        let path = dir.path().join("uring_sync_repoll.txt");
+
+        let file = IoUringFile::create(&path).unwrap();
+        let mut future = file.sync_all();
+        let waker = noop_waker();
+        let mut cx = Context::from_waker(&waker);
+
+        let first = Pin::new(&mut future).poll(&mut cx);
+        assert!(matches!(first, Poll::Ready(Ok(()))));
+
+        match Pin::new(&mut future).poll(&mut cx) {
+            Poll::Ready(Err(err)) => assert_polled_after_completion(err, "sync"),
+            other => panic!("expected fail-closed sync repoll, got {other:?}"),
+        }
+        crate::test_complete!("test_uring_sync_future_second_poll_fails_closed");
+    }
+
+    #[test]
+    fn test_uring_error_terminal_still_fails_closed_on_repoll() {
+        init_test("test_uring_error_terminal_still_fails_closed_on_repoll");
+        let dir = tempdir().unwrap();
+        let path = dir.path().join("uring_error_repoll.txt");
+        std::fs::write(&path, b"hello").unwrap();
+
+        let file = IoUringFile::open(&path).unwrap();
+        let mut future = file.write(b"abc");
+        let waker = noop_waker();
+        let mut cx = Context::from_waker(&waker);
+
+        let first = Pin::new(&mut future).poll(&mut cx);
+        assert!(matches!(first, Poll::Ready(Err(_))));
+        assert_eq!(file.position(), 0);
+
+        match Pin::new(&mut future).poll(&mut cx) {
+            Poll::Ready(Err(err)) => assert_polled_after_completion(err, "write"),
+            other => panic!("expected fail-closed repoll after write error, got {other:?}"),
+        }
+        assert_eq!(file.position(), 0);
+        crate::test_complete!("test_uring_error_terminal_still_fails_closed_on_repoll");
     }
 
     #[test]
