@@ -587,19 +587,23 @@ impl<M: ConnectionManager> DbPool<M> {
     }
 
     /// Return a connection to the pool, preserving its original creation time.
-    fn return_connection(&self, conn: M::Connection, created_at: Instant) {
-        let conn_to_disconnect = {
+    ///
+    /// Returns `true` when the connection was re-queued into the idle pool.
+    /// Returns `false` when the pool was already closed and the connection was
+    /// disconnected instead.
+    fn return_connection(&self, conn: M::Connection, created_at: Instant) -> bool {
+        let (requeued, conn_to_disconnect) = {
             let mut inner = self.inner.lock();
             if inner.closed {
                 inner.total = inner.total.saturating_sub(1);
-                Some(conn)
+                (false, Some(conn))
             } else {
                 inner.idle.push_back(IdleConnection {
                     conn,
                     created_at,
                     last_used: (self.time_getter)(),
                 });
-                None
+                (true, None)
             }
         };
 
@@ -607,6 +611,7 @@ impl<M: ConnectionManager> DbPool<M> {
             self.stats.total_discards.fetch_add(1, Ordering::Relaxed);
             self.manager.disconnect(conn);
         }
+        requeued
     }
 
     /// Discard a connection (don't return to pool).
@@ -717,8 +722,9 @@ impl<M: ConnectionManager> DbPool<M> {
                 Ok(conn) => {
                     guard.active = false;
                     self.stats.total_creates.fetch_add(1, Ordering::Relaxed);
-                    self.return_connection(conn, (self.time_getter)());
-                    created += 1;
+                    if self.return_connection(conn, (self.time_getter)()) {
+                        created += 1;
+                    }
                 }
                 Err(_) => {
                     guard.active = false;
@@ -771,7 +777,7 @@ impl<'a, M: ConnectionManager> PooledConnection<'a, M> {
     /// Explicitly return the connection to the pool.
     pub fn return_to_pool(mut self) {
         if let Some(conn) = self.conn.take() {
-            self.pool.return_connection(conn, self.created_at);
+            let _ = self.pool.return_connection(conn, self.created_at);
         }
     }
 
@@ -802,7 +808,7 @@ impl<M: ConnectionManager> std::ops::DerefMut for PooledConnection<'_, M> {
 impl<M: ConnectionManager> Drop for PooledConnection<'_, M> {
     fn drop(&mut self) {
         if let Some(conn) = self.conn.take() {
-            self.pool.return_connection(conn, self.created_at);
+            let _ = self.pool.return_connection(conn, self.created_at);
         }
     }
 }
@@ -2053,6 +2059,31 @@ mod tests {
 
         drop(held);
         crate::test_complete!("warm_up_only_tops_up_missing_idle_connections");
+    }
+
+    #[test]
+    fn warm_up_racing_close_does_not_overreport_created() {
+        init_test("warm_up_racing_close_does_not_overreport_created");
+        let gate = BlockingGate::default();
+        let pool = Arc::new(DbPool::new(
+            BlockingConnectManager::new(gate.clone()),
+            DbPoolConfig::default().min_idle(1),
+        ));
+
+        let warm_pool = Arc::clone(&pool);
+        let handle = std::thread::spawn(move || warm_pool.warm_up());
+
+        gate.wait_until_entered();
+        pool.close();
+        gate.release();
+
+        let created = handle.join().expect("warm_up thread panicked");
+        assert_eq!(created, 0, "closed pool must not report warmed connections");
+        assert_eq!(pool.stats().idle, 0);
+        assert_eq!(pool.stats().total, 0);
+        assert_eq!(pool.manager.creates(), 1);
+        assert_eq!(pool.manager.disconnects(), 1);
+        crate::test_complete!("warm_up_racing_close_does_not_overreport_created");
     }
 
     #[test]
