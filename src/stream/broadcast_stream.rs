@@ -53,7 +53,11 @@ impl<T: Clone + Send> Stream for BroadcastStream<T> {
             Poll::Ready(Err(broadcast::RecvError::Lagged(n))) => {
                 Poll::Ready(Some(Err(BroadcastStreamRecvError::Lagged(n))))
             }
-            Poll::Ready(Err(broadcast::RecvError::Closed | broadcast::RecvError::Cancelled)) => {
+            Poll::Ready(Err(
+                broadcast::RecvError::Closed
+                | broadcast::RecvError::Cancelled
+                | broadcast::RecvError::PolledAfterCompletion,
+            )) => {
                 this.terminated = true;
                 Poll::Ready(None)
             }

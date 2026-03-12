@@ -54,6 +54,8 @@ pub enum RecvError {
     Closed,
     /// The receive operation was cancelled.
     Cancelled,
+    /// The receive future was polled after it had already completed.
+    PolledAfterCompletion,
 }
 
 impl std::fmt::Display for RecvError {
@@ -62,6 +64,9 @@ impl std::fmt::Display for RecvError {
             Self::Lagged(n) => write!(f, "receiver lagged by {n} messages"),
             Self::Closed => write!(f, "broadcast channel closed"),
             Self::Cancelled => write!(f, "receive operation cancelled"),
+            Self::PolledAfterCompletion => {
+                write!(f, "broadcast receive future polled after completion")
+            }
         }
     }
 }
@@ -297,12 +302,14 @@ impl<T: Clone> Receiver<T> {
     ///
     /// - `RecvError::Lagged(n)`: The receiver fell behind.
     /// - `RecvError::Closed`: All senders dropped.
+    /// - `RecvError::PolledAfterCompletion`: This specific future was already resolved.
     #[inline]
     pub fn recv<'a>(&'a mut self, cx: &'a Cx) -> Recv<'a, T> {
         Recv {
             receiver: self,
             cx,
             waiter: None,
+            completed: false,
         }
     }
 
@@ -385,6 +392,7 @@ pub struct Recv<'a, T> {
     cx: &'a Cx,
     /// Token for the registered waiter in the arena.
     waiter: Option<ArenaIndex>,
+    completed: bool,
 }
 
 impl<T> Recv<'_, T> {
@@ -399,8 +407,17 @@ impl<T: Clone> Future for Recv<'_, T> {
     #[inline]
     fn poll(mut self: Pin<&mut Self>, ctx: &mut Context<'_>) -> Poll<Self::Output> {
         let this = &mut *self;
-        this.receiver
-            .poll_recv_with_waiter(this.cx, ctx, &mut this.waiter)
+        if this.completed {
+            return Poll::Ready(Err(RecvError::PolledAfterCompletion));
+        }
+
+        let poll = this
+            .receiver
+            .poll_recv_with_waiter(this.cx, ctx, &mut this.waiter);
+        if poll.is_ready() {
+            this.completed = true;
+        }
+        poll
     }
 }
 
@@ -980,6 +997,144 @@ mod tests {
     }
 
     #[test]
+    fn recv_second_poll_after_ok_fails_closed() {
+        init_test("recv_second_poll_after_ok_fails_closed");
+        let cx = test_cx();
+        let (tx, mut rx) = channel::<i32>(4);
+        tx.send(&cx, 42).expect("send failed");
+
+        let wake_state = CountingWaker::new();
+        let waker = Waker::from(Arc::clone(&wake_state));
+        let mut ctx = Context::from_waker(&waker);
+        let mut fut = Box::pin(rx.recv(&cx));
+
+        let first = fut.as_mut().poll(&mut ctx);
+        crate::assert_with_log!(
+            matches!(first, Poll::Ready(Ok(42))),
+            "first poll receives value",
+            "Poll::Ready(Ok(42))",
+            format!("{first:?}")
+        );
+
+        let second = fut.as_mut().poll(&mut ctx);
+        crate::assert_with_log!(
+            matches!(second, Poll::Ready(Err(RecvError::PolledAfterCompletion))),
+            "second poll fails closed",
+            "Poll::Ready(Err(PolledAfterCompletion))",
+            format!("{second:?}")
+        );
+
+        crate::test_complete!("recv_second_poll_after_ok_fails_closed");
+    }
+
+    #[test]
+    fn recv_second_poll_after_lagged_fails_closed() {
+        init_test("recv_second_poll_after_lagged_fails_closed");
+        let cx = test_cx();
+        let (tx, mut rx) = channel::<i32>(2);
+        tx.send(&cx, 1).expect("send failed");
+        tx.send(&cx, 2).expect("send failed");
+        tx.send(&cx, 3).expect("send failed");
+
+        let wake_state = CountingWaker::new();
+        let waker = Waker::from(Arc::clone(&wake_state));
+        let mut ctx = Context::from_waker(&waker);
+
+        {
+            let mut fut = std::pin::pin!(rx.recv(&cx));
+
+            let first = fut.as_mut().poll(&mut ctx);
+            crate::assert_with_log!(
+                matches!(first, Poll::Ready(Err(RecvError::Lagged(1)))),
+                "first poll reports lag",
+                "Poll::Ready(Err(Lagged(1)))",
+                format!("{first:?}")
+            );
+
+            let second = fut.as_mut().poll(&mut ctx);
+            crate::assert_with_log!(
+                matches!(second, Poll::Ready(Err(RecvError::PolledAfterCompletion))),
+                "second poll fails closed after lag",
+                "Poll::Ready(Err(PolledAfterCompletion))",
+                format!("{second:?}")
+            );
+        }
+
+        let next = block_on(rx.recv(&cx))
+            .expect("new recv future should continue from lag-adjusted cursor");
+        crate::assert_with_log!(
+            next == 2,
+            "next recv continues at earliest retained item",
+            2,
+            next
+        );
+
+        crate::test_complete!("recv_second_poll_after_lagged_fails_closed");
+    }
+
+    #[test]
+    fn recv_second_poll_after_closed_fails_closed() {
+        init_test("recv_second_poll_after_closed_fails_closed");
+        let cx = test_cx();
+        let (tx, mut rx) = channel::<i32>(4);
+        drop(tx);
+
+        let wake_state = CountingWaker::new();
+        let waker = Waker::from(Arc::clone(&wake_state));
+        let mut ctx = Context::from_waker(&waker);
+        let mut fut = Box::pin(rx.recv(&cx));
+
+        let first = fut.as_mut().poll(&mut ctx);
+        crate::assert_with_log!(
+            matches!(first, Poll::Ready(Err(RecvError::Closed))),
+            "first poll reports closed",
+            "Poll::Ready(Err(Closed))",
+            format!("{first:?}")
+        );
+
+        let second = fut.as_mut().poll(&mut ctx);
+        crate::assert_with_log!(
+            matches!(second, Poll::Ready(Err(RecvError::PolledAfterCompletion))),
+            "second poll fails closed after close",
+            "Poll::Ready(Err(PolledAfterCompletion))",
+            format!("{second:?}")
+        );
+
+        crate::test_complete!("recv_second_poll_after_closed_fails_closed");
+    }
+
+    #[test]
+    fn recv_second_poll_after_cancelled_fails_closed() {
+        init_test("recv_second_poll_after_cancelled_fails_closed");
+        let cx = test_cx();
+        let (_tx, mut rx) = channel::<i32>(4);
+        cx.set_cancel_requested(true);
+
+        let wake_state = CountingWaker::new();
+        let waker = Waker::from(Arc::clone(&wake_state));
+        let mut ctx = Context::from_waker(&waker);
+        let mut fut = Box::pin(rx.recv(&cx));
+
+        let first = fut.as_mut().poll(&mut ctx);
+        crate::assert_with_log!(
+            matches!(first, Poll::Ready(Err(RecvError::Cancelled))),
+            "first poll reports cancelled",
+            "Poll::Ready(Err(Cancelled))",
+            format!("{first:?}")
+        );
+
+        let second = fut.as_mut().poll(&mut ctx);
+        crate::assert_with_log!(
+            matches!(second, Poll::Ready(Err(RecvError::PolledAfterCompletion))),
+            "second poll fails closed after cancellation",
+            "Poll::Ready(Err(PolledAfterCompletion))",
+            format!("{second:?}")
+        );
+
+        crate::test_complete!("recv_second_poll_after_cancelled_fails_closed");
+    }
+
+    #[test]
     fn permit_send_after_last_receiver_drop_is_noop() {
         init_test("permit_send_after_last_receiver_drop_is_noop");
         let cx = test_cx();
@@ -1266,11 +1421,13 @@ mod tests {
             RecvError::Lagged(5),
             RecvError::Closed,
             RecvError::Cancelled,
+            RecvError::PolledAfterCompletion,
         ];
         let expected_display = [
             "receiver lagged by 5 messages",
             "broadcast channel closed",
             "receive operation cancelled",
+            "broadcast receive future polled after completion",
         ];
         for (e, expected) in errors.iter().zip(expected_display.iter()) {
             let copied = *e;

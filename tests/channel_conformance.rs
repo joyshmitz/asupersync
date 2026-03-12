@@ -241,9 +241,11 @@ impl<T: Send + Clone + 'static> BroadcastReceiver<T> for BroadcastReceiverWrappe
             match receiver.recv(&cx).await {
                 Ok(v) => Ok(v),
                 Err(broadcast::RecvError::Lagged(n)) => Err(BroadcastRecvError::Lagged(n)),
-                Err(broadcast::RecvError::Closed | broadcast::RecvError::Cancelled) => {
-                    Err(BroadcastRecvError::Closed)
-                }
+                Err(
+                    broadcast::RecvError::Closed
+                    | broadcast::RecvError::Cancelled
+                    | broadcast::RecvError::PolledAfterCompletion,
+                ) => Err(BroadcastRecvError::Closed),
             }
         })
     }

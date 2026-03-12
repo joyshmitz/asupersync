@@ -368,7 +368,11 @@ proptest! {
                     Err(broadcast::RecvError::Lagged(n)) => {
                         tracing::debug!(receiver = i, lagged = n, "receiver lagged");
                     }
-                    Err(broadcast::RecvError::Closed | broadcast::RecvError::Cancelled) => break,
+                    Err(
+                        broadcast::RecvError::Closed
+                            | broadcast::RecvError::Cancelled
+                            | broadcast::RecvError::PolledAfterCompletion,
+                    ) => break,
                 }
             }
 

@@ -42,8 +42,8 @@ use parking_lot::{Mutex, RwLock, RwLockReadGuard};
 use smallvec::SmallVec;
 use std::future::Future;
 use std::pin::Pin;
-use std::sync::Arc;
 use std::sync::atomic::{AtomicBool, AtomicU64, AtomicUsize, Ordering};
+use std::sync::Arc;
 use std::task::{Context, Poll, Waker};
 
 use crate::cx::Cx;
@@ -67,6 +67,10 @@ impl std::fmt::Debug for WatchWaiter {
 }
 
 /// Error returned when sending fails.
+///
+/// A live sender preserves the latest watch value even if there are currently
+/// no active receivers. This error is therefore reserved for genuinely invalid
+/// send attempts rather than the ordinary zero-receiver case.
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub enum SendError<T> {
     /// All receivers have been dropped.
@@ -252,15 +256,22 @@ impl<T> Sender<T> {
     ///
     /// # Errors
     ///
-    /// Returns `SendError::Closed(value)` if all receivers have been dropped.
+    /// Stores a new latest value for current and future subscribers.
+    ///
+    /// This preserves the watch cell even when there are no active receivers.
+    /// New subscribers created after a zero-receiver gap observe the most
+    /// recent value.
+    ///
+    /// # Errors
+    ///
+    /// Returns `SendError::Closed(value)` only if the sender has already been
+    /// marked closed.
     pub fn send(&self, value: T) -> Result<(), SendError<T>> {
-        let receiver_count = self.inner.receiver_count.load(Ordering::Acquire);
-
-        // Check if anyone is listening
-        if receiver_count == 0 {
+        if self.inner.is_sender_dropped() {
             return Err(SendError::Closed(value));
         }
 
+        let receiver_count = self.inner.receiver_count.load(Ordering::Acquire);
         let _old_value = {
             let mut guard = self.inner.value.write();
             let old = std::mem::replace(&mut guard.0, value);
@@ -269,7 +280,9 @@ impl<T> Sender<T> {
             old
         };
 
-        self.inner.wake_all_waiters();
+        if receiver_count != 0 {
+            self.inner.wake_all_waiters();
+        }
 
         Ok(())
     }
@@ -281,17 +294,25 @@ impl<T> Sender<T> {
     ///
     /// # Errors
     ///
-    /// Returns `Err(ModifyError::Closed)` if all receivers have been dropped.
+    /// Applies an in-place update to the latest value for current and future
+    /// subscribers.
+    ///
+    /// Like [`Sender::send`], this preserves the watch cell even if there are
+    /// no active receivers at the instant of mutation.
+    ///
+    /// # Errors
+    ///
+    /// Returns `Err(ModifyError)` only if the sender has already been marked
+    /// closed.
     pub fn send_modify<F>(&self, f: F) -> Result<(), ModifyError>
     where
         F: FnOnce(&mut T),
     {
-        let receiver_count = self.inner.receiver_count.load(Ordering::Acquire);
-
-        if receiver_count == 0 {
+        if self.inner.is_sender_dropped() {
             return Err(ModifyError);
         }
 
+        let receiver_count = self.inner.receiver_count.load(Ordering::Acquire);
         {
             let mut guard = self.inner.value.write();
             f(&mut guard.0);
@@ -299,7 +320,9 @@ impl<T> Sender<T> {
             self.inner.version.store(guard.1, Ordering::Release);
         }
 
-        self.inner.wake_all_waiters();
+        if receiver_count != 0 {
+            self.inner.wake_all_waiters();
+        }
 
         Ok(())
     }
@@ -859,21 +882,52 @@ mod tests {
     }
 
     #[test]
-    fn send_error_when_no_receivers() {
-        init_test("send_error_when_no_receivers");
+    fn send_without_receivers_preserves_latest_value() {
+        init_test("send_without_receivers_preserves_latest_value");
         let (tx, rx) = channel(0);
         drop(rx);
 
         let closed = tx.is_closed();
         crate::assert_with_log!(closed, "tx closed", true, closed);
-        let err = tx.send(42);
+        let result = tx.send(42);
         crate::assert_with_log!(
-            matches!(err, Err(SendError::Closed(42))),
-            "send closed",
-            "Err(Closed(42))",
-            format!("{:?}", err)
+            result.is_ok(),
+            "send still preserves state",
+            true,
+            result.is_ok()
         );
-        crate::test_complete!("send_error_when_no_receivers");
+
+        let rx2 = tx.subscribe();
+        let value = *rx2.borrow();
+        crate::assert_with_log!(value == 42, "subscriber sees preserved state", 42, value);
+        let changed = rx2.has_changed();
+        crate::assert_with_log!(
+            !changed,
+            "new subscriber starts at current version",
+            false,
+            changed
+        );
+        crate::test_complete!("send_without_receivers_preserves_latest_value");
+    }
+
+    #[test]
+    fn send_modify_without_receivers_preserves_latest_value() {
+        init_test("send_modify_without_receivers_preserves_latest_value");
+        let (tx, rx) = channel(10);
+        drop(rx);
+
+        let result = tx.send_modify(|value| *value += 32);
+        crate::assert_with_log!(
+            result.is_ok(),
+            "send_modify preserves state",
+            true,
+            result.is_ok()
+        );
+
+        let rx2 = tx.subscribe();
+        let value = *rx2.borrow();
+        crate::assert_with_log!(value == 42, "subscriber sees modified state", 42, value);
+        crate::test_complete!("send_modify_without_receivers_preserves_latest_value");
     }
 
     #[test]
