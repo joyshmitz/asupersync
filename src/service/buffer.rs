@@ -178,15 +178,7 @@ impl<S> Buffer<S> {
     /// Wakes all tasks waiting for capacity or inner-service readiness so they
     /// can observe the closed state and return `BufferError::Closed`.
     pub fn close(&self) {
-        *self.shared.closed.lock() = true;
-        let ready_wakers = std::mem::take(&mut *self.shared.ready_wakers.lock());
-        let inner_wakers = std::mem::take(&mut *self.shared.inner_wakers.wakers.lock());
-        for w in ready_wakers {
-            w.wake();
-        }
-        for w in inner_wakers {
-            w.wake();
-        }
+        close_shared_buffer(&self.shared);
     }
 
     /// Returns `true` if the buffer has been closed.
@@ -285,6 +277,23 @@ fn release_capacity_claim<S>(shared: &SharedBuffer<S>) {
         w.wake();
     }
     let inner_wakers = std::mem::take(&mut *shared.inner_wakers.wakers.lock());
+    for w in inner_wakers {
+        w.wake();
+    }
+}
+
+/// Close the shared buffer and wake all waiters.
+///
+/// This is used both by the explicit `close()` API and by panic paths inside
+/// `BufferFuture` once the shared inner service may have been left in an
+/// inconsistent readiness state.
+fn close_shared_buffer<S>(shared: &SharedBuffer<S>) {
+    *shared.closed.lock() = true;
+    let ready_wakers = std::mem::take(&mut *shared.ready_wakers.lock());
+    let inner_wakers = std::mem::take(&mut *shared.inner_wakers.wakers.lock());
+    for w in ready_wakers {
+        w.wake();
+    }
     for w in inner_wakers {
         w.wake();
     }
@@ -442,10 +451,32 @@ where
                     let mut inner = shared.inner.lock();
                     let waker = std::task::Waker::from(Arc::clone(&shared.inner_wakers));
                     let mut inner_cx = std::task::Context::from_waker(&waker);
-                    match inner.poll_ready(&mut inner_cx) {
-                        Poll::Ready(Ok(())) => {
+                    let ready_result =
+                        std::panic::catch_unwind(std::panic::AssertUnwindSafe(|| {
+                            inner.poll_ready(&mut inner_cx)
+                        }));
+                    match ready_result {
+                        Err(panic_payload) => {
+                            drop(inner);
+                            close_shared_buffer(&shared);
+                            drop(guard);
+                            std::panic::resume_unwind(panic_payload);
+                        }
+                        Ok(Poll::Ready(Ok(()))) => {
                             let req = request.take().unwrap();
-                            let future = inner.call(req);
+                            let call_result =
+                                std::panic::catch_unwind(std::panic::AssertUnwindSafe(|| {
+                                    inner.call(req)
+                                }));
+                            let future = match call_result {
+                                Ok(future) => future,
+                                Err(panic_payload) => {
+                                    drop(inner);
+                                    close_shared_buffer(&shared);
+                                    drop(guard);
+                                    std::panic::resume_unwind(panic_payload);
+                                }
+                            };
                             drop(inner);
 
                             let wakers = std::mem::take(&mut *shared.inner_wakers.wakers.lock());
@@ -458,14 +489,14 @@ where
                             this.state = BufferFutureState::Active { future, shared };
                             // Loop around to poll Active
                         }
-                        Poll::Ready(Err(e)) => {
+                        Ok(Poll::Ready(Err(e))) => {
                             drop(inner);
                             // Guard will handle the decrement + wakeups on drop.
                             drop(guard);
                             this.state = BufferFutureState::Error(BufferError::Inner(e));
                             // Loop around to poll Error
                         }
-                        Poll::Pending => {
+                        Ok(Poll::Pending) => {
                             drop(inner);
                             // Defuse: state restored with shared still tracked.
                             let shared = guard.defuse();
@@ -604,6 +635,7 @@ where
 #[cfg(test)]
 mod tests {
     use super::*;
+    use std::panic::{AssertUnwindSafe, catch_unwind};
     use std::sync::Arc;
     use std::sync::atomic::{AtomicUsize, Ordering};
     use std::task::Waker;
@@ -719,6 +751,46 @@ mod tests {
 
         fn call(&mut self, _req: i32) -> Self::Future {
             std::future::pending()
+        }
+    }
+
+    struct PanicOnInnerPollReadyService;
+
+    impl Service<i32> for PanicOnInnerPollReadyService {
+        type Response = i32;
+        type Error = &'static str;
+        type Future = std::future::Ready<Result<i32, &'static str>>;
+
+        fn poll_ready(&mut self, _cx: &mut Context<'_>) -> Poll<Result<(), Self::Error>> {
+            panic!("panic during inner poll_ready");
+        }
+
+        fn call(&mut self, req: i32) -> Self::Future {
+            std::future::ready(Ok(req))
+        }
+    }
+
+    struct PanicAfterReserveService {
+        reserved: bool,
+    }
+
+    impl Service<i32> for PanicAfterReserveService {
+        type Response = i32;
+        type Error = &'static str;
+        type Future = std::future::Ready<Result<i32, &'static str>>;
+
+        fn poll_ready(&mut self, _cx: &mut Context<'_>) -> Poll<Result<(), Self::Error>> {
+            if self.reserved {
+                Poll::Pending
+            } else {
+                self.reserved = true;
+                Poll::Ready(Ok(()))
+            }
+        }
+
+        fn call(&mut self, _req: i32) -> Self::Future {
+            assert!(self.reserved, "call requires a readiness reservation");
+            panic!("panic after reserve");
         }
     }
 
@@ -1078,6 +1150,69 @@ mod tests {
             second,
             Poll::Ready(Err(BufferError::PolledAfterCompletion))
         ));
+    }
+
+    #[test]
+    fn inner_poll_ready_panic_closes_buffer_and_future() {
+        init_test("inner_poll_ready_panic_closes_buffer_and_future");
+        let mut svc = Buffer::new(PanicOnInnerPollReadyService, 1);
+        let waker = noop_waker();
+        let mut cx = Context::from_waker(&waker);
+
+        assert!(matches!(svc.poll_ready(&mut cx), Poll::Ready(Ok(()))));
+        let mut future = svc.call(7);
+
+        let panic = catch_unwind(AssertUnwindSafe(|| {
+            let _ = Pin::new(&mut future).poll(&mut cx);
+        }));
+        assert!(panic.is_err(), "inner poll_ready panic should propagate");
+        assert!(svc.is_closed(), "buffer should fail closed after panic");
+        assert_eq!(svc.pending(), 0, "panic path must release pending slot");
+        assert!(matches!(
+            Pin::new(&mut future).poll(&mut cx),
+            Poll::Ready(Err(BufferError::PolledAfterCompletion))
+        ));
+        assert!(matches!(
+            svc.poll_ready(&mut cx),
+            Poll::Ready(Err(BufferError::Closed))
+        ));
+        crate::test_complete!("inner_poll_ready_panic_closes_buffer_and_future");
+    }
+
+    #[test]
+    fn inner_call_panic_closes_buffer_and_prevents_wedged_readiness() {
+        init_test("inner_call_panic_closes_buffer_and_prevents_wedged_readiness");
+        let mut svc = Buffer::new(PanicAfterReserveService { reserved: false }, 1);
+        let waker = noop_waker();
+        let mut cx = Context::from_waker(&waker);
+
+        assert!(matches!(svc.poll_ready(&mut cx), Poll::Ready(Ok(()))));
+        let mut future = svc.call(9);
+
+        let panic = catch_unwind(AssertUnwindSafe(|| {
+            let _ = Pin::new(&mut future).poll(&mut cx);
+        }));
+        assert!(panic.is_err(), "inner call panic should propagate");
+        assert!(svc.is_closed(), "buffer should fail closed after panic");
+        assert_eq!(svc.pending(), 0, "panic path must release pending slot");
+        assert!(matches!(
+            Pin::new(&mut future).poll(&mut cx),
+            Poll::Ready(Err(BufferError::PolledAfterCompletion))
+        ));
+
+        let mut clone = svc.clone();
+        assert!(matches!(
+            clone.poll_ready(&mut cx),
+            Poll::Ready(Err(BufferError::Closed))
+        ));
+
+        let mut after_close = svc.call(10);
+        assert!(matches!(
+            Pin::new(&mut after_close).poll(&mut cx),
+            Poll::Ready(Err(BufferError::Closed))
+        ));
+
+        crate::test_complete!("inner_call_panic_closes_buffer_and_prevents_wedged_readiness");
     }
 
     // ================================================================

@@ -374,6 +374,8 @@ pub enum LoadBalanceError<E> {
     NoBackends,
     /// Backends exist, but none are currently ready to accept work.
     NoReadyBackends,
+    /// The load-balanced future was polled after it had already completed.
+    PolledAfterCompletion,
     /// Inner service error.
     Inner(E),
 }
@@ -383,6 +385,9 @@ impl<E: fmt::Display> fmt::Display for LoadBalanceError<E> {
         match self {
             Self::NoBackends => write!(f, "no backends available"),
             Self::NoReadyBackends => write!(f, "no ready backends available"),
+            Self::PolledAfterCompletion => {
+                write!(f, "load-balanced future polled after completion")
+            }
             Self::Inner(e) => write!(f, "backend error: {e}"),
         }
     }
@@ -391,7 +396,7 @@ impl<E: fmt::Display> fmt::Display for LoadBalanceError<E> {
 impl<E: std::error::Error + 'static> std::error::Error for LoadBalanceError<E> {
     fn source(&self) -> Option<&(dyn std::error::Error + 'static)> {
         match self {
-            Self::NoBackends | Self::NoReadyBackends => None,
+            Self::NoBackends | Self::NoReadyBackends | Self::PolledAfterCompletion => None,
             Self::Inner(e) => Some(e),
         }
     }
@@ -584,7 +589,7 @@ impl<S, T: Strategy> LoadBalancer<S, T> {
         let idx = self
             .strategy
             .pick(&loads)
-            .ok_or(LoadBalanceError::NoBackends)?;
+            .ok_or(LoadBalanceError::NoReadyBackends)?;
         drop(backends);
 
         if idx >= backend_handles.len() {
@@ -621,7 +626,7 @@ impl<S, T: Strategy> LoadBalancer<S, T> {
                     drop(svc);
 
                     return Ok(LoadBalancedFuture {
-                        inner: fut,
+                        inner: Some(fut),
                         service_marker: PhantomData,
                         load_metric: Some(load_metric),
                     });
@@ -643,7 +648,7 @@ impl<S, T: Strategy> LoadBalancer<S, T> {
 
 /// Future returned by load-balanced dispatch.
 pub struct LoadBalancedFuture<F, S> {
-    inner: F,
+    inner: Option<F>,
     service_marker: PhantomData<fn() -> S>,
     /// Load metric to decrement when the future completes or is dropped.
     load_metric: Option<Arc<LoadMetric>>,
@@ -655,21 +660,30 @@ impl<F, S> fmt::Debug for LoadBalancedFuture<F, S> {
     }
 }
 
-impl<F, S> Future for LoadBalancedFuture<F, S>
+impl<F, S, T, E> Future for LoadBalancedFuture<F, S>
 where
-    F: Future + Unpin,
+    F: Future<Output = Result<T, E>> + Unpin,
 {
-    type Output = F::Output;
+    type Output = Result<T, LoadBalanceError<E>>;
 
     fn poll(mut self: Pin<&mut Self>, cx: &mut Context<'_>) -> Poll<Self::Output> {
-        let result = Pin::new(&mut self.inner).poll(cx);
+        let Some(inner) = self.inner.as_mut() else {
+            return Poll::Ready(Err(LoadBalanceError::PolledAfterCompletion));
+        };
+
+        let result = Pin::new(inner).poll(cx);
         if result.is_ready() {
+            self.inner = None;
             // Decrement in-flight counter when the future completes.
             if let Some(load) = self.load_metric.take() {
                 load.decrement();
             }
         }
-        result
+        match result {
+            Poll::Ready(Ok(response)) => Poll::Ready(Ok(response)),
+            Poll::Ready(Err(err)) => Poll::Ready(Err(LoadBalanceError::Inner(err))),
+            Poll::Pending => Poll::Pending,
+        }
     }
 }
 
@@ -912,10 +926,22 @@ mod tests {
     }
 
     #[test]
+    fn error_polled_after_completion_display() {
+        let err: LoadBalanceError<std::io::Error> = LoadBalanceError::PolledAfterCompletion;
+        assert_eq!(
+            format!("{err}"),
+            "load-balanced future polled after completion"
+        );
+    }
+
+    #[test]
     fn error_source() {
         use std::error::Error;
         let err: LoadBalanceError<std::io::Error> = LoadBalanceError::NoBackends;
         assert!(err.source().is_none());
+
+        let done: LoadBalanceError<std::io::Error> = LoadBalanceError::PolledAfterCompletion;
+        assert!(done.source().is_none());
 
         let inner = std::io::Error::other("fail");
         let err = LoadBalanceError::Inner(inner);
@@ -959,6 +985,23 @@ mod tests {
 
         fn call(&mut self, _req: u32) -> Self::Future {
             panic!("panic during call construction");
+        }
+    }
+
+    #[derive(Clone, Debug)]
+    struct ErrorService;
+
+    impl Service<u32> for ErrorService {
+        type Response = u32;
+        type Error = std::io::Error;
+        type Future = std::future::Ready<Result<Self::Response, Self::Error>>;
+
+        fn poll_ready(&mut self, _cx: &mut Context<'_>) -> Poll<Result<(), Self::Error>> {
+            Poll::Ready(Ok(()))
+        }
+
+        fn call(&mut self, _req: u32) -> Self::Future {
+            std::future::ready(Err(std::io::Error::other("backend failed")))
         }
     }
 
@@ -1257,6 +1300,59 @@ mod tests {
     }
 
     #[test]
+    fn lb_balanced_future_repoll_after_success_is_fail_closed() {
+        init_test("lb_balanced_future_repoll_after_success_is_fail_closed");
+        let lb = LoadBalancer::new(RoundRobin::new(), vec![ReadyArmService::new(41)]);
+
+        let mut fut = lb
+            .call_balanced(7)
+            .expect("ready backend should dispatch successfully");
+        let waker = noop_waker();
+        let mut cx = Context::from_waker(&waker);
+
+        let first = Pin::new(&mut fut).poll(&mut cx);
+        assert!(matches!(first, Poll::Ready(Ok(41))));
+        assert_eq!(lb.loads(), vec![0]);
+
+        let second = Pin::new(&mut fut).poll(&mut cx);
+        assert!(matches!(
+            second,
+            Poll::Ready(Err(LoadBalanceError::PolledAfterCompletion))
+        ));
+        assert_eq!(lb.loads(), vec![0]);
+        crate::test_complete!("lb_balanced_future_repoll_after_success_is_fail_closed");
+    }
+
+    #[test]
+    fn lb_balanced_future_repoll_after_error_is_fail_closed() {
+        init_test("lb_balanced_future_repoll_after_error_is_fail_closed");
+        let lb = LoadBalancer::new(RoundRobin::new(), vec![ErrorService]);
+
+        let mut fut = lb
+            .call_balanced(7)
+            .expect("erroring backend should still dispatch a future");
+        let waker = noop_waker();
+        let mut cx = Context::from_waker(&waker);
+
+        let first = Pin::new(&mut fut).poll(&mut cx);
+        match first {
+            Poll::Ready(Err(LoadBalanceError::Inner(err))) => {
+                assert_eq!(err.to_string(), "backend failed");
+            }
+            other => panic!("expected inner backend error, got {other:?}"),
+        }
+        assert_eq!(lb.loads(), vec![0]);
+
+        let second = Pin::new(&mut fut).poll(&mut cx);
+        assert!(matches!(
+            second,
+            Poll::Ready(Err(LoadBalanceError::PolledAfterCompletion))
+        ));
+        assert_eq!(lb.loads(), vec![0]);
+        crate::test_complete!("lb_balanced_future_repoll_after_error_is_fail_closed");
+    }
+
+    #[test]
     fn lb_call_balanced_skips_pending_backend() {
         init_test("lb_call_balanced_skips_pending_backend");
         let lb = LoadBalancer::new(
@@ -1288,6 +1384,22 @@ mod tests {
         assert!(matches!(err, LoadBalanceError::NoReadyBackends));
         assert_eq!(lb.loads(), vec![0]);
         crate::test_complete!("lb_call_balanced_reports_when_all_backends_pending");
+    }
+
+    #[test]
+    fn lb_call_balanced_reports_no_ready_when_strategy_declines_all_backends() {
+        init_test("lb_call_balanced_reports_no_ready_when_strategy_declines_all_backends");
+        let lb = LoadBalancer::new(Weighted::new(vec![0]), vec![ReadyArmService::new(17)]);
+
+        let err = lb
+            .call_balanced(7)
+            .expect_err("zero-weight strategy should decline all backends");
+
+        assert!(matches!(err, LoadBalanceError::NoReadyBackends));
+        assert_eq!(lb.loads(), vec![0]);
+        crate::test_complete!(
+            "lb_call_balanced_reports_no_ready_when_strategy_declines_all_backends"
+        );
     }
 
     #[test]
@@ -1579,7 +1691,7 @@ mod tests {
     #[test]
     fn balanced_future_debug() {
         let fut = LoadBalancedFuture::<_, ()> {
-            inner: std::future::ready(42),
+            inner: Some(std::future::ready(42)),
             service_marker: PhantomData,
             load_metric: None,
         };
