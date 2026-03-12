@@ -645,8 +645,7 @@ impl MacaroonToken {
                                     return Err(VerificationError::CaveatFailed {
                                         index: i,
                                         predicate: format!(
-                                            "discharge[{}].caveat[{}]: unsatisfied third-party caveat '{}'",
-                                            tp_id, di, identifier,
+                                            "discharge[{tp_id}].caveat[{di}]: unsatisfied third-party caveat '{identifier}'",
                                         ),
                                         reason:
                                             "no discharge provided for nested third-party caveat"
