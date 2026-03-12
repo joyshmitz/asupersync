@@ -328,6 +328,8 @@ pub enum RateLimitError<E> {
     NotReady,
     /// Rate limit exceeded (should not normally be seen - poll_ready handles this).
     RateLimitExceeded,
+    /// The future was polled after it had already completed.
+    PolledAfterCompletion,
     /// The inner service returned an error.
     Inner(E),
 }
@@ -337,6 +339,7 @@ impl<E: std::fmt::Display> std::fmt::Display for RateLimitError<E> {
         match self {
             Self::NotReady => write!(f, "poll_ready required before call"),
             Self::RateLimitExceeded => write!(f, "rate limit exceeded"),
+            Self::PolledAfterCompletion => write!(f, "future polled after completion"),
             Self::Inner(e) => write!(f, "inner service error: {e}"),
         }
     }
@@ -345,7 +348,7 @@ impl<E: std::fmt::Display> std::fmt::Display for RateLimitError<E> {
 impl<E: std::error::Error + 'static> std::error::Error for RateLimitError<E> {
     fn source(&self) -> Option<&(dyn std::error::Error + 'static)> {
         match self {
-            Self::NotReady | Self::RateLimitExceeded => None,
+            Self::NotReady | Self::RateLimitExceeded | Self::PolledAfterCompletion => None,
             Self::Inner(e) => Some(e),
         }
     }
@@ -417,6 +420,7 @@ enum RateLimitFutureState<F, E> {
     Error {
         error: Option<RateLimitError<E>>,
     },
+    Done,
 }
 
 impl<F, E> RateLimitFuture<F, E> {
@@ -445,15 +449,30 @@ where
 
     #[inline]
     fn poll(self: Pin<&mut Self>, cx: &mut Context<'_>) -> Poll<Self::Output> {
-        match self.project().state.project() {
+        let mut this = self.project();
+
+        match this.state.as_mut().project() {
             RateLimitFutureStateProj::Inner { inner } => match inner.poll(cx) {
-                Poll::Ready(Ok(response)) => Poll::Ready(Ok(response)),
-                Poll::Ready(Err(error)) => Poll::Ready(Err(RateLimitError::Inner(error))),
+                Poll::Ready(Ok(response)) => {
+                    this.state.set(RateLimitFutureState::Done);
+                    Poll::Ready(Ok(response))
+                }
+                Poll::Ready(Err(error)) => {
+                    this.state.set(RateLimitFutureState::Done);
+                    Poll::Ready(Err(RateLimitError::Inner(error)))
+                }
                 Poll::Pending => Poll::Pending,
             },
-            RateLimitFutureStateProj::Error { error } => Poll::Ready(Err(error
-                .take()
-                .unwrap_or(RateLimitError::RateLimitExceeded))),
+            RateLimitFutureStateProj::Error { error } => {
+                let error = error
+                    .take()
+                    .unwrap_or(RateLimitError::PolledAfterCompletion);
+                this.state.set(RateLimitFutureState::Done);
+                Poll::Ready(Err(error))
+            }
+            RateLimitFutureStateProj::Done => {
+                Poll::Ready(Err(RateLimitError::PolledAfterCompletion))
+            }
         }
     }
 }
@@ -469,6 +488,10 @@ impl<F: std::fmt::Debug, E> std::fmt::Debug for RateLimitFuture<F, E> {
             RateLimitFutureState::Error { .. } => f
                 .debug_struct("RateLimitFuture")
                 .field("state", &"ImmediateError")
+                .finish(),
+            RateLimitFutureState::Done => f
+                .debug_struct("RateLimitFuture")
+                .field("state", &"Done")
                 .finish(),
         }
     }
@@ -1031,6 +1054,10 @@ mod tests {
         let dbg = format!("{err:?}");
         assert!(dbg.contains("RateLimitExceeded"));
 
+        let err: RateLimitError<&str> = RateLimitError::PolledAfterCompletion;
+        let dbg = format!("{err:?}");
+        assert!(dbg.contains("PolledAfterCompletion"));
+
         let err: RateLimitError<&str> = RateLimitError::Inner("fail");
         let dbg = format!("{err:?}");
         assert!(dbg.contains("Inner"));
@@ -1045,6 +1072,9 @@ mod tests {
         let err: RateLimitError<std::io::Error> = RateLimitError::RateLimitExceeded;
         assert!(err.source().is_none());
 
+        let err: RateLimitError<std::io::Error> = RateLimitError::PolledAfterCompletion;
+        assert!(err.source().is_none());
+
         let inner = std::io::Error::other("test");
         let err = RateLimitError::Inner(inner);
         assert!(err.source().is_some());
@@ -1056,6 +1086,101 @@ mod tests {
             RateLimitFuture::new(std::future::ready(Ok::<i32, &str>(42)));
         let dbg = format!("{future:?}");
         assert!(dbg.contains("RateLimitFuture"));
+    }
+
+    #[test]
+    fn immediate_error_repolls_fail_closed_after_completion() {
+        init_test("immediate_error_repolls_fail_closed_after_completion");
+        let waker = noop_waker();
+        let mut cx = Context::from_waker(&waker);
+        let mut future: RateLimitFuture<std::future::Ready<Result<i32, &'static str>>, &'static str> =
+            RateLimitFuture::immediate_error(RateLimitError::NotReady);
+
+        let first = Pin::new(&mut future).poll(&mut cx);
+        crate::assert_with_log!(
+            matches!(first, Poll::Ready(Err(RateLimitError::NotReady))),
+            "first poll returns stored error",
+            true,
+            matches!(first, Poll::Ready(Err(RateLimitError::NotReady)))
+        );
+
+        let second = Pin::new(&mut future).poll(&mut cx);
+        crate::assert_with_log!(
+            matches!(
+                second,
+                Poll::Ready(Err(RateLimitError::PolledAfterCompletion))
+            ),
+            "second poll fails closed",
+            true,
+            matches!(
+                second,
+                Poll::Ready(Err(RateLimitError::PolledAfterCompletion))
+            )
+        );
+        crate::test_complete!("immediate_error_repolls_fail_closed_after_completion");
+    }
+
+    #[test]
+    fn completed_inner_future_repolls_fail_closed() {
+        init_test("completed_inner_future_repolls_fail_closed");
+        let waker = noop_waker();
+        let mut cx = Context::from_waker(&waker);
+        let mut future: RateLimitFuture<_, &'static str> =
+            RateLimitFuture::new(std::future::ready(Ok::<i32, &'static str>(42)));
+
+        let first = Pin::new(&mut future).poll(&mut cx);
+        crate::assert_with_log!(
+            matches!(first, Poll::Ready(Ok(42))),
+            "first poll returns success",
+            true,
+            matches!(first, Poll::Ready(Ok(42)))
+        );
+
+        let second = Pin::new(&mut future).poll(&mut cx);
+        crate::assert_with_log!(
+            matches!(
+                second,
+                Poll::Ready(Err(RateLimitError::PolledAfterCompletion))
+            ),
+            "second poll fails closed",
+            true,
+            matches!(
+                second,
+                Poll::Ready(Err(RateLimitError::PolledAfterCompletion))
+            )
+        );
+        crate::test_complete!("completed_inner_future_repolls_fail_closed");
+    }
+
+    #[test]
+    fn completed_inner_error_repolls_fail_closed() {
+        init_test("completed_inner_error_repolls_fail_closed");
+        let waker = noop_waker();
+        let mut cx = Context::from_waker(&waker);
+        let mut future = RateLimitFuture::new(std::future::ready(Err::<i32, &'static str>("boom")));
+
+        let first = Pin::new(&mut future).poll(&mut cx);
+        crate::assert_with_log!(
+            matches!(first, Poll::Ready(Err(RateLimitError::Inner("boom")))),
+            "first poll returns inner error",
+            true,
+            matches!(first, Poll::Ready(Err(RateLimitError::Inner("boom"))))
+        );
+
+        let second = Pin::new(&mut future).poll(&mut cx);
+        crate::assert_with_log!(
+            matches!(
+                second,
+                Poll::Ready(Err(RateLimitError::PolledAfterCompletion))
+            ),
+            "second poll fails closed",
+            true,
+            matches!(
+                second,
+                Poll::Ready(Err(RateLimitError::PolledAfterCompletion))
+            )
+        );
+        crate::test_complete!("completed_inner_error_repolls_fail_closed");
     }
 
     struct TrackWaker(Arc<AtomicBool>);
@@ -1122,6 +1247,16 @@ mod tests {
         let display = format!("{err}");
         let has_rate = display.contains("rate limit exceeded");
         crate::assert_with_log!(has_rate, "rate limit", true, has_rate);
+
+        let err: RateLimitError<&str> = RateLimitError::PolledAfterCompletion;
+        let display = format!("{err}");
+        let has_polled_after_completion = display.contains("future polled after completion");
+        crate::assert_with_log!(
+            has_polled_after_completion,
+            "polled after completion",
+            true,
+            has_polled_after_completion
+        );
 
         let err: RateLimitError<&str> = RateLimitError::Inner("inner error");
         let display = format!("{err}");

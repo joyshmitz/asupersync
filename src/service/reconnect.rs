@@ -69,6 +69,8 @@ pub enum ReconnectError<E, M> {
     Connect(M),
     /// The caller attempted `call()` without a preceding successful `poll_ready()`.
     NotReady,
+    /// The reconnect future was polled after it had already completed.
+    PolledAfterCompletion,
 }
 
 impl<E: fmt::Display, M: fmt::Display> fmt::Display for ReconnectError<E, M> {
@@ -77,6 +79,9 @@ impl<E: fmt::Display, M: fmt::Display> fmt::Display for ReconnectError<E, M> {
             Self::Inner(e) => write!(f, "service error: {e}"),
             Self::Connect(e) => write!(f, "reconnect failed: {e}"),
             Self::NotReady => write!(f, "service not ready; poll_ready required before call"),
+            Self::PolledAfterCompletion => {
+                write!(f, "reconnect future polled after completion")
+            }
         }
     }
 }
@@ -88,7 +93,7 @@ impl<E: std::error::Error + 'static, M: std::error::Error + 'static> std::error:
         match self {
             Self::Inner(e) => Some(e),
             Self::Connect(e) => Some(e),
-            Self::NotReady => None,
+            Self::NotReady | Self::PolledAfterCompletion => None,
         }
     }
 }
@@ -347,7 +352,7 @@ enum ReconnectFutureState<F, E, ME> {
         service_epoch: Arc<AtomicU64>,
         call_epoch: u64,
     },
-    Error(Option<ReconnectError<E, ME>>),
+    Error(ReconnectError<E, ME>),
     Done,
 }
 
@@ -370,7 +375,7 @@ impl<F, E, ME> ReconnectFuture<F, E, ME> {
 
     fn error(error: ReconnectError<E, ME>) -> Self {
         Self {
-            state: ReconnectFutureState::Error(Some(error)),
+            state: ReconnectFutureState::Error(error),
         }
     }
 }
@@ -417,10 +422,10 @@ where
                     Poll::Pending
                 }
             },
-            ReconnectFutureState::Error(mut error) => Poll::Ready(Err(error
-                .take()
-                .expect("error future polled after completion"))),
-            ReconnectFutureState::Done => panic!("ReconnectFuture polled after completion"),
+            ReconnectFutureState::Error(error) => Poll::Ready(Err(error)),
+            ReconnectFutureState::Done => {
+                Poll::Ready(Err(ReconnectError::PolledAfterCompletion))
+            }
         }
     }
 }
@@ -1149,6 +1154,13 @@ mod tests {
     }
 
     #[test]
+    fn reconnect_error_polled_after_completion_display() {
+        let err: ReconnectError<std::io::Error, std::io::Error> =
+            ReconnectError::PolledAfterCompletion;
+        assert!(format!("{err}").contains("polled after completion"));
+    }
+
+    #[test]
     fn reconnect_error_source() {
         use std::error::Error;
         let err: ReconnectError<std::io::Error, std::io::Error> =
@@ -1157,6 +1169,10 @@ mod tests {
 
         let not_ready: ReconnectError<std::io::Error, std::io::Error> = ReconnectError::NotReady;
         assert!(not_ready.source().is_none());
+
+        let done: ReconnectError<std::io::Error, std::io::Error> =
+            ReconnectError::PolledAfterCompletion;
+        assert!(done.source().is_none());
     }
 
     #[test]
@@ -1203,5 +1219,93 @@ mod tests {
         );
         let dbg = format!("{fut:?}");
         assert!(dbg.contains("ReconnectFuture"));
+    }
+
+    #[test]
+    fn reconnect_call_without_poll_ready_second_poll_fails_closed() {
+        init_test("reconnect_call_without_poll_ready_second_poll_fails_closed");
+        let maker = ReconnectingMaker::new(1);
+        let mut rc = Reconnect::lazy(maker);
+        let waker = noop_waker();
+        let mut cx = Context::from_waker(&waker);
+
+        let mut call = rc.call(());
+        assert!(matches!(
+            Pin::new(&mut call).poll(&mut cx),
+            Poll::Ready(Err(ReconnectError::NotReady))
+        ));
+        assert!(matches!(
+            Pin::new(&mut call).poll(&mut cx),
+            Poll::Ready(Err(ReconnectError::PolledAfterCompletion))
+        ));
+
+        crate::test_complete!("reconnect_call_without_poll_ready_second_poll_fails_closed");
+    }
+
+    #[test]
+    fn reconnect_success_second_poll_fails_closed() {
+        init_test("reconnect_success_second_poll_fails_closed");
+        let calls = Arc::new(AtomicU32::new(0));
+        let maker = CountingReconnectMaker::new(1, Arc::clone(&calls));
+        let initial = CountingReconnectSvc {
+            id: 9,
+            calls: Arc::clone(&calls),
+        };
+        let mut rc = Reconnect::new(maker, initial);
+        let waker = noop_waker();
+        let mut cx = Context::from_waker(&waker);
+
+        assert!(matches!(rc.poll_ready(&mut cx), Poll::Ready(Ok(()))));
+
+        let mut call = rc.call(());
+        assert!(matches!(
+            Pin::new(&mut call).poll(&mut cx),
+            Poll::Ready(Ok(9))
+        ));
+        assert!(matches!(
+            Pin::new(&mut call).poll(&mut cx),
+            Poll::Ready(Err(ReconnectError::PolledAfterCompletion))
+        ));
+        assert_eq!(
+            calls.load(Ordering::SeqCst),
+            1,
+            "successful first poll must still invoke the inner service exactly once"
+        );
+
+        crate::test_complete!("reconnect_success_second_poll_fails_closed");
+    }
+
+    #[test]
+    fn reconnect_error_second_poll_fails_closed_and_refresh_still_applies() {
+        init_test("reconnect_error_second_poll_fails_closed_and_refresh_still_applies");
+        let maker = ReconnectingMaker::new(1);
+        let initial = ReconnectingSvc {
+            id: 0,
+            fail_next_call: true,
+        };
+        let mut rc = Reconnect::new(maker, initial);
+        let waker = noop_waker();
+        let mut cx = Context::from_waker(&waker);
+
+        assert!(matches!(rc.poll_ready(&mut cx), Poll::Ready(Ok(()))));
+
+        let mut call = rc.call(());
+        assert!(matches!(
+            Pin::new(&mut call).poll(&mut cx),
+            Poll::Ready(Err(ReconnectError::Inner(ReconnectingCallError)))
+        ));
+        assert!(matches!(
+            Pin::new(&mut call).poll(&mut cx),
+            Poll::Ready(Err(ReconnectError::PolledAfterCompletion))
+        ));
+
+        assert!(
+            matches!(rc.poll_ready(&mut cx), Poll::Ready(Ok(()))),
+            "first terminal error poll must still trigger reconnect on next readiness probe"
+        );
+        assert_eq!(rc.inner().map(|svc| svc.id), Some(1));
+        assert_eq!(rc.reconnect_count(), 1);
+
+        crate::test_complete!("reconnect_error_second_poll_fails_closed_and_refresh_still_applies");
     }
 }

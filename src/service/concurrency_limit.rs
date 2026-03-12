@@ -161,6 +161,8 @@ impl<S> ConcurrencyLimit<S> {
 pub enum ConcurrencyLimitError<E> {
     /// The caller attempted `call()` without a preceding successful `poll_ready()`.
     NotReady,
+    /// The concurrency-limit future was polled after it had already completed.
+    PolledAfterCompletion,
     /// Failed to acquire a permit (should not happen in normal operation).
     LimitExceeded,
     /// The inner service returned an error.
@@ -171,6 +173,9 @@ impl<E: std::fmt::Display> std::fmt::Display for ConcurrencyLimitError<E> {
     fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
         match self {
             Self::NotReady => write!(f, "poll_ready required before call"),
+            Self::PolledAfterCompletion => {
+                write!(f, "concurrency limit future polled after completion")
+            }
             Self::LimitExceeded => write!(f, "concurrency limit exceeded"),
             Self::Inner(e) => write!(f, "inner service error: {e}"),
         }
@@ -180,7 +185,7 @@ impl<E: std::fmt::Display> std::fmt::Display for ConcurrencyLimitError<E> {
 impl<E: std::error::Error + 'static> std::error::Error for ConcurrencyLimitError<E> {
     fn source(&self) -> Option<&(dyn std::error::Error + 'static)> {
         match self {
-            Self::NotReady | Self::LimitExceeded => None,
+            Self::NotReady | Self::PolledAfterCompletion | Self::LimitExceeded => None,
             Self::Inner(e) => Some(e),
         }
     }
@@ -281,6 +286,7 @@ where
 pub struct ConcurrencyLimitFuture<F, E> {
     #[pin]
     state: ConcurrencyLimitFutureState<F, E>,
+    completed: bool,
 }
 
 #[pin_project::pin_project(project = ConcurrencyLimitFutureStateProj)]
@@ -305,6 +311,7 @@ impl<F, E> ConcurrencyLimitFuture<F, E> {
                 future: inner,
                 permit: Some(permit),
             },
+            completed: false,
         }
     }
 
@@ -313,6 +320,7 @@ impl<F, E> ConcurrencyLimitFuture<F, E> {
     pub fn immediate_error(err: ConcurrencyLimitError<E>) -> Self {
         Self {
             state: ConcurrencyLimitFutureState::Error { err: Some(err) },
+            completed: false,
         }
     }
 }
@@ -325,19 +333,27 @@ where
 
     #[inline]
     fn poll(self: Pin<&mut Self>, cx: &mut Context<'_>) -> Poll<Self::Output> {
-        match self.project().state.project() {
+        let this = self.project();
+        if *this.completed {
+            return Poll::Ready(Err(ConcurrencyLimitError::PolledAfterCompletion));
+        }
+
+        match this.state.project() {
             ConcurrencyLimitFutureStateProj::Inner { future, permit } => match future.poll(cx) {
                 Poll::Ready(Ok(response)) => {
+                    *this.completed = true;
                     let _ = permit.take();
                     Poll::Ready(Ok(response))
                 }
                 Poll::Ready(Err(e)) => {
+                    *this.completed = true;
                     let _ = permit.take();
                     Poll::Ready(Err(ConcurrencyLimitError::Inner(e)))
                 }
                 Poll::Pending => Poll::Pending,
             },
             ConcurrencyLimitFutureStateProj::Error { err } => {
+                *this.completed = true;
                 let err = err.take().unwrap_or(ConcurrencyLimitError::LimitExceeded);
                 Poll::Ready(Err(err))
             }
@@ -664,6 +680,33 @@ mod tests {
     }
 
     #[test]
+    fn immediate_error_future_second_poll_fails_closed() {
+        init_test("immediate_error_future_second_poll_fails_closed");
+        let layer = ConcurrencyLimitLayer::new(1);
+        let mut svc = layer.layer(EchoService);
+        let waker = noop_waker();
+        let mut cx = Context::from_waker(&waker);
+
+        let mut future = svc.call(7);
+        let first = Pin::new(&mut future).poll(&mut cx);
+        let first_not_ready = matches!(first, Poll::Ready(Err(ConcurrencyLimitError::NotReady)));
+        crate::assert_with_log!(first_not_ready, "first poll not ready", true, first_not_ready);
+
+        let second = Pin::new(&mut future).poll(&mut cx);
+        let second_fails_closed = matches!(
+            second,
+            Poll::Ready(Err(ConcurrencyLimitError::PolledAfterCompletion))
+        );
+        crate::assert_with_log!(
+            second_fails_closed,
+            "second poll fails closed",
+            true,
+            second_fails_closed
+        );
+        crate::test_complete!("immediate_error_future_second_poll_fails_closed");
+    }
+
+    #[test]
     fn future_releases_permit_on_completion() {
         init_test("future_releases_permit_on_completion");
         let layer = ConcurrencyLimitLayer::new(2);
@@ -716,6 +759,40 @@ mod tests {
         // Keep the future alive until here to ensure the release is not drop-coupled.
         let _still_retained = future;
         crate::test_complete!("future_releases_permit_when_ready_even_if_retained");
+    }
+
+    #[test]
+    fn future_second_poll_after_success_fails_closed() {
+        init_test("future_second_poll_after_success_fails_closed");
+        let layer = ConcurrencyLimitLayer::new(1);
+        let mut svc = layer.layer(EchoService);
+        let waker = noop_waker();
+        let mut cx = Context::from_waker(&waker);
+
+        let ready = svc.poll_ready(&mut cx);
+        let ready_ok = matches!(ready, Poll::Ready(Ok(())));
+        crate::assert_with_log!(ready_ok, "ready ok", true, ready_ok);
+
+        let mut future = svc.call(42);
+        let first = Pin::new(&mut future).poll(&mut cx);
+        let first_ok = matches!(first, Poll::Ready(Ok(42)));
+        crate::assert_with_log!(first_ok, "first poll ok", true, first_ok);
+
+        let available = svc.available();
+        crate::assert_with_log!(available == 1, "available", 1, available);
+
+        let second = Pin::new(&mut future).poll(&mut cx);
+        let second_fails_closed = matches!(
+            second,
+            Poll::Ready(Err(ConcurrencyLimitError::PolledAfterCompletion))
+        );
+        crate::assert_with_log!(
+            second_fails_closed,
+            "second poll fails closed",
+            true,
+            second_fails_closed
+        );
+        crate::test_complete!("future_second_poll_after_success_fails_closed");
     }
 
     #[test]
@@ -1034,6 +1111,10 @@ mod tests {
         let dbg = format!("{err:?}");
         assert!(dbg.contains("NotReady"));
 
+        let err: ConcurrencyLimitError<&str> = ConcurrencyLimitError::PolledAfterCompletion;
+        let dbg = format!("{err:?}");
+        assert!(dbg.contains("PolledAfterCompletion"));
+
         let err: ConcurrencyLimitError<&str> = ConcurrencyLimitError::LimitExceeded;
         let dbg = format!("{err:?}");
         assert!(dbg.contains("LimitExceeded"));
@@ -1048,6 +1129,10 @@ mod tests {
     fn concurrency_limit_error_source() {
         use std::error::Error;
         let err: ConcurrencyLimitError<std::io::Error> = ConcurrencyLimitError::NotReady;
+        assert!(err.source().is_none());
+
+        let err: ConcurrencyLimitError<std::io::Error> =
+            ConcurrencyLimitError::PolledAfterCompletion;
         assert!(err.source().is_none());
 
         let err: ConcurrencyLimitError<std::io::Error> = ConcurrencyLimitError::LimitExceeded;
@@ -1087,6 +1172,11 @@ mod tests {
         let display = format!("{err}");
         let has_limit = display.contains("limit exceeded");
         crate::assert_with_log!(has_limit, "limit exceeded", true, has_limit);
+
+        let err: ConcurrencyLimitError<&str> = ConcurrencyLimitError::PolledAfterCompletion;
+        let display = format!("{err}");
+        let has_done = display.contains("polled after completion");
+        crate::assert_with_log!(has_done, "polled after completion", true, has_done);
 
         let err: ConcurrencyLimitError<&str> = ConcurrencyLimitError::Inner("inner error");
         let display = format!("{err}");
