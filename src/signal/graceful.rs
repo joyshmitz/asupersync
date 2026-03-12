@@ -9,6 +9,7 @@ use std::time::Duration;
 use super::ShutdownReceiver;
 use crate::combinator::{Either, Select};
 use crate::time::{TimeoutFuture, wall_now};
+use crate::tracing_compat::{info, warn};
 use crate::types::Time;
 
 fn wall_clock_now() -> std::time::Instant {
@@ -210,7 +211,7 @@ impl GracefulBuilder {
 
         if shutdown.is_shutting_down() {
             if config.log_events {
-                tracing::info!("graceful builder observed pre-signaled shutdown");
+                info!("graceful builder observed pre-signaled shutdown");
             }
             return GracefulOutcome::ShutdownSignaled;
         }
@@ -222,7 +223,7 @@ impl GracefulBuilder {
             Either::Left(result) => GracefulOutcome::Completed(result),
             Either::Right(()) => {
                 if config.log_events {
-                    tracing::info!(grace_period = ?config.grace_period, "graceful shutdown signaled");
+                    info!(grace_period = ?config.grace_period, "graceful shutdown signaled");
                 }
 
                 if config.grace_period.is_zero() {
@@ -239,7 +240,7 @@ impl GracefulBuilder {
                 result.map_or_else(
                     |_| {
                         if config.log_events {
-                            tracing::warn!(
+                            warn!(
                                 grace_period = ?config.grace_period,
                                 "grace period elapsed before task completed"
                             );
@@ -248,7 +249,7 @@ impl GracefulBuilder {
                     },
                     |result| {
                         if config.log_events {
-                            tracing::info!(
+                            info!(
                                 grace_period = ?config.grace_period,
                                 "task completed within graceful shutdown grace period"
                             );
