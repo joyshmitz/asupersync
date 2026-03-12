@@ -201,8 +201,7 @@ where
     fn poll(self: Pin<&mut Self>, cx: &mut Context<'_>) -> Poll<Self::Output> {
         let this = self.get_mut();
         if this.completed {
-            return Poll::Ready(Err(io::Error::new(
-                io::ErrorKind::Other,
+            return Poll::Ready(Err(io::Error::other(
                 "ReadLine future polled after completion",
             )));
         }

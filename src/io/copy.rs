@@ -79,8 +79,7 @@ where
         let this = self.get_mut();
 
         if this.completed {
-            return Poll::Ready(Err(io::Error::new(
-                io::ErrorKind::Other,
+            return Poll::Ready(Err(io::Error::other(
                 "Copy future polled after completion",
             )));
         }
@@ -251,8 +250,7 @@ where
         let this = self.get_mut();
 
         if this.completed {
-            return Poll::Ready(Err(io::Error::new(
-                io::ErrorKind::Other,
+            return Poll::Ready(Err(io::Error::other(
                 "CopyBuf future polled after completion",
             )));
         }
@@ -391,8 +389,7 @@ where
         let this = self.get_mut();
 
         if this.completed {
-            return Poll::Ready(Err(io::Error::new(
-                io::ErrorKind::Other,
+            return Poll::Ready(Err(io::Error::other(
                 "CopyWithProgress future polled after completion",
             )));
         }
@@ -732,8 +729,7 @@ where
         let this = self.get_mut();
 
         if this.completed {
-            return Poll::Ready(Err(io::Error::new(
-                io::ErrorKind::Other,
+            return Poll::Ready(Err(io::Error::other(
                 "CopyBidirectional future polled after completion",
             )));
         }
