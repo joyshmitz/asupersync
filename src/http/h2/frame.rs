@@ -189,6 +189,15 @@ pub enum Frame {
     WindowUpdate(WindowUpdateFrame),
     /// CONTINUATION frame for header block continuation.
     Continuation(ContinuationFrame),
+    /// Unknown/extension frame type — MUST be ignored per RFC 7540 §4.1.
+    Unknown {
+        /// The raw frame type byte.
+        frame_type: u8,
+        /// The stream ID from the frame header.
+        stream_id: u32,
+        /// The opaque payload.
+        payload: Bytes,
+    },
 }
 
 impl Frame {
@@ -204,6 +213,7 @@ impl Frame {
             Self::PushPromise(f) => f.stream_id,
             Self::WindowUpdate(f) => f.stream_id,
             Self::Continuation(f) => f.stream_id,
+            Self::Unknown { stream_id, .. } => *stream_id,
         }
     }
 
@@ -221,6 +231,20 @@ impl Frame {
             Self::GoAway(f) => f.encode(dst),
             Self::WindowUpdate(f) => f.encode(dst),
             Self::Continuation(f) => f.encode(dst),
+            Self::Unknown {
+                frame_type,
+                stream_id,
+                payload,
+            } => {
+                let header = FrameHeader {
+                    length: payload.len() as u32,
+                    frame_type: *frame_type,
+                    flags: 0,
+                    stream_id: *stream_id,
+                };
+                header.write(dst);
+                dst.extend_from_slice(payload);
+            }
         }
     }
 }
@@ -1074,10 +1098,11 @@ pub fn parse_frame(header: &FrameHeader, payload: Bytes) -> Result<Frame, H2Erro
         Some(FrameType::Continuation) => Ok(Frame::Continuation(ContinuationFrame::parse(
             header, payload,
         )?)),
-        None => Err(H2Error::protocol(format!(
-            "unknown frame type: {}",
-            header.frame_type
-        ))),
+        None => Ok(Frame::Unknown {
+            frame_type: header.frame_type,
+            stream_id: header.stream_id,
+            payload,
+        }),
     }
 }
 
@@ -1761,17 +1786,29 @@ mod tests {
     }
 
     #[test]
-    fn test_unknown_frame_type_rejected() {
+    fn test_unknown_frame_type_ignored() {
+        // RFC 7540 §4.1: unknown frame types MUST be ignored
         let header = FrameHeader {
-            length: 0,
+            length: 3,
             frame_type: 0xFF,
             flags: 0,
-            stream_id: 0,
+            stream_id: 7,
         };
-        let payload = Bytes::new();
+        let payload = Bytes::from_static(b"abc");
 
-        let err = parse_frame(&header, payload).unwrap_err();
-        assert_eq!(err.code, ErrorCode::ProtocolError);
+        let frame = parse_frame(&header, payload.clone()).unwrap();
+        match frame {
+            Frame::Unknown {
+                frame_type,
+                stream_id,
+                payload: p,
+            } => {
+                assert_eq!(frame_type, 0xFF);
+                assert_eq!(stream_id, 7);
+                assert_eq!(p, payload);
+            }
+            _ => panic!("expected Frame::Unknown"),
+        }
     }
 
     // ========================================================================

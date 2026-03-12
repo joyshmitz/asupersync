@@ -555,6 +555,7 @@ impl Connection {
             Frame::GoAway(f) => Ok(Some(self.process_goaway(f))),
             Frame::WindowUpdate(f) => self.process_window_update(f),
             Frame::Continuation(f) => self.process_continuation(f),
+            Frame::Unknown { .. } => Ok(None), // RFC 7540 §4.1: ignore unknown types
         };
 
         // Prune closed streams when the map grows large relative to the

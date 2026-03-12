@@ -715,8 +715,9 @@ impl EpochBarrier {
             }
         }
 
-        // Record arrival
-        {
+        // Record arrival — hold participants lock across both the dedup check and
+        // the atomic increment so the list and counter stay in sync (fixes TOCTOU).
+        let arrived = {
             let mut participants = self.participants.write();
             if participants.contains(&participant_id.to_string()) {
                 return Err(Box::new(
@@ -725,9 +726,11 @@ impl EpochBarrier {
                 ));
             }
             participants.push(participant_id.to_string());
-        }
-
-        let arrived = self.arrived.fetch_add(1, Ordering::AcqRel) + 1;
+            // NB: intentionally hold participants lock across fetch_add to prevent TOCTOU
+            let count = self.arrived.fetch_add(1, Ordering::AcqRel) + 1;
+            drop(participants);
+            count
+        };
 
         // Check if all arrived
         if arrived >= u64::from(self.expected) {
