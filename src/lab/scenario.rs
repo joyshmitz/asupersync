@@ -895,11 +895,9 @@ mod tests {
         }"#;
         let s: Scenario = serde_json::from_str(json).unwrap();
         let errors = s.validate();
-        assert!(
-            errors
-                .iter()
-                .any(|e| e.field == "network.links.alice->bob.packet_loss")
-        );
+        assert!(errors
+            .iter()
+            .any(|e| e.field == "network.links.alice->bob.packet_loss"));
     }
 
     #[test]
@@ -916,11 +914,9 @@ mod tests {
         }"#;
         let s: Scenario = serde_json::from_str(json).unwrap();
         let errors = s.validate();
-        assert!(
-            errors
-                .iter()
-                .any(|e| e.field == "network.links.alice->bob.latency")
-        );
+        assert!(errors
+            .iter()
+            .any(|e| e.field == "network.links.alice->bob.latency"));
     }
 
     #[test]

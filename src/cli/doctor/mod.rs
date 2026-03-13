@@ -17525,23 +17525,42 @@ fn sanitize_line_for_lock_analysis(line: &str) -> String {
             // Distinguish Rust lifetime annotations ('a, 'static, '_) from char literals ('x').
             // Lifetimes start with ' followed by [a-z_], have no closing quote, and should
             // not suppress lock-call detection on the rest of the line.
-            if let Some(&next) = chars.peek() {
+            let mut is_lifetime = false;
+            let mut lookahead = chars.clone();
+
+            if let Some(&next) = lookahead.peek() {
                 if next.is_ascii_lowercase() || next == '_' {
-                    // Likely a lifetime annotation — skip the tick and the identifier,
-                    // but do NOT enter in_char mode.
-                    sanitized.push(' ');
-                    // Consume the lifetime identifier characters
-                    while let Some(&peek) = chars.peek() {
+                    // Consume the identifier characters in our lookahead
+                    while let Some(&peek) = lookahead.peek() {
                         if peek.is_ascii_alphanumeric() || peek == '_' {
-                            sanitized.push(' ');
-                            chars.next();
+                            lookahead.next();
                         } else {
                             break;
                         }
                     }
-                    continue;
+                    // If the next character after the identifier is not a closing tick,
+                    // then it is a lifetime, not a char literal.
+                    if lookahead.peek().copied() != Some('\'') {
+                        is_lifetime = true;
+                    }
                 }
             }
+
+            if is_lifetime {
+                // It's a lifetime annotation — skip the tick and the identifier,
+                // but do NOT enter in_char mode.
+                sanitized.push(' ');
+                while let Some(&peek) = chars.peek() {
+                    if peek.is_ascii_alphanumeric() || peek == '_' {
+                        sanitized.push(' ');
+                        chars.next();
+                    } else {
+                        break;
+                    }
+                }
+                continue;
+            }
+
             in_char = true;
             sanitized.push(' ');
             continue;
@@ -17899,7 +17918,10 @@ fn parse_package_name(manifest: &str, member_relative: &str, log: &mut ScanLog) 
         // Extract the scalar string value from `name = "crate_name"`.
         // Do NOT use parse_string_array_literal here — it expects array syntax
         // with brackets and would always set malformed=true for scalar fields.
-        let value_part = trimmed.trim_start_matches("name").trim_start_matches('=').trim();
+        let value_part = trimmed
+            .trim_start_matches("name")
+            .trim_start_matches('=')
+            .trim();
         if let Some(stripped) = value_part.strip_prefix('"') {
             if let Some(name) = stripped.split('"').next() {
                 if !name.is_empty() {
