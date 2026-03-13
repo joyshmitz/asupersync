@@ -50,9 +50,7 @@ where
     #[inline]
     fn poll(self: Pin<&mut Self>, cx: &mut Context<'_>) -> Poll<Acc> {
         let mut this = self.project();
-        if *this.completed {
-            return Poll::Pending;
-        }
+        assert!(!*this.completed, "Fold polled after completion");
         let mut folded_this_poll = 0usize;
         loop {
             match this.stream.as_mut().poll_next(cx) {
@@ -282,8 +280,9 @@ mod tests {
     }
 
     #[test]
-    fn fold_repoll_after_completion_returns_pending_without_repolling_upstream() {
-        init_test("fold_repoll_after_completion_returns_pending_without_repolling_upstream");
+    #[should_panic(expected = "Fold polled after completion")]
+    fn fold_repoll_after_completion_panics() {
+        init_test("fold_repoll_after_completion_panics");
         let polls = Arc::new(AtomicUsize::new(0));
         let mut future = Fold::new(
             PollCountingEmptyStream::new(Arc::clone(&polls)),
@@ -294,35 +293,10 @@ mod tests {
         let mut cx = Context::from_waker(&waker);
 
         let first = Pin::new(&mut future).poll(&mut cx);
-        crate::assert_with_log!(
-            first == Poll::Ready(7),
-            "first poll completes empty fold",
-            Poll::Ready(7),
-            first
-        );
-        crate::assert_with_log!(
-            polls.load(Ordering::SeqCst) == 1,
-            "first completion polls upstream once",
-            1,
-            polls.load(Ordering::SeqCst)
-        );
+        assert_eq!(first, Poll::Ready(7));
 
-        let repoll = Pin::new(&mut future).poll(&mut cx);
-        crate::assert_with_log!(
-            repoll == Poll::<usize>::Pending,
-            "repoll returns pending",
-            Poll::<usize>::Pending,
-            repoll
-        );
-        crate::assert_with_log!(
-            polls.load(Ordering::SeqCst) == 1,
-            "repoll does not touch upstream again",
-            1,
-            polls.load(Ordering::SeqCst)
-        );
-
-        crate::test_complete!(
-            "fold_repoll_after_completion_returns_pending_without_repolling_upstream"
-        );
+        // Repoll after completion must panic (fail-closed), not return
+        // Pending without a waker which would cause a silent hang.
+        let _repoll = Pin::new(&mut future).poll(&mut cx);
     }
 }

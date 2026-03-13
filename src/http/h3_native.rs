@@ -200,6 +200,11 @@ impl H3Settings {
             seen_ids.push(id);
 
             match id {
+                // RFC 9114 §7.2.4.1: HTTP/2 reserved setting identifiers
+                // MUST NOT be sent; receipt is a connection error.
+                0x00 | 0x02 | 0x03 | 0x04 | 0x05 => {
+                    return Err(H3NativeError::InvalidSettingValue(id));
+                }
                 H3_SETTING_QPACK_MAX_TABLE_CAPACITY => {
                     settings.qpack_max_table_capacity = Some(value);
                 }
@@ -3027,5 +3032,20 @@ mod tests {
             err,
             H3NativeError::InvalidFrame("qpack string prefix length must be less than 8")
         );
+    }
+
+    #[test]
+    fn settings_rejects_h2_reserved_ids() {
+        // RFC 9114 §7.2.4.1: HTTP/2 reserved setting IDs (0x00, 0x02-0x05)
+        // MUST be treated as a connection error.
+        for reserved_id in [0x00u64, 0x02, 0x03, 0x04, 0x05] {
+            let mut payload = Vec::new();
+            encode_varint(reserved_id, &mut payload).expect("varint");
+            encode_varint(42, &mut payload).expect("varint");
+            let err = H3Settings::decode_payload(&payload).expect_err(&format!(
+                "must reject H2 reserved setting 0x{reserved_id:02x}"
+            ));
+            assert_eq!(err, H3NativeError::InvalidSettingValue(reserved_id));
+        }
     }
 }
