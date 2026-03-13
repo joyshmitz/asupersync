@@ -339,6 +339,17 @@ pub struct SymbolObligationTracker {
 }
 
 impl SymbolObligationTracker {
+    fn assert_registration_valid(&self, obligation: &SymbolObligation) {
+        assert_eq!(
+            obligation.inner.region, self.region_id,
+            "symbol obligation tracker region mismatch"
+        );
+        assert!(
+            !self.obligations.contains_key(&obligation.id()),
+            "duplicate symbol obligation id registered"
+        );
+    }
+
     fn index_obligation_id(&mut self, id: ObligationId, kind: &SymbolObligationKind) {
         match kind {
             SymbolObligationKind::SymbolTransmit { symbol_id, .. }
@@ -383,6 +394,12 @@ impl SymbolObligationTracker {
         }
     }
 
+    fn remove_obligation(&mut self, id: ObligationId) -> Option<SymbolObligation> {
+        let obligation = self.obligations.remove(&id)?;
+        self.remove_indexed_obligation_id(id, &obligation.kind);
+        Some(obligation)
+    }
+
     /// Creates a new tracker for the given region.
     #[must_use]
     pub fn new(region_id: RegionId) -> Self {
@@ -401,12 +418,13 @@ impl SymbolObligationTracker {
     }
 
     /// Registers a new symbolic obligation.
+    ///
+    /// # Panics
+    /// Panics if the obligation belongs to a different region or reuses an
+    /// already-pending obligation ID.
     pub fn register(&mut self, obligation: SymbolObligation) -> ObligationId {
+        self.assert_registration_valid(&obligation);
         let id = obligation.id();
-        if let Some(previous) = self.obligations.remove(&id) {
-            self.remove_indexed_obligation_id(id, &previous.kind);
-        }
-
         self.index_obligation_id(id, &obligation.kind);
         self.obligations.insert(id, obligation);
         id
@@ -421,9 +439,7 @@ impl SymbolObligationTracker {
         commit: bool,
         now: Time,
     ) -> Option<SymbolObligation> {
-        self.obligations.remove(&id).map(|mut ob| {
-            self.remove_indexed_obligation_id(id, &ob.kind);
-
+        self.remove_obligation(id).map(|mut ob| {
             if ob.is_pending() {
                 if commit {
                     ob.commit(now);
@@ -447,7 +463,7 @@ impl SymbolObligationTracker {
             .get(&symbol_id)
             .map(|ids| {
                 ids.iter()
-                    .filter_map(|id| self.obligations.get(id))
+                    .filter_map(|id| self.obligations.get(id).filter(|ob| ob.is_pending()))
                     .collect()
             })
             .unwrap_or_default()
@@ -462,11 +478,15 @@ impl SymbolObligationTracker {
     /// Checks for leaked obligations and marks them.
     /// Called during region close.
     pub fn check_leaks(&mut self, now: Time) -> Vec<ObligationId> {
-        let mut leaked = Vec::with_capacity(self.obligations.len());
-        for (id, ob) in &mut self.obligations {
-            if ob.is_pending() {
+        let leaked: Vec<ObligationId> = self
+            .obligations
+            .iter()
+            .filter_map(|(id, ob)| ob.is_pending().then_some(*id))
+            .collect();
+
+        for id in &leaked {
+            if let Some(mut ob) = self.remove_obligation(*id) {
                 ob.mark_leaked(now);
-                leaked.push(*id);
             }
         }
         leaked
@@ -474,11 +494,17 @@ impl SymbolObligationTracker {
 
     /// Aborts all pending obligations outside the given epoch window.
     pub fn abort_expired_epoch(&mut self, current_epoch: EpochId, now: Time) -> Vec<ObligationId> {
-        let mut aborted = Vec::with_capacity(self.obligations.len());
-        for (id, ob) in &mut self.obligations {
-            if ob.is_pending() && !ob.is_epoch_valid(current_epoch) {
+        let aborted: Vec<ObligationId> = self
+            .obligations
+            .iter()
+            .filter_map(|(id, ob)| {
+                (ob.is_pending() && !ob.is_epoch_valid(current_epoch)).then_some(*id)
+            })
+            .collect();
+
+        for id in &aborted {
+            if let Some(mut ob) = self.remove_obligation(*id) {
                 ob.abort(now);
-                aborted.push(*id);
             }
         }
         aborted
@@ -486,11 +512,15 @@ impl SymbolObligationTracker {
 
     /// Aborts all pending obligations that have passed their deadline.
     pub fn abort_expired_deadlines(&mut self, now: Time) -> Vec<ObligationId> {
-        let mut aborted = Vec::with_capacity(self.obligations.len());
-        for (id, ob) in &mut self.obligations {
-            if ob.is_pending() && ob.is_expired(now) {
+        let aborted: Vec<ObligationId> = self
+            .obligations
+            .iter()
+            .filter_map(|(id, ob)| (ob.is_pending() && ob.is_expired(now)).then_some(*id))
+            .collect();
+
+        for id in &aborted {
+            if let Some(mut ob) = self.remove_obligation(*id) {
                 ob.abort(now);
-                aborted.push(*id);
             }
         }
         aborted
@@ -646,10 +676,10 @@ mod tests {
         assert_eq!(found[0].id(), id);
     }
 
-    // Regression: re-registering the same ID must re-index by symbol/object and
-    // not leave stale index entries pointing to a different obligation payload.
+    // Regression: duplicate registration must fail closed and preserve the
+    // original pending obligation instead of silently discarding it.
     #[test]
-    fn test_register_same_id_reindexes_lookup() {
+    fn test_register_same_id_panics_and_preserves_original_obligation() {
         let rid = RegionId::from_arena(ArenaIndex::new(0, 0));
         let mut tracker = SymbolObligationTracker::new(rid);
 
@@ -673,12 +703,47 @@ mod tests {
             None,
             Time::from_nanos(1),
         );
-        tracker.register(second);
 
-        assert!(tracker.by_symbol(first_symbol).is_empty());
-        let reindexed = tracker.by_symbol(second_symbol);
-        assert_eq!(reindexed.len(), 1);
-        assert_eq!(reindexed[0].id(), oid);
+        let panic = std::panic::catch_unwind(std::panic::AssertUnwindSafe(|| {
+            tracker.register(second);
+        }));
+        assert!(panic.is_err());
+
+        let original = tracker.by_symbol(first_symbol);
+        assert_eq!(original.len(), 1);
+        assert_eq!(original[0].id(), oid);
+        assert!(tracker.by_symbol(second_symbol).is_empty());
+        assert_eq!(tracker.pending_count(), 1);
+    }
+
+    // Regression: the tracker must reject obligations that belong to another
+    // region instead of silently tracking them under the wrong owner.
+    #[test]
+    fn test_register_cross_region_obligation_panics() {
+        let tracker_region = RegionId::from_arena(ArenaIndex::new(0, 0));
+        let other_region = RegionId::from_arena(ArenaIndex::new(9, 0));
+        let mut tracker = SymbolObligationTracker::new(tracker_region);
+
+        let (oid, tid, _) = test_ids();
+        let symbol_id = SymbolId::new_for_test(77, 0, 0);
+        let dest = RegionId::from_arena(ArenaIndex::new(1, 0));
+        let obligation = SymbolObligation::transmit(
+            oid,
+            tid,
+            other_region,
+            symbol_id,
+            dest,
+            None,
+            None,
+            Time::ZERO,
+        );
+
+        let panic = std::panic::catch_unwind(std::panic::AssertUnwindSafe(|| {
+            tracker.register(obligation);
+        }));
+        assert!(panic.is_err());
+        assert_eq!(tracker.pending_count(), 0);
+        assert!(tracker.by_symbol(symbol_id).is_empty());
     }
 
     // Test 6: Tracker resolution (commit)
@@ -724,6 +789,8 @@ mod tests {
 
         let leaked = tracker.check_leaks(Time::from_millis(200));
         assert_eq!(leaked.len(), 1);
+        assert_eq!(tracker.pending_count(), 0);
+        assert!(tracker.by_symbol(symbol_id).is_empty());
     }
 
     // Test 8: Epoch-based abort
@@ -749,6 +816,9 @@ mod tests {
         // Epoch 25 is past window, obligation aborted
         let aborted = tracker.abort_expired_epoch(EpochId(25), Time::from_millis(200));
         assert_eq!(aborted.len(), 1);
+        assert_eq!(tracker.pending_count(), 0);
+        assert!(tracker.obligations.is_empty());
+        assert!(tracker.by_object.is_empty());
     }
 
     // Test 9: Deadline-based abort
@@ -771,6 +841,9 @@ mod tests {
         // After deadline
         let aborted = tracker.abort_expired_deadlines(Time::from_millis(1500));
         assert_eq!(aborted.len(), 1);
+        assert_eq!(tracker.pending_count(), 0);
+        assert!(tracker.obligations.is_empty());
+        assert!(tracker.by_object.is_empty());
     }
 
     // Test 10: Decoding progress updates

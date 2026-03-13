@@ -252,7 +252,7 @@ pub struct SymbolicObligation {
 impl SymbolicObligation {
     /// Creates a new obligation for sending an object.
     #[must_use]
-    pub(crate) fn new_send_object(
+    fn new_send_object(
         id: ObligationId,
         object_id: ObjectId,
         params: &ObjectParams,
@@ -282,7 +282,7 @@ impl SymbolicObligation {
 
     /// Creates a new obligation for sending a single symbol.
     #[must_use]
-    pub(crate) fn new_send_symbol(
+    fn new_send_symbol(
         id: ObligationId,
         symbol_id: SymbolId,
         holder: TaskId,
@@ -309,7 +309,7 @@ impl SymbolicObligation {
 
     /// Creates a new obligation for acknowledging receipt.
     #[must_use]
-    pub(crate) fn new_acknowledge(
+    fn new_acknowledge(
         id: ObligationId,
         object_id: ObjectId,
         expected_count: u32,
@@ -337,7 +337,7 @@ impl SymbolicObligation {
 
     /// Creates a new obligation for decoding.
     #[must_use]
-    pub(crate) fn new_decode(
+    fn new_decode(
         id: ObligationId,
         object_id: ObjectId,
         min_symbols: u32,
