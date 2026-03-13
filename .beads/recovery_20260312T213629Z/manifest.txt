@@ -1,3 +1,0 @@
-repo_path=.
-timestamp=20260312T213629Z
-issue_id=asupersync-1qfd0
