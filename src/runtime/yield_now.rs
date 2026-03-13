@@ -13,9 +13,7 @@ impl Future for YieldNow {
 
     #[inline]
     fn poll(mut self: Pin<&mut Self>, cx: &mut Context<'_>) -> Poll<Self::Output> {
-        if self.completed {
-            return Poll::Ready(());
-        }
+        assert!(!self.completed, "yield_now future polled after completion");
         if self.yielded {
             self.completed = true;
             Poll::Ready(())
@@ -77,9 +75,9 @@ mod tests {
     }
 
     #[test]
-    fn yield_now_repoll_after_completion_returns_ready() {
+    fn yield_now_repoll_after_completion_panics() {
         crate::test_utils::init_test_logging();
-        crate::test_phase!("yield_now_repoll_after_completion_returns_ready");
+        crate::test_phase!("yield_now_repoll_after_completion_panics");
 
         let wake_counter = Arc::new(WakeCounter::default());
         let waker = std::task::Waker::from(Arc::clone(&wake_counter));
@@ -88,7 +86,23 @@ mod tests {
 
         assert!(matches!(fut.as_mut().poll(&mut cx), Poll::Pending));
         assert!(matches!(fut.as_mut().poll(&mut cx), Poll::Ready(())));
-        // Fail-closed: repoll returns Ready(()) instead of panicking
-        assert!(matches!(fut.as_mut().poll(&mut cx), Poll::Ready(())));
+
+        let repoll = std::panic::catch_unwind(std::panic::AssertUnwindSafe(|| {
+            let _ = fut.as_mut().poll(&mut cx);
+        }));
+        let payload = repoll.expect_err("post-completion repoll must fail closed");
+        let message = payload.downcast_ref::<&'static str>().map_or_else(
+            || {
+                payload
+                    .downcast_ref::<String>()
+                    .cloned()
+                    .unwrap_or_else(|| "<non-string panic payload>".to_string())
+            },
+            |msg| (*msg).to_string(),
+        );
+        assert!(
+            message.contains("yield_now future polled after completion"),
+            "unexpected panic message: {message}"
+        );
     }
 }

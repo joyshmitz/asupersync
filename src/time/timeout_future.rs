@@ -161,19 +161,15 @@ impl<F> TimeoutFuture<F> {
 
     /// Resets the timeout to a new deadline.
     pub fn reset(&mut self, deadline: Time) {
-        if self.timed_out {
-            self.completed = false;
-            self.timed_out = false;
-        }
+        self.completed = false;
+        self.timed_out = false;
         self.sleep.reset(deadline);
     }
 
     /// Resets the timeout to expire after the given duration.
     pub fn reset_after(&mut self, now: Time, duration: Duration) {
-        if self.timed_out {
-            self.completed = false;
-            self.timed_out = false;
-        }
+        self.completed = false;
+        self.timed_out = false;
         self.sleep.reset_after(now, duration);
     }
 }
