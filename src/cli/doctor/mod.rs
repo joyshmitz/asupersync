@@ -12819,6 +12819,16 @@ pub fn build_agent_mail_pane_snapshot(
         }
     }
 
+    // Compute pending_ack_count from the UNFILTERED inbox before applying
+    // thread_filter_mode, so the count reflects global ack obligations.
+    let pending_ack_count = u32::try_from(
+        inbox
+            .iter()
+            .filter(|message| message.ack_required && !message.acknowledged)
+            .count(),
+    )
+    .map_err(|_| "pending ack count overflow".to_string())?;
+
     match thread_filter_mode {
         "all" => {}
         "ack_required" => {
@@ -12895,14 +12905,6 @@ pub fn build_agent_mail_pane_snapshot(
             });
         }
     }
-
-    let pending_ack_count = u32::try_from(
-        inbox
-            .iter()
-            .filter(|message| message.ack_required && !message.acknowledged)
-            .count(),
-    )
-    .map_err(|_| "pending ack count overflow".to_string())?;
 
     let mut replay_commands = vec![
         contract.fetch_inbox_command.clone(),
@@ -17520,6 +17522,26 @@ fn sanitize_line_for_lock_analysis(line: &str) -> String {
             continue;
         }
         if ch == '\'' {
+            // Distinguish Rust lifetime annotations ('a, 'static, '_) from char literals ('x').
+            // Lifetimes start with ' followed by [a-z_], have no closing quote, and should
+            // not suppress lock-call detection on the rest of the line.
+            if let Some(&next) = chars.peek() {
+                if next.is_ascii_lowercase() || next == '_' {
+                    // Likely a lifetime annotation — skip the tick and the identifier,
+                    // but do NOT enter in_char mode.
+                    sanitized.push(' ');
+                    // Consume the lifetime identifier characters
+                    while let Some(&peek) = chars.peek() {
+                        if peek.is_ascii_alphanumeric() || peek == '_' {
+                            sanitized.push(' ');
+                            chars.next();
+                        } else {
+                            break;
+                        }
+                    }
+                    continue;
+                }
+            }
             in_char = true;
             sanitized.push(' ');
             continue;
@@ -17874,17 +17896,22 @@ fn parse_package_name(manifest: &str, member_relative: &str, log: &mut ScanLog) 
         if !in_package || !trimmed.starts_with("name =") {
             continue;
         }
-        let parsed = parse_string_array_literal(trimmed);
-        if parsed.malformed {
-            log.warn(
-                "member_scan",
-                "malformed package name field in Cargo.toml".to_string(),
-                Some(member_relative.to_string()),
-            );
+        // Extract the scalar string value from `name = "crate_name"`.
+        // Do NOT use parse_string_array_literal here — it expects array syntax
+        // with brackets and would always set malformed=true for scalar fields.
+        let value_part = trimmed.trim_start_matches("name").trim_start_matches('=').trim();
+        if let Some(stripped) = value_part.strip_prefix('"') {
+            if let Some(name) = stripped.split('"').next() {
+                if !name.is_empty() {
+                    return Some(name.to_string());
+                }
+            }
         }
-        if let Some(name) = parsed.values.first() {
-            return Some(name.clone());
-        }
+        log.warn(
+            "member_scan",
+            "malformed package name field in Cargo.toml".to_string(),
+            Some(member_relative.to_string()),
+        );
     }
     if saw_package {
         log.warn(
