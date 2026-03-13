@@ -576,12 +576,6 @@ fn lab_yield_once() -> LabYieldOnce {
     LabYieldOnce { yielded: false }
 }
 
-async fn lab_yield_n(count: usize) {
-    for _ in 0..count {
-        lab_yield_once().await;
-    }
-}
-
 // ---------------------------------------------------------------------------
 // SharedLabHandle: wraps TaskHandle in Arc so multiple DAG parents can
 // reference the same spawned task (needed for diamond-pattern DAGs after
@@ -787,12 +781,12 @@ fn execute_plan_in_lab_core(
                     .collect();
                 spawn_lab_race(runtime, region, child_handles)
             }
-            PlanNode::Timeout { child, .. } => {
+            PlanNode::Timeout { child, duration } => {
                 let child_handle = handles[child.index()]
                     .as_ref()
                     .expect("child handle available")
                     .clone();
-                spawn_lab_timeout(runtime, region, child_handle)
+                spawn_lab_timeout(runtime, region, child_handle, duration)
             }
         };
 
@@ -868,7 +862,14 @@ fn spawn_lab_leaf(
     yield_count: usize,
 ) -> (TaskId, TaskHandle<BTreeSet<String>>) {
     let future = async move {
-        lab_yield_n(yield_count).await;
+        // Map the seed-derived schedule variation onto virtual time so timeout
+        // fixtures can exercise real deadline behavior in the lab harness.
+        lab_yield_once().await;
+        crate::time::sleep(
+            crate::types::Time::ZERO,
+            Duration::from_secs(yield_count as u64),
+        )
+        .await;
         let mut set = BTreeSet::new();
         set.insert(label);
         set
@@ -958,8 +959,17 @@ fn spawn_lab_timeout(
     runtime: &mut LabRuntime,
     region: crate::types::RegionId,
     child_handle: SharedLabHandle,
+    duration: Duration,
 ) -> (TaskId, TaskHandle<BTreeSet<String>>) {
-    let future = async move { child_handle.join().await };
+    let future = async move {
+        if let Ok(result) = crate::time::timeout(crate::types::Time::ZERO, duration, child_handle.join()).await {
+            result
+        } else {
+            child_handle.abort_with_reason(CancelReason::timeout());
+            let _ = child_handle.join().await;
+            BTreeSet::new()
+        }
+    };
     runtime
         .state
         .create_task(region, Budget::INFINITE, future)
@@ -2152,6 +2162,18 @@ mod tests {
         let result = execute_plan_in_lab(7, &dag);
         assert_eq!(result.len(), 1);
         assert!(result.contains("inner"));
+    }
+
+    #[test]
+    fn dynamic_lab_timeout_cancels_slow_child() {
+        init_test();
+        let mut dag = PlanDag::new();
+        let a = dag.leaf("inner");
+        let t = dag.timeout(a, Duration::from_secs(2));
+        dag.set_root(t);
+
+        let result = execute_plan_in_lab(7, &dag);
+        assert!(result.is_empty(), "short timeout should cancel slow child");
     }
 
     #[test]

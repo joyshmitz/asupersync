@@ -509,6 +509,19 @@ impl ObligationFlow {
         }
         diags
     }
+
+    /// Returns the effective obligation safety implied by the detailed flow.
+    #[must_use]
+    pub fn effective_safety(&self) -> ObligationSafety {
+        let mut safety = ObligationSafety::Clean;
+        if !self.leak_on_cancel.is_empty() {
+            safety = safety.join(ObligationSafety::MayLeak);
+        }
+        if !self.all_paths_resolve && !self.must_resolve.is_empty() {
+            safety = safety.join(ObligationSafety::Leaked);
+        }
+        safety
+    }
 }
 
 impl fmt::Display for ObligationFlow {
@@ -572,10 +585,23 @@ pub struct NodeAnalysis {
 }
 
 impl NodeAnalysis {
+    /// Returns the fail-closed obligation safety after considering detailed flow.
+    #[must_use]
+    pub fn effective_obligation(&self) -> ObligationSafety {
+        self.obligation
+            .join(self.obligation_flow.effective_safety())
+    }
+
+    /// Returns true if the node has any obligation safety issue.
+    #[must_use]
+    pub fn has_obligation_issues(&self) -> bool {
+        !self.effective_obligation().is_safe()
+    }
+
     /// Returns true if the node is safe on all dimensions.
     #[must_use]
     pub fn is_safe(&self) -> bool {
-        self.obligation.is_safe() && self.cancel.is_safe()
+        !self.has_obligation_issues() && self.cancel.is_safe()
     }
 }
 
@@ -610,7 +636,7 @@ impl PlanAnalysis {
     pub fn obligation_issues(&self) -> Vec<&NodeAnalysis> {
         self.nodes
             .values()
-            .filter(|n| !n.obligation.is_safe())
+            .filter(|n| n.has_obligation_issues())
             .collect()
     }
 
@@ -863,6 +889,16 @@ impl PlanAnalyzer {
                     .iter()
                     .map(|a| a.obligation_flow.clone())
                     .fold(ObligationFlow::empty(), ObligationFlow::race);
+                let obligation = if obligation_flow.leak_on_cancel.is_empty() {
+                    obligation
+                } else {
+                    obligation.join(ObligationSafety::MayLeak)
+                };
+                let cancel = if obligation_flow.leak_on_cancel.is_empty() {
+                    cancel
+                } else {
+                    cancel.join(CancelSafety::MayOrphan)
+                };
 
                 let cost = PlanCost {
                     allocations: sum_costs(child_analyses.iter().map(|a| a.cost.allocations))
@@ -900,6 +936,22 @@ impl PlanAnalyzer {
                     .leak_on_cancel
                     .extend(obligation_flow.must_resolve.iter().cloned());
                 ObligationFlow::dedupe_vec(&mut obligation_flow.leak_on_cancel);
+                let obligation = if obligation_flow.leak_on_cancel.is_empty() {
+                    child_analysis.obligation
+                } else {
+                    child_analysis.obligation.join(ObligationSafety::MayLeak)
+                };
+                let cancel =
+                    if child_analysis.cancel.is_safe() && child_analysis.obligation.is_safe() {
+                        CancelSafety::Safe
+                    } else {
+                        child_analysis.cancel.join(CancelSafety::MayOrphan)
+                    };
+                let cancel = if obligation_flow.leak_on_cancel.is_empty() {
+                    cancel
+                } else {
+                    cancel.join(CancelSafety::MayOrphan)
+                };
 
                 // Compute deadline from the Duration
                 let deadline = DeadlineMicros::from_duration(duration);
@@ -913,17 +965,11 @@ impl PlanAnalyzer {
 
                 NodeAnalysis {
                     id,
-                    obligation: child_analysis.obligation,
+                    obligation,
                     obligation_flow,
                     // Timeout introduces cancel: if child exceeds the deadline,
                     // it is cancelled. Same logic as race with deadline branch.
-                    cancel: if child_analysis.cancel.is_safe()
-                        && child_analysis.obligation.is_safe()
-                    {
-                        CancelSafety::Safe
-                    } else {
-                        child_analysis.cancel.join(CancelSafety::MayOrphan)
-                    },
+                    cancel,
                     budget: BudgetEffect {
                         min_polls: child_analysis.budget.min_polls,
                         max_polls: child_analysis.budget.max_polls,
@@ -975,7 +1021,7 @@ impl<'a> SideConditionChecker<'a> {
     pub fn obligations_safe(&self, id: PlanId) -> bool {
         self.analysis
             .get(id)
-            .is_some_and(|a| a.obligation.is_safe() && a.obligation_flow.leak_on_cancel.is_empty())
+            .is_some_and(|a| a.effective_obligation().is_safe())
     }
 
     /// Check if a node's cancel behavior is safe (losers drained).
@@ -1171,7 +1217,7 @@ impl<'a> SideConditionChecker<'a> {
             return false;
         };
         // Safety must not degrade.
-        if before_a.obligation.is_safe() && !after_a.obligation.is_safe() {
+        if before_a.effective_obligation().is_safe() && !after_a.effective_obligation().is_safe() {
             return false;
         }
         let bf = &before_a.obligation_flow;
@@ -1908,6 +1954,25 @@ mod tests {
         assert!(summary.contains("3/3 safe"));
     }
 
+    #[test]
+    fn obligation_leaf_summary_uses_flow_derived_safety() {
+        let mut dag = PlanDag::new();
+        let obligation = dag.leaf("obl:permit");
+        dag.set_root(obligation);
+
+        let analysis = PlanAnalyzer::analyze(&dag);
+        let node = analysis.get(obligation).expect("leaf analyzed");
+        assert_eq!(node.obligation, ObligationSafety::Clean);
+        assert_eq!(node.effective_obligation(), ObligationSafety::MayLeak);
+        assert!(!node.is_safe());
+        assert_eq!(analysis.obligation_issues().len(), 1);
+        assert!(!analysis.all_safe());
+
+        let summary = analysis.summary();
+        assert!(summary.contains("0/1 safe"));
+        assert!(summary.contains("1 obligation issue"));
+    }
+
     // ---- Display impls ----
 
     #[test]
@@ -2017,6 +2082,30 @@ mod tests {
         let race_node = analysis.get(race).expect("race analyzed");
         // In a race, the loser's obligations may leak.
         assert!(!race_node.obligation_flow.leak_on_cancel.is_empty());
+        assert_eq!(race_node.obligation, ObligationSafety::MayLeak);
+        assert_eq!(race_node.cancel, CancelSafety::MayOrphan);
+        assert!(!race_node.is_safe());
+        assert!(!analysis.all_safe());
+    }
+
+    #[test]
+    fn timeout_over_obligation_leaf_reports_cancel_leak_risk() {
+        let mut dag = PlanDag::new();
+        let obligation = dag.leaf("obl:lease");
+        let timeout = dag.timeout(obligation, Duration::from_secs(1));
+        dag.set_root(timeout);
+
+        let analysis = PlanAnalyzer::analyze(&dag);
+        let timeout_node = analysis.get(timeout).expect("timeout analyzed");
+        assert!(
+            timeout_node
+                .obligation_flow
+                .leak_on_cancel
+                .contains(&"obl:lease".to_string())
+        );
+        assert_eq!(timeout_node.obligation, ObligationSafety::MayLeak);
+        assert_eq!(timeout_node.cancel, CancelSafety::MayOrphan);
+        assert!(!timeout_node.is_safe());
     }
 
     #[test]
