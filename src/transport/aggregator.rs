@@ -1220,11 +1220,11 @@ struct BufferedSymbol {
 /// Per-object reordering state.
 #[derive(Debug)]
 struct ObjectReorderState {
-    /// Next expected sequence number.
-    next_expected: u32,
+    /// Next expected sequence number (unwrapped to 64-bit to handle wrap-around).
+    next_expected: u64,
 
-    /// Buffered out-of-order symbols (keyed by sequence).
-    buffer: BTreeMap<u32, BufferedSymbol>,
+    /// Buffered out-of-order symbols (keyed by unwrapped sequence).
+    buffer: BTreeMap<u64, BufferedSymbol>,
 
     /// Last delivery time.
     #[allow(dead_code)]
@@ -1234,7 +1234,10 @@ struct ObjectReorderState {
 impl ObjectReorderState {
     fn new() -> Self {
         Self {
-            next_expected: 0,
+            // Start at a high base to prevent underflow (wrapping to u64::MAX)
+            // if a late duplicate arrives before the first expected symbol.
+            // (1_u64 << 32) mod 2^32 is exactly 0, matching the protocol start seq.
+            next_expected: 1_u64 << 32,
             buffer: BTreeMap::new(),
             last_delivery: Time::ZERO,
         }
@@ -1258,16 +1261,6 @@ pub struct SymbolReorderer {
 
     /// Symbols that timed out waiting.
     timeout_deliveries: AtomicU64,
-}
-
-/// Wrapping-aware sequence comparison (TCP-style).
-///
-/// Returns `true` if `a` is logically "after" `b` in a u32 sequence space
-/// that wraps around. Uses the standard signed-difference test: `a` is after
-/// `b` when `(a.wrapping_sub(b) as i32) > 0`.
-#[inline]
-fn seq_after(a: u32, b: u32) -> bool {
-    a.wrapping_sub(b).cast_signed() > 0
 }
 
 impl SymbolReorderer {
@@ -1303,7 +1296,10 @@ impl SymbolReorderer {
         let mut ready = Vec::with_capacity(1);
 
         // Check if this is the expected symbol
-        if seq == state.next_expected {
+        #[allow(clippy::cast_possible_wrap)]
+        let diff = seq.wrapping_sub(state.next_expected as u32) as i32;
+
+        if diff == 0 {
             // Deliver immediately
             ready.push(symbol);
             state.next_expected = state.next_expected.wrapping_add(1);
@@ -1316,36 +1312,37 @@ impl SymbolReorderer {
                 state.next_expected = state.next_expected.wrapping_add(1);
                 self.reordered_deliveries.fetch_add(1, Ordering::Relaxed);
             }
-        } else if seq_after(seq, state.next_expected) {
+        } else if diff > 0 {
             // Out of order - buffer it.
-            // Wrapping-aware gap: the signed distance is always positive here
-            // because seq_after guarantees seq is logically ahead.
-            let gap = seq.wrapping_sub(state.next_expected);
-            if gap <= self.config.max_sequence_gap
+            #[allow(clippy::cast_sign_loss)]
+            let gap = diff as u64;
+            let seq_unwrapped = state.next_expected + gap;
+            
+            if gap <= u64::from(self.config.max_sequence_gap)
                 && state.buffer.len() < self.config.max_buffer_per_object
             {
                 state.buffer.insert(
-                    seq,
+                    seq_unwrapped,
                     BufferedSymbol {
                         symbol,
                         received_at: now,
                         path,
                     },
                 );
-            } else if gap > self.config.max_sequence_gap {
+            } else if gap > u64::from(self.config.max_sequence_gap) {
                 // Gap too large: give up waiting on missing sequence and advance.
                 // Deliver all buffered symbols (in sequence order) before resetting.
                 for (_, buffered) in std::mem::take(&mut state.buffer) {
                     ready.push(buffered.symbol);
                     self.timeout_deliveries.fetch_add(1, Ordering::Relaxed);
                 }
-                state.next_expected = seq.wrapping_add(1);
+                state.next_expected = seq_unwrapped.wrapping_add(1);
                 state.last_delivery = now;
                 ready.push(symbol);
             }
             // else: buffer full, drop the symbol
         }
-        // else: seq < next_expected - this is a late duplicate, ignore
+        // else: diff < 0 - this is a late duplicate, ignore
 
         drop(objects);
         ready
@@ -1365,12 +1362,12 @@ impl SymbolReorderer {
             // because we are about to advance next_expected past it.
             let mut max_timeout_seq = None;
 
-            for (&seq, buffered) in &state.buffer {
+            for (&seq_unwrapped, buffered) in &state.buffer {
                 let wait_time = now
                     .as_nanos()
                     .saturating_sub(buffered.received_at.as_nanos());
                 if wait_time >= max_wait_nanos {
-                    max_timeout_seq = Some(seq);
+                    max_timeout_seq = Some(seq_unwrapped);
                 }
             }
 
@@ -1378,8 +1375,8 @@ impl SymbolReorderer {
                 // Drain everything up to cutoff
                 // BTreeMap::split_off returns keys >= argument.
                 // We want to keep keys > cutoff, so we split at cutoff + 1.
-                let to_flush = if cutoff == u32::MAX {
-                    // No key can be greater than u32::MAX.
+                let to_flush = if cutoff == u64::MAX {
+                    // No key can be greater than u64::MAX.
                     std::mem::take(&mut state.buffer)
                 } else {
                     let keep = state.buffer.split_off(&(cutoff + 1));
