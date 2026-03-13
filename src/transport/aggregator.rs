@@ -242,7 +242,7 @@ impl TransportPath {
     pub fn effective_loss_rate(&self) -> f64 {
         let received = self.symbols_received.load(Ordering::Relaxed);
         let lost = self.symbols_lost.load(Ordering::Relaxed);
-        let total = received + lost;
+        let total = received.saturating_add(lost);
         if total == 0 {
             0.0
         } else {
@@ -933,11 +933,14 @@ impl PathSet {
         let mut total_bandwidth = 0u64;
 
         for path in paths.values() {
-            total_received += path.symbols_received.load(Ordering::Relaxed);
-            total_lost += path.symbols_lost.load(Ordering::Relaxed);
-            total_duplicates += path.duplicates_received.load(Ordering::Relaxed);
+            total_received =
+                total_received.saturating_add(path.symbols_received.load(Ordering::Relaxed));
+            total_lost = total_lost.saturating_add(path.symbols_lost.load(Ordering::Relaxed));
+            total_duplicates =
+                total_duplicates.saturating_add(path.duplicates_received.load(Ordering::Relaxed));
             if path.state().is_usable() {
-                total_bandwidth += path.characteristics.bandwidth_bps;
+                total_bandwidth =
+                    total_bandwidth.saturating_add(path.characteristics.bandwidth_bps);
             }
         }
 
@@ -1257,6 +1260,16 @@ pub struct SymbolReorderer {
     timeout_deliveries: AtomicU64,
 }
 
+/// Wrapping-aware sequence comparison (TCP-style).
+///
+/// Returns `true` if `a` is logically "after" `b` in a u32 sequence space
+/// that wraps around. Uses the standard signed-difference test: `a` is after
+/// `b` when `(a.wrapping_sub(b) as i32) > 0`.
+#[inline]
+fn seq_after(a: u32, b: u32) -> bool {
+    a.wrapping_sub(b).cast_signed() > 0
+}
+
 impl SymbolReorderer {
     /// Creates a new reorderer.
     #[must_use]
@@ -1303,11 +1316,11 @@ impl SymbolReorderer {
                 state.next_expected = state.next_expected.wrapping_add(1);
                 self.reordered_deliveries.fetch_add(1, Ordering::Relaxed);
             }
-        } else if seq > state.next_expected {
+        } else if seq_after(seq, state.next_expected) {
             // Out of order - buffer it.
-            // Use saturating subtraction to prevent debug-mode overflow when
-            // seq is near u32::MAX.
-            let gap = seq.saturating_sub(state.next_expected);
+            // Wrapping-aware gap: the signed distance is always positive here
+            // because seq_after guarantees seq is logically ahead.
+            let gap = seq.wrapping_sub(state.next_expected);
             if gap <= self.config.max_sequence_gap
                 && state.buffer.len() < self.config.max_buffer_per_object
             {
@@ -3485,35 +3498,43 @@ mod tests {
         let reorderer = SymbolReorderer::new(config);
         let path = PathId(1);
 
+        // seq=u32::MAX when next_expected=0 is a late duplicate in wrapping
+        // arithmetic (u32::MAX is logically just before 0), so it is dropped.
         let out = reorderer.process(Symbol::new_for_test(1, 0, u32::MAX, &[1]), path, Time::ZERO);
-        crate::assert_with_log!(out.len() == 1, "u32::MAX delivered", 1, out.len());
         crate::assert_with_log!(
-            out[0].esi() == u32::MAX,
-            "delivered esi is u32::MAX",
-            u32::MAX,
-            out[0].esi()
+            out.is_empty(),
+            "u32::MAX is late dup (wrapping)",
+            true,
+            out.is_empty()
         );
+
+        // Verify a genuine forward gap still works: seq=2 when next_expected=0.
+        let out2 = reorderer.process(Symbol::new_for_test(1, 0, 2, &[2]), path, Time::ZERO);
+        // gap=2 > max_sequence_gap=1, so gap-too-large branch delivers it.
+        crate::assert_with_log!(out2.len() == 1, "forward gap delivered", 1, out2.len());
 
         crate::test_complete!("reorderer_large_gap_u32_max_does_not_overflow");
     }
 
     #[test]
-    fn flush_timeouts_handles_u32_max_cutoff() {
-        init_test("flush_timeouts_handles_u32_max_cutoff");
+    fn flush_timeouts_handles_large_seq_cutoff() {
+        init_test("flush_timeouts_handles_large_seq_cutoff");
         let config = ReordererConfig {
             immediate_delivery: false,
             max_wait_time: Time::from_millis(1),
-            max_sequence_gap: u32::MAX,
+            // Allow a forward gap up to i32::MAX (half the u32 space) which
+            // is the maximum representable forward distance in wrapping arithmetic.
+            max_sequence_gap: i32::MAX as u32,
             ..Default::default()
         };
         let reorderer = SymbolReorderer::new(config);
         let path = PathId(1);
 
-        // This is buffered (gap == u32::MAX, allowed by config).
-        let out = reorderer.process(Symbol::new_for_test(1, 0, u32::MAX, &[9]), path, Time::ZERO);
+        // Forward gap of 100 from next_expected=0 → buffered.
+        let out = reorderer.process(Symbol::new_for_test(1, 0, 100, &[9]), path, Time::ZERO);
         crate::assert_with_log!(
             out.is_empty(),
-            "u32::MAX symbol buffered",
+            "seq=100 symbol buffered",
             true,
             out.is_empty()
         );
@@ -3521,18 +3542,18 @@ mod tests {
         let flushed = reorderer.flush_timeouts(Time::from_millis(2));
         crate::assert_with_log!(
             flushed.len() == 1,
-            "flush emits buffered u32::MAX symbol",
+            "flush emits buffered symbol",
             1,
             flushed.len()
         );
         crate::assert_with_log!(
-            flushed[0].esi() == u32::MAX,
-            "flushed esi is u32::MAX",
-            u32::MAX,
+            flushed[0].esi() == 100,
+            "flushed esi is 100",
+            100,
             flushed[0].esi()
         );
 
-        crate::test_complete!("flush_timeouts_handles_u32_max_cutoff");
+        crate::test_complete!("flush_timeouts_handles_large_seq_cutoff");
     }
 
     // =========================================================================
