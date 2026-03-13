@@ -159,14 +159,13 @@ pub fn negotiate_encoding(
             .map(|q| q.quality);
 
         let quality = match encoding {
-            ContentEncoding::Identity => explicit_quality.unwrap_or_else(|| {
-                // RFC 9110: identity remains acceptable by default unless it is
-                // explicitly refused via identity;q=0 or a zero-quality wildcard.
-                if matches!(wildcard_quality, Some(q) if q <= 0.0) {
-                    0.0
-                } else {
-                    1.0
-                }
+            // RFC 9110 §12.5.3: identity is acceptable by default (q=1.0)
+            // unless explicitly excluded by `identity;q=0` or `*;q=0`
+            // (without a more specific identity entry). A non-zero wildcard
+            // like `*;q=0.5` does NOT lower identity from its default.
+            ContentEncoding::Identity => explicit_quality.unwrap_or(match wildcard_quality {
+                Some(q) if q <= 0.0 => 0.0,
+                _ => 1.0,
             }),
             _ => explicit_quality.or(wildcard_quality).unwrap_or(0.0),
         };
@@ -674,8 +673,9 @@ mod tests {
             ContentEncoding::Identity,
         ];
         let best = negotiate_encoding("gzip;q=0, *;q=0.5", supported);
-        // gzip is explicitly rejected, deflate gets wildcard q=0.5, and
-        // identity remains implicitly acceptable at q=1.0.
+        // gzip is explicitly rejected (q=0). deflate inherits wildcard q=0.5.
+        // identity keeps its RFC 9110 §12.5.3 default q=1.0 (wildcard only
+        // excludes identity when *;q=0).
         assert_eq!(best, Some(ContentEncoding::Identity));
     }
 
@@ -717,9 +717,20 @@ mod tests {
     }
 
     #[test]
-    fn negotiate_identity_beats_nonzero_wildcard() {
+    fn negotiate_identity_default_preferred_over_wildcard_quality() {
         let supported = &[ContentEncoding::Brotli, ContentEncoding::Identity];
         let best = negotiate_encoding("*;q=0.5", supported);
+        // Brotli inherits wildcard q=0.5. Identity keeps its RFC 9110 §12.5.3
+        // default q=1.0 — the wildcard only excludes identity at *;q=0.
+        assert_eq!(best, Some(ContentEncoding::Identity));
+    }
+
+    #[test]
+    fn negotiate_wildcard_only_identity_keeps_default() {
+        // Regression: *;q=0.5 must NOT lower identity from its RFC default 1.0.
+        let supported = &[ContentEncoding::Gzip, ContentEncoding::Identity];
+        let best = negotiate_encoding("*;q=0.5", supported);
+        // identity q=1.0 (default) > gzip q=0.5 (from wildcard)
         assert_eq!(best, Some(ContentEncoding::Identity));
     }
 
@@ -728,6 +739,36 @@ mod tests {
         let supported = &[ContentEncoding::Identity];
         let best = negotiate_encoding("*;q=0", supported);
         assert_eq!(best, None);
+    }
+
+    #[test]
+    fn negotiate_identity_default_without_wildcard() {
+        // No wildcard at all: identity gets its RFC default q=1.0
+        let supported = &[ContentEncoding::Gzip, ContentEncoding::Identity];
+        let best = negotiate_encoding("gzip;q=0.8", supported);
+        assert_eq!(best, Some(ContentEncoding::Identity));
+    }
+
+    #[test]
+    fn negotiate_explicit_identity_overrides_wildcard() {
+        // Explicit identity;q=1.0 takes priority over *;q=0.5
+        let supported = &[ContentEncoding::Gzip, ContentEncoding::Identity];
+        let best = negotiate_encoding("identity;q=1.0, *;q=0.5", supported);
+        assert_eq!(best, Some(ContentEncoding::Identity));
+    }
+
+    #[test]
+    fn negotiate_wildcard_does_not_lower_identity_default() {
+        // RFC 9110 §12.5.3: identity is acceptable by default (q=1.0)
+        // unless excluded by *;q=0. *;q=0.3 does NOT lower identity.
+        let supported = &[ContentEncoding::Identity];
+        let best = negotiate_encoding("*;q=0.3", supported);
+        assert_eq!(best, Some(ContentEncoding::Identity));
+        // Identity keeps q=1.0 even when wildcard is lower
+        let supported2 = &[ContentEncoding::Gzip, ContentEncoding::Identity];
+        let best2 = negotiate_encoding("gzip;q=0.5, *;q=0.3", supported2);
+        // identity q=1.0 (default) > gzip q=0.5
+        assert_eq!(best2, Some(ContentEncoding::Identity));
     }
 
     // ====================================================================
