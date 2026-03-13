@@ -434,15 +434,21 @@ impl<T> CrashSender<T> {
         if let Some(limit) = self.config.crash_after_sends {
             let count = self.send_count.load(Ordering::Relaxed);
             if count >= limit {
-                self.controller.crash();
+                let actually_crashed = self.controller.crash();
                 self.controller
                     .stats
                     .sends_rejected
                     .fetch_add(1, Ordering::Relaxed);
+                
+                let action = if actually_crashed {
+                    "crash_after_sends"
+                } else {
+                    "send_rejected_crashed"
+                };
                 emit_crash_evidence(
                     &self.evidence_sink,
                     self.controller.next_evidence_ts(),
-                    "crash_after_sends",
+                    action,
                     0,
                 );
                 return Err(SendError::Disconnected(value));
@@ -456,15 +462,21 @@ impl<T> CrashSender<T> {
                 rng.should_inject(self.config.crash_probability)
             };
             if should_crash {
-                self.controller.crash();
+                let actually_crashed = self.controller.crash();
                 self.controller
                     .stats
                     .sends_rejected
                     .fetch_add(1, Ordering::Relaxed);
+                
+                let action = if actually_crashed {
+                    "crash_probabilistic"
+                } else {
+                    "send_rejected_crashed"
+                };
                 emit_crash_evidence(
                     &self.evidence_sink,
                     self.controller.next_evidence_ts(),
-                    "crash_probabilistic",
+                    action,
                     0,
                 );
                 return Err(SendError::Disconnected(value));
