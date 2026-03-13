@@ -510,7 +510,12 @@ impl<T, E> Outcome<T, E> {
     /// Returns the success value, or computes a fallback from a closure.
     ///
     /// Unlike [`unwrap_or_else`][Self::unwrap_or_else], this returns a `Result`
-    /// that preserves the distinction between different non-Ok outcomes.
+    /// instead of another value of `T`.
+    ///
+    /// This intentionally collapses every non-`Ok` outcome (`Err`,
+    /// `Cancelled`, and `Panicked`) into the same lazily computed fallback
+    /// error. Use [`into_result`][Self::into_result] if you need to preserve
+    /// which terminal outcome occurred.
     ///
     /// # Examples
     ///
@@ -540,7 +545,8 @@ impl<T, E> Outcome<T, E> {
     /// # Note on Value Handling
     ///
     /// When both outcomes are `Ok`, this method returns `self`. When both are
-    /// the same non-Ok severity, the first (self) is returned.
+    /// `Cancelled`, the stronger [`CancelReason`] is retained. Other equal-
+    /// severity ties remain left-biased and return `self`.
     ///
     /// # Examples
     ///
@@ -562,15 +568,24 @@ impl<T, E> Outcome<T, E> {
     /// assert!(err.join(cancelled).is_cancelled());
     /// ```
     /// Implements `def.outcome.join_semantics` (#31).
-    /// Left-bias: on equal severity, `self` (left argument) wins.
-    /// This is intentional — join is associative on severity but
-    /// NOT value-commutative. See `law.join.assoc` (#42).
+    /// Left-bias: on equal severity, `self` (left argument) wins except for
+    /// `Cancelled + Cancelled`, which strengthens to the worse cancellation
+    /// reason. This is intentional: join is associative on severity, but not
+    /// fully value-commutative. See `law.join.assoc` (#42).
     #[must_use]
     pub fn join(self, other: Self) -> Self {
-        if self.severity() >= other.severity() {
-            self
-        } else {
-            other
+        match (self, other) {
+            (Self::Cancelled(mut left), Self::Cancelled(right)) => {
+                left.strengthen(&right);
+                Self::Cancelled(left)
+            }
+            (left, right) => {
+                if left.severity() >= right.severity() {
+                    left
+                } else {
+                    right
+                }
+            }
         }
     }
 
@@ -652,8 +667,10 @@ impl<E: fmt::Debug + fmt::Display> std::error::Error for OutcomeError<E> {}
 /// Compares two outcomes by severity and returns the worse one.
 ///
 /// This implements the lattice join operation.
+///
+/// When both outcomes are `Cancelled`, the stronger [`CancelReason`] is kept.
 pub fn join_outcomes<T, E>(a: Outcome<T, E>, b: Outcome<T, E>) -> Outcome<T, E> {
-    if a.severity() >= b.severity() { a } else { b }
+    a.join(b)
 }
 
 #[cfg(test)]
@@ -787,6 +804,38 @@ mod tests {
         assert!(join_outcomes(cancelled, panicked).is_panicked());
     }
 
+    #[test]
+    fn join_cancelled_strengthens_to_worst_reason() {
+        let user: Outcome<i32, &str> = Outcome::Cancelled(CancelReason::user("soft"));
+        let shutdown: Outcome<i32, &str> = Outcome::Cancelled(CancelReason::shutdown());
+
+        let left_first = user.clone().join(shutdown.clone());
+        let right_first = shutdown.join(user);
+
+        match left_first {
+            Outcome::Cancelled(reason) => assert!(reason.is_shutdown()),
+            other => panic!("expected cancelled outcome, got {other:?}"),
+        }
+
+        match right_first {
+            Outcome::Cancelled(reason) => assert!(reason.is_shutdown()),
+            other => panic!("expected cancelled outcome, got {other:?}"),
+        }
+    }
+
+    #[test]
+    fn join_outcomes_cancelled_strengthens_to_worst_reason() {
+        let user: Outcome<i32, &str> = Outcome::Cancelled(CancelReason::user("soft"));
+        let shutdown: Outcome<i32, &str> = Outcome::Cancelled(CancelReason::shutdown());
+
+        let joined = join_outcomes(user, shutdown);
+
+        match joined {
+            Outcome::Cancelled(reason) => assert!(reason.is_shutdown()),
+            other => panic!("expected cancelled outcome, got {other:?}"),
+        }
+    }
+
     // =========================================================================
     // Map Operations Tests
     // =========================================================================
@@ -899,6 +948,22 @@ mod tests {
         let ok: Outcome<i32, &str> = Outcome::Ok(42);
         let result = ok.unwrap_or_else(|| panic!("should not be called"));
         assert_eq!(result, 42);
+    }
+
+    #[test]
+    fn ok_or_else_collapses_non_ok_variants_to_fallback() {
+        let cancelled: Outcome<i32, &str> = Outcome::Cancelled(CancelReason::default());
+        let panicked: Outcome<i32, &str> = Outcome::Panicked(PanicPayload::new("oops"));
+
+        assert_eq!(cancelled.ok_or_else(|| "fallback"), Err("fallback"));
+        assert_eq!(panicked.ok_or_else(|| "fallback"), Err("fallback"));
+    }
+
+    #[test]
+    fn ok_or_else_doesnt_call_closure_on_ok() {
+        let ok: Outcome<i32, &str> = Outcome::Ok(42);
+        let result = ok.ok_or_else(|| panic!("should not be called"));
+        assert_eq!(result, Ok(42));
     }
 
     // =========================================================================
