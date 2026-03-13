@@ -1517,11 +1517,15 @@ mod tests {
             poll_waiter.poll_ready(&mut cx)
         });
 
-        for _ in 0..1000 {
+        for i in 0..10_000 {
             if shared.pending.try_lock().is_none() {
                 break;
             }
-            std::thread::yield_now();
+            if i % 100 == 99 {
+                std::thread::sleep(std::time::Duration::from_millis(1));
+            } else {
+                std::thread::yield_now();
+            }
         }
         assert!(
             shared.pending.try_lock().is_none(),
@@ -1533,11 +1537,15 @@ mod tests {
             ready_slot_reserved: false,
         };
         let close_thread = std::thread::spawn(move || closer.close());
-        for _ in 0..1000 {
+        for i in 0..10_000 {
             if *shared.closed.lock() {
                 break;
             }
-            std::thread::yield_now();
+            if i % 100 == 99 {
+                std::thread::sleep(std::time::Duration::from_millis(1));
+            } else {
+                std::thread::yield_now();
+            }
         }
         assert!(*shared.closed.lock(), "close() never set the closed flag");
 

@@ -17,7 +17,7 @@ use crate::types::Time;
 #[cfg(not(target_arch = "wasm32"))]
 use socket2::{Domain, Protocol, SockAddr, Socket, Type};
 #[cfg(not(target_arch = "wasm32"))]
-use std::future::{Future, poll_fn};
+use std::future::Future;
 use std::io::{self, IoSlice, IoSliceMut};
 use std::net::{self, Shutdown, SocketAddr, ToSocketAddrs};
 use std::pin::Pin;
