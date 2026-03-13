@@ -406,20 +406,20 @@ where
     /// Initiate a close handshake.
     ///
     /// Sends a close frame and waits for the peer's response.
-    pub async fn close(&mut self, reason: CloseReason) -> Result<(), WsError> {
+    pub async fn close(&mut self, cx: &crate::cx::Cx, reason: CloseReason) -> Result<(), WsError> {
         self.initiate_close(reason).await?;
 
         // Wait for close response (with timeout)
         let timeout_duration = self.close_handshake.close_timeout();
-        let initial_time = crate::cx::Cx::current()
-            .and_then(|current| current.timer_driver())
-            .map_or_else(crate::time::wall_now, |driver| driver.now());
+        let current_time = || {
+            cx.timer_driver()
+                .map_or_else(crate::time::wall_now, |driver| driver.now())
+        };
+        let initial_time = current_time();
         let deadline = initial_time + timeout_duration;
 
         while !self.close_handshake.is_closed() {
-            let time_now = crate::cx::Cx::current()
-                .and_then(|current| current.timer_driver())
-                .map_or_else(crate::time::wall_now, |driver| driver.now());
+            let time_now = current_time();
 
             if time_now >= deadline {
                 self.close_handshake.force_close(CloseReason::going_away());
@@ -435,9 +435,7 @@ where
                     // Ignore non-close frames during close
                 }
                 None => {
-                    let time_now = crate::cx::Cx::current()
-                        .and_then(|current| current.timer_driver())
-                        .map_or_else(crate::time::wall_now, |driver| driver.now());
+                    let time_now = current_time();
 
                     if time_now >= deadline {
                         self.close_handshake.force_close(CloseReason::going_away());

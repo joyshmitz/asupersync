@@ -36,7 +36,7 @@ fn ws_integration_large_binary_roundtrip() {
                 ws.send(&cx, Message::Binary(b)).await.expect("echo binary");
             }
 
-            let _ = ws.close(CloseReason::going_away()).await;
+            let _ = ws.close(&cx, CloseReason::going_away()).await;
         });
     });
 

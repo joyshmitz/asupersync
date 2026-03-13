@@ -26,8 +26,10 @@ fn ws_conformance_close_handshake_client_initiated() {
         let mut client_ws = WebSocket::from_upgraded(client_io, WebSocketConfig::default());
 
         // Client close waits for the server's close response; server recv triggers that response.
-        let client_fut = async move { client_ws.close(CloseReason::normal()).await };
-        let server_fut = async move { server_ws.recv(&cx).await };
+        let client_cx = cx.clone();
+        let server_cx = cx.clone();
+        let client_fut = async move { client_ws.close(&client_cx, CloseReason::normal()).await };
+        let server_fut = async move { server_ws.recv(&server_cx).await };
 
         let (client_res, server_msg) = futures_lite::future::zip(client_fut, server_fut).await;
 

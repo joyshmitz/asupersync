@@ -36,7 +36,7 @@ fn ws_integration_client_can_reconnect_after_server_closes() {
                 if let Some(Message::Text(text)) = ws.recv(&cx).await.expect("recv") {
                     ws.send(&cx, Message::text(text)).await.expect("echo");
                 }
-                let _ = ws.close(CloseReason::going_away()).await;
+                let _ = ws.close(&cx, CloseReason::going_away()).await;
             }
         });
     });

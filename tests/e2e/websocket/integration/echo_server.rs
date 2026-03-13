@@ -39,7 +39,7 @@ fn ws_integration_echo_server_roundtrip() {
             }
 
             // Best-effort clean close (ignore if peer already dropped).
-            let _ = ws.close(CloseReason::going_away()).await;
+            let _ = ws.close(&cx, CloseReason::going_away()).await;
         });
     });
 
@@ -54,7 +54,9 @@ fn ws_integration_echo_server_roundtrip() {
         let msg = ws.recv(&cx).await.expect("recv").expect("msg");
         assert!(matches!(msg, Message::Text(s) if s == "hello"));
 
-        ws.close(CloseReason::normal()).await.expect("client close");
+        ws.close(&cx, CloseReason::normal())
+            .await
+            .expect("client close");
     });
 
     server_thread.join().expect("server thread");
