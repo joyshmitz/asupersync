@@ -1,0 +1,9 @@
+{
+  "error": {
+    "code": "CONFIG_ERROR",
+    "message": "Configuration error: Invalid JSON at line 5416: expected ident at line 1 column 2",
+    "hint": null,
+    "retryable": false,
+    "context": null
+  }
+}
