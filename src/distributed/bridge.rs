@@ -799,6 +799,8 @@ impl RegionBridge {
             cancel_reason,
         );
 
+        // Keep future locally created snapshots monotonic after recovery/apply.
+        self.sequence = self.sequence.max(snapshot.sequence);
         self.sync_state.last_synced_sequence = snapshot.sequence;
         self.sync_state.sync_pending = false;
         self.sync_state.pending_ops = 0;
@@ -1271,6 +1273,34 @@ mod tests {
         assert_eq!(bridge.sync_state.last_synced_sequence, 42);
         assert!(!bridge.sync_state.sync_pending);
         assert_eq!(bridge.sync_state.pending_ops, 0);
+    }
+
+    #[test]
+    fn apply_snapshot_advances_local_sequence_counter() {
+        let mut bridge = create_local_bridge();
+
+        let snap = RegionSnapshot {
+            region_id: bridge.id(),
+            state: RegionState::Open,
+            timestamp: Time::from_secs(100),
+            sequence: 42,
+            tasks: vec![],
+            children: vec![],
+            finalizer_count: 0,
+            budget: BudgetSnapshot {
+                deadline_nanos: None,
+                polls_remaining: None,
+                cost_remaining: None,
+            },
+            cancel_reason: None,
+            parent: None,
+            metadata: vec![],
+        };
+
+        bridge.apply_snapshot(&snap).unwrap();
+
+        let next = bridge.create_snapshot();
+        assert_eq!(next.sequence, 43);
     }
 
     #[test]
