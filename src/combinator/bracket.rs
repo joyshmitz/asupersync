@@ -435,16 +435,8 @@ pub async fn commit_section<F, T>(cx: &Cx, _max_polls: u32, f: F) -> T
 where
     F: Future<Output = T>,
 {
-    // Run under cancel mask
-    // In full implementation, this would track poll count and enforce budget
-    cx.masked(|| {
-        // This is synchronous masked execution
-        // For async, we'd need a more sophisticated approach
-    });
-
-    // For Phase 0, just run the future
-    // Full implementation would poll with budget tracking
-    f.await
+    let mut future = Box::pin(f);
+    std::future::poll_fn(|task_cx| cx.masked(|| future.as_mut().poll(task_cx))).await
 }
 
 /// Commit section that returns a Result.
@@ -454,8 +446,8 @@ pub async fn try_commit_section<F, T, E>(cx: &Cx, _max_polls: u32, f: F) -> Resu
 where
     F: Future<Output = Result<T, E>>,
 {
-    cx.masked(|| {});
-    f.await
+    let mut future = Box::pin(f);
+    std::future::poll_fn(|task_cx| cx.masked(|| future.as_mut().poll(task_cx))).await
 }
 
 #[cfg(test)]
@@ -756,6 +748,65 @@ mod tests {
         assert_eq!(result, "completed");
     }
 
+    struct PendingThenCheckpoint<'a> {
+        cx: &'a Cx,
+        first_poll: bool,
+    }
+
+    impl Future for PendingThenCheckpoint<'_> {
+        type Output = Result<(), crate::Error>;
+
+        fn poll(mut self: Pin<&mut Self>, _cx: &mut Context<'_>) -> Poll<Self::Output> {
+            if self.first_poll {
+                self.first_poll = false;
+                Poll::Pending
+            } else {
+                Poll::Ready(self.cx.checkpoint())
+            }
+        }
+    }
+
+    struct PendingThenCheckpointResult<'a> {
+        cx: &'a Cx,
+        first_poll: bool,
+        value: i32,
+    }
+
+    impl Future for PendingThenCheckpointResult<'_> {
+        type Output = Result<i32, crate::Error>;
+
+        fn poll(mut self: Pin<&mut Self>, _cx: &mut Context<'_>) -> Poll<Self::Output> {
+            if self.first_poll {
+                self.first_poll = false;
+                Poll::Pending
+            } else {
+                Poll::Ready(self.cx.checkpoint().map(|()| self.value))
+            }
+        }
+    }
+
+    #[test]
+    fn commit_section_masks_checkpoint_on_later_polls() {
+        let cx = test_cx();
+        cx.set_cancel_requested(true);
+
+        let waker = noop_waker();
+        let mut task_cx = Context::from_waker(&waker);
+        let mut fut = Box::pin(commit_section(
+            &cx,
+            10,
+            PendingThenCheckpoint {
+                cx: &cx,
+                first_poll: true,
+            },
+        ));
+
+        assert!(matches!(fut.as_mut().poll(&mut task_cx), Poll::Pending));
+
+        let second = fut.as_mut().poll(&mut task_cx);
+        assert!(matches!(second, Poll::Ready(Ok(()))), "{second:?}");
+    }
+
     // =========================================================================
     // try_commit_section() Tests
     // =========================================================================
@@ -791,6 +842,29 @@ mod tests {
 
         assert!(executed.get());
         assert_eq!(result, Ok(42));
+    }
+
+    #[test]
+    fn try_commit_section_masks_checkpoint_on_later_polls() {
+        let cx = test_cx();
+        cx.set_cancel_requested(true);
+
+        let waker = noop_waker();
+        let mut task_cx = Context::from_waker(&waker);
+        let mut fut = Box::pin(try_commit_section(
+            &cx,
+            10,
+            PendingThenCheckpointResult {
+                cx: &cx,
+                first_poll: true,
+                value: 42,
+            },
+        ));
+
+        assert!(matches!(fut.as_mut().poll(&mut task_cx), Poll::Pending));
+
+        let second = fut.as_mut().poll(&mut task_cx);
+        assert!(matches!(second, Poll::Ready(Ok(42))), "{second:?}");
     }
 
     // =========================================================================
