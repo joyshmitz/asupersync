@@ -12,6 +12,15 @@ use crate::types::resource::{PoolExhausted, SymbolPool};
 use crate::types::{ObjectId, Symbol, SymbolId, SymbolKind};
 use std::cmp::min;
 
+/// The symbol ID format caps objects at 256 source blocks.
+pub(crate) const MAX_SOURCE_BLOCKS: usize = u8::MAX as usize + 1;
+
+/// Returns the maximum object size supported by the byte-based block contract.
+#[must_use]
+pub(crate) fn max_object_size(max_block_size: usize) -> usize {
+    max_block_size.saturating_mul(MAX_SOURCE_BLOCKS)
+}
+
 /// Errors produced by the encoding pipeline.
 #[derive(Debug, thiserror::Error)]
 pub enum EncodingError {
@@ -230,8 +239,7 @@ impl EncodingPipeline {
             });
         }
 
-        let max_blocks = u8::MAX as usize + 1;
-        let max_total = self.config.max_block_size.saturating_mul(max_blocks);
+        let max_total = max_object_size(self.config.max_block_size);
         if data.len() > max_total {
             return Err(EncodingError::DataTooLarge {
                 size: data.len(),

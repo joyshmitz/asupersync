@@ -9,7 +9,7 @@ use std::task::{Context, Poll};
 use crate::config::RaptorQConfig;
 use crate::cx::Cx;
 use crate::decoding::{DecodingConfig, DecodingPipeline, SymbolAcceptResult};
-use crate::encoding::EncodingPipeline;
+use crate::encoding::{EncodingPipeline, max_object_size};
 use crate::error::{Error, ErrorKind};
 use crate::observability::Metrics;
 use crate::security::{AuthenticatedSymbol, SecurityContext};
@@ -85,9 +85,9 @@ impl<T: SymbolSink + Unpin> RaptorQSender<T> {
         object_id: ObjectId,
         data: &[u8],
     ) -> Result<SendOutcome, Error> {
-        // Validate data size.
-        let max_size = (self.config.encoding.max_block_size as u64)
-            * u64::from(self.config.encoding.symbol_size);
+        // Keep sender-side validation aligned with the encoder/decoder byte contract:
+        // an object may span up to 256 source blocks because SBN is u8.
+        let max_size = max_object_size(self.config.encoding.max_block_size) as u64;
         if data.len() as u64 > max_size {
             return Err(Error::data_too_large(data.len() as u64, max_size));
         }
@@ -648,8 +648,7 @@ mod tests {
         let sink = VecSink::new();
         let mut sender = RaptorQSender::new(RaptorQConfig::default(), sink, None, None);
 
-        let max = u64::from(sender.config().encoding.symbol_size)
-            * sender.config().encoding.max_block_size as u64;
+        let max = max_object_size(sender.config().encoding.max_block_size) as u64;
         let data = vec![0u8; (max + 1) as usize];
         let result = sender.send_object(&cx, ObjectId::new_for_test(1), &data);
 
@@ -669,6 +668,45 @@ mod tests {
 
         assert!(result.is_err());
         assert_eq!(result.unwrap_err().kind(), ErrorKind::Cancelled);
+    }
+
+    #[test]
+    fn test_send_object_accepts_valid_non_default_small_symbol_size() {
+        let cx: Cx = Cx::for_testing();
+        let sink = VecSink::new();
+        let mut config = RaptorQConfig::default();
+        config.encoding.symbol_size = 8;
+        config.encoding.max_block_size = 32;
+        config.encoding.repair_overhead = 1.0;
+        let mut sender = RaptorQSender::new(config, sink, None, None);
+
+        // This exceeded the old max_block_size * symbol_size guard, but it still fits
+        // within the byte-based 256-block contract enforced by EncodingPipeline.
+        let data = vec![0xA5u8; 257];
+        let outcome = sender
+            .send_object(&cx, ObjectId::new_for_test(20), &data)
+            .expect("byte-valid payload should not be rejected early");
+
+        assert!(outcome.symbols_sent >= outcome.source_symbols);
+        assert_eq!(sender.transport_mut().symbols.len(), outcome.symbols_sent);
+    }
+
+    #[test]
+    fn test_send_object_rejects_large_symbol_size_payload_with_data_too_large() {
+        let cx: Cx = Cx::for_testing();
+        let sink = VecSink::new();
+        let mut config = RaptorQConfig::default();
+        config.encoding.symbol_size = 512;
+        config.encoding.max_block_size = 32;
+        config.encoding.repair_overhead = 1.0;
+        let mut sender = RaptorQSender::new(config, sink, None, None);
+
+        let data = vec![0u8; max_object_size(sender.config().encoding.max_block_size) + 1];
+        let err = sender
+            .send_object(&cx, ObjectId::new_for_test(21), &data)
+            .expect_err("payload beyond byte contract must fail before encoding");
+
+        assert_eq!(err.kind(), ErrorKind::DataTooLarge);
     }
 
     #[test]

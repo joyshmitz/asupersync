@@ -5,6 +5,7 @@ use std::task::{Context, Poll};
 
 use crate::config::RaptorQConfig;
 use crate::cx::Cx;
+use crate::encoding::max_object_size;
 use crate::error::ErrorKind;
 use crate::observability::Metrics;
 use crate::raptorq::builder::{RaptorQReceiverBuilder, RaptorQSenderBuilder};
@@ -219,10 +220,9 @@ fn sender_rejects_oversized_data() {
         .build()
         .unwrap_or_else(|err| panic!("{context} sender build should succeed; got {err:?}"));
 
-    // Create data larger than max_block_size * symbol_size.
-    let max = u64::try_from(sender.config().encoding.max_block_size)
-        .expect("max_block_size fits u64")
-        * u64::from(sender.config().encoding.symbol_size);
+    // Oversized objects exceed the byte-based 256-block contract from EncodingPipeline.
+    let max = u64::try_from(max_object_size(sender.config().encoding.max_block_size))
+        .expect("max_object_size fits u64");
     let data = vec![0u8; (max + 1) as usize];
     let result = sender.send_object(&cx, ObjectId::new_for_test(99), &data);
 
@@ -233,6 +233,39 @@ fn sender_rejects_oversized_data() {
         err.kind(),
         ErrorKind::DataTooLarge,
         "{context} expected DataTooLarge error kind"
+    );
+}
+
+#[test]
+fn sender_allows_small_symbol_size_payloads_that_fit_byte_limit() {
+    let seed = 0u64;
+    let cx: Cx = Cx::for_testing();
+    let sink = VecSink::new();
+    let mut config = RaptorQConfig::default();
+    config.encoding.symbol_size = 8;
+    config.encoding.max_block_size = 32;
+    config.encoding.repair_overhead = 1.0;
+    let replay_ref = "replay:rq-u-builder-small-symbol-byte-limit-v1";
+    let context = builder_failure_context(
+        "RQ-U-BUILDER-SMALL-SYMBOL-BYTE-LIMIT",
+        seed,
+        "symbol_size=8,max_block_size=32,data_len=257",
+        replay_ref,
+    );
+    let mut sender = RaptorQSenderBuilder::new()
+        .config(config)
+        .transport(sink)
+        .build()
+        .unwrap_or_else(|err| panic!("{context} sender build should succeed; got {err:?}"));
+
+    let data = vec![0x5Au8; 257];
+    let outcome = sender
+        .send_object(&cx, ObjectId::new_for_test(100), &data)
+        .unwrap_or_else(|err| panic!("{context} expected success, got {err:?}"));
+
+    assert!(
+        outcome.symbols_sent >= outcome.source_symbols,
+        "{context} expected source symbols to be transmitted"
     );
 }
 
