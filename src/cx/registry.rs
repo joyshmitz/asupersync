@@ -972,6 +972,39 @@ impl NameRegistry {
         Ok(())
     }
 
+    /// Unregister a name only if it is still owned by the provided lease.
+    ///
+    /// This guards manual lease-resolution paths against stale handles: the
+    /// active registry entry must still match the lease's full identity
+    /// (`name`, `holder`, `region`, and acquisition time).
+    ///
+    /// # Errors
+    ///
+    /// Returns [`NameLeaseError::NotFound`] if the name is no longer
+    /// registered, or [`NameLeaseError::PermissionDenied`] if the active entry
+    /// no longer matches the supplied lease.
+    pub fn unregister_owned_and_grant(
+        &mut self,
+        lease: &NameLease,
+        now: Time,
+    ) -> Result<(), NameLeaseError> {
+        let name = lease.name();
+        let Some(entry) = self.leases.get(name) else {
+            return Err(NameLeaseError::NotFound {
+                name: name.to_string(),
+            });
+        };
+        if entry.holder != lease.holder()
+            || entry.region != lease.region()
+            || entry.acquired_at != lease.acquired_at()
+        {
+            return Err(NameLeaseError::PermissionDenied {
+                name: name.to_string(),
+            });
+        }
+        self.unregister_and_grant(name, now)
+    }
+
     /// Check the waiter queue for a name and grant to the first eligible waiter.
     ///
     /// Expired waiters (deadline < now) are removed. If an eligible waiter

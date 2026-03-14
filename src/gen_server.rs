@@ -1571,25 +1571,14 @@ impl<P: crate::types::Policy> crate::cx::Scope<'_, P> {
             "gen_server spawned"
         );
 
-        let child_observability = cx.child_observability(self.region_id(), task_id);
-        let child_entropy = cx.child_entropy(task_id);
-        let io_driver = state.io_driver_handle();
-        let child_cx = Cx::new_with_observability(
-            self.region_id(),
-            task_id,
-            self.budget(),
-            Some(child_observability),
-            io_driver,
-            Some(child_entropy),
-        )
-        .with_blocking_pool_handle(cx.blocking_pool_handle());
+        let (child_cx, child_cx_full) = self.build_child_task_cx(state, cx, task_id);
 
         if let Some(record) = state.task_mut(task_id) {
             record.set_cx_inner(child_cx.inner.clone());
-            record.set_cx(child_cx.clone());
+            record.set_cx(child_cx_full.clone());
         }
 
-        let cx_for_send = child_cx.clone();
+        let cx_for_send = child_cx_full;
         let inner_weak = Arc::downgrade(&child_cx.inner);
         let state_for_task = Arc::clone(&server_state);
 
@@ -1645,8 +1634,8 @@ impl<P: crate::types::Policy> crate::cx::Scope<'_, P> {
     /// processing messages.
     ///
     /// On success, the returned [`NamedGenServerHandle`] holds both the server
-    /// handle and the name lease. The lease is released when the handle is
-    /// stopped via [`NamedGenServerHandle::stop_and_release`] or aborted via
+    /// handle and the name lease. The lease is resolved when the handle is
+    /// released via [`NamedGenServerHandle::release_name`] or aborted via
     /// [`NamedGenServerHandle::abort_lease`].
     ///
     /// # Errors
@@ -1731,11 +1720,31 @@ impl std::fmt::Display for NamedSpawnError {
 
 impl std::error::Error for NamedSpawnError {}
 
+/// Error returned when releasing a stopped named server's registry entry fails.
+#[derive(Debug)]
+pub enum ReleaseNameError {
+    /// The server is still running; stop + drain or join it first.
+    StillRunning,
+    /// Resolving the name lease failed.
+    Lease(crate::cx::NameLeaseError),
+}
+
+impl std::fmt::Display for ReleaseNameError {
+    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        match self {
+            Self::StillRunning => write!(f, "named server is still running"),
+            Self::Lease(err) => write!(f, "named server lease resolution failed: {err}"),
+        }
+    }
+}
+
+impl std::error::Error for ReleaseNameError {}
+
 /// Handle to a running **named** GenServer.
 ///
 /// Wraps a [`GenServerHandle`] together with a [`NameLease`] from the
 /// registry. The lease is an obligation (drop bomb): callers must resolve it
-/// by calling [`stop_and_release`](Self::stop_and_release) or
+/// by calling [`release_name`](Self::release_name) or
 /// [`abort_lease`](Self::abort_lease) before dropping.
 ///
 /// All `call`, `cast`, `info` methods delegate to the inner handle.
@@ -1784,22 +1793,58 @@ impl<S: GenServer> NamedGenServerHandle<S> {
         &self.handle
     }
 
-    /// Stop the server and release the name lease (commit).
+    /// Signal the server to stop gracefully.
+    pub fn stop(&self) {
+        self.handle.stop();
+    }
+
+    /// Release the name lease (commit) after the server has already stopped.
     ///
-    /// This is the normal shutdown path: the name becomes available for
-    /// re-registration after this call.
+    /// Callers should first request graceful shutdown via [`stop`](Self::stop)
+    /// and then drive or join the server to completion. This method only
+    /// removes the registry entry and resolves the lease once the underlying
+    /// server task is no longer live, preserving the invariant that a running
+    /// server keeps its name.
     ///
     /// # Errors
     ///
-    /// Returns [`crate::cx::NameLeaseError::AlreadyResolved`] if the lease was
-    /// already resolved or moved out via [`take_lease`](Self::take_lease).
-    pub fn stop_and_release(&mut self) -> Result<(), crate::cx::NameLeaseError> {
-        self.lease
-            .as_mut()
-            .ok_or(crate::cx::NameLeaseError::AlreadyResolved)?
-            .release()
-            .map(|_proof| {
-                self.handle.stop();
+    /// Returns [`ReleaseNameError::StillRunning`] if the underlying server
+    /// task has not finished yet. Returns [`ReleaseNameError::Lease`] if
+    /// the lease was already resolved or moved out via
+    /// [`take_lease`](Self::take_lease), or if lease resolution fails.
+    pub fn release_name(
+        &mut self,
+        registry: &mut crate::cx::NameRegistry,
+        now: Time,
+    ) -> Result<(), ReleaseNameError> {
+        let Some(lease) = self.lease.as_ref() else {
+            return Err(ReleaseNameError::Lease(
+                crate::cx::NameLeaseError::AlreadyResolved,
+            ));
+        };
+        if !lease.is_active() {
+            return Err(ReleaseNameError::Lease(
+                crate::cx::NameLeaseError::AlreadyResolved,
+            ));
+        }
+
+        if !self.handle.is_finished() {
+            return Err(ReleaseNameError::StillRunning);
+        }
+
+        registry
+            .unregister_owned_and_grant(lease, now)
+            .map(|_proof| ())
+            .map_err(ReleaseNameError::Lease)
+            .and_then(|()| {
+                self.lease
+                    .take()
+                    .ok_or(ReleaseNameError::Lease(
+                        crate::cx::NameLeaseError::AlreadyResolved,
+                    ))?
+                    .release()
+                    .map(|_proof| ())
+                    .map_err(ReleaseNameError::Lease)
             })
     }
 
@@ -1812,9 +1857,20 @@ impl<S: GenServer> NamedGenServerHandle<S> {
     ///
     /// Returns [`crate::cx::NameLeaseError::AlreadyResolved`] if the lease was
     /// already resolved or moved out via [`take_lease`](Self::take_lease).
-    pub fn abort_lease(&mut self) -> Result<(), crate::cx::NameLeaseError> {
+    pub fn abort_lease(
+        &mut self,
+        registry: &mut crate::cx::NameRegistry,
+        now: Time,
+    ) -> Result<(), crate::cx::NameLeaseError> {
+        let Some(lease) = self.lease.as_ref() else {
+            return Err(crate::cx::NameLeaseError::AlreadyResolved);
+        };
+        if !lease.is_active() {
+            return Err(crate::cx::NameLeaseError::AlreadyResolved);
+        }
+        registry.unregister_owned_and_grant(lease, now)?;
         self.lease
-            .as_mut()
+            .take()
             .ok_or(crate::cx::NameLeaseError::AlreadyResolved)?
             .abort()
             .map(|_proof| ())
@@ -1823,7 +1879,9 @@ impl<S: GenServer> NamedGenServerHandle<S> {
     /// Take ownership of the lease (for manual lifecycle management).
     ///
     /// After this call, the handle no longer owns the lease; the caller is
-    /// responsible for resolving it.
+    /// responsible for removing the matching registry entry (for example via
+    /// [`crate::cx::NameRegistry::unregister_owned_and_grant`]) and then
+    /// resolving the lease obligation.
     pub fn take_lease(&mut self) -> Option<crate::cx::NameLease> {
         self.lease.take()
     }
@@ -1911,17 +1969,19 @@ where
         let lease_slot_for_finalizer = Arc::clone(&lease_slot);
         let registry_for_finalizer = Arc::clone(&self.registry);
         let finalizer_registered = scope.defer_sync(state, move || {
-            let _ = registry_for_finalizer.lock().cleanup_task(task_id);
             let lease_to_resolve = lease_slot_for_finalizer.lock().take();
             if let Some(mut lease) = lease_to_resolve {
+                let _ = registry_for_finalizer
+                    .lock()
+                    .unregister_owned_and_grant(&lease, Time::ZERO);
                 let _ = lease.release();
             }
         });
 
         if !finalizer_registered {
-            let _ = self.registry.lock().cleanup_task(task_id);
             let lease_to_abort = lease_slot.lock().take();
             if let Some(mut lease) = lease_to_abort {
+                let _ = self.registry.lock().unregister_owned_and_grant(&lease, now);
                 let _ = lease.abort();
             }
             if let Some(region_record) = state.region(scope.region_id()) {
@@ -2143,6 +2203,123 @@ mod tests {
         assert_eq!(result, 5);
 
         crate::test_complete!("gen_server_spawn_and_call");
+    }
+
+    #[test]
+    #[allow(clippy::items_after_statements)]
+    fn gen_server_spawn_inherits_full_child_cx_capabilities() {
+        use crate::cx::registry::RegistryHandle;
+        use crate::evidence_sink::{CollectorSink, EvidenceSink};
+        use crate::remote::{NodeId, RemoteCap};
+        use franken_evidence::EvidenceLedgerBuilder;
+
+        init_test("gen_server_spawn_inherits_full_child_cx_capabilities");
+
+        #[derive(Debug, Default)]
+        #[allow(clippy::struct_excessive_bools)]
+        struct CapabilityProbe {
+            has_timer: bool,
+            has_registry: bool,
+            has_remote: bool,
+            remote_origin: Option<String>,
+            logical_tick_advanced: bool,
+        }
+
+        impl GenServer for CapabilityProbe {
+            type Call = ();
+            type Reply = ();
+            type Cast = ();
+            type Info = SystemMsg;
+
+            fn on_start(&mut self, cx: &Cx) -> Pin<Box<dyn Future<Output = ()> + Send + '_>> {
+                self.has_timer = cx.has_timer();
+                self.has_registry = cx.registry_handle().is_some();
+                self.has_remote = cx.has_remote();
+                self.remote_origin = cx.remote().map(|remote| remote.local_node().to_string());
+                let before = cx.logical_now();
+                let after = cx.logical_tick();
+                self.logical_tick_advanced = after > before;
+                let entry = EvidenceLedgerBuilder::new()
+                    .ts_unix_ms(1_700_000_000_000)
+                    .component("gen_server_capability_probe")
+                    .action("on_start")
+                    .posterior(vec![0.6, 0.4])
+                    .chosen_expected_loss(0.1)
+                    .calibration_score(0.85)
+                    .build()
+                    .expect("evidence entry");
+                cx.emit_evidence(&entry);
+                Box::pin(async {})
+            }
+
+            fn handle_call(
+                &mut self,
+                _cx: &Cx,
+                _request: (),
+                reply: Reply<()>,
+            ) -> Pin<Box<dyn Future<Output = ()> + Send + '_>> {
+                let _ = reply.send(());
+                Box::pin(async {})
+            }
+        }
+
+        let mut runtime = crate::lab::LabRuntime::new(crate::lab::LabConfig::default());
+        let clock = Arc::new(crate::time::VirtualClock::new());
+        runtime
+            .state
+            .set_timer_driver(crate::time::TimerDriverHandle::with_virtual_clock(clock));
+
+        let registry = crate::cx::NameRegistry::new();
+        let registry_handle = RegistryHandle::new(Arc::new(registry));
+        let sink = Arc::new(CollectorSink::new());
+        let cx = Cx::for_testing()
+            .with_registry_handle(Some(registry_handle))
+            .with_remote_cap(RemoteCap::new().with_local_node(NodeId::new("origin-test")))
+            .with_evidence_sink(Some(sink.clone() as Arc<dyn EvidenceSink>));
+
+        let region = runtime.state.create_root_region(Budget::INFINITE);
+        let scope = crate::cx::Scope::<FailFast>::new(region, Budget::INFINITE);
+
+        let (mut handle, stored) = scope
+            .spawn_gen_server(&mut runtime.state, &cx, CapabilityProbe::default(), 8)
+            .expect("spawn should succeed");
+        let task_id = handle.task_id();
+        runtime.state.store_spawned_task(task_id, stored);
+
+        runtime.scheduler.lock().schedule(task_id, 0);
+        runtime.run_until_idle();
+
+        handle.stop();
+        runtime.scheduler.lock().schedule(task_id, 0);
+        runtime.run_until_quiescent();
+
+        let server = futures_lite::future::block_on(handle.join(&cx)).expect("join ok");
+        assert!(
+            server.has_timer,
+            "gen server child cx must inherit timer driver"
+        );
+        assert!(
+            server.has_registry,
+            "gen server child cx must inherit registry handle",
+        );
+        assert!(
+            server.has_remote,
+            "gen server child cx must inherit remote cap"
+        );
+        assert_eq!(server.remote_origin.as_deref(), Some("origin-test"));
+        assert!(
+            server.logical_tick_advanced,
+            "gen server child cx must inherit a live logical clock",
+        );
+        let entries = sink.entries();
+        assert_eq!(
+            entries.len(),
+            1,
+            "gen server child cx must inherit evidence sink"
+        );
+        assert_eq!(entries[0].component, "gen_server_capability_probe");
+
+        crate::test_complete!("gen_server_spawn_inherits_full_child_cx_capabilities");
     }
 
     #[test]
@@ -4969,10 +5146,115 @@ mod tests {
         assert_eq!(registry.whereis("my_counter"), Some(task_id));
         assert_eq!(named_handle.name(), "my_counter");
 
-        // Clean up: release lease.
-        named_handle.stop_and_release().unwrap();
+        // Clean up: stop the task, drive it to completion, then release the name.
+        named_handle.stop();
+        runtime.scheduler.lock().schedule(task_id, 0);
+        runtime.run_until_quiescent();
+        let release_now = runtime.state.now;
+        named_handle
+            .release_name(&mut registry, release_now)
+            .expect("release ok");
+        assert!(
+            registry.whereis("my_counter").is_none(),
+            "name must be removed once shutdown completes",
+        );
+
+        let (mut restarted, stored) = scope
+            .spawn_named_gen_server(
+                &mut runtime.state,
+                &cx,
+                &mut registry,
+                "my_counter",
+                Counter(0),
+                32,
+                now,
+            )
+            .expect("name should be reusable after release_name");
+        runtime
+            .state
+            .store_spawned_task(restarted.task_id(), stored);
+        restarted.stop();
+        runtime.scheduler.lock().schedule(restarted.task_id(), 0);
+        runtime.run_until_quiescent();
+        let restart_release_now = runtime.state.now;
+        restarted
+            .release_name(&mut registry, restart_release_now)
+            .expect("restart cleanup ok");
 
         crate::test_complete!("named_server_register_and_whereis");
+    }
+
+    /// Named server: release_name must not remove the name while the server is still live.
+    #[test]
+    fn named_server_release_name_requires_stopped_server() {
+        crate::test_utils::init_test_logging();
+        crate::test_phase!("named_server_release_name_requires_stopped_server");
+
+        let budget = Budget::new().with_poll_quota(100_000);
+        let mut runtime = crate::lab::LabRuntime::new(crate::lab::LabConfig::new(42));
+        let region = runtime.state.create_root_region(budget);
+        let cx = Cx::for_testing();
+        let scope = crate::cx::Scope::<FailFast>::new(region, budget);
+        let mut registry = crate::cx::NameRegistry::new();
+
+        #[allow(clippy::items_after_statements)]
+        #[derive(Debug)]
+        struct Noop;
+
+        #[allow(clippy::items_after_statements)]
+        impl GenServer for Noop {
+            type Call = ();
+            type Reply = ();
+            type Cast = ();
+            type Info = SystemMsg;
+
+            fn handle_call(
+                &mut self,
+                _cx: &Cx,
+                _request: (),
+                reply: Reply<()>,
+            ) -> Pin<Box<dyn Future<Output = ()> + Send + '_>> {
+                let _ = reply.send(());
+                Box::pin(async {})
+            }
+        }
+
+        let now = crate::types::Time::ZERO;
+        let (mut handle, stored) = scope
+            .spawn_named_gen_server(
+                &mut runtime.state,
+                &cx,
+                &mut registry,
+                "still_running",
+                Noop,
+                8,
+                now,
+            )
+            .unwrap();
+        runtime.state.store_spawned_task(handle.task_id(), stored);
+
+        assert!(
+            matches!(
+                handle.release_name(&mut registry, now),
+                Err(ReleaseNameError::StillRunning)
+            ),
+            "release_name must fail closed while the server is still live",
+        );
+        assert_eq!(
+            registry.whereis("still_running"),
+            Some(handle.task_id()),
+            "premature release_name must not remove the registered name",
+        );
+
+        handle.stop();
+        runtime.scheduler.lock().schedule(handle.task_id(), 0);
+        runtime.run_until_quiescent();
+        let release_now = runtime.state.now;
+        handle
+            .release_name(&mut registry, release_now)
+            .expect("release after shutdown should succeed");
+
+        crate::test_complete!("named_server_release_name_requires_stopped_server");
     }
 
     /// Named server: duplicate name is rejected.
@@ -5062,7 +5344,12 @@ mod tests {
             "region should only have the first task; orphaned task must be removed"
         );
 
-        h1.stop_and_release().unwrap();
+        h1.stop();
+        runtime.scheduler.lock().schedule(h1.task_id(), 0);
+        runtime.run_until_quiescent();
+        let release_now = runtime.state.now;
+        h1.release_name(&mut registry, release_now)
+            .expect("release ok");
 
         crate::test_complete!("named_server_duplicate_name_rejected");
     }
@@ -5128,12 +5415,11 @@ mod tests {
         assert!(registry.whereis("temp_name").is_some());
 
         // Abort the lease (simulating cancellation).
-        handle.abort_lease().unwrap();
-
-        // Name should no longer be registered after unregister.
-        // Note: abort resolves the obligation but doesn't auto-unregister;
-        // the name entry stays until explicitly unregistered.
-        // The lease obligation is resolved (no drop bomb).
+        handle.abort_lease(&mut registry, now).unwrap();
+        assert!(
+            registry.whereis("temp_name").is_none(),
+            "aborting the lease must remove the registry entry",
+        );
 
         crate::test_complete!("named_server_abort_lease_removes_name");
     }
@@ -5208,13 +5494,11 @@ mod tests {
         crate::test_complete!("named_server_take_lease_manual_management");
     }
 
-    /// Named server: stop_and_release fails closed after take_lease removed the lease.
+    /// Named server: release_name fails closed after take_lease removed the lease.
     #[test]
-    fn named_server_stop_and_release_after_take_lease_returns_already_resolved() {
+    fn named_server_release_name_after_take_lease_returns_already_resolved() {
         crate::test_utils::init_test_logging();
-        crate::test_phase!(
-            "named_server_stop_and_release_after_take_lease_returns_already_resolved"
-        );
+        crate::test_phase!("named_server_release_name_after_take_lease_returns_already_resolved");
 
         let budget = Budget::new().with_poll_quota(100_000);
         let mut runtime = crate::lab::LabRuntime::new(crate::lab::LabConfig::new(42));
@@ -5273,29 +5557,32 @@ mod tests {
             ActorState::Created,
             "taking the lease alone must not stop the server"
         );
-        assert_eq!(
-            handle.stop_and_release().unwrap_err(),
-            crate::cx::NameLeaseError::AlreadyResolved
+        assert!(
+            matches!(
+                handle.release_name(&mut registry, now),
+                Err(ReleaseNameError::Lease(
+                    crate::cx::NameLeaseError::AlreadyResolved
+                ))
+            ),
+            "release_name after take_lease must fail closed with AlreadyResolved",
         );
         assert_eq!(
             handle.handle.state.load(),
             ActorState::Created,
-            "failed stop_and_release after take_lease must not mutate actor state"
+            "failed release_name after take_lease must not mutate actor state"
         );
         let _ = lease.abort();
 
         crate::test_complete!(
-            "named_server_stop_and_release_after_take_lease_returns_already_resolved"
+            "named_server_release_name_after_take_lease_returns_already_resolved"
         );
     }
 
-    /// Named server: abort_lease fails closed after stop_and_release resolved the lease.
+    /// Named server: abort_lease fails closed after release_name resolved the lease.
     #[test]
-    fn named_server_abort_lease_after_stop_and_release_returns_already_resolved() {
+    fn named_server_abort_lease_after_release_name_returns_already_resolved() {
         crate::test_utils::init_test_logging();
-        crate::test_phase!(
-            "named_server_abort_lease_after_stop_and_release_returns_already_resolved"
-        );
+        crate::test_phase!("named_server_abort_lease_after_release_name_returns_already_resolved");
 
         let budget = Budget::new().with_poll_quota(100_000);
         let mut runtime = crate::lab::LabRuntime::new(crate::lab::LabConfig::new(42));
@@ -5348,16 +5635,20 @@ mod tests {
             .unwrap();
         runtime.state.store_spawned_task(handle.task_id(), stored);
 
+        handle.stop();
+        runtime.scheduler.lock().schedule(handle.task_id(), 0);
+        runtime.run_until_quiescent();
+        let release_now = runtime.state.now;
         handle
-            .stop_and_release()
+            .release_name(&mut registry, release_now)
             .expect("initial release should succeed");
         assert_eq!(
-            handle.abort_lease().unwrap_err(),
+            handle.abort_lease(&mut registry, now).unwrap_err(),
             crate::cx::NameLeaseError::AlreadyResolved
         );
 
         crate::test_complete!(
-            "named_server_abort_lease_after_stop_and_release_returns_already_resolved"
+            "named_server_abort_lease_after_release_name_returns_already_resolved"
         );
     }
 

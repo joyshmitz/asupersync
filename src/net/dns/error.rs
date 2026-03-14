@@ -10,7 +10,7 @@ use std::io;
 pub enum DnsError {
     /// No DNS records found for the host.
     NoRecords(String),
-    /// DNS query timed out.
+    /// DNS lookup or connect operation timed out.
     Timeout,
     /// I/O error during DNS query.
     Io(String),
@@ -30,7 +30,7 @@ impl fmt::Display for DnsError {
     fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
         match self {
             Self::NoRecords(host) => write!(f, "no DNS records found for: {host}"),
-            Self::Timeout => write!(f, "DNS query timed out"),
+            Self::Timeout => write!(f, "DNS operation timed out"),
             Self::Io(msg) => write!(f, "DNS I/O error: {msg}"),
             Self::Connection(msg) => write!(f, "connection error: {msg}"),
             Self::Cancelled => write!(f, "DNS operation cancelled"),
@@ -72,7 +72,7 @@ mod tests {
 
         let expected_display = [
             "no DNS records found for: example.com",
-            "DNS query timed out",
+            "DNS operation timed out",
             "DNS I/O error: broken pipe",
             "connection error: refused",
             "DNS operation cancelled",

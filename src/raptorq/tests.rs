@@ -1950,8 +1950,8 @@ mod failure_modes {
         }
     }
 
-    /// Contiguous burst loss: drop the first K source symbols,
-    /// rely entirely on repair symbols for recovery.
+    /// Contiguous burst loss: drop all K source symbols and rely entirely on
+    /// repair symbols for recovery.
     #[test]
     fn contiguous_burst_loss_all_source_symbols_dropped() {
         let k = 8;
@@ -1987,25 +1987,16 @@ mod failure_modes {
             received.push(ReceivedSymbol::repair(esi, cols, coefs, repair_data));
         }
 
-        let result = decoder.decode(&received);
-        match result {
-            Ok(decoded_symbols) => {
-                assert_eq!(
-                    decoded_symbols.source, source,
-                    "{context} burst-loss decode should recover original source"
-                );
-            }
-            Err(DecodeError::SingularMatrix { .. }) => {
-                // Acceptable: some parameter combos are rank-deficient under full source loss.
-                // But we should not panic.
-            }
-            Err(other) => {
-                panic!("{context} unexpected error on burst loss: {other:?}");
-            }
-        }
+        let decoded_symbols = decoder.decode(&received).unwrap_or_else(|err| {
+            panic!("{context} burst-loss decode should recover original source; got {err:?}");
+        });
+        assert_eq!(
+            decoded_symbols.source, source,
+            "{context} burst-loss decode should recover original source"
+        );
     }
 
-    /// Contiguous burst: drop a specific consecutive range of ESIs.
+    /// Contiguous burst: drop the first half of source symbols.
     #[test]
     fn contiguous_burst_drop_first_half_of_source() {
         let k = 16;
@@ -2046,21 +2037,13 @@ mod failure_modes {
             received.push(ReceivedSymbol::repair(esi, cols, coefs, repair_data));
         }
 
-        let result = decoder.decode(&received);
-        match result {
-            Ok(decoded_symbols) => {
-                assert_eq!(
-                    decoded_symbols.source, source,
-                    "{context} first-half burst loss should still recover"
-                );
-            }
-            Err(DecodeError::SingularMatrix { .. }) => {
-                // Acceptable for some parameter configurations
-            }
-            Err(other) => {
-                panic!("{context} unexpected error: {other:?}");
-            }
-        }
+        let decoded_symbols = decoder.decode(&received).unwrap_or_else(|err| {
+            panic!("{context} first-half burst loss should still recover; got {err:?}");
+        });
+        assert_eq!(
+            decoded_symbols.source, source,
+            "{context} first-half burst loss should still recover"
+        );
     }
 
     /// Proof replay after a SingularMatrix failure: verify that the proof

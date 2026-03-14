@@ -52,8 +52,7 @@ impl<T: Clone + Send + Sync> Stream for WatchStream<T> {
         if !this.has_seen_initial {
             this.has_seen_initial = true;
             // The initial snapshot counts as observed by this stream.
-            this.inner.mark_seen();
-            return Poll::Ready(Some(this.inner.borrow_and_clone()));
+            return Poll::Ready(Some(this.inner.borrow_and_update_clone()));
         }
 
         // Poll the changed future (non-blocking, waker-based)
@@ -63,7 +62,7 @@ impl<T: Clone + Send + Sync> Stream for WatchStream<T> {
             Pin::new(&mut future).poll(context)
         };
         match result {
-            Poll::Ready(Ok(())) => Poll::Ready(Some(this.inner.borrow_and_clone())),
+            Poll::Ready(Ok(())) => Poll::Ready(Some(this.inner.borrow_and_update_clone())),
             Poll::Ready(Err(_)) => {
                 this.terminated = true;
                 Poll::Ready(None)

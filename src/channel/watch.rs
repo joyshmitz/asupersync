@@ -440,6 +440,19 @@ impl<T> Receiver<T> {
         }
     }
 
+    /// Borrows the current value and marks it as seen in a single operation.
+    ///
+    /// This prevents race conditions where a new value arrives between calling
+    /// `changed()` and `borrow()`, ensuring the receiver doesn't miss updates
+    /// or process the same value multiple times.
+    #[inline]
+    #[must_use]
+    pub fn borrow_and_update(&mut self) -> Ref<'_, T> {
+        let guard = self.inner.value.read();
+        self.seen_version = guard.1;
+        Ref { guard }
+    }
+
     /// Returns a clone of the current value.
     ///
     /// Convenience method that borrows and clones in one operation.
@@ -451,6 +464,19 @@ impl<T> Receiver<T> {
         T: Clone,
     {
         self.borrow().clone()
+    }
+
+    /// Returns a clone of the current value and marks it as seen.
+    ///
+    /// Convenience method that borrows, updates the seen version, and clones
+    /// in one operation.
+    #[inline]
+    #[must_use]
+    pub fn borrow_and_update_clone(&mut self) -> T
+    where
+        T: Clone,
+    {
+        self.borrow_and_update().clone_inner()
     }
 
     /// Marks the current value as seen.

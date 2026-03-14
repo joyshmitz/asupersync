@@ -2019,13 +2019,23 @@ mod tests {
         let history = futures_lite::future::block_on(client_handle.join(&cx)).expect("join ok");
         assert_eq!(history, vec!["welcome to lobby"]);
 
-        // Clean up: release the name lease obligation, then unregister the name.
-        named_handle.stop_and_release().expect("release ok");
-        registry.lock().unregister("lobby").expect("unregister ok");
+        // Clean up: stop the server, drive shutdown, then release the name.
+        named_handle.stop();
+        runtime.scheduler.lock().schedule(task_id, 0);
+        runtime.run_until_quiescent();
+        let release_now = runtime.state.now;
+        let mut registry_guard = registry.lock();
+        named_handle
+            .release_name(&mut registry_guard, release_now)
+            .expect("release ok");
+        drop(registry_guard);
 
-        // After unregister, whereis should return None.
+        // After stop-and-release, whereis should return None.
         let found_after = registry.lock().whereis("lobby");
-        assert!(found_after.is_none(), "name must be gone after unregister");
+        assert!(
+            found_after.is_none(),
+            "name must be gone after stop-and-release"
+        );
 
         crate::test_complete!("example_chat_room_named_via_registry");
     }

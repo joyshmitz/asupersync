@@ -1540,9 +1540,43 @@ pub fn gf256_add_slice(dst: &mut [u8], src: &[u8]) {
 pub fn gf256_add_slices2(dst_a: &mut [u8], src_a: &[u8], dst_b: &mut [u8], src_b: &[u8]) {
     assert_eq!(dst_a.len(), src_a.len(), "slice length mismatch");
     assert_eq!(dst_b.len(), src_b.len(), "slice length mismatch");
-    let add_slice = dispatch().add_slice;
-    add_slice(dst_a, src_a);
-    add_slice(dst_b, src_b);
+    let dispatch = dispatch();
+
+    #[cfg(all(
+        feature = "simd-intrinsics",
+        any(target_arch = "x86", target_arch = "x86_64")
+    ))]
+    if matches!(dispatch.kind, Gf256Kernel::X86Avx2) {
+        if src_a.len() < 32 && src_b.len() < 32 {
+            (dispatch.add_slice)(dst_a, src_a);
+            (dispatch.add_slice)(dst_b, src_b);
+            return;
+        }
+        // SAFETY: `dispatch()` only selects X86Avx2 when runtime feature
+        // detection succeeds; slice lengths were checked above.
+        unsafe {
+            gf256_add_slices2_x86_avx2_impl(dst_a, src_a, dst_b, src_b);
+        }
+        return;
+    }
+
+    #[cfg(all(feature = "simd-intrinsics", target_arch = "aarch64"))]
+    if matches!(dispatch.kind, Gf256Kernel::Aarch64Neon) {
+        if src_a.len() < 16 && src_b.len() < 16 {
+            (dispatch.add_slice)(dst_a, src_a);
+            (dispatch.add_slice)(dst_b, src_b);
+            return;
+        }
+        // SAFETY: `dispatch()` only selects Aarch64Neon when runtime feature
+        // detection succeeds; slice lengths were checked above.
+        unsafe {
+            gf256_add_slices2_aarch64_neon_impl(dst_a, src_a, dst_b, src_b);
+        }
+        return;
+    }
+
+    (dispatch.add_slice)(dst_a, src_a);
+    (dispatch.add_slice)(dst_b, src_b);
 }
 
 fn gf256_add_slice_scalar(dst: &mut [u8], src: &[u8]) {
@@ -1597,14 +1631,32 @@ fn gf256_add_slice_scalar(dst: &mut [u8], src: &[u8]) {
     any(target_arch = "x86", target_arch = "x86_64")
 ))]
 fn gf256_add_slice_x86_avx2(dst: &mut [u8], src: &[u8]) {
-    // Dispatch scaffold: AVX2 lane currently reuses scalar core.
-    gf256_add_slice_scalar(dst, src);
+    assert_eq!(dst.len(), src.len(), "slice length mismatch");
+    if src.len() < 32 {
+        gf256_add_slice_scalar(dst, src);
+        return;
+    }
+    // SAFETY: `dispatch()` only selects X86Avx2 when runtime feature
+    // detection succeeds; `gf256_addmul_slice_x86_avx2` also guards this
+    // call on the `c == 1` fast path. Slice lengths were checked above.
+    unsafe {
+        gf256_add_slice_x86_avx2_impl(dst, src);
+    }
 }
 
 #[cfg(all(feature = "simd-intrinsics", target_arch = "aarch64"))]
 fn gf256_add_slice_aarch64_neon(dst: &mut [u8], src: &[u8]) {
-    // Dispatch scaffold: NEON lane currently reuses scalar core.
-    gf256_add_slice_scalar(dst, src);
+    assert_eq!(dst.len(), src.len(), "slice length mismatch");
+    if src.len() < 16 {
+        gf256_add_slice_scalar(dst, src);
+        return;
+    }
+    // SAFETY: `dispatch()` only selects Aarch64Neon when runtime feature
+    // detection succeeds; `gf256_addmul_slice_aarch64_neon` also guards this
+    // call on the `c == 1` fast path. Slice lengths were checked above.
+    unsafe {
+        gf256_add_slice_aarch64_neon_impl(dst, src);
+    }
 }
 
 /// Minimum slice length to amortize SIMD nibble-table setup in mul paths.
@@ -2100,6 +2152,90 @@ fn gf256_addmul_slice_aarch64_neon(dst: &mut [u8], src: &[u8], c: Gf256) {
     any(target_arch = "x86", target_arch = "x86_64")
 ))]
 #[target_feature(enable = "avx2")]
+unsafe fn gf256_add_slice_x86_avx2_impl(dst: &mut [u8], src: &[u8]) {
+    let mut i = 0usize;
+    while i + 32 <= src.len() {
+        let src_ptr = unsafe { src.as_ptr().add(i) };
+        let dst_ptr = unsafe { dst.as_mut_ptr().add(i) };
+        // SAFETY: pointer ranges are in-bounds and unaligned loads/stores are used.
+        let src_v = unsafe { _mm256_loadu_si256(src_ptr.cast::<__m256i>()) };
+        let dst_v = unsafe { _mm256_loadu_si256(dst_ptr.cast::<__m256i>()) };
+        unsafe { _mm256_storeu_si256(dst_ptr.cast::<__m256i>(), _mm256_xor_si256(dst_v, src_v)) };
+        i += 32;
+    }
+
+    for (d, s) in dst[i..].iter_mut().zip(src[i..].iter()) {
+        *d ^= *s;
+    }
+}
+
+#[cfg(all(
+    feature = "simd-intrinsics",
+    any(target_arch = "x86", target_arch = "x86_64")
+))]
+#[target_feature(enable = "avx2")]
+unsafe fn gf256_add_slices2_x86_avx2_impl(
+    dst_a: &mut [u8],
+    src_a: &[u8],
+    dst_b: &mut [u8],
+    src_b: &[u8],
+) {
+    let common = src_a.len().min(src_b.len());
+    let mut i = 0usize;
+    while i + 32 <= common {
+        let src_ptr_a = unsafe { src_a.as_ptr().add(i) };
+        let dst_ptr_a = unsafe { dst_a.as_mut_ptr().add(i) };
+        let src_ptr_b = unsafe { src_b.as_ptr().add(i) };
+        let dst_ptr_b = unsafe { dst_b.as_mut_ptr().add(i) };
+        // SAFETY: pointer ranges are in-bounds and unaligned loads/stores are used.
+        let src_v_a = unsafe { _mm256_loadu_si256(src_ptr_a.cast::<__m256i>()) };
+        let dst_v_a = unsafe { _mm256_loadu_si256(dst_ptr_a.cast::<__m256i>()) };
+        let src_v_b = unsafe { _mm256_loadu_si256(src_ptr_b.cast::<__m256i>()) };
+        let dst_v_b = unsafe { _mm256_loadu_si256(dst_ptr_b.cast::<__m256i>()) };
+        unsafe {
+            _mm256_storeu_si256(
+                dst_ptr_a.cast::<__m256i>(),
+                _mm256_xor_si256(dst_v_a, src_v_a),
+            );
+        }
+        unsafe {
+            _mm256_storeu_si256(
+                dst_ptr_b.cast::<__m256i>(),
+                _mm256_xor_si256(dst_v_b, src_v_b),
+            );
+        }
+        i += 32;
+    }
+
+    if i < src_a.len() {
+        let rem_dst_a = &mut dst_a[i..];
+        let rem_src_a = &src_a[i..];
+        if rem_src_a.len() >= 32 {
+            unsafe {
+                gf256_add_slice_x86_avx2_impl(rem_dst_a, rem_src_a);
+            }
+        } else {
+            gf256_add_slice_scalar(rem_dst_a, rem_src_a);
+        }
+    }
+    if i < src_b.len() {
+        let rem_dst_b = &mut dst_b[i..];
+        let rem_src_b = &src_b[i..];
+        if rem_src_b.len() >= 32 {
+            unsafe {
+                gf256_add_slice_x86_avx2_impl(rem_dst_b, rem_src_b);
+            }
+        } else {
+            gf256_add_slice_scalar(rem_dst_b, rem_src_b);
+        }
+    }
+}
+
+#[cfg(all(
+    feature = "simd-intrinsics",
+    any(target_arch = "x86", target_arch = "x86_64")
+))]
+#[target_feature(enable = "avx2")]
 unsafe fn gf256_mul_slice_x86_avx2_impl(dst: &mut [u8], c: Gf256) {
     let (low_tbl_arr, high_tbl_arr) = mul_nibble_tables(c);
     // SAFETY: this function requires AVX2 via `target_feature`, and delegates to
@@ -2365,6 +2501,70 @@ unsafe fn gf256_addmul_slices2_x86_avx2_impl_tables(
             };
         } else {
             addmul_with_table_scalar(rem_dst_b, rem_src_b, table);
+        }
+    }
+}
+
+#[cfg(all(feature = "simd-intrinsics", target_arch = "aarch64"))]
+unsafe fn gf256_add_slice_aarch64_neon_impl(dst: &mut [u8], src: &[u8]) {
+    let mut i = 0usize;
+    while i + 16 <= src.len() {
+        let src_ptr = unsafe { src.as_ptr().add(i) };
+        let dst_ptr = unsafe { dst.as_mut_ptr().add(i) };
+        let src_v = unsafe { vld1q_u8(src_ptr) };
+        let dst_v = unsafe { vld1q_u8(dst_ptr) };
+        unsafe { vst1q_u8(dst_ptr, veorq_u8(dst_v, src_v)) };
+        i += 16;
+    }
+
+    for (d, s) in dst[i..].iter_mut().zip(src[i..].iter()) {
+        *d ^= *s;
+    }
+}
+
+#[cfg(all(feature = "simd-intrinsics", target_arch = "aarch64"))]
+unsafe fn gf256_add_slices2_aarch64_neon_impl(
+    dst_a: &mut [u8],
+    src_a: &[u8],
+    dst_b: &mut [u8],
+    src_b: &[u8],
+) {
+    let common = src_a.len().min(src_b.len());
+    let mut i = 0usize;
+    while i + 16 <= common {
+        let src_ptr_a = unsafe { src_a.as_ptr().add(i) };
+        let dst_ptr_a = unsafe { dst_a.as_mut_ptr().add(i) };
+        let src_ptr_b = unsafe { src_b.as_ptr().add(i) };
+        let dst_ptr_b = unsafe { dst_b.as_mut_ptr().add(i) };
+        let src_v_a = unsafe { vld1q_u8(src_ptr_a) };
+        let dst_v_a = unsafe { vld1q_u8(dst_ptr_a) };
+        let src_v_b = unsafe { vld1q_u8(src_ptr_b) };
+        let dst_v_b = unsafe { vld1q_u8(dst_ptr_b) };
+        unsafe { vst1q_u8(dst_ptr_a, veorq_u8(dst_v_a, src_v_a)) };
+        unsafe { vst1q_u8(dst_ptr_b, veorq_u8(dst_v_b, src_v_b)) };
+        i += 16;
+    }
+
+    if i < src_a.len() {
+        let rem_dst_a = &mut dst_a[i..];
+        let rem_src_a = &src_a[i..];
+        if rem_src_a.len() >= 16 {
+            unsafe {
+                gf256_add_slice_aarch64_neon_impl(rem_dst_a, rem_src_a);
+            }
+        } else {
+            gf256_add_slice_scalar(rem_dst_a, rem_src_a);
+        }
+    }
+    if i < src_b.len() {
+        let rem_dst_b = &mut dst_b[i..];
+        let rem_src_b = &src_b[i..];
+        if rem_src_b.len() >= 16 {
+            unsafe {
+                gf256_add_slice_aarch64_neon_impl(rem_dst_b, rem_src_b);
+            }
+        } else {
+            gf256_add_slice_scalar(rem_dst_b, rem_src_b);
         }
     }
 }
@@ -3034,6 +3234,76 @@ mod tests {
         any(target_arch = "x86", target_arch = "x86_64")
     ))]
     #[test]
+    fn avx2_add_slice_matches_scalar_with_remainders() {
+        if !std::is_x86_feature_detected!("avx2") {
+            return;
+        }
+
+        const LEN: usize = 95;
+        let seed = 0u64;
+        let replay_ref = "replay:rq-u-gf256-simd-scalar-equivalence-v1";
+        let context = failure_context(
+            "RQ-U-GF256-ALGEBRA",
+            seed,
+            "avx2_add_slice_matches_scalar_with_remainders",
+            replay_ref,
+        );
+
+        let src: Vec<u8> = (0..LEN).map(|i| (i.wrapping_mul(13)) as u8).collect();
+        let mut actual: Vec<u8> = (0..LEN).map(|i| (i.wrapping_mul(19)) as u8).collect();
+        let mut expected = actual.clone();
+
+        unsafe {
+            gf256_add_slice_x86_avx2_impl(&mut actual, &src);
+        }
+        gf256_add_slice_scalar(&mut expected, &src);
+
+        assert_eq!(actual, expected, "{context}");
+    }
+
+    #[cfg(all(
+        feature = "simd-intrinsics",
+        any(target_arch = "x86", target_arch = "x86_64")
+    ))]
+    #[test]
+    fn avx2_add_slices2_matches_single_lane_impl_with_remainders() {
+        if !std::is_x86_feature_detected!("avx2") {
+            return;
+        }
+
+        const LEN_A: usize = 95;
+        const LEN_B: usize = 157;
+        let seed = 0u64;
+        let replay_ref = "replay:rq-u-gf256-simd-scalar-equivalence-v1";
+        let context = failure_context(
+            "RQ-U-GF256-ALGEBRA",
+            seed,
+            "avx2_add_slices2_matches_single_lane_impl_with_remainders",
+            replay_ref,
+        );
+
+        let src_a: Vec<u8> = (0..LEN_A).map(|i| (i.wrapping_mul(13)) as u8).collect();
+        let src_b: Vec<u8> = (0..LEN_B).map(|i| (i.wrapping_mul(17)) as u8).collect();
+        let mut actual_a: Vec<u8> = (0..LEN_A).map(|i| (i.wrapping_mul(19)) as u8).collect();
+        let mut actual_b: Vec<u8> = (0..LEN_B).map(|i| (i.wrapping_mul(23)) as u8).collect();
+        let mut expected_a = actual_a.clone();
+        let mut expected_b = actual_b.clone();
+
+        unsafe {
+            gf256_add_slices2_x86_avx2_impl(&mut actual_a, &src_a, &mut actual_b, &src_b);
+            gf256_add_slice_x86_avx2_impl(&mut expected_a, &src_a);
+            gf256_add_slice_x86_avx2_impl(&mut expected_b, &src_b);
+        }
+
+        assert_eq!(actual_a, expected_a, "{context}");
+        assert_eq!(actual_b, expected_b, "{context}");
+    }
+
+    #[cfg(all(
+        feature = "simd-intrinsics",
+        any(target_arch = "x86", target_arch = "x86_64")
+    ))]
+    #[test]
     fn avx2_dual_mul_tables_matches_single_lane_impl_with_remainders() {
         if !std::is_x86_feature_detected!("avx2") {
             return;
@@ -3073,6 +3343,70 @@ mod tests {
 
         assert_eq!(a_actual, a_expected, "{context}");
         assert_eq!(b_actual, b_expected, "{context}");
+    }
+
+    #[cfg(all(feature = "simd-intrinsics", target_arch = "aarch64"))]
+    #[test]
+    fn neon_add_slice_matches_scalar_with_remainders() {
+        if !std::arch::is_aarch64_feature_detected!("neon") {
+            return;
+        }
+
+        const LEN: usize = 47;
+        let seed = 0u64;
+        let replay_ref = "replay:rq-u-gf256-simd-scalar-equivalence-v1";
+        let context = failure_context(
+            "RQ-U-GF256-ALGEBRA",
+            seed,
+            "neon_add_slice_matches_scalar_with_remainders",
+            replay_ref,
+        );
+
+        let src: Vec<u8> = (0..LEN).map(|i| (i.wrapping_mul(13)) as u8).collect();
+        let mut actual: Vec<u8> = (0..LEN).map(|i| (i.wrapping_mul(19)) as u8).collect();
+        let mut expected = actual.clone();
+
+        unsafe {
+            gf256_add_slice_aarch64_neon_impl(&mut actual, &src);
+        }
+        gf256_add_slice_scalar(&mut expected, &src);
+
+        assert_eq!(actual, expected, "{context}");
+    }
+
+    #[cfg(all(feature = "simd-intrinsics", target_arch = "aarch64"))]
+    #[test]
+    fn neon_add_slices2_matches_single_lane_impl_with_remainders() {
+        if !std::arch::is_aarch64_feature_detected!("neon") {
+            return;
+        }
+
+        const LEN_A: usize = 47;
+        const LEN_B: usize = 79;
+        let seed = 0u64;
+        let replay_ref = "replay:rq-u-gf256-simd-scalar-equivalence-v1";
+        let context = failure_context(
+            "RQ-U-GF256-ALGEBRA",
+            seed,
+            "neon_add_slices2_matches_single_lane_impl_with_remainders",
+            replay_ref,
+        );
+
+        let src_a: Vec<u8> = (0..LEN_A).map(|i| (i.wrapping_mul(13)) as u8).collect();
+        let src_b: Vec<u8> = (0..LEN_B).map(|i| (i.wrapping_mul(17)) as u8).collect();
+        let mut actual_a: Vec<u8> = (0..LEN_A).map(|i| (i.wrapping_mul(19)) as u8).collect();
+        let mut actual_b: Vec<u8> = (0..LEN_B).map(|i| (i.wrapping_mul(23)) as u8).collect();
+        let mut expected_a = actual_a.clone();
+        let mut expected_b = actual_b.clone();
+
+        unsafe {
+            gf256_add_slices2_aarch64_neon_impl(&mut actual_a, &src_a, &mut actual_b, &src_b);
+            gf256_add_slice_aarch64_neon_impl(&mut expected_a, &src_a);
+            gf256_add_slice_aarch64_neon_impl(&mut expected_b, &src_b);
+        }
+
+        assert_eq!(actual_a, expected_a, "{context}");
+        assert_eq!(actual_b, expected_b, "{context}");
     }
 
     #[cfg(all(
@@ -3154,6 +3488,34 @@ mod tests {
         let src_b: Vec<u8> = (0..LEN_B).map(|i| (i.wrapping_mul(17)) as u8).collect();
         let mut accum_left: Vec<u8> = (0..LEN_A).map(|i| (i.wrapping_mul(19)) as u8).collect();
         let mut accum_right: Vec<u8> = (0..LEN_B).map(|i| (i.wrapping_mul(23)) as u8).collect();
+        let mut expected_left = accum_left.clone();
+        let mut expected_right = accum_right.clone();
+
+        gf256_add_slices2(&mut accum_left, &src_a, &mut accum_right, &src_b);
+        gf256_add_slice(&mut expected_left, &src_a);
+        gf256_add_slice(&mut expected_right, &src_b);
+
+        assert_eq!(accum_left, expected_left, "{context}");
+        assert_eq!(accum_right, expected_right, "{context}");
+    }
+
+    #[test]
+    fn add_slices2_tiny_pairs_match_two_independent_add_slice_calls() {
+        const LEN_A: usize = 7;
+        const LEN_B: usize = 11;
+        let seed = 0u64;
+        let replay_ref = "replay:rq-u-gf256-simd-scalar-equivalence-v1";
+        let context = failure_context(
+            "RQ-U-GF256-ALGEBRA",
+            seed,
+            "add_slices2_tiny_pairs_match_two_independent_add_slice_calls",
+            replay_ref,
+        );
+
+        let src_a: Vec<u8> = (0..LEN_A).map(|i| (i.wrapping_mul(3)) as u8).collect();
+        let src_b: Vec<u8> = (0..LEN_B).map(|i| (i.wrapping_mul(5)) as u8).collect();
+        let mut accum_left: Vec<u8> = (0..LEN_A).map(|i| (i.wrapping_mul(7)) as u8).collect();
+        let mut accum_right: Vec<u8> = (0..LEN_B).map(|i| (i.wrapping_mul(11)) as u8).collect();
         let mut expected_left = accum_left.clone();
         let mut expected_right = accum_right.clone();
 

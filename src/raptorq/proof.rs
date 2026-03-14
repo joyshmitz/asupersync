@@ -23,7 +23,7 @@ pub const MAX_PIVOT_EVENTS: usize = 256;
 pub const MAX_RECEIVED_SYMBOLS: usize = 1024;
 
 /// Version of the proof artifact schema.
-pub const PROOF_SCHEMA_VERSION: u8 = 1;
+pub const PROOF_SCHEMA_VERSION: u8 = 2;
 
 // ============================================================================
 // Proof artifact types
@@ -85,6 +85,14 @@ impl DecodeProof {
             };
         compare_proofs(self, &actual)
     }
+}
+
+fn recovered_source_hash(source: &[Vec<u8>]) -> u64 {
+    use std::hash::{Hash, Hasher};
+
+    let mut hasher = DetHasher::default();
+    source.hash(&mut hasher);
+    hasher.finish()
 }
 
 // ============================================================================
@@ -533,8 +541,10 @@ pub struct PivotEvent {
 pub enum ProofOutcome {
     /// Decode succeeded.
     Success {
-        /// Total symbols recovered.
+        /// Total source symbols recovered.
         symbols_recovered: usize,
+        /// Deterministic hash of the recovered source payload.
+        source_payload_hash: u64,
     },
     /// Decode failed with a specific reason.
     Failure {
@@ -689,8 +699,11 @@ impl DecodeProofBuilder {
     }
 
     /// Mark decode as successful.
-    pub fn set_success(&mut self, symbols_recovered: usize) {
-        self.outcome = Some(ProofOutcome::Success { symbols_recovered });
+    pub fn set_success(&mut self, recovered_source: &[Vec<u8>]) {
+        self.outcome = Some(ProofOutcome::Success {
+            symbols_recovered: recovered_source.len(),
+            source_payload_hash: recovered_source_hash(recovered_source),
+        });
     }
 
     /// Mark decode as failed.
@@ -739,9 +752,14 @@ mod tests {
         }
     }
 
+    fn make_test_recovered(config: &DecodeConfig) -> Vec<Vec<u8>> {
+        vec![vec![0u8; config.symbol_size]; config.k]
+    }
+
     #[test]
     fn proof_builder_success() {
         let config = make_test_config();
+        let recovered = make_test_recovered(&config);
         let mut builder = DecodeProof::builder(config);
 
         builder.set_received(ReceivedSummary {
@@ -759,7 +777,7 @@ mod tests {
         builder.elimination_mut().record_pivot(2, 0);
         builder.elimination_mut().record_row_op();
 
-        builder.set_success(10);
+        builder.set_success(&recovered);
 
         let proof = builder.build();
 
@@ -812,6 +830,7 @@ mod tests {
     #[test]
     fn content_hash_deterministic() {
         let config = make_test_config();
+        let recovered = make_test_recovered(&config);
         let mut builder1 = DecodeProof::builder(config.clone());
         let mut builder2 = DecodeProof::builder(config);
 
@@ -823,7 +842,7 @@ mod tests {
                 esis: (0..15).collect(),
                 truncated: false,
             });
-            builder.set_success(10);
+            builder.set_success(&recovered);
         }
 
         let proof1 = builder1.build();
@@ -999,6 +1018,7 @@ mod tests {
     fn proof_outcome_debug_clone_hash_eq() {
         let success = ProofOutcome::Success {
             symbols_recovered: 10,
+            source_payload_hash: 123,
         };
         let success2 = success.clone();
         assert_eq!(success, success2);
@@ -1089,15 +1109,16 @@ mod tests {
     #[test]
     fn decode_proof_debug_clone_eq() {
         let config = make_test_config();
+        let recovered = make_test_recovered(&config);
         let mut builder = DecodeProof::builder(config);
         builder.set_received(ReceivedSummary {
-            total: 0,
-            source_count: 0,
+            total: 10,
+            source_count: 10,
             repair_count: 0,
-            esis: vec![],
+            esis: (0..10).collect(),
             truncated: false,
         });
-        builder.set_success(0);
+        builder.set_success(&recovered);
         let proof = builder.build();
         let proof2 = proof.clone();
         assert_eq!(proof, proof2);
@@ -1179,5 +1200,59 @@ mod tests {
             .replay_and_verify(&received)
             .expect_err("replay should detect mismatch");
         assert!(err.to_string().contains("row_ops"));
+    }
+
+    #[test]
+    fn replay_verification_rejects_payload_divergent_success() {
+        let k = 8;
+        let symbol_size = 32;
+        let seed = 123u64;
+
+        let make_source = |salt: u8| -> Vec<Vec<u8>> {
+            (0..k)
+                .map(|i| {
+                    (0..symbol_size)
+                        .map(|j| ((i * 53 + j * 19 + usize::from(salt)) % 256) as u8)
+                        .collect()
+                })
+                .collect()
+        };
+        let make_received =
+            |decoder: &InactivationDecoder, source: &[Vec<u8>]| -> Vec<ReceivedSymbol> {
+                let encoder = SystematicEncoder::new(source, symbol_size, seed).unwrap();
+                let l = decoder.params().l;
+                let mut received = decoder.constraint_symbols();
+                for (i, data) in source.iter().enumerate() {
+                    received.push(ReceivedSymbol::source(i as u32, data.clone()));
+                }
+                for esi in (k as u32)..(l as u32) {
+                    let (cols, coefs) = decoder.repair_equation(esi);
+                    let repair_data = encoder.repair_symbol(esi);
+                    received.push(ReceivedSymbol::repair(esi, cols, coefs, repair_data));
+                }
+                received
+            };
+
+        let source = make_source(3);
+        let mutated_source = make_source(11);
+        let decoder = InactivationDecoder::new(k, symbol_size, seed);
+        let original_received = make_received(&decoder, &source);
+        let mutated_received = make_received(&decoder, &mutated_source);
+        let object_id = ObjectId::new_for_test(8080);
+
+        let proof = decoder
+            .decode_with_proof(&original_received, object_id, 0)
+            .expect("original decode should succeed")
+            .proof;
+        let mutated_result = decoder
+            .decode_with_proof(&mutated_received, object_id, 0)
+            .expect("mutated decode should still succeed");
+        assert_eq!(mutated_result.result.source, mutated_source);
+        assert_ne!(mutated_result.result.source, source);
+
+        let err = proof
+            .replay_and_verify(&mutated_received)
+            .expect_err("payload-divergent replay must fail verification");
+        assert!(err.to_string().contains("source_payload_hash"));
     }
 }

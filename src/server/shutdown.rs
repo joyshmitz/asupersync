@@ -272,10 +272,15 @@ impl ShutdownSignal {
     /// Marks the server as fully stopped.
     ///
     /// Called when all connections have been closed.
+    ///
+    /// Also trips the underlying shutdown controller so subscribers blocked on
+    /// [`ShutdownReceiver::wait`] wake even if the server reaches `Stopped`
+    /// without first entering the drain phase.
     pub fn mark_stopped(&self) {
         self.state
             .phase
             .store(ShutdownPhase::Stopped as u8, Ordering::Release);
+        self.state.controller.shutdown();
         self.state.phase_notify.notify_waiters();
     }
 
@@ -873,6 +878,35 @@ mod tests {
             h.join().expect("thread panicked");
         });
         crate::test_complete!("subscriber_receives_drain_signal");
+    }
+
+    #[test]
+    fn subscriber_receives_mark_stopped_without_prior_drain() {
+        init_test("subscriber_receives_mark_stopped_without_prior_drain");
+        crate::test_utils::run_test(|| async {
+            let signal = ShutdownSignal::new();
+            let mut receiver = signal.subscribe();
+            let signal2 = signal.clone();
+
+            let handle = std::thread::spawn(move || {
+                std::thread::sleep(Duration::from_millis(10));
+                signal2.mark_stopped();
+            });
+
+            receiver.wait().await;
+
+            let shutting = receiver.is_shutting_down();
+            crate::assert_with_log!(shutting, "receiver sees shutdown", true, shutting);
+            crate::assert_with_log!(
+                signal.phase() == ShutdownPhase::Stopped,
+                "phase after mark_stopped",
+                ShutdownPhase::Stopped,
+                signal.phase()
+            );
+
+            handle.join().expect("thread panicked");
+        });
+        crate::test_complete!("subscriber_receives_mark_stopped_without_prior_drain");
     }
 
     // ====================================================================

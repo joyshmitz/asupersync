@@ -31,7 +31,7 @@ use crate::trace::{TraceData, TraceEvent, check_refinement_firewall};
 use crate::trace::{canonicalize::trace_fingerprint, certificate::TraceCertificate};
 use crate::types::Time;
 use crate::types::{ObligationId, RegionId, TaskId};
-use crate::util::det_hash::DetHashSet;
+use crate::util::det_hash::{DetHashMap, DetHashSet};
 use crate::util::{DetEntropy, DetRng};
 use parking_lot::Mutex;
 use std::fmt;
@@ -57,7 +57,8 @@ pub struct LabTraceCertificateSummary {
 pub struct VirtualTimeReport {
     /// Total scheduler steps executed.
     pub steps: u64,
-    /// Number of times virtual time was auto-advanced to a timer deadline.
+    /// Number of times virtual time was auto-advanced to the next pending
+    /// timer or lab-reactor deadline.
     pub auto_advances: u64,
     /// Total timer wakeups triggered by auto-advances.
     pub total_wakeups: u64,
@@ -928,6 +929,32 @@ impl LabRuntime {
             .and_then(|h| h.next_deadline())
     }
 
+    fn next_reactor_deadline(&self) -> Option<Time> {
+        self.state
+            .io_driver_handle()
+            .and_then(|_| self.lab_reactor.next_event_time())
+    }
+
+    fn next_auto_advance_deadline(&self) -> Option<Time> {
+        match (self.next_timer_deadline(), self.next_reactor_deadline()) {
+            (Some(timer), Some(reactor)) => Some(timer.min(reactor)),
+            (Some(timer), None) => Some(timer),
+            (None, Some(reactor)) => Some(reactor),
+            (None, None) => None,
+        }
+    }
+
+    fn pump_due_system_events(&mut self) -> usize {
+        let wakeups = self
+            .state
+            .timer_driver_handle()
+            .map_or(0, |h| h.process_timers());
+        self.poll_io();
+        self.schedule_async_finalizers();
+        self.check_deadline_monitor();
+        wakeups
+    }
+
     /// Returns the number of pending timers.
     #[must_use]
     pub fn pending_timer_count(&self) -> usize {
@@ -937,7 +964,7 @@ impl LabRuntime {
     }
 
     /// Runs until quiescent, automatically advancing virtual time to pending
-    /// timer deadlines whenever all tasks are idle.
+    /// timer or lab-reactor deadlines whenever all tasks are idle.
     ///
     /// This enables "instant timeout testing": a scenario that would take
     /// 24 hours of wall-clock time completes in <1 second because every
@@ -945,8 +972,9 @@ impl LabRuntime {
     ///
     /// The loop is:
     /// 1. Run until idle (no runnable tasks in scheduler).
-    /// 2. If timers are pending, advance time to next deadline → go to 1.
-    /// 3. If no timers and quiescent → done.
+    /// 2. If timers or lab-reactor events are pending, advance time to the
+    ///    next deadline → go to 1.
+    /// 3. If no pending virtual deadlines and quiescent → done.
     ///
     /// Returns a [`VirtualTimeReport`] with execution statistics.
     pub fn run_with_auto_advance(&mut self) -> VirtualTimeReport {
@@ -973,25 +1001,23 @@ impl LabRuntime {
             }
 
             // Scheduler is empty — check if we should auto-advance
-            if let Some(deadline) = self.next_timer_deadline() {
+            if let Some(deadline) = self.next_auto_advance_deadline() {
                 if deadline > self.virtual_time {
-                    let wakeups = self.advance_to_next_timer();
+                    self.advance_time_to(deadline);
+                    let wakeups = self
+                        .state
+                        .timer_driver_handle()
+                        .map_or(0, |h| h.process_timers());
                     auto_advances += 1;
                     total_wakeups += wakeups as u64;
                     continue;
                 }
-                // Timer at or before current time — process and continue
-                let wakeups = self
-                    .state
-                    .timer_driver_handle()
-                    .map_or(0, |h| h.process_timers());
-                if wakeups > 0 {
-                    total_wakeups += wakeups as u64;
-                    continue;
-                }
+                // A timer or reactor event is already due at the current time.
+                total_wakeups += self.pump_due_system_events() as u64;
+                continue;
             }
 
-            // No runnable tasks and no pending timers → quiescent
+            // No runnable tasks and no pending virtual deadlines → quiescent
             if self.is_quiescent() {
                 break;
             }
@@ -1563,29 +1589,33 @@ impl LabRuntime {
                                 crate::types::Outcome::Panicked(p)
                             }
                         };
-                        let mut completed_via_cancel = false;
-                        if matches!(record_outcome, crate::types::Outcome::Ok(())) {
-                            let should_cancel = matches!(
-                                record.state,
-                                TaskState::Cancelling { .. } | TaskState::Finalizing { .. }
-                            ) || (cancel_ack
-                                && matches!(record.state, TaskState::CancelRequested { .. }));
-                            if should_cancel {
-                                if matches!(record.state, TaskState::CancelRequested { .. }) {
-                                    let _ = record.acknowledge_cancel();
-                                }
-                                if matches!(record.state, TaskState::Cancelling { .. }) {
-                                    record.cleanup_done();
-                                }
-                                if matches!(record.state, TaskState::Finalizing { .. }) {
-                                    record.finalize_done();
-                                }
-                                completed_via_cancel = matches!(
+                        let completed_via_cancel =
+                            if matches!(record_outcome, crate::types::Outcome::Ok(())) {
+                                let should_cancel = matches!(
                                     record.state,
-                                    TaskState::Completed(crate::types::Outcome::Cancelled(_))
-                                );
-                            }
-                        }
+                                    TaskState::Cancelling { .. } | TaskState::Finalizing { .. }
+                                ) || (cancel_ack
+                                    && matches!(record.state, TaskState::CancelRequested { .. }));
+                                if should_cancel {
+                                    if matches!(record.state, TaskState::CancelRequested { .. }) {
+                                        let _ = record.acknowledge_cancel();
+                                    }
+                                    if matches!(record.state, TaskState::Cancelling { .. }) {
+                                        record.cleanup_done();
+                                    }
+                                    if matches!(record.state, TaskState::Finalizing { .. }) {
+                                        record.finalize_done();
+                                    }
+                                    matches!(
+                                        record.state,
+                                        TaskState::Completed(crate::types::Outcome::Cancelled(_))
+                                    )
+                                } else {
+                                    false
+                                }
+                            } else {
+                                false
+                            };
                         if !completed_via_cancel {
                             record.complete(record_outcome);
                         }
@@ -1735,7 +1765,6 @@ impl LabRuntime {
         // Check for budget exhaustion injection
         let budget_exhaust = chaos_rng.should_inject_budget_exhaust(&chaos_config);
         let skip_poll = cancel | budget_exhaust;
-
         // Now apply the injections (no more borrowing chaos_rng).
         // Cancel and budget_exhaust are independent — apply both when both fire.
         if cancel {
@@ -1753,9 +1782,10 @@ impl LabRuntime {
             self.inject_budget_exhaust(task_id);
         }
 
+        let injected_anything = cancel || delay.is_some() || budget_exhaust;
         if skip_poll {
             self.reschedule_after_chaos_skip(task_id);
-        } else {
+        } else if !injected_anything {
             self.chaos_stats.record_no_injection();
         }
 
@@ -1929,9 +1959,7 @@ impl LabRuntime {
 
         // Schedule the task multiple times (spurious wakeups)
         let mut sched = self.scheduler.lock();
-        for _ in 0..count {
-            sched.schedule(task_id, priority);
-        }
+        sched.inject_spurious_wakes(task_id, priority, count);
         drop(sched);
 
         // Emit trace event
@@ -2133,6 +2161,12 @@ impl LabRuntime {
 
 const DEFAULT_LAB_CANCEL_STREAK_LIMIT: usize = 16;
 
+#[derive(Debug, Clone, Copy)]
+struct PendingSpuriousWake {
+    priority: u8,
+    remaining: usize,
+}
+
 #[derive(Debug)]
 /// Deterministic lab scheduler with per-worker queues.
 ///
@@ -2141,6 +2175,7 @@ const DEFAULT_LAB_CANCEL_STREAK_LIMIT: usize = 16;
 pub struct LabScheduler {
     workers: Vec<crate::runtime::scheduler::PriorityScheduler>,
     scheduled: DetHashSet<TaskId>,
+    pending_spurious_wakes: DetHashMap<TaskId, PendingSpuriousWake>,
     /// Task → worker assignment, indexed by arena slot.
     assignments: Vec<Option<usize>>,
     next_worker: usize,
@@ -2157,6 +2192,7 @@ impl LabScheduler {
                 .map(|_| crate::runtime::scheduler::PriorityScheduler::new())
                 .collect(),
             scheduled: DetHashSet::default(),
+            pending_spurious_wakes: DetHashMap::default(),
             assignments: Vec::new(),
             next_worker: 0,
             cancel_streak: vec![0; count],
@@ -2217,6 +2253,39 @@ impl LabScheduler {
         self.workers[worker].schedule(task, priority);
     }
 
+    /// Injects ready-lane wakeups that should survive normal deduplication.
+    ///
+    /// The first wake is scheduled immediately when needed. Remaining wakeups
+    /// are re-armed one-by-one after each dequeue so wake storms trigger
+    /// repeated polls instead of collapsing to a single queued wake.
+    fn inject_spurious_wakes(&mut self, task: TaskId, priority: u8, count: usize) {
+        if count == 0 {
+            return;
+        }
+
+        let mut remaining = count;
+        if self.scheduled.insert(task) {
+            let worker = self.assign_worker(task);
+            self.workers[worker].schedule(task, priority);
+            remaining = remaining.saturating_sub(1);
+        }
+
+        if remaining == 0 {
+            return;
+        }
+
+        self.pending_spurious_wakes
+            .entry(task)
+            .and_modify(|pending| {
+                pending.priority = pending.priority.max(priority);
+                pending.remaining = pending.remaining.saturating_add(remaining);
+            })
+            .or_insert(PendingSpuriousWake {
+                priority,
+                remaining,
+            });
+    }
+
     /// Schedules or promotes a task into the cancel lane.
     pub fn schedule_cancel(&mut self, task: TaskId, priority: u8) {
         if self.scheduled.insert(task) {
@@ -2259,6 +2328,7 @@ impl LabScheduler {
                 *cancel_streak += 1;
                 self.scheduled.remove(&task);
                 self.set_assignment(task, worker);
+                self.rearm_spurious_wake(task);
                 return Some((task, lane));
             }
         }
@@ -2267,6 +2337,7 @@ impl LabScheduler {
             *cancel_streak = 0;
             self.scheduled.remove(&task);
             self.set_assignment(task, worker);
+            self.rearm_spurious_wake(task);
             return Some((task, DispatchLane::Timed));
         }
 
@@ -2274,6 +2345,7 @@ impl LabScheduler {
             *cancel_streak = 0;
             self.scheduled.remove(&task);
             self.set_assignment(task, worker);
+            self.rearm_spurious_wake(task);
             return Some((task, DispatchLane::Ready));
         }
 
@@ -2281,6 +2353,7 @@ impl LabScheduler {
             *cancel_streak = 1;
             self.scheduled.remove(&task);
             self.set_assignment(task, worker);
+            self.rearm_spurious_wake(task);
             return Some((task, lane));
         }
 
@@ -2307,6 +2380,7 @@ impl LabScheduler {
             {
                 self.scheduled.remove(&task);
                 self.set_assignment(task, thief);
+                self.rearm_spurious_wake(task);
                 return Some(task);
             }
         }
@@ -2316,12 +2390,25 @@ impl LabScheduler {
 
     fn forget_task(&mut self, task: TaskId) {
         self.scheduled.remove(&task);
+        self.pending_spurious_wakes.remove(&task);
         let slot = task.arena_index().index() as usize;
         if slot < self.assignments.len() {
             self.assignments[slot] = None;
         }
         for worker in &mut self.workers {
             worker.remove(task);
+        }
+    }
+
+    fn rearm_spurious_wake(&mut self, task: TaskId) {
+        let Some(mut pending) = self.pending_spurious_wakes.remove(&task) else {
+            return;
+        };
+
+        self.schedule(task, pending.priority);
+        pending.remaining = pending.remaining.saturating_sub(1);
+        if pending.remaining > 0 {
+            self.pending_spurious_wakes.insert(task, pending);
         }
     }
 }
@@ -2664,9 +2751,9 @@ mod tests {
 
         let stats = runtime.chaos_stats();
         crate::assert_with_log!(
-            stats.decision_points == 1,
+            stats.decision_points == 2,
             "pending-task decision point counted",
-            1u64,
+            2u64,
             stats.decision_points
         );
         crate::assert_with_log!(
@@ -2775,6 +2862,144 @@ mod tests {
         );
 
         crate::test_complete!("lab_scheduler_steal_for_worker_only_steals_ready_tasks");
+    }
+
+    #[test]
+    fn lab_scheduler_spurious_wakes_do_not_collapse_duplicates() {
+        init_test("lab_scheduler_spurious_wakes_do_not_collapse_duplicates");
+        let mut scheduler = LabScheduler::new(1);
+        let task = TaskId::from_arena(ArenaIndex::new(13, 0));
+
+        scheduler.inject_spurious_wakes(task, 42, 3);
+
+        let first = scheduler.pop_for_worker(0, 0, Time::ZERO);
+        crate::assert_with_log!(
+            first == Some((task, DispatchLane::Ready)),
+            "first spurious wake dispatches",
+            Some((task, DispatchLane::Ready)),
+            first
+        );
+
+        let second = scheduler.pop_for_worker(0, 1, Time::ZERO);
+        crate::assert_with_log!(
+            second == Some((task, DispatchLane::Ready)),
+            "second spurious wake remains queued",
+            Some((task, DispatchLane::Ready)),
+            second
+        );
+
+        let third = scheduler.pop_for_worker(0, 2, Time::ZERO);
+        crate::assert_with_log!(
+            third == Some((task, DispatchLane::Ready)),
+            "third spurious wake remains queued",
+            Some((task, DispatchLane::Ready)),
+            third
+        );
+
+        let fourth = scheduler.pop_for_worker(0, 3, Time::ZERO);
+        crate::assert_with_log!(
+            fourth.is_none(),
+            "storm drains after requested wake count",
+            true,
+            fourth.is_none()
+        );
+        crate::assert_with_log!(
+            scheduler.is_empty(),
+            "scheduler empty after spurious storm drains",
+            true,
+            scheduler.is_empty()
+        );
+
+        crate::test_complete!("lab_scheduler_spurious_wakes_do_not_collapse_duplicates");
+    }
+
+    #[test]
+    fn lab_scheduler_forget_task_clears_pending_spurious_wakes() {
+        init_test("lab_scheduler_forget_task_clears_pending_spurious_wakes");
+        let mut scheduler = LabScheduler::new(1);
+        let task = TaskId::from_arena(ArenaIndex::new(14, 0));
+
+        scheduler.inject_spurious_wakes(task, 42, 3);
+        let first = scheduler.pop_for_worker(0, 0, Time::ZERO);
+        crate::assert_with_log!(
+            first == Some((task, DispatchLane::Ready)),
+            "first spurious wake dispatches before forget",
+            Some((task, DispatchLane::Ready)),
+            first
+        );
+
+        scheduler.forget_task(task);
+
+        let second = scheduler.pop_for_worker(0, 1, Time::ZERO);
+        crate::assert_with_log!(
+            second.is_none(),
+            "forget_task drains queued spurious wakes",
+            true,
+            second.is_none()
+        );
+        crate::assert_with_log!(
+            scheduler.pending_spurious_wakes.is_empty(),
+            "forget_task clears pending spurious wake budget",
+            true,
+            scheduler.pending_spurious_wakes.is_empty()
+        );
+        crate::assert_with_log!(
+            scheduler.is_empty(),
+            "scheduler empty after forget_task",
+            true,
+            scheduler.is_empty()
+        );
+
+        crate::test_complete!("lab_scheduler_forget_task_clears_pending_spurious_wakes");
+    }
+
+    #[test]
+    fn lab_scheduler_steal_preserves_pending_spurious_wakes() {
+        init_test("lab_scheduler_steal_preserves_pending_spurious_wakes");
+        let mut scheduler = LabScheduler::new(2);
+        let task = TaskId::from_arena(ArenaIndex::new(15, 0));
+
+        scheduler.inject_spurious_wakes(task, 42, 3);
+
+        let stolen = scheduler.steal_for_worker(1, 0);
+        crate::assert_with_log!(
+            stolen == Some(task),
+            "steal dispatches first storm wake",
+            Some(task),
+            stolen
+        );
+
+        let second = scheduler.pop_for_worker(1, 1, Time::ZERO);
+        crate::assert_with_log!(
+            second == Some((task, DispatchLane::Ready)),
+            "steal path re-arms second storm wake on thief worker",
+            Some((task, DispatchLane::Ready)),
+            second
+        );
+
+        let third = scheduler.pop_for_worker(1, 2, Time::ZERO);
+        crate::assert_with_log!(
+            third == Some((task, DispatchLane::Ready)),
+            "steal path preserves final pending storm wake",
+            Some((task, DispatchLane::Ready)),
+            third
+        );
+
+        let fourth = scheduler.pop_for_worker(1, 3, Time::ZERO);
+        crate::assert_with_log!(
+            fourth.is_none(),
+            "all stolen storm wakes drain after requested count",
+            true,
+            fourth.is_none()
+        );
+        crate::assert_with_log!(
+            scheduler.is_empty(),
+            "scheduler empty after stolen storm drains",
+            true,
+            scheduler.is_empty()
+        );
+
+        crate::test_complete!("lab_scheduler_steal_preserves_pending_spurious_wakes");
     }
 
     #[test]
@@ -4126,6 +4351,65 @@ mod tests {
         let was_woken = woken.load(std::sync::atomic::Ordering::SeqCst);
         crate::assert_with_log!(was_woken, "waker fired", true, was_woken);
         crate::test_complete!("advance_to_next_timer_fires_timer");
+    }
+
+    #[cfg(unix)]
+    #[test]
+    fn run_with_auto_advance_delivers_delayed_reactor_events() {
+        init_test("run_with_auto_advance_delivers_delayed_reactor_events");
+        let config = LabConfig::new(42).with_auto_advance().max_steps(32);
+        let mut runtime = LabRuntime::new(config);
+        let handle = runtime.state.io_driver_handle().expect("io driver");
+        let wake_count = Arc::new(std::sync::atomic::AtomicU64::new(0));
+        let waker = Waker::from(Arc::new(CountWaker(wake_count.clone())));
+        let source = TestFdSource;
+
+        let registration = handle
+            .register(&source, Interest::READABLE, waker)
+            .expect("register source");
+        let token = registration.token();
+
+        runtime
+            .lab_reactor()
+            .inject_event(token, Event::readable(token), Duration::from_secs(1));
+
+        let report = runtime.run_with_auto_advance();
+
+        crate::assert_with_log!(
+            report.auto_advances >= 1,
+            "auto-advance reaches delayed reactor deadline",
+            true,
+            report.auto_advances >= 1
+        );
+        crate::assert_with_log!(
+            runtime.now() >= Time::from_secs(1),
+            "virtual time advanced to delayed reactor event",
+            true,
+            runtime.now() >= Time::from_secs(1)
+        );
+        let wakeups = wake_count.load(std::sync::atomic::Ordering::SeqCst);
+        crate::assert_with_log!(
+            wakeups == 1,
+            "reactor event woke registration",
+            1u64,
+            wakeups
+        );
+        let saw_ready = runtime
+            .state
+            .trace
+            .snapshot()
+            .iter()
+            .any(|event| event.kind == TraceEventKind::IoReady);
+        crate::assert_with_log!(saw_ready, "io ready trace recorded", true, saw_ready);
+        let next_event = runtime.lab_reactor().next_event_time();
+        crate::assert_with_log!(
+            next_event.is_none(),
+            "delayed reactor event drained",
+            true,
+            next_event.is_none()
+        );
+
+        crate::test_complete!("run_with_auto_advance_delivers_delayed_reactor_events");
     }
 
     #[test]

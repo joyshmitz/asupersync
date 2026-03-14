@@ -1116,29 +1116,14 @@ mod tests {
             .collect()
     }
 
-    /// Try to create an encoder, returning None if the constraint matrix is
-    /// singular (known issue tracked by bd-uix9 for small K values).
-    fn try_encoder(k: usize, symbol_size: usize, seed: u64) -> Option<SystematicEncoder> {
+    fn make_encoder(k: usize, symbol_size: usize, seed: u64) -> SystematicEncoder {
         let source = make_source_symbols(k, symbol_size);
-        SystematicEncoder::new(&source, symbol_size, seed)
-    }
-
-    /// Create an encoder for the requested `(k, symbol_size)` and retry with
-    /// alternate seeds if the initial seed yields a singular matrix.
-    ///
-    /// Keeping `k` fixed avoids tests silently validating a different
-    /// source-block size than the scenario under test.
-    fn require_encoder(k: usize, symbol_size: usize, seed: u64) -> SystematicEncoder {
-        for &try_seed in &[seed, 42, 99, 7777, 2024, 12345] {
-            if let Some(enc) = try_encoder(k, symbol_size, try_seed) {
-                return enc;
-            }
-        }
-        panic!(
-            "could not create encoder for requested k={k}, symbol_size={symbol_size} \
-             across tested seeds [{seed}, 42, 99, 7777, 2024, 12345]; \
-             matrix singularity issue (bd-uix9)"
-        );
+        SystematicEncoder::new(&source, symbol_size, seed).unwrap_or_else(|| {
+            panic!(
+                "expected encoder construction to succeed for supported parameters: \
+                 k={k}, symbol_size={symbol_size}, seed={seed}"
+            )
+        })
     }
 
     fn failure_context(
@@ -1215,6 +1200,22 @@ mod tests {
                 max_supported: 56403
             }
         );
+    }
+
+    #[test]
+    fn encoder_construction_succeeds_for_supported_small_k_across_seed_sweep() {
+        let symbol_size = 16;
+        let seeds = [0u64, 1, 42, 99, 7777, 2024];
+
+        for k in 1..=16 {
+            let source = make_source_symbols(k, symbol_size);
+            for &seed in &seeds {
+                assert!(
+                    SystematicEncoder::new(&source, symbol_size, seed).is_some(),
+                    "supported small-K encoder construction should succeed for k={k}, symbol_size={symbol_size}, seed={seed}"
+                );
+            }
+        }
     }
 
     #[test]
@@ -1715,7 +1716,7 @@ mod tests {
     #[test]
     fn repair_cursor_advances_across_calls() {
         let symbol_size = 16;
-        let mut enc = require_encoder(16, symbol_size, 42);
+        let mut enc = make_encoder(16, symbol_size, 42);
         let k = enc.params().k;
 
         assert_eq!(enc.next_repair_esi(), k as u32, "cursor starts at K");
@@ -1738,7 +1739,7 @@ mod tests {
     #[test]
     fn repair_cursor_no_overlap() {
         let symbol_size = 32;
-        let mut enc = require_encoder(16, symbol_size, 99);
+        let mut enc = make_encoder(16, symbol_size, 99);
 
         let a = enc.emit_repair(4);
         let b = enc.emit_repair(4);
@@ -1754,7 +1755,7 @@ mod tests {
     #[test]
     fn systematic_emitted_flag() {
         let symbol_size = 16;
-        let mut enc = require_encoder(16, symbol_size, 42);
+        let mut enc = make_encoder(16, symbol_size, 42);
 
         assert!(!enc.systematic_emitted(), "not emitted initially");
         enc.emit_systematic();
@@ -1764,7 +1765,7 @@ mod tests {
     #[test]
     fn stats_bytes_tracking() {
         let symbol_size = 32;
-        let mut enc = require_encoder(16, symbol_size, 42);
+        let mut enc = make_encoder(16, symbol_size, 42);
         let k = enc.params().k;
 
         assert_eq!(enc.stats().systematic_bytes_emitted, 0);
@@ -1795,7 +1796,7 @@ mod tests {
     #[test]
     fn stats_encoding_efficiency() {
         let symbol_size = 64;
-        let mut enc = require_encoder(16, symbol_size, 42);
+        let mut enc = make_encoder(16, symbol_size, 42);
         let k = enc.params().k;
 
         // Before emission
@@ -1822,7 +1823,7 @@ mod tests {
     #[test]
     fn stats_repair_overhead() {
         let symbol_size = 16;
-        let mut enc = require_encoder(16, symbol_size, 42);
+        let mut enc = make_encoder(16, symbol_size, 42);
         let k = enc.params().k;
 
         // Before emission
@@ -1845,7 +1846,7 @@ mod tests {
     #[test]
     fn stats_display_stable() {
         let symbol_size = 16;
-        let mut enc = require_encoder(16, symbol_size, 42);
+        let mut enc = make_encoder(16, symbol_size, 42);
         let k = enc.params().k;
 
         enc.emit_systematic();
@@ -1869,7 +1870,7 @@ mod tests {
     #[test]
     fn stats_cumulative_across_batches() {
         let symbol_size = 32;
-        let mut enc = require_encoder(16, symbol_size, 42);
+        let mut enc = make_encoder(16, symbol_size, 42);
 
         enc.emit_repair(5);
         let after_first = enc.stats().clone();
@@ -1888,7 +1889,7 @@ mod tests {
     #[test]
     fn emit_all_esi_strictly_ascending() {
         let symbol_size = 24;
-        let mut enc = require_encoder(16, symbol_size, 42);
+        let mut enc = make_encoder(16, symbol_size, 42);
         let k = enc.params().k;
 
         let all = enc.emit_all(10);

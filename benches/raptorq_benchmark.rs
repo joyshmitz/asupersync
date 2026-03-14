@@ -15,8 +15,8 @@ use asupersync::raptorq::decoder::{DecodeStats, InactivationDecoder, ReceivedSym
 use asupersync::raptorq::gf256::{
     Gf256, Gf256ProfileFallbackReason, Gf256ProfilePackId, Gf256ProfilePackManifestSnapshot,
     dual_addmul_kernel_decision_detail, dual_mul_kernel_decision_detail, gf256_add_slice,
-    gf256_addmul_slice, gf256_addmul_slices2, gf256_mul_slice, gf256_mul_slices2,
-    gf256_profile_pack_manifest_snapshot,
+    gf256_add_slices2, gf256_addmul_slice, gf256_addmul_slices2, gf256_mul_slice,
+    gf256_mul_slices2, gf256_profile_pack_manifest_snapshot,
 };
 use asupersync::raptorq::linalg::{DenseRow, GaussianSolver, row_scale_add, row_xor};
 use asupersync::raptorq::systematic::SystematicEncoder;
@@ -307,6 +307,25 @@ fn validate_gf256_bit_exactness(scenario: &Gf256BenchScenario, src: &[u8], c_val
     let addmul_ctx = gf256_bench_context(scenario, "addmul_slice_bit_exact");
     assert_eq!(addmul_actual, addmul_expected, "{addmul_ctx} mismatch");
 
+    // Validate fused dual add path against sequential baseline.
+    let src2 = deterministic_bytes(scenario.len, scenario.seed ^ 0xABCD_0ADD);
+    let mut add_left_actual = deterministic_bytes(scenario.len, scenario.seed ^ 0x0133_5001);
+    let mut add_right_actual = deterministic_bytes(scenario.len, scenario.seed ^ 0x0133_5002);
+    let mut add_left_expected = add_left_actual.clone();
+    let mut add_right_expected = add_right_actual.clone();
+    gf256_add_slices2(&mut add_left_actual, src, &mut add_right_actual, &src2);
+    gf256_add_slice(&mut add_left_expected, src);
+    gf256_add_slice(&mut add_right_expected, &src2);
+    let add2_ctx = gf256_bench_context(scenario, "add_slices2_bit_exact");
+    assert_eq!(
+        add_left_actual, add_left_expected,
+        "{add2_ctx} mismatch on lane_a"
+    );
+    assert_eq!(
+        add_right_actual, add_right_expected,
+        "{add2_ctx} mismatch on lane_b"
+    );
+
     // Validate fused dual multiply path against sequential baseline.
     let mut mul_left_actual = deterministic_bytes(scenario.len, scenario.seed ^ 0x0133_7001);
     let mut mul_right_actual = deterministic_bytes(scenario.len, scenario.seed ^ 0x0133_7002);
@@ -523,10 +542,10 @@ fn bench_gf256_primitives(c: &mut Criterion) {
 
     // Deterministic scenario matrix for reproducible profiling + parity checks.
     for scenario in gf256_scenarios() {
-        group.throughput(Throughput::Bytes(scenario.len as u64));
-
         let src = deterministic_bytes(scenario.len, scenario.seed);
         let c_val = Gf256::new(scenario.mul_const);
+        let single_lane_bytes = scenario.len as u64;
+        let dual_lane_bytes = scenario.len.saturating_mul(2) as u64;
         validate_gf256_bit_exactness(&scenario, &src, c_val);
         emit_track_e_policy_log(&scenario);
         let label = format!(
@@ -535,14 +554,50 @@ fn bench_gf256_primitives(c: &mut Criterion) {
         );
 
         // Benchmark gf256_add_slice (pure XOR)
+        group.throughput(Throughput::Bytes(single_lane_bytes));
         group.bench_with_input(BenchmarkId::new("add_slice", &label), &scenario, |b, _| {
             let mut dst = deterministic_bytes(scenario.len, scenario.seed ^ 0xAA55_AA55);
             b.iter(|| {
                 gf256_add_slice(std::hint::black_box(&mut dst), std::hint::black_box(&src));
             });
         });
+        group.throughput(Throughput::Bytes(dual_lane_bytes));
+        group.bench_with_input(
+            BenchmarkId::new("add_slices2_fused", &label),
+            &scenario,
+            |b, _| {
+                let src_b = deterministic_bytes(scenario.len, scenario.seed ^ 0xCAFE_A001);
+                let mut dst_a = deterministic_bytes(scenario.len, scenario.seed ^ 0xAAAA_1101);
+                let mut dst_b = deterministic_bytes(scenario.len, scenario.seed ^ 0xBBBB_2202);
+                b.iter(|| {
+                    gf256_add_slices2(
+                        std::hint::black_box(&mut dst_a),
+                        std::hint::black_box(&src),
+                        std::hint::black_box(&mut dst_b),
+                        std::hint::black_box(&src_b),
+                    );
+                });
+            },
+        );
+        group.bench_with_input(
+            BenchmarkId::new("add_slices2_sequential", &label),
+            &scenario,
+            |b, _| {
+                let src_b = deterministic_bytes(scenario.len, scenario.seed ^ 0xCAFE_A001);
+                let mut dst_a = deterministic_bytes(scenario.len, scenario.seed ^ 0xAAAA_1101);
+                let mut dst_b = deterministic_bytes(scenario.len, scenario.seed ^ 0xBBBB_2202);
+                b.iter(|| {
+                    gf256_add_slice(std::hint::black_box(&mut dst_a), std::hint::black_box(&src));
+                    gf256_add_slice(
+                        std::hint::black_box(&mut dst_b),
+                        std::hint::black_box(&src_b),
+                    );
+                });
+            },
+        );
 
         // Benchmark gf256_mul_slice (scalar multiply)
+        group.throughput(Throughput::Bytes(single_lane_bytes));
         group.bench_with_input(BenchmarkId::new("mul_slice", &label), &scenario, |b, _| {
             let mut dst: Vec<u8> = src.clone();
             b.iter(|| {
@@ -551,6 +606,7 @@ fn bench_gf256_primitives(c: &mut Criterion) {
         });
 
         // Benchmark gf256_addmul_slice (THE critical hot path)
+        group.throughput(Throughput::Bytes(single_lane_bytes));
         group.bench_with_input(
             BenchmarkId::new("addmul_slice", &label),
             &scenario,
@@ -567,6 +623,7 @@ fn bench_gf256_primitives(c: &mut Criterion) {
         );
 
         // Benchmark fused dual mul against sequential mul+mul.
+        group.throughput(Throughput::Bytes(dual_lane_bytes));
         group.bench_with_input(
             BenchmarkId::new("mul_slices2_fused", &label),
             &scenario,
@@ -602,6 +659,7 @@ fn bench_gf256_primitives(c: &mut Criterion) {
         );
 
         // Benchmark fused dual addmul against sequential addmul+addmul.
+        group.throughput(Throughput::Bytes(dual_lane_bytes));
         group.bench_with_input(
             BenchmarkId::new("addmul_slices2_fused", &label),
             &scenario,

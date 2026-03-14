@@ -545,8 +545,8 @@ impl<T, E> Outcome<T, E> {
     /// # Note on Value Handling
     ///
     /// When both outcomes are `Ok`, this method returns `self`. When both are
-    /// `Cancelled`, the stronger [`CancelReason`] is retained. Other equal-
-    /// severity ties remain left-biased and return `self`.
+    /// `Cancelled`, a strictly stronger [`CancelReason`] is retained. Equal-
+    /// severity cancellation ties remain left-biased and return `self`.
     ///
     /// # Examples
     ///
@@ -568,15 +568,18 @@ impl<T, E> Outcome<T, E> {
     /// assert!(err.join(cancelled).is_cancelled());
     /// ```
     /// Implements `def.outcome.join_semantics` (#31).
-    /// Left-bias: on equal severity, `self` (left argument) wins except for
-    /// `Cancelled + Cancelled`, which strengthens to the worse cancellation
-    /// reason. This is intentional: join is associative on severity, but not
-    /// fully value-commutative. See `law.join.assoc` (#42).
+    /// Left-bias: on equal severity, `self` (left argument) wins. The only
+    /// `Cancelled + Cancelled` special case is when the right-hand cancellation
+    /// reason has strictly higher severity and therefore strengthens the result.
+    /// This is intentional: join is associative on severity, but not fully
+    /// value-commutative. See `law.join.assoc` (#42).
     #[must_use]
     pub fn join(self, other: Self) -> Self {
         match (self, other) {
             (Self::Cancelled(mut left), Self::Cancelled(right)) => {
-                left.strengthen(&right);
+                if right.severity() > left.severity() {
+                    left.strengthen(&right);
+                }
                 Self::Cancelled(left)
             }
             (left, right) => {
@@ -668,7 +671,8 @@ impl<E: fmt::Debug + fmt::Display> std::error::Error for OutcomeError<E> {}
 ///
 /// This implements the lattice join operation.
 ///
-/// When both outcomes are `Cancelled`, the stronger [`CancelReason`] is kept.
+/// When both outcomes are `Cancelled`, a strictly stronger [`CancelReason`] is
+/// kept. Equal-severity cancellation ties remain left-biased.
 pub fn join_outcomes<T, E>(a: Outcome<T, E>, b: Outcome<T, E>) -> Outcome<T, E> {
     a.join(b)
 }
@@ -832,6 +836,37 @@ mod tests {
 
         match joined {
             Outcome::Cancelled(reason) => assert!(reason.is_shutdown()),
+            other => panic!("expected cancelled outcome, got {other:?}"),
+        }
+    }
+
+    #[test]
+    fn join_cancelled_equal_severity_is_left_biased() {
+        use crate::types::CancelKind;
+        let left: Outcome<i32, &str> = Outcome::Cancelled(CancelReason::user("z-left"));
+        let right: Outcome<i32, &str> = Outcome::Cancelled(CancelReason::user("a-right"));
+
+        let joined = left.join(right);
+
+        match joined {
+            Outcome::Cancelled(reason) => {
+                assert!(reason.is_kind(CancelKind::User));
+                assert_eq!(reason.message(), Some("z-left"));
+            }
+            other => panic!("expected cancelled outcome, got {other:?}"),
+        }
+    }
+
+    #[test]
+    fn join_cancelled_equal_rank_kinds_is_left_biased() {
+        use crate::types::CancelKind;
+        let left: Outcome<i32, &str> = Outcome::Cancelled(CancelReason::timeout());
+        let right: Outcome<i32, &str> = Outcome::Cancelled(CancelReason::deadline());
+
+        let joined = left.join(right);
+
+        match joined {
+            Outcome::Cancelled(reason) => assert!(reason.is_kind(CancelKind::Timeout)),
             other => panic!("expected cancelled outcome, got {other:?}"),
         }
     }

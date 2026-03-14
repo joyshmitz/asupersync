@@ -135,14 +135,15 @@ impl<T: SymbolSink + Unpin> RaptorQSender<T> {
             // Synchronous poll loop for send.
             poll_send_blocking(&mut self.transport, auth_symbol)?;
             symbols_sent += 1;
-
-            if let Some(ref mut m) = self.metrics {
-                m.counter("raptorq.symbols_sent").increment();
-            }
         }
 
         // Flush transport.
         poll_flush_blocking(&mut self.transport)?;
+
+        if let Some(ref mut m) = self.metrics {
+            m.counter("raptorq.symbols_sent")
+                .add(symbols_sent.try_into().unwrap_or(u64::MAX));
+        }
 
         let stats = encoder.stats();
         if let Some(ref mut m) = self.metrics {
@@ -377,7 +378,9 @@ fn poll_flush_blocking<T: SymbolSink + Unpin>(sink: &mut T) -> Result<(), Error>
         Poll::Ready(Err(e)) => {
             Err(Error::new(ErrorKind::DispatchFailed).with_message(e.to_string()))
         }
-        Poll::Ready(Ok(())) | Poll::Pending => Ok(()), // Best-effort flush in sync context
+        Poll::Ready(Ok(())) => Ok(()),
+        Poll::Pending => Err(Error::new(ErrorKind::SinkRejected)
+            .with_message("transport flush not ready (sync context)")),
     }
 }
 
@@ -403,6 +406,7 @@ fn poll_next_blocking<S: SymbolStream + Unpin>(
 #[cfg(test)]
 mod tests {
     use super::*;
+    use crate::observability::Metrics;
     use crate::security::{AuthenticationTag, SecurityContext};
     use crate::transport::error::{SinkError, StreamError};
     use crate::types::symbol::{ObjectId, ObjectParams, Symbol};
@@ -471,6 +475,43 @@ mod tests {
     }
 
     impl Unpin for PendingSink {}
+
+    struct FlushPendingSink {
+        symbols: Vec<AuthenticatedSymbol>,
+    }
+
+    impl FlushPendingSink {
+        fn new() -> Self {
+            Self {
+                symbols: Vec::new(),
+            }
+        }
+    }
+
+    impl SymbolSink for FlushPendingSink {
+        fn poll_send(
+            mut self: Pin<&mut Self>,
+            _cx: &mut Context<'_>,
+            symbol: AuthenticatedSymbol,
+        ) -> Poll<Result<(), SinkError>> {
+            self.symbols.push(symbol);
+            Poll::Ready(Ok(()))
+        }
+
+        fn poll_flush(self: Pin<&mut Self>, _cx: &mut Context<'_>) -> Poll<Result<(), SinkError>> {
+            Poll::Pending
+        }
+
+        fn poll_close(self: Pin<&mut Self>, _cx: &mut Context<'_>) -> Poll<Result<(), SinkError>> {
+            Poll::Ready(Ok(()))
+        }
+
+        fn poll_ready(self: Pin<&mut Self>, _cx: &mut Context<'_>) -> Poll<Result<(), SinkError>> {
+            Poll::Ready(Ok(()))
+        }
+    }
+
+    impl Unpin for FlushPendingSink {}
 
     struct VecStream {
         symbols: Vec<AuthenticatedSymbol>,
@@ -737,6 +778,89 @@ mod tests {
         let result = sender.send_object(&cx, ObjectId::new_for_test(3), &data);
         assert!(result.is_err());
         assert_eq!(result.unwrap_err().kind(), ErrorKind::SinkRejected);
+    }
+
+    #[test]
+    fn test_send_object_pending_flush_returns_rejected() {
+        let cx: Cx = Cx::for_testing();
+        let sink = FlushPendingSink::new();
+        let mut sender = RaptorQSender::new(RaptorQConfig::default(), sink, None, None);
+
+        let data = vec![0x33u8; 64];
+        let result = sender.send_object(&cx, ObjectId::new_for_test(31), &data);
+        let err = result.expect_err("pending flush must not report send success");
+
+        assert_eq!(err.kind(), ErrorKind::SinkRejected);
+        assert!(
+            !sender.transport_mut().symbols.is_empty(),
+            "symbols may have been accepted before flush blocked"
+        );
+    }
+
+    #[test]
+    fn test_send_symbols_pending_flush_returns_rejected() {
+        let cx: Cx = Cx::for_testing();
+        let sink = FlushPendingSink::new();
+        let mut sender = RaptorQSender::new(RaptorQConfig::default(), sink, None, None);
+
+        let symbols: Vec<AuthenticatedSymbol> = (0..2)
+            .map(|i| {
+                let sym = Symbol::new_for_test(1, 0, i, &[i as u8; 256]);
+                AuthenticatedSymbol::new_verified(sym, AuthenticationTag::zero())
+            })
+            .collect();
+
+        let err = sender
+            .send_symbols(&cx, symbols)
+            .expect_err("pending flush must not report direct send success");
+
+        assert_eq!(err.kind(), ErrorKind::SinkRejected);
+        assert_eq!(
+            sender.transport_mut().symbols.len(),
+            2,
+            "all symbols may be staged before flush reports pending"
+        );
+    }
+
+    #[test]
+    fn test_send_object_metrics_increment_only_after_successful_flush() {
+        let cx: Cx = Cx::for_testing();
+        let sink = VecSink::new();
+        let mut metrics = Metrics::new();
+        let symbols_sent_counter = metrics.counter("raptorq.symbols_sent");
+        let objects_sent_counter = metrics.counter("raptorq.objects_sent");
+        let mut sender = RaptorQSender::new(RaptorQConfig::default(), sink, None, Some(metrics));
+
+        let data = vec![0x5Au8; 64];
+        let outcome = sender
+            .send_object(&cx, ObjectId::new_for_test(32), &data)
+            .expect("successful flush should record metrics");
+
+        assert_eq!(symbols_sent_counter.get(), outcome.symbols_sent as u64);
+        assert_eq!(objects_sent_counter.get(), 1);
+    }
+
+    #[test]
+    fn test_send_object_pending_flush_does_not_increment_sent_metrics() {
+        let cx: Cx = Cx::for_testing();
+        let sink = FlushPendingSink::new();
+        let mut metrics = Metrics::new();
+        let symbols_sent_counter = metrics.counter("raptorq.symbols_sent");
+        let objects_sent_counter = metrics.counter("raptorq.objects_sent");
+        let mut sender = RaptorQSender::new(RaptorQConfig::default(), sink, None, Some(metrics));
+
+        let data = vec![0x44u8; 64];
+        let err = sender
+            .send_object(&cx, ObjectId::new_for_test(33), &data)
+            .expect_err("pending flush must not report success");
+
+        assert_eq!(err.kind(), ErrorKind::SinkRejected);
+        assert_eq!(
+            symbols_sent_counter.get(),
+            0,
+            "flush failure must not overcount sent symbols"
+        );
+        assert_eq!(objects_sent_counter.get(), 0);
     }
 
     #[test]

@@ -515,6 +515,12 @@ enum BodyKind {
     Chunked,
 }
 
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub(super) struct RequestHeadPreview {
+    pub version: Version,
+    pub headers: Vec<(String, String)>,
+}
+
 const MAX_CHUNK_LINE_LEN: usize = 1024;
 
 type ChunkedDecoded = (Vec<u8>, Vec<(String, String)>);
@@ -650,18 +656,28 @@ fn parse_chunk_size_line(line: &[u8]) -> Result<usize, HttpError> {
 /// Parse the head (request line + headers) from `src`, splitting off the
 /// consumed bytes. Returns `None` if the full header block hasn't arrived yet.
 #[allow(clippy::type_complexity)]
-fn decode_head(
-    src: &mut BytesMut,
+fn decode_head_parts(
+    src: &[u8],
     max_headers_size: usize,
-) -> Result<Option<(Method, String, Version, Vec<(String, String)>, BodyKind)>, HttpError> {
-    let Some(end) = find_headers_end(src.as_ref()) else {
+) -> Result<
+    Option<(
+        usize,
+        Method,
+        String,
+        Version,
+        Vec<(String, String)>,
+        BodyKind,
+    )>,
+    HttpError,
+> {
+    let Some(end) = find_headers_end(src) else {
         if src.len() > max_headers_size {
             return Err(HttpError::HeadersTooLarge);
         }
         // Preserve request-line limit behavior for incomplete heads while
         // avoiding an extra scan on the common fully-buffered decode path.
         if src.len() > MAX_REQUEST_LINE {
-            match find_crlf(src.as_ref()) {
+            match find_crlf(src) {
                 Some(line_end) if line_end > MAX_REQUEST_LINE => {
                     return Err(HttpError::RequestLineTooLong);
                 }
@@ -676,8 +692,7 @@ fn decode_head(
         return Err(HttpError::HeadersTooLarge);
     }
 
-    let head_bytes = src.split_to(end);
-    let head = head_bytes.as_ref();
+    let head = &src[..end];
 
     // Single-pass: collect all CRLF positions in the header block at once.
     // This replaces N+1 individual `find_crlf()` sub-slice calls with one
@@ -749,7 +764,51 @@ fn decode_head(
         (None, None) => BodyKind::ContentLength(0),
     };
 
+    Ok(Some((end, method, uri, version, headers, kind)))
+}
+
+#[allow(clippy::type_complexity)]
+fn decode_head(
+    src: &mut BytesMut,
+    max_headers_size: usize,
+) -> Result<Option<(Method, String, Version, Vec<(String, String)>, BodyKind)>, HttpError> {
+    let Some((end, method, uri, version, headers, kind)) =
+        decode_head_parts(src.as_ref(), max_headers_size)?
+    else {
+        return Ok(None);
+    };
+
+    let _ = src.split_to(end);
     Ok(Some((method, uri, version, headers, kind)))
+}
+
+pub(super) fn preview_request_head(
+    codec: &Http1Codec,
+    src: &BytesMut,
+) -> Result<Option<RequestHeadPreview>, HttpError> {
+    match &codec.state {
+        DecodeState::Body {
+            version, headers, ..
+        }
+        | DecodeState::Chunked {
+            version, headers, ..
+        } => {
+            return Ok(Some(RequestHeadPreview {
+                version: *version,
+                headers: headers.clone(),
+            }));
+        }
+        DecodeState::Poisoned => return Err(HttpError::BadHeader),
+        DecodeState::Head => {}
+    }
+
+    let Some((_end, _method, _uri, version, headers, _kind)) =
+        decode_head_parts(src.as_ref(), codec.max_headers_size)?
+    else {
+        return Ok(None);
+    };
+
+    Ok(Some(RequestHeadPreview { version, headers }))
 }
 
 /// Extract the head fields from a `DecodeState::Body` or `DecodeState::Chunked`.
@@ -1125,6 +1184,39 @@ mod tests {
             b"POST /x HTTP/1.1\r\nContent-Length: 10\r\n\r\nhel",
         );
         assert!(matches!(result, Ok(None)));
+    }
+
+    #[test]
+    fn preview_request_head_available_before_body_bytes() {
+        let raw = b"POST /upload HTTP/1.1\r\nExpect: 100-continue\r\nContent-Length: 5\r\n\r\n";
+        let mut buf = BytesMut::from(&raw[..]);
+        let codec = Http1Codec::new();
+
+        let preview = preview_request_head(&codec, &buf)
+            .unwrap()
+            .expect("header preview should be available before body bytes arrive");
+
+        assert_eq!(preview.version, Version::Http11);
+        assert_eq!(
+            header_value(&preview.headers, "expect"),
+            Some("100-continue")
+        );
+        assert_eq!(header_value(&preview.headers, "content-length"), Some("5"));
+        assert_eq!(buf.as_ref(), raw);
+
+        let mut codec = Http1Codec::new();
+        assert!(codec.decode(&mut buf).unwrap().is_none());
+        assert!(buf.is_empty(), "head bytes should move into codec state");
+
+        let preview = preview_request_head(&codec, &buf)
+            .unwrap()
+            .expect("pending codec state should still expose request head");
+        assert_eq!(preview.version, Version::Http11);
+        assert_eq!(
+            header_value(&preview.headers, "expect"),
+            Some("100-continue")
+        );
+        assert_eq!(header_value(&preview.headers, "content-length"), Some("5"));
     }
 
     #[test]

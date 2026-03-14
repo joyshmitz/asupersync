@@ -90,29 +90,36 @@ fn wf_tie_1_join_left_bias_on_equal_severity() {
     init_test_logging();
 
     let outcomes = [
-        Outcome::Ok(()),
-        Outcome::Err(()),
-        Outcome::Cancelled(CancelReason::timeout()),
-        Outcome::Panicked(PanicPayload::new("left")),
+        Outcome::Ok("left-ok"),
+        Outcome::Err("left-err"),
+        Outcome::Cancelled(CancelReason::user("z-left")),
+        Outcome::Panicked(PanicPayload::new("left-panic")),
     ];
 
     let right_variants = [
-        Outcome::Ok(()),
-        Outcome::Err(()),
-        Outcome::Cancelled(CancelReason::user("test")),
-        Outcome::Panicked(PanicPayload::new("right")),
+        Outcome::Ok("right-ok"),
+        Outcome::Err("right-err"),
+        Outcome::Cancelled(CancelReason::user("a-right")),
+        Outcome::Panicked(PanicPayload::new("right-panic")),
     ];
 
-    // Same-severity pairs: join(left, right) must produce severity == left.severity
+    // Same-severity pairs: join(left, right) must preserve the full left value,
+    // not just the severity class. The Cancelled case deliberately uses two
+    // equal-severity reasons where strengthen() would prefer the RHS by message
+    // ordering if join() delegated tie-breaking incorrectly.
     for (left, right) in outcomes.iter().zip(right_variants.iter()) {
         let joined = join_outcomes(left.clone(), right.clone());
+        let reversed = join_outcomes(right.clone(), left.clone());
+
         assert_eq!(
-            joined.severity(),
-            left.severity(),
-            "WF-TIE.1 VIOLATED: join({left:?}, {right:?}) = {joined:?}, \
-             expected severity {:?} but got {:?}",
-            left.severity(),
-            joined.severity(),
+            joined,
+            left.clone(),
+            "WF-TIE.1 VIOLATED: join({left:?}, {right:?}) must preserve the left value on equal severity",
+        );
+        assert_eq!(
+            reversed,
+            right.clone(),
+            "WF-TIE.1 VIOLATED: join({right:?}, {left:?}) must preserve the left value on equal severity",
         );
     }
 }

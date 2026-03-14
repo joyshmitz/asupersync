@@ -178,6 +178,63 @@ fn roundtrip_repair_only() {
     }
 }
 
+// Mirror the failure-mode unit-test contract in the integration harness so
+// these exact deterministic cases remain remotely verifiable even when
+// unrelated `cargo test --lib` worktree churn blocks the lib-test lane. These
+// cases intentionally hand-build `ReceivedSymbol::source` rows to match the
+// unit tests instead of routing through `build_received_symbols()`.
+#[test]
+fn contiguous_burst_loss_all_source_symbols_dropped_contract() {
+    let k = 8;
+    let symbol_size = 32;
+    let seed = 42u64;
+
+    let source = make_patterned_source(k, symbol_size);
+    let encoder = SystematicEncoder::new(&source, symbol_size, seed).unwrap();
+    let decoder = InactivationDecoder::new(k, symbol_size, seed);
+    let l = decoder.params().l;
+
+    // Mirror the exact failure_modes contract so this scenario remains
+    // runnable through the integration harness when unrelated lib-test
+    // surfaces are red in the shared worktree.
+    let mut received = decoder.constraint_symbols();
+    for esi in (k as u32)..((k + l * 2) as u32) {
+        let (cols, coefs) = decoder.repair_equation(esi);
+        let repair_data = encoder.repair_symbol(esi);
+        received.push(ReceivedSymbol::repair(esi, cols, coefs, repair_data));
+    }
+
+    let result = decoder.decode(&received).expect("decode should succeed");
+    assert_eq!(result.source, source);
+}
+
+#[test]
+fn contiguous_burst_drop_first_half_of_source_contract() {
+    let k = 16;
+    let symbol_size = 32;
+    let seed = 42u64;
+
+    let source = make_patterned_source(k, symbol_size);
+    let encoder = SystematicEncoder::new(&source, symbol_size, seed).unwrap();
+    let decoder = InactivationDecoder::new(k, symbol_size, seed);
+    let l = decoder.params().l;
+
+    // Mirror the exact failure_modes received-symbol shape here as well,
+    // including direct source rows for the surviving half.
+    let mut received = decoder.constraint_symbols();
+    for i in (k / 2)..k {
+        received.push(ReceivedSymbol::source(i as u32, source[i].clone()));
+    }
+    for esi in (k as u32)..((k + l * 2) as u32) {
+        let (cols, coefs) = decoder.repair_equation(esi);
+        let repair_data = encoder.repair_symbol(esi);
+        received.push(ReceivedSymbol::repair(esi, cols, coefs, repair_data));
+    }
+
+    let result = decoder.decode(&received).expect("decode should succeed");
+    assert_eq!(result.source, source);
+}
+
 // ============================================================================
 // Property: Determinism
 // ============================================================================

@@ -7,8 +7,8 @@
 
 use crate::codec::Framed;
 use crate::cx::Cx;
-use crate::http::h1::codec::{Http1Codec, HttpError};
-use crate::http::h1::types::{Request, Response, Version, default_reason};
+use crate::http::h1::codec::{Http1Codec, HttpError, preview_request_head};
+use crate::http::h1::types::{Method, Request, Response, Version, default_reason};
 use crate::io::{AsyncRead, AsyncWrite, AsyncWriteExt};
 use crate::server::shutdown::{ShutdownPhase, ShutdownSignal};
 use crate::stream::Stream;
@@ -116,6 +116,7 @@ pub enum ConnectionPhase {
 #[derive(Debug)]
 enum ReadOutcome {
     Read(Option<Result<Request, HttpError>>),
+    ExpectationRejected,
     Shutdown,
 }
 
@@ -221,45 +222,94 @@ where
         T: AsyncRead + AsyncWrite + Unpin,
     {
         let read_future = Box::pin(async {
-            if let Some(signal) = &self.shutdown_signal {
-                if signal.is_shutting_down() {
-                    return ReadOutcome::Shutdown;
+            let mut pending_expectation_flush = None;
+            let mut handled_expectation = false;
+            let mut shutdown_fut = self.shutdown_signal.as_ref().map(|signal| {
+                Box::pin(signal.wait_for_phase(crate::server::shutdown::ShutdownPhase::Draining))
+            });
+
+            poll_fn(|cx| {
+                loop {
+                    if Cx::current().is_some_and(|c| c.checkpoint().is_err()) {
+                        return Poll::Ready(ReadOutcome::Shutdown);
+                    }
+                    if self
+                        .shutdown_signal
+                        .as_ref()
+                        .is_some_and(ShutdownSignal::is_shutting_down)
+                    {
+                        return Poll::Ready(ReadOutcome::Shutdown);
+                    }
+                    if shutdown_fut
+                        .as_mut()
+                        .is_some_and(|future| future.as_mut().poll(cx).is_ready())
+                    {
+                        return Poll::Ready(ReadOutcome::Shutdown);
+                    }
+
+                    if let Some(action) = pending_expectation_flush {
+                        match framed.poll_flush(cx).map_err(HttpError::Io) {
+                            Poll::Pending => return Poll::Pending,
+                            Poll::Ready(Err(err)) => {
+                                return Poll::Ready(ReadOutcome::Read(Some(Err(err))));
+                            }
+                            Poll::Ready(Ok(())) => {
+                                pending_expectation_flush = None;
+                                if action == ExpectationAction::Reject {
+                                    return Poll::Ready(ReadOutcome::ExpectationRejected);
+                                }
+                            }
+                        }
+                    }
+
+                    match Pin::new(&mut *framed).poll_next(cx) {
+                        Poll::Ready(item) => return Poll::Ready(ReadOutcome::Read(item)),
+                        Poll::Pending => {}
+                    }
+
+                    if !handled_expectation {
+                        let preview =
+                            match preview_request_head(framed.codec(), framed.read_buffer()) {
+                                Ok(preview) => preview,
+                                Err(err) => return Poll::Ready(ReadOutcome::Read(Some(Err(err)))),
+                            };
+
+                        if let Some(preview) = preview {
+                            let action =
+                                classify_expectation_from_parts(preview.version, &preview.headers);
+                            if action != ExpectationAction::None
+                                && request_expects_body_headers(&preview.headers)
+                            {
+                                let response = expectation_response(preview.version, action)
+                                    .expect("expectation action should build a response");
+                                if let Err(err) = framed.send(response) {
+                                    return Poll::Ready(ReadOutcome::Read(Some(Err(err))));
+                                }
+                                handled_expectation = true;
+
+                                match framed.poll_flush(cx).map_err(HttpError::Io) {
+                                    Poll::Pending => {
+                                        pending_expectation_flush = Some(action);
+                                        return Poll::Pending;
+                                    }
+                                    Poll::Ready(Err(err)) => {
+                                        return Poll::Ready(ReadOutcome::Read(Some(Err(err))));
+                                    }
+                                    Poll::Ready(Ok(())) => {
+                                        if action == ExpectationAction::Reject {
+                                            return Poll::Ready(ReadOutcome::ExpectationRejected);
+                                        }
+                                        continue;
+                                    }
+                                }
+                            }
+                        }
+                    }
+
+                    return Poll::Pending;
                 }
-
-                let mut read_fut = std::pin::pin!(framed.poll_next_ready());
-                let mut shutdown_fut = std::pin::pin!(
-                    signal.wait_for_phase(crate::server::shutdown::ShutdownPhase::Draining)
-                );
-
-                poll_fn(|cx| {
-                    if Cx::current().is_some_and(|c| c.checkpoint().is_err()) {
-                        return Poll::Ready(ReadOutcome::Shutdown);
-                    }
-                    if signal.is_shutting_down() {
-                        return Poll::Ready(ReadOutcome::Shutdown);
-                    }
-                    if shutdown_fut.as_mut().poll(cx).is_ready() {
-                        return Poll::Ready(ReadOutcome::Shutdown);
-                    }
-                    if let Poll::Ready(r) = read_fut.as_mut().poll(cx) {
-                        return Poll::Ready(ReadOutcome::Read(r));
-                    }
-                    Poll::Pending
-                })
-                .await
-            } else {
-                let mut read_fut = std::pin::pin!(framed.poll_next_ready());
-                poll_fn(|cx| {
-                    if Cx::current().is_some_and(|c| c.checkpoint().is_err()) {
-                        return Poll::Ready(ReadOutcome::Shutdown);
-                    }
-                    if let Poll::Ready(r) = read_fut.as_mut().poll(cx) {
-                        return Poll::Ready(ReadOutcome::Read(r));
-                    }
-                    Poll::Pending
-                })
-                .await
-            }
+            })
+            .await
         });
 
         if let Some(idle_timeout) = self.config.idle_timeout {
@@ -346,6 +396,14 @@ where
             };
 
             let req = match read_outcome {
+                ReadOutcome::ExpectationRejected => {
+                    state.requests_served += 1;
+                    state.last_request_at = Cx::current()
+                        .and_then(|cx| cx.timer_driver())
+                        .map_or_else(wall_now, |timer| timer.now());
+                    state.phase = ConnectionPhase::Closing;
+                    break;
+                }
                 ReadOutcome::Shutdown => {
                     state.phase = ConnectionPhase::Closing;
                     break;
@@ -368,8 +426,8 @@ where
             let expectation_action = classify_expectation(&req);
             if expectation_action == ExpectationAction::Reject {
                 state.phase = ConnectionPhase::Writing;
-                let mut reject = Response::new(417, default_reason(417), Vec::new());
-                finalize_response_persistence(req.version, &mut reject, true);
+                let reject = expectation_response(req.version, ExpectationAction::Reject)
+                    .expect("reject expectation should build a response");
                 framed.send(reject)?;
                 poll_fn(|cx| {
                     if Cx::current().is_some_and(|c| c.checkpoint().is_err()) {
@@ -389,25 +447,10 @@ where
                 break;
             }
 
-            if expectation_action == ExpectationAction::Continue && request_expects_body(&req) {
-                let mut continue_response = Response::new(100, default_reason(100), Vec::new());
-                finalize_response_persistence(req.version, &mut continue_response, false);
-                framed.send(continue_response)?;
-                poll_fn(|cx| {
-                    if Cx::current().is_some_and(|c| c.checkpoint().is_err()) {
-                        return Poll::Ready(Err(HttpError::Io(std::io::Error::new(
-                            std::io::ErrorKind::Interrupted,
-                            "connection cancelled",
-                        ))));
-                    }
-                    framed.poll_flush(cx).map_err(HttpError::Io)
-                })
-                .await?;
-            }
-
             // Determine if we should close after this request
             let close_after = should_close_connection(&req, &self.config, &state);
             let request_version = req.version;
+            let request_method = req.method.clone();
 
             state.phase = ConnectionPhase::Processing;
 
@@ -442,6 +485,10 @@ where
             } else {
                 (self.handler)(req).await
             };
+
+            if request_method == Method::Head {
+                suppress_response_body_for_head(&mut resp);
+            }
 
             let close_after =
                 finalize_response_persistence(request_version, &mut resp, close_after);
@@ -482,11 +529,18 @@ where
 }
 
 fn classify_expectation(req: &Request) -> ExpectationAction {
+    classify_expectation_from_parts(req.version, &req.headers)
+}
+
+fn classify_expectation_from_parts(
+    version: Version,
+    headers: &[(String, String)],
+) -> ExpectationAction {
     let mut saw_expect = false;
     let mut saw_continue = false;
     let mut saw_unsupported = false;
 
-    for (name, value) in &req.headers {
+    for (name, value) in headers {
         if !name.eq_ignore_ascii_case("expect") {
             continue;
         }
@@ -508,7 +562,7 @@ fn classify_expectation(req: &Request) -> ExpectationAction {
         return ExpectationAction::None;
     }
 
-    if saw_unsupported || req.version != Version::Http11 {
+    if saw_unsupported || version != Version::Http11 {
         return ExpectationAction::Reject;
     }
 
@@ -521,7 +575,11 @@ fn classify_expectation(req: &Request) -> ExpectationAction {
 }
 
 fn request_expects_body(req: &Request) -> bool {
-    for (name, value) in &req.headers {
+    request_expects_body_headers(&req.headers) || !req.body.is_empty()
+}
+
+fn request_expects_body_headers(headers: &[(String, String)]) -> bool {
+    for (name, value) in headers {
         if name.eq_ignore_ascii_case("content-length") {
             if let Ok(len) = value.trim().parse::<usize>() {
                 if len > 0 {
@@ -537,7 +595,17 @@ fn request_expects_body(req: &Request) -> bool {
                 .any(|token| token.eq_ignore_ascii_case("chunked"));
         }
     }
-    !req.body.is_empty()
+    false
+}
+
+fn expectation_response(version: Version, action: ExpectationAction) -> Option<Response> {
+    let mut response = match action {
+        ExpectationAction::None => return None,
+        ExpectationAction::Continue => Response::new(100, default_reason(100), Vec::new()),
+        ExpectationAction::Reject => Response::new(417, default_reason(417), Vec::new()),
+    };
+    finalize_response_persistence(version, &mut response, action == ExpectationAction::Reject);
+    Some(response)
 }
 
 /// Determine whether the connection should close after this request.
@@ -643,6 +711,49 @@ fn response_requests_close(resp: &Response) -> bool {
     false
 }
 
+fn replace_or_insert_header(resp: &mut Response, header_name: &str, header_value: String) {
+    let mut replaced = false;
+    resp.headers.retain_mut(|(name, value)| {
+        if name.eq_ignore_ascii_case(header_name) {
+            if replaced {
+                false
+            } else {
+                header_value.clone_into(value);
+                replaced = true;
+                true
+            }
+        } else {
+            true
+        }
+    });
+    if !replaced {
+        resp.headers.push((header_name.to_owned(), header_value));
+    }
+}
+
+fn remove_header(resp: &mut Response, header_name: &str) -> bool {
+    let before = resp.headers.len();
+    resp.headers
+        .retain(|(name, _)| !name.eq_ignore_ascii_case(header_name));
+    resp.headers.len() != before
+}
+
+fn suppress_response_body_for_head(resp: &mut Response) {
+    let body_len = resp.body.len();
+    let has_content_length = resp
+        .headers
+        .iter()
+        .any(|(name, _)| name.eq_ignore_ascii_case("content-length"));
+    let had_transfer_encoding = remove_header(resp, "transfer-encoding");
+
+    if !has_content_length && (had_transfer_encoding || body_len != 0) {
+        replace_or_insert_header(resp, "Content-Length", body_len.to_string());
+    }
+
+    resp.trailers.clear();
+    resp.body.clear();
+}
+
 /// Align the response version/connection headers with the actual socket policy.
 fn finalize_response_persistence(
     request_version: Version,
@@ -666,23 +777,148 @@ fn finalize_response_persistence(
     false
 }
 
-/// Helper trait to await the next item from a `Stream` (since `Stream`
-/// provides `poll_next`, not an async method).
-trait StreamNextExt: Stream {
-    async fn poll_next_ready(&mut self) -> Option<Self::Item>
-    where
-        Self: Unpin,
-    {
-        std::future::poll_fn(|cx| Pin::new(&mut *self).poll_next(cx)).await
-    }
-}
-
-impl<T: Stream + Unpin> StreamNextExt for T {}
-
 #[cfg(test)]
 mod tests {
     use super::*;
     use crate::http::h1::types::Method;
+    use crate::io::{AsyncRead, AsyncWrite, ReadBuf};
+    use crate::runtime::RuntimeBuilder;
+    use std::io;
+    use std::pin::Pin;
+    use std::sync::atomic::{AtomicBool, Ordering};
+    use std::sync::{Arc, Mutex};
+    use std::task::{Context, Poll};
+
+    struct TestIo {
+        read_data: Vec<u8>,
+        written: Arc<Mutex<Vec<u8>>>,
+    }
+
+    impl TestIo {
+        fn new(read_data: Vec<u8>, written: Arc<Mutex<Vec<u8>>>) -> Self {
+            Self { read_data, written }
+        }
+    }
+
+    impl AsyncRead for TestIo {
+        fn poll_read(
+            mut self: Pin<&mut Self>,
+            _cx: &mut Context<'_>,
+            buf: &mut ReadBuf<'_>,
+        ) -> Poll<io::Result<()>> {
+            if self.read_data.is_empty() {
+                return Poll::Ready(Ok(()));
+            }
+            let n = std::cmp::min(buf.remaining(), self.read_data.len());
+            buf.put_slice(&self.read_data[..n]);
+            self.read_data.drain(..n);
+            Poll::Ready(Ok(()))
+        }
+    }
+
+    impl AsyncWrite for TestIo {
+        fn poll_write(
+            self: Pin<&mut Self>,
+            _cx: &mut Context<'_>,
+            buf: &[u8],
+        ) -> Poll<io::Result<usize>> {
+            self.written.lock().unwrap().extend_from_slice(buf);
+            Poll::Ready(Ok(buf.len()))
+        }
+
+        fn poll_flush(self: Pin<&mut Self>, _cx: &mut Context<'_>) -> Poll<io::Result<()>> {
+            Poll::Ready(Ok(()))
+        }
+
+        fn poll_shutdown(self: Pin<&mut Self>, _cx: &mut Context<'_>) -> Poll<io::Result<()>> {
+            Poll::Ready(Ok(()))
+        }
+    }
+
+    struct GatedBodyIo {
+        head: Vec<u8>,
+        body: Vec<u8>,
+        release_marker: Vec<u8>,
+        gated_polls: usize,
+        written: Arc<Mutex<Vec<u8>>>,
+    }
+
+    impl GatedBodyIo {
+        fn new(
+            head: Vec<u8>,
+            body: Vec<u8>,
+            release_marker: Vec<u8>,
+            written: Arc<Mutex<Vec<u8>>>,
+        ) -> Self {
+            Self {
+                head,
+                body,
+                release_marker,
+                gated_polls: 0,
+                written,
+            }
+        }
+
+        fn body_release_seen(&self) -> bool {
+            let written = self.written.lock().unwrap();
+            written
+                .windows(self.release_marker.len())
+                .any(|window| window == self.release_marker.as_slice())
+        }
+    }
+
+    impl AsyncRead for GatedBodyIo {
+        fn poll_read(
+            mut self: Pin<&mut Self>,
+            cx: &mut Context<'_>,
+            buf: &mut ReadBuf<'_>,
+        ) -> Poll<io::Result<()>> {
+            if !self.head.is_empty() {
+                let n = std::cmp::min(buf.remaining(), self.head.len());
+                buf.put_slice(&self.head[..n]);
+                self.head.drain(..n);
+                return Poll::Ready(Ok(()));
+            }
+
+            if self.body.is_empty() {
+                return Poll::Ready(Ok(()));
+            }
+
+            if self.body_release_seen() {
+                let n = std::cmp::min(buf.remaining(), self.body.len());
+                buf.put_slice(&self.body[..n]);
+                self.body.drain(..n);
+                return Poll::Ready(Ok(()));
+            }
+
+            self.gated_polls += 1;
+            assert!(
+                self.gated_polls < 8,
+                "request body stayed gated because the server never emitted the expected interim response"
+            );
+            cx.waker().wake_by_ref();
+            Poll::Pending
+        }
+    }
+
+    impl AsyncWrite for GatedBodyIo {
+        fn poll_write(
+            self: Pin<&mut Self>,
+            _cx: &mut Context<'_>,
+            buf: &[u8],
+        ) -> Poll<io::Result<usize>> {
+            self.written.lock().unwrap().extend_from_slice(buf);
+            Poll::Ready(Ok(buf.len()))
+        }
+
+        fn poll_flush(self: Pin<&mut Self>, _cx: &mut Context<'_>) -> Poll<io::Result<()>> {
+            Poll::Ready(Ok(()))
+        }
+
+        fn poll_shutdown(self: Pin<&mut Self>, _cx: &mut Context<'_>) -> Poll<io::Result<()>> {
+            Poll::Ready(Ok(()))
+        }
+    }
 
     fn make_request(version: Version, headers: Vec<(String, String)>) -> Request {
         Request {
@@ -886,6 +1122,20 @@ mod tests {
     }
 
     #[test]
+    fn suppress_response_body_for_head_replaces_chunked_framing() {
+        let mut resp = Response::new(200, "OK", b"hello".to_vec())
+            .with_header("Transfer-Encoding", "chunked")
+            .with_trailer("X-Trace", "abc123");
+
+        suppress_response_body_for_head(&mut resp);
+
+        assert!(resp.body.is_empty());
+        assert!(resp.trailers.is_empty());
+        assert_eq!(resp.header_value("transfer-encoding"), None);
+        assert_eq!(resp.header_value("content-length"), Some("5"));
+    }
+
+    #[test]
     fn config_builder() {
         let config = Http1Config::default()
             .max_headers_size(1024)
@@ -959,6 +1209,101 @@ mod tests {
             vec![("Transfer-Encoding".into(), "chunked".into())],
         );
         assert!(request_expects_body(&req));
+    }
+
+    #[test]
+    fn serve_head_request_omits_response_body_bytes() {
+        let written = Arc::new(Mutex::new(Vec::new()));
+        let io = TestIo::new(
+            b"HEAD / HTTP/1.1\r\nHost: localhost\r\nConnection: close\r\n\r\n".to_vec(),
+            Arc::clone(&written),
+        );
+        let server = Http1Server::new(|_req| async move { Response::new(200, "OK", b"hello") });
+        let runtime = RuntimeBuilder::current_thread()
+            .build()
+            .expect("build current-thread runtime");
+
+        let state = runtime
+            .block_on(async { server.serve(io).await })
+            .expect("serve head request");
+
+        assert_eq!(state.requests_served, 1);
+
+        let written = String::from_utf8(written.lock().unwrap().clone())
+            .expect("response should be valid utf8");
+        assert!(written.starts_with("HTTP/1.1 200 OK\r\n"));
+        assert!(written.contains("Content-Length: 5\r\n"));
+        assert!(written.contains("Connection: close\r\n"));
+        assert!(written.ends_with("\r\n\r\n"));
+        assert!(!written.ends_with("\r\n\r\nhello"));
+    }
+
+    #[test]
+    fn serve_expect_continue_unblocks_body_waiting_client() {
+        let written = Arc::new(Mutex::new(Vec::new()));
+        let seen_body = Arc::new(Mutex::new(Vec::new()));
+        let io = GatedBodyIo::new(
+            b"POST /upload HTTP/1.1\r\nHost: localhost\r\nExpect: 100-continue\r\nContent-Length: 5\r\nConnection: close\r\n\r\n".to_vec(),
+            b"hello".to_vec(),
+            b"HTTP/1.1 100 Continue\r\n\r\n".to_vec(),
+            Arc::clone(&written),
+        );
+        let seen_body_for_handler = Arc::clone(&seen_body);
+        let server = Http1Server::new(move |req| {
+            let seen_body_for_handler = Arc::clone(&seen_body_for_handler);
+            async move {
+                *seen_body_for_handler.lock().unwrap() = req.body.clone();
+                Response::new(200, "OK", b"done")
+            }
+        });
+        let runtime = RuntimeBuilder::current_thread()
+            .build()
+            .expect("build current-thread runtime");
+
+        let state = runtime
+            .block_on(async { server.serve(io).await })
+            .expect("serve expect-continue request");
+
+        assert_eq!(state.requests_served, 1);
+        assert_eq!(&*seen_body.lock().unwrap(), b"hello");
+
+        let written = String::from_utf8(written.lock().unwrap().clone())
+            .expect("response should be valid utf8");
+        assert!(written.starts_with("HTTP/1.1 100 Continue\r\n\r\nHTTP/1.1 200 OK\r\n"));
+        assert!(written.contains("Content-Length: 4\r\n"));
+    }
+
+    #[test]
+    fn serve_rejects_unsupported_expectation_before_body_arrives() {
+        let written = Arc::new(Mutex::new(Vec::new()));
+        let handler_called = Arc::new(AtomicBool::new(false));
+        let io = GatedBodyIo::new(
+            b"POST /upload HTTP/1.1\r\nHost: localhost\r\nExpect: fancy-feature\r\nContent-Length: 5\r\nConnection: close\r\n\r\n".to_vec(),
+            b"hello".to_vec(),
+            b"HTTP/1.1 417 Expectation Failed\r\n".to_vec(),
+            Arc::clone(&written),
+        );
+        let handler_called_for_handler = Arc::clone(&handler_called);
+        let server = Http1Server::new(move |_req| {
+            handler_called_for_handler.store(true, Ordering::SeqCst);
+            async move { Response::new(200, "OK", b"nope") }
+        });
+        let runtime = RuntimeBuilder::current_thread()
+            .build()
+            .expect("build current-thread runtime");
+
+        let state = runtime
+            .block_on(async { server.serve(io).await })
+            .expect("serve unsupported expect request");
+
+        assert_eq!(state.requests_served, 1);
+        assert!(!handler_called.load(Ordering::SeqCst));
+
+        let written = String::from_utf8(written.lock().unwrap().clone())
+            .expect("response should be valid utf8");
+        assert!(written.starts_with("HTTP/1.1 417 Expectation Failed\r\n"));
+        assert!(written.contains("Connection: close\r\n"));
+        assert!(!written.contains("200 OK"));
     }
 
     #[test]

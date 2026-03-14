@@ -368,11 +368,15 @@ impl SymbolSet {
             }
             let total = progress.total();
             let raw = (f64::from(k) * config.overhead_factor).ceil();
-            if raw.is_sign_negative() {
-                return false;
+            let minimum_threshold = k_usize.saturating_add(config.min_overhead);
+            if !raw.is_finite() || raw.is_sign_negative() {
+                return total >= minimum_threshold;
             }
             #[allow(clippy::cast_sign_loss)]
-            let threshold = (raw as usize).saturating_add(config.min_overhead);
+            let factor_threshold = raw as usize;
+            // `overhead_factor` is already a total-symbol target; `min_overhead`
+            // is the minimum extra beyond K, so it acts as a floor instead.
+            let threshold = factor_threshold.max(minimum_threshold);
             total >= threshold
         })
     }
@@ -639,6 +643,38 @@ mod tests {
         let _ = set.insert(test_symbol(0, 0, 4));
         assert!(!set.set_block_k(0, 2));
         assert!(!set.threshold_reached(0));
+    }
+
+    #[test]
+    fn threshold_reached_when_minimum_extra_dominates_without_double_counting() {
+        let config = ThresholdConfig::new(1.05, 3, 0);
+        let mut set = SymbolSet::with_config(config);
+        assert!(!set.set_block_k(0, 10));
+
+        let _ = set.insert(test_symbol(0, 0, 4));
+        for esi in 1..=11 {
+            let _ = set.insert(test_symbol(0, esi, 4));
+        }
+        assert!(!set.threshold_reached(0));
+
+        let _ = set.insert(test_symbol(0, 12, 4));
+        assert!(set.threshold_reached(0));
+    }
+
+    #[test]
+    fn threshold_reached_when_factor_dominates_without_extra_increment() {
+        let config = ThresholdConfig::new(1.5, 1, 0);
+        let mut set = SymbolSet::with_config(config);
+        assert!(!set.set_block_k(0, 10));
+
+        let _ = set.insert(test_symbol(0, 0, 4));
+        for esi in 1..=13 {
+            let _ = set.insert(test_symbol(0, esi, 4));
+        }
+        assert!(!set.threshold_reached(0));
+
+        let _ = set.insert(test_symbol(0, 14, 4));
+        assert!(set.threshold_reached(0));
     }
 
     // =========================================================================

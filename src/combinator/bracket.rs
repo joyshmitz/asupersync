@@ -1,14 +1,17 @@
 //! Bracket combinator for resource safety.
 //!
-//! The bracket pattern ensures that resources are always released, even when
-//! errors or cancellation occur. It follows the acquire/use/release pattern
+//! The bracket pattern runs explicit acquire/use/release logic and makes a
+//! bounded best-effort attempt to drive release during drop if cancellation
+//! interrupts the normal path. It follows the acquire/use/release pattern
 //! familiar from RAII and try-finally.
 //!
 //! # Cancel Safety
 //!
-//! The [`bracket`] function and [`Bracket`] struct are cancel-safe. If the
-//! returned future is dropped during the use phase, the release function
-//! will still be called synchronously during drop.
+//! The [`bracket`] function and [`Bracket`] struct try to run release
+//! synchronously during drop if the returned future is cancelled during the
+//! use or release phases. Release futures that can make progress under a
+//! noop waker complete during this drop path; futures that require external
+//! wakeups may not finish before the bounded drop loop gives up.
 
 use crate::cx::Cx;
 use std::future::Future;
@@ -67,14 +70,17 @@ struct BracketState<Res, T, E, A, UF, R, RF> {
 
 /// Cancel-safe bracket combinator future.
 ///
-/// This struct implements `Future` and guarantees that the release function
-/// is called even if the future is dropped during the use phase (cancellation).
+/// This struct implements `Future` and runs explicit acquire/use/release
+/// phases, with bounded best-effort drop-time cleanup if cancellation interrupts
+/// the normal path.
 ///
 /// # Cancel Safety
 ///
-/// When dropped during the `Using` phase, the `Drop` implementation will
-/// synchronously drive the release future to completion. This guarantees
-/// resource cleanup even on cancellation.
+/// When dropped during the `Using` or `Releasing` phases, the `Drop`
+/// implementation makes a bounded best-effort attempt to synchronously
+/// drive the release future to completion. Immediately-progressable release
+/// futures are cleaned up even on cancellation; externally-woken release
+/// futures may still outlive that bounded drop loop.
 ///
 /// # Example
 /// ```ignore
@@ -95,7 +101,8 @@ where
     use_fn: Option<U>,
 }
 
-// Bracket is Unpin because all futures are stored as Pin<Box<F>> which is always Unpin.
+// Bracket is Unpin because its pinned state lives behind Pin<Box<_>> and the
+// remaining fields are not self-referential.
 impl<Res, T, E, A, U, UF, R, RF> Unpin for Bracket<Res, T, E, A, U, UF, R, RF>
 where
     R: FnOnce(Res) -> RF,
@@ -125,6 +132,30 @@ where
             use_fn: Some(use_fn),
         }
     }
+
+    fn transition_to_releasing(&mut self) -> std::thread::Result<()> {
+        let release_fn = self
+            .state
+            .release_fn
+            .take()
+            .expect("release_fn consumed twice");
+        let resource = self
+            .state
+            .resource_for_release
+            .take()
+            .expect("resource_for_release missing");
+
+        match std::panic::catch_unwind(std::panic::AssertUnwindSafe(|| release_fn(resource))) {
+            Ok(release_fut) => {
+                self.state.phase = BracketPhase::Releasing(Box::pin(release_fut));
+                Ok(())
+            }
+            Err(payload) => {
+                self.state.phase = BracketPhase::Done;
+                Err(payload)
+            }
+        }
+    }
 }
 
 impl<Res, T, E, A, U, UF, R, RF> Future for Bracket<Res, T, E, A, U, UF, R, RF>
@@ -145,20 +176,37 @@ where
         loop {
             match &mut this.state.phase {
                 BracketPhase::Acquiring(acquire_fut) => {
-                    match acquire_fut.as_mut().poll(cx) {
-                        Poll::Pending => return Poll::Pending,
-                        Poll::Ready(Err(e)) => {
+                    match std::panic::catch_unwind(std::panic::AssertUnwindSafe(|| {
+                        acquire_fut.as_mut().poll(cx)
+                    })) {
+                        Err(panic_payload) => {
+                            this.state.phase = BracketPhase::Done;
+                            std::panic::resume_unwind(panic_payload);
+                        }
+                        Ok(Poll::Pending) => return Poll::Pending,
+                        Ok(Poll::Ready(Err(e))) => {
                             this.state.phase = BracketPhase::Done;
                             return Poll::Ready(Err(BracketError::Inner(e)));
                         }
-                        Poll::Ready(Ok(resource)) => {
+                        Ok(Poll::Ready(Ok(resource))) => {
                             // Clone resource for release before use_fn consumes it
                             this.state.resource_for_release = Some(resource.clone());
 
                             // Transition to Using phase
                             let use_fn = this.use_fn.take().expect("use_fn consumed twice");
-                            let use_fut = Box::pin(use_fn(resource));
-                            this.state.phase = BracketPhase::Using(use_fut);
+                            match std::panic::catch_unwind(std::panic::AssertUnwindSafe(|| {
+                                use_fn(resource)
+                            })) {
+                                Ok(use_fut) => {
+                                    this.state.phase = BracketPhase::Using(Box::pin(use_fut));
+                                }
+                                Err(panic_payload) => {
+                                    this.state.use_result = Some(Err(panic_payload));
+                                    if let Err(release_panic) = this.transition_to_releasing() {
+                                        std::panic::resume_unwind(release_panic);
+                                    }
+                                }
+                            }
                             // Continue loop to poll use phase
                         }
                     }
@@ -176,44 +224,32 @@ where
                         Ok(Poll::Ready(result)) => {
                             // Use completed, store result and transition to Releasing
                             this.state.use_result = Some(Ok(result));
-                            let release_fn = this
-                                .state
-                                .release_fn
-                                .take()
-                                .expect("release_fn consumed twice");
-                            let resource = this
-                                .state
-                                .resource_for_release
-                                .take()
-                                .expect("resource_for_release missing");
-                            let release_fut = Box::pin(release_fn(resource));
-                            this.state.phase = BracketPhase::Releasing(release_fut);
+                            if let Err(release_panic) = this.transition_to_releasing() {
+                                std::panic::resume_unwind(release_panic);
+                            }
                             // Continue loop to poll release phase
                         }
                         Err(panic_payload) => {
                             // Use panicked, store panic and transition to Releasing
                             this.state.use_result = Some(Err(panic_payload));
-                            let release_fn = this
-                                .state
-                                .release_fn
-                                .take()
-                                .expect("release_fn consumed twice");
-                            let resource = this
-                                .state
-                                .resource_for_release
-                                .take()
-                                .expect("resource_for_release missing");
-                            let release_fut = Box::pin(release_fn(resource));
-                            this.state.phase = BracketPhase::Releasing(release_fut);
+                            if let Err(release_panic) = this.transition_to_releasing() {
+                                std::panic::resume_unwind(release_panic);
+                            }
                             // Continue loop to poll release phase
                         }
                     }
                 }
 
                 BracketPhase::Releasing(release_fut) => {
-                    match release_fut.as_mut().poll(cx) {
-                        Poll::Pending => return Poll::Pending,
-                        Poll::Ready(()) => {
+                    match std::panic::catch_unwind(std::panic::AssertUnwindSafe(|| {
+                        release_fut.as_mut().poll(cx)
+                    })) {
+                        Err(panic_payload) => {
+                            this.state.phase = BracketPhase::Done;
+                            std::panic::resume_unwind(panic_payload);
+                        }
+                        Ok(Poll::Pending) => return Poll::Pending,
+                        Ok(Poll::Ready(())) => {
                             this.state.phase = BracketPhase::Done;
                             // Return the stored use result
                             match this.state.use_result.take().expect("use_result missing") {
@@ -240,23 +276,27 @@ where
     RF: Future<Output = ()>,
 {
     fn drop(&mut self) {
+        let mut release_panic: Option<Box<dyn std::any::Any + Send>> = None;
         // Determine the release future to drive:
-        // - Acquiring phase: if resource_for_release is Some, use_fn panicked during transition.
         // - Using phase: resource acquired but use not complete; construct release future.
         // - Releasing phase: release already started but not complete; drive existing future.
         let release_fut: Option<Pin<Box<RF>>> = match &self.state.phase {
             BracketPhase::Acquiring(_) | BracketPhase::Using(_) => {
-                // Cancel during use or if use_fn panicked during transition:
-                // construct the release future from saved state.
+                // Cancel before release starts: construct the release future
+                // from the saved resource clone if one exists.
                 if let (Some(release_fn), Some(resource)) = (
                     self.state.release_fn.take(),
                     self.state.resource_for_release.take(),
                 ) {
-                    // Catch panic from release_fn itself
-                    let result = std::panic::catch_unwind(std::panic::AssertUnwindSafe(|| {
+                    match std::panic::catch_unwind(std::panic::AssertUnwindSafe(|| {
                         release_fn(resource)
-                    }));
-                    result.ok().map(|fut| Box::pin(fut))
+                    })) {
+                        Ok(fut) => Some(Box::pin(fut)),
+                        Err(payload) => {
+                            release_panic = Some(payload);
+                            None
+                        }
+                    }
                 } else {
                     None
                 }
@@ -270,6 +310,13 @@ where
             }
             BracketPhase::Done => None,
         };
+
+        if let Some(payload) = release_panic {
+            if !std::thread::panicking() {
+                std::panic::resume_unwind(payload);
+            }
+            return;
+        }
 
         if let Some(mut release_fut) = release_fut {
             // Drive it to completion synchronously using a noop waker.
@@ -285,7 +332,20 @@ where
                     release_fut.as_mut().poll(&mut cx)
                 }));
                 match poll_result {
-                    Ok(Poll::Ready(())) | Err(_) => return,
+                    Ok(Poll::Ready(())) => {
+                        if !std::thread::panicking() {
+                            if let Some(Err(payload)) = self.state.use_result.take() {
+                                std::panic::resume_unwind(payload);
+                            }
+                        }
+                        return;
+                    }
+                    Err(payload) => {
+                        if !std::thread::panicking() {
+                            std::panic::resume_unwind(payload);
+                        }
+                        return;
+                    }
                     Ok(Poll::Pending) => {
                         // Yield to allow progress
                         std::hint::spin_loop();
@@ -313,13 +373,16 @@ impl Wake for NoopWaker {
 
 /// Executes the bracket pattern: acquire, use, release.
 ///
-/// This function guarantees that the release function is called even if
-/// the use function returns an error, panics, or the future is cancelled.
+/// This function runs the release function on the normal completion path,
+/// and makes a bounded best-effort drop-time cleanup attempt if the future
+/// is cancelled after acquire succeeds.
 ///
 /// # Cancel Safety
 ///
-/// This function is cancel-safe. If the returned future is dropped during
-/// the use phase, the release function will still be called synchronously.
+/// This function attempts synchronous release during drop when cancellation
+/// interrupts the use or release phases. Release futures that can complete
+/// under the bounded noop-waker drop loop will be cleaned up; release
+/// futures that require external wakeups may not finish in that path.
 ///
 /// # Arguments
 /// * `acquire` - Future that acquires the resource
@@ -395,59 +458,66 @@ where
     }
 }
 
-/// Helper future to catch panics during polling.
-struct CatchPanic<F>(Pin<Box<F>>);
-
-impl<F: Future> Future for CatchPanic<F> {
-    type Output = std::thread::Result<F::Output>;
-
-    fn poll(mut self: Pin<&mut Self>, cx: &mut Context<'_>) -> Poll<Self::Output> {
-        let inner = self.0.as_mut();
-
-        let result = std::panic::catch_unwind(std::panic::AssertUnwindSafe(|| inner.poll(cx)));
-
-        match result {
-            Ok(Poll::Ready(v)) => Poll::Ready(Ok(v)),
-            Ok(Poll::Pending) => Poll::Pending,
-            Err(payload) => Poll::Ready(Err(payload)),
-        }
-    }
-}
-
 /// Commit section: runs a future with bounded cancel masking.
 ///
-/// This is useful for two-phase commit operations where a critical section
-/// must complete without interruption.
+/// This is useful for two-phase commit operations where a short critical
+/// section needs a bounded window of cancellation masking.
+///
+/// The future is polled with cancellation masked for at most `max_polls`
+/// polls. Once that masked budget is exhausted, subsequent polls run
+/// unmasked so cancellation-aware checkpoints can observe pending cancel
+/// requests instead of deferring them forever.
 ///
 /// # Arguments
 /// * `cx` - The capability context
-/// * `max_polls` - Maximum polls allowed (budget bound)
+/// * `max_polls` - Maximum number of polls that keep cancellation masked
 /// * `f` - The future to run
 ///
 /// # Example
 /// ```ignore
 /// let permit = tx.reserve(cx).await?;
 /// commit_section(cx, 10, async {
-///     permit.send(message);  // Must complete
+///     permit.send(message);  // Keep this section short
 /// }).await;
 /// ```
-pub async fn commit_section<F, T>(cx: &Cx, _max_polls: u32, f: F) -> T
+pub async fn commit_section<F, T>(cx: &Cx, max_polls: u32, f: F) -> T
 where
     F: Future<Output = T>,
 {
     let mut future = Box::pin(f);
-    std::future::poll_fn(|task_cx| cx.masked(|| future.as_mut().poll(task_cx))).await
+    let mut masked_polls = 0u32;
+    std::future::poll_fn(|task_cx| {
+        if masked_polls < max_polls {
+            masked_polls = masked_polls.saturating_add(1);
+            cx.masked(|| future.as_mut().poll(task_cx))
+        } else {
+            future.as_mut().poll(task_cx)
+        }
+    })
+    .await
 }
 
 /// Commit section that returns a Result.
 ///
 /// Similar to `commit_section` but for fallible operations.
-pub async fn try_commit_section<F, T, E>(cx: &Cx, _max_polls: u32, f: F) -> Result<T, E>
+///
+/// `max_polls` bounds how many polls run under cancellation masking before
+/// later polls proceed unmasked.
+pub async fn try_commit_section<F, T, E>(cx: &Cx, max_polls: u32, f: F) -> Result<T, E>
 where
     F: Future<Output = Result<T, E>>,
 {
     let mut future = Box::pin(f);
-    std::future::poll_fn(|task_cx| cx.masked(|| future.as_mut().poll(task_cx))).await
+    let mut masked_polls = 0u32;
+    std::future::poll_fn(|task_cx| {
+        if masked_polls < max_polls {
+            masked_polls = masked_polls.saturating_add(1);
+            cx.masked(|| future.as_mut().poll(task_cx))
+        } else {
+            future.as_mut().poll(task_cx)
+        }
+    })
+    .await
 }
 
 #[cfg(test)]
@@ -807,6 +877,45 @@ mod tests {
         assert!(matches!(second, Poll::Ready(Ok(()))), "{second:?}");
     }
 
+    #[test]
+    fn commit_section_unmasks_after_max_polls() {
+        let cx = test_cx();
+        cx.set_cancel_requested(true);
+
+        let waker = noop_waker();
+        let mut task_cx = Context::from_waker(&waker);
+        let mut fut = Box::pin(commit_section(
+            &cx,
+            1,
+            PendingThenCheckpoint {
+                cx: &cx,
+                first_poll: true,
+            },
+        ));
+
+        assert!(matches!(fut.as_mut().poll(&mut task_cx), Poll::Pending));
+
+        let second = fut.as_mut().poll(&mut task_cx);
+        match second {
+            Poll::Ready(Err(err)) => assert!(err.is_cancelled(), "{err:?}"),
+            other => panic!("expected cancelled result after masked poll budget, got {other:?}"),
+        }
+    }
+
+    #[test]
+    fn commit_section_zero_max_polls_never_masks() {
+        let cx = test_cx();
+        cx.set_cancel_requested(true);
+
+        let cx_clone = cx.clone();
+        let result = poll_ready(commit_section(&cx, 0, async move { cx_clone.checkpoint() }));
+
+        assert!(
+            matches!(result, Err(ref err) if err.is_cancelled()),
+            "{result:?}"
+        );
+    }
+
     // =========================================================================
     // try_commit_section() Tests
     // =========================================================================
@@ -865,6 +974,48 @@ mod tests {
 
         let second = fut.as_mut().poll(&mut task_cx);
         assert!(matches!(second, Poll::Ready(Ok(42))), "{second:?}");
+    }
+
+    #[test]
+    fn try_commit_section_unmasks_after_max_polls() {
+        let cx = test_cx();
+        cx.set_cancel_requested(true);
+
+        let waker = noop_waker();
+        let mut task_cx = Context::from_waker(&waker);
+        let mut fut = Box::pin(try_commit_section(
+            &cx,
+            1,
+            PendingThenCheckpointResult {
+                cx: &cx,
+                first_poll: true,
+                value: 42,
+            },
+        ));
+
+        assert!(matches!(fut.as_mut().poll(&mut task_cx), Poll::Pending));
+
+        let second = fut.as_mut().poll(&mut task_cx);
+        match second {
+            Poll::Ready(Err(err)) => assert!(err.is_cancelled(), "{err:?}"),
+            other => panic!("expected cancelled result after masked poll budget, got {other:?}"),
+        }
+    }
+
+    #[test]
+    fn try_commit_section_zero_max_polls_never_masks() {
+        let cx = test_cx();
+        cx.set_cancel_requested(true);
+
+        let cx_clone = cx.clone();
+        let result = poll_ready(try_commit_section(&cx, 0, async move {
+            cx_clone.checkpoint().map(|()| 42)
+        }));
+
+        assert!(
+            matches!(result, Err(ref err) if err.is_cancelled()),
+            "{result:?}"
+        );
     }
 
     // =========================================================================
@@ -968,6 +1119,16 @@ mod tests {
         }
     }
 
+    struct PanicOnPollUse;
+
+    impl Future for PanicOnPollUse {
+        type Output = Result<(), ()>;
+
+        fn poll(self: Pin<&mut Self>, _cx: &mut Context<'_>) -> Poll<Self::Output> {
+            panic!("use future panicked before release completed");
+        }
+    }
+
     /// Regression: if the bracket future is dropped while the release future
     /// is in progress (Releasing phase returns Pending then the bracket is
     /// dropped), the Drop handler must drive the release future to completion.
@@ -1006,6 +1167,266 @@ mod tests {
         assert!(
             released.load(Ordering::SeqCst),
             "release must complete even when bracket is dropped during Releasing phase"
+        );
+    }
+
+    #[test]
+    fn bracket_drop_during_releasing_preserves_stored_use_panic() {
+        let released = Arc::new(AtomicBool::new(false));
+        let rel = released.clone();
+
+        let waker = noop_waker();
+        let mut cx = Context::from_waker(&waker);
+
+        let mut fut = Box::pin(bracket(
+            async { Ok::<_, ()>(42_i32) },
+            |_x| PanicOnPollUse,
+            move |_| TwoPollRelease {
+                done: false,
+                flag: rel,
+            },
+        ));
+
+        let poll1 = fut.as_mut().poll(&mut cx);
+        assert!(
+            poll1.is_pending(),
+            "panicking use future should still leave bracket pending until release finishes"
+        );
+        assert!(!released.load(Ordering::SeqCst), "release not yet complete");
+
+        let panic = std::panic::catch_unwind(std::panic::AssertUnwindSafe(|| drop(fut)));
+        assert!(
+            panic.is_err(),
+            "drop must rethrow the stored use panic after completing release"
+        );
+        assert!(
+            released.load(Ordering::SeqCst),
+            "drop should still finish the release future before rethrowing the use panic"
+        );
+    }
+
+    struct NeverReadyUse;
+
+    impl Future for NeverReadyUse {
+        type Output = Result<(), ()>;
+
+        fn poll(self: Pin<&mut Self>, _cx: &mut Context<'_>) -> Poll<Self::Output> {
+            Poll::Pending
+        }
+    }
+
+    struct PanicOnSecondPollRelease {
+        first_poll: bool,
+    }
+
+    impl Future for PanicOnSecondPollRelease {
+        type Output = ();
+
+        fn poll(mut self: Pin<&mut Self>, _cx: &mut Context<'_>) -> Poll<Self::Output> {
+            if self.first_poll {
+                self.first_poll = false;
+                Poll::Pending
+            } else {
+                panic!("release future panicked during drop");
+            }
+        }
+    }
+
+    #[test]
+    fn bracket_drop_during_using_propagates_release_constructor_panic() {
+        let waker = noop_waker();
+        let mut cx = Context::from_waker(&waker);
+
+        let mut fut = Box::pin(bracket(
+            async { Ok::<_, ()>(42_i32) },
+            |_| NeverReadyUse,
+            |_| -> std::future::Ready<()> { panic!("release constructor panicked during drop") },
+        ));
+
+        assert!(
+            matches!(fut.as_mut().poll(&mut cx), Poll::Pending),
+            "use future should still be pending before cancellation"
+        );
+
+        let panic = std::panic::catch_unwind(std::panic::AssertUnwindSafe(|| drop(fut)));
+        assert!(
+            panic.is_err(),
+            "drop should surface release constructor panics when not already unwinding"
+        );
+    }
+
+    #[test]
+    fn bracket_drop_during_releasing_propagates_release_poll_panic() {
+        let waker = noop_waker();
+        let mut cx = Context::from_waker(&waker);
+
+        let mut fut = Box::pin(bracket(
+            async { Ok::<_, ()>(42_i32) },
+            |x| async move { Ok::<_, ()>(x) },
+            |_| PanicOnSecondPollRelease { first_poll: true },
+        ));
+
+        assert!(
+            matches!(fut.as_mut().poll(&mut cx), Poll::Pending),
+            "release future should be pending before drop drives it again"
+        );
+
+        let panic = std::panic::catch_unwind(std::panic::AssertUnwindSafe(|| drop(fut)));
+        assert!(
+            panic.is_err(),
+            "drop should surface release future panics when not already unwinding"
+        );
+    }
+
+    struct PanicAcquireFuture;
+
+    impl Future for PanicAcquireFuture {
+        type Output = Result<i32, &'static str>;
+
+        fn poll(self: Pin<&mut Self>, _cx: &mut Context<'_>) -> Poll<Self::Output> {
+            panic!("acquire future panicked");
+        }
+    }
+
+    struct ImmediatePanicRelease;
+
+    impl Future for ImmediatePanicRelease {
+        type Output = ();
+
+        fn poll(self: Pin<&mut Self>, _cx: &mut Context<'_>) -> Poll<Self::Output> {
+            panic!("release future panicked during normal poll");
+        }
+    }
+
+    struct PollCountingUse {
+        polls: Arc<AtomicUsize>,
+    }
+
+    impl Future for PollCountingUse {
+        type Output = Result<i32, &'static str>;
+
+        fn poll(self: Pin<&mut Self>, _cx: &mut Context<'_>) -> Poll<Self::Output> {
+            self.polls.fetch_add(1, Ordering::SeqCst);
+            Poll::Ready(Ok(42))
+        }
+    }
+
+    #[test]
+    fn bracket_use_fn_panic_marks_future_done_after_unwind_is_caught() {
+        let acquire_polls = Arc::new(AtomicUsize::new(0));
+        let released = Arc::new(AtomicBool::new(false));
+        let rel = released.clone();
+
+        let waker = noop_waker();
+        let mut cx = Context::from_waker(&waker);
+
+        let mut fut = Box::pin(bracket(
+            PollCountingStream {
+                polls: acquire_polls.clone(),
+            },
+            |_| -> std::future::Ready<Result<i32, &'static str>> {
+                panic!("use_fn panicked during transition")
+            },
+            move |_| {
+                rel.store(true, Ordering::SeqCst);
+                async {}
+            },
+        ));
+
+        let first = std::panic::catch_unwind(std::panic::AssertUnwindSafe(|| {
+            let _ = fut.as_mut().poll(&mut cx);
+        }));
+        assert!(first.is_err(), "use_fn panic must still propagate");
+        assert!(
+            released.load(Ordering::SeqCst),
+            "release must run before the panic escapes"
+        );
+        assert_eq!(acquire_polls.load(Ordering::SeqCst), 1);
+
+        let second = fut.as_mut().poll(&mut cx);
+        assert_eq!(
+            second,
+            Poll::Ready(Err(BracketError::PolledAfterCompletion))
+        );
+        assert_eq!(acquire_polls.load(Ordering::SeqCst), 1);
+    }
+
+    #[test]
+    fn bracket_release_constructor_panic_marks_future_done_after_unwind_is_caught() {
+        let use_polls = Arc::new(AtomicUsize::new(0));
+        let use_polls_for_future = use_polls.clone();
+
+        let waker = noop_waker();
+        let mut cx = Context::from_waker(&waker);
+
+        let mut fut = Box::pin(bracket(
+            async { Ok::<_, &'static str>(42_i32) },
+            move |_| PollCountingUse {
+                polls: use_polls_for_future,
+            },
+            |_| -> std::future::Ready<()> { panic!("release constructor panicked") },
+        ));
+
+        let first = std::panic::catch_unwind(std::panic::AssertUnwindSafe(|| {
+            let _ = fut.as_mut().poll(&mut cx);
+        }));
+        assert!(
+            first.is_err(),
+            "release constructor panic must still propagate"
+        );
+        assert_eq!(use_polls.load(Ordering::SeqCst), 1);
+
+        let second = fut.as_mut().poll(&mut cx);
+        assert_eq!(
+            second,
+            Poll::Ready(Err(BracketError::PolledAfterCompletion))
+        );
+        assert_eq!(use_polls.load(Ordering::SeqCst), 1);
+    }
+
+    #[test]
+    fn bracket_acquire_panic_marks_future_done_after_unwind_is_caught() {
+        let waker = noop_waker();
+        let mut cx = Context::from_waker(&waker);
+
+        let mut fut = Box::pin(bracket(
+            PanicAcquireFuture,
+            |x| async move { Ok::<_, &'static str>(x) },
+            |_| async {},
+        ));
+
+        let first = std::panic::catch_unwind(std::panic::AssertUnwindSafe(|| {
+            let _ = fut.as_mut().poll(&mut cx);
+        }));
+        assert!(first.is_err(), "acquire panic must still propagate");
+
+        let second = fut.as_mut().poll(&mut cx);
+        assert_eq!(
+            second,
+            Poll::Ready(Err(BracketError::PolledAfterCompletion))
+        );
+    }
+
+    #[test]
+    fn bracket_release_poll_panic_marks_future_done_after_unwind_is_caught() {
+        let waker = noop_waker();
+        let mut cx = Context::from_waker(&waker);
+
+        let mut fut = Box::pin(bracket(
+            async { Ok::<_, &'static str>(42_i32) },
+            |x| async move { Ok::<_, &'static str>(x) },
+            |_| ImmediatePanicRelease,
+        ));
+
+        let first = std::panic::catch_unwind(std::panic::AssertUnwindSafe(|| {
+            let _ = fut.as_mut().poll(&mut cx);
+        }));
+        assert!(first.is_err(), "release poll panic must still propagate");
+
+        let second = fut.as_mut().poll(&mut cx);
+        assert_eq!(
+            second,
+            Poll::Ready(Err(BracketError::PolledAfterCompletion))
         );
     }
 

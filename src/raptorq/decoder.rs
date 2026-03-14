@@ -1608,8 +1608,8 @@ impl InactivationDecoder {
 
         let source: Vec<Vec<u8>> = intermediate[..k].to_vec();
 
-        // Mark success
-        proof_builder.set_success(k);
+        // Mark success with a deterministic binding to the recovered payload.
+        proof_builder.set_success(&source);
 
         Ok(DecodeResultWithProof {
             result: DecodeResult {
@@ -1907,10 +1907,7 @@ impl InactivationDecoder {
         state.stats.dense_core_cols = n_cols;
 
         if n_rows < n_cols {
-            return Err(DecodeError::InsufficientSymbols {
-                received: n_rows,
-                required: n_cols,
-            });
+            return Err(singular_matrix_error(&unsolved, n_rows));
         }
 
         // Build flat row-major dense matrix A and RHS vector b.
@@ -2118,6 +2115,9 @@ impl InactivationDecoder {
         state: &mut DecoderState,
         trace: &mut EliminationTrace,
     ) -> Result<(), DecodeError> {
+        // Each decode proof must describe only the current invocation, even if
+        // a caller reuses a trace buffer across runs.
+        *trace = EliminationTrace::default();
         let symbol_size = self.params.symbol_size;
 
         // Collect remaining unsolved columns
@@ -2131,6 +2131,7 @@ impl InactivationDecoder {
         if unsolved.is_empty() {
             return Ok(());
         }
+        state.stats.peeling_fallback_reason = Some("peeling_exhausted_to_dense_core");
 
         // Collect unused equations
         let unused_eqs: Vec<usize> = state
@@ -2169,10 +2170,7 @@ impl InactivationDecoder {
         state.stats.dense_core_cols = n_cols;
 
         if n_rows < n_cols {
-            return Err(DecodeError::InsufficientSymbols {
-                received: n_rows,
-                required: n_cols,
-            });
+            return Err(singular_matrix_error(&unsolved, n_rows));
         }
 
         // Build flat row-major dense matrix A and RHS vector b.
@@ -3743,6 +3741,48 @@ mod tests {
         }
     }
 
+    fn make_underdetermined_dense_core_state(
+        params: &SystematicParams,
+        symbol_size: usize,
+        left_col: usize,
+        right_col: usize,
+    ) -> DecoderState {
+        let equation = Equation::new(vec![left_col, right_col], vec![Gf256::ONE, Gf256::ONE]);
+        let active_cols = [left_col, right_col].into_iter().collect();
+        DecoderState {
+            params: params.clone(),
+            equations: vec![equation],
+            rhs: vec![vec![0x11; symbol_size]],
+            solved: vec![None; params.l],
+            active_cols,
+            inactive_cols: BTreeSet::new(),
+            stats: DecodeStats::default(),
+        }
+    }
+
+    fn make_reordered_underdetermined_dense_core_state(
+        params: &SystematicParams,
+        symbol_size: usize,
+        left_col: usize,
+        middle_col: usize,
+        right_col: usize,
+    ) -> DecoderState {
+        let eq_left_middle =
+            Equation::new(vec![left_col, middle_col], vec![Gf256::ONE, Gf256::ONE]);
+        let eq_middle_right =
+            Equation::new(vec![middle_col, right_col], vec![Gf256::ONE, Gf256::ONE]);
+        let active_cols = [left_col, middle_col, right_col].into_iter().collect();
+        DecoderState {
+            params: params.clone(),
+            equations: vec![eq_left_middle, eq_middle_right],
+            rhs: vec![vec![0x11; symbol_size], vec![0x22; symbol_size]],
+            solved: vec![None; params.l],
+            active_cols,
+            inactive_cols: BTreeSet::new(),
+            stats: DecodeStats::default(),
+        }
+    }
+
     fn make_pivot_tie_break_state(
         params: &SystematicParams,
         symbol_size: usize,
@@ -3893,6 +3933,34 @@ mod tests {
     }
 
     #[test]
+    fn underdetermined_dense_core_reports_singular_error() {
+        let decoder = InactivationDecoder::new(8, 16, 512);
+        let params = decoder.params().clone();
+        let mut state = make_underdetermined_dense_core_state(&params, 16, 3, 7);
+
+        let err = decoder.inactivate_and_solve(&mut state).unwrap_err();
+        assert_eq!(
+            err,
+            DecodeError::SingularMatrix { row: 7 },
+            "dense-core underdetermined systems should be classified as rank-deficient"
+        );
+    }
+
+    #[test]
+    fn underdetermined_dense_core_reports_witness_in_natural_unsolved_order() {
+        let decoder = InactivationDecoder::new(8, 16, 5121);
+        let params = decoder.params().clone();
+        let mut state = make_reordered_underdetermined_dense_core_state(&params, 16, 3, 7, 9);
+
+        let err = decoder.inactivate_and_solve(&mut state).unwrap_err();
+        assert_eq!(
+            err,
+            DecodeError::SingularMatrix { row: 9 },
+            "early underdetermined failure should report a witness the proof trace can explain"
+        );
+    }
+
+    #[test]
     fn singular_matrix_with_proof_keeps_deterministic_attempt_history() {
         let decoder = InactivationDecoder::new(8, 16, 321);
         let params = decoder.params().clone();
@@ -3911,6 +3979,115 @@ mod tests {
                 .collect::<Vec<_>>(),
             vec![3],
             "pivot history should be deterministic across rank-deficient failure"
+        );
+    }
+
+    #[test]
+    fn underdetermined_dense_core_with_proof_reports_singular_error() {
+        let decoder = InactivationDecoder::new(8, 16, 513);
+        let params = decoder.params().clone();
+        let mut state = make_underdetermined_dense_core_state(&params, 16, 3, 7);
+        let mut trace = EliminationTrace::default();
+
+        let err = decoder
+            .inactivate_and_solve_with_proof(&mut state, &mut trace)
+            .unwrap_err();
+        assert_eq!(
+            err,
+            DecodeError::SingularMatrix { row: 7 },
+            "proof path should keep the same rank-deficiency classification"
+        );
+        assert!(
+            trace.pivot_events.is_empty(),
+            "no pivots should be recorded when the dense core is underdetermined up front"
+        );
+        assert_eq!(
+            trace.inactive_cols,
+            vec![3, 7],
+            "proof trace should preserve deterministic inactivation order"
+        );
+        assert_eq!(trace.inactivated, 2);
+    }
+
+    #[test]
+    fn underdetermined_dense_core_with_proof_keeps_witness_in_inactive_col_order() {
+        let decoder = InactivationDecoder::new(8, 16, 5131);
+        let params = decoder.params().clone();
+        let mut state = make_reordered_underdetermined_dense_core_state(&params, 16, 3, 7, 9);
+        let mut trace = EliminationTrace::default();
+
+        let err = decoder
+            .inactivate_and_solve_with_proof(&mut state, &mut trace)
+            .unwrap_err();
+        assert_eq!(err, DecodeError::SingularMatrix { row: 9 });
+        assert_eq!(
+            trace.inactive_cols,
+            vec![3, 7, 9],
+            "proof trace should expose the same column ordering used for the underdetermined witness"
+        );
+        assert!(trace.pivot_events.is_empty());
+    }
+
+    #[test]
+    fn underdetermined_dense_core_with_proof_resets_stale_trace_state() {
+        let decoder = InactivationDecoder::new(8, 16, 514);
+        let params = decoder.params().clone();
+        let mut state = make_underdetermined_dense_core_state(&params, 16, 3, 7);
+        let mut trace = EliminationTrace::default();
+        trace.set_strategy(InactivationStrategy::BlockSchurLowRank);
+        trace.record_inactivation(99);
+        trace.record_pivot(88, 0);
+        trace.record_row_op();
+
+        let err = decoder
+            .inactivate_and_solve_with_proof(&mut state, &mut trace)
+            .unwrap_err();
+        assert_eq!(err, DecodeError::SingularMatrix { row: 7 });
+        assert_eq!(
+            trace.strategy,
+            InactivationStrategy::AllAtOnce,
+            "proof helper should not leak prior strategy state into a new decode"
+        );
+        assert_eq!(
+            trace.inactive_cols,
+            vec![3, 7],
+            "only the current decode's inactivations should remain in the trace"
+        );
+        assert_eq!(trace.inactivated, 2);
+        assert!(
+            trace.pivot_events.is_empty(),
+            "stale pivot events must be cleared before recording a new decode"
+        );
+        assert_eq!(trace.row_ops, 0);
+        assert!(
+            trace.strategy_transitions.is_empty(),
+            "stale strategy transitions must not leak across proof invocations"
+        );
+        assert!(!trace.truncated);
+    }
+
+    #[test]
+    fn proof_and_non_proof_dense_core_fallback_stats_stay_aligned() {
+        let decoder = InactivationDecoder::new(8, 16, 514);
+        let params = decoder.params().clone();
+
+        let mut plain_state = make_underdetermined_dense_core_state(&params, 16, 3, 7);
+        let plain_err = decoder.inactivate_and_solve(&mut plain_state).unwrap_err();
+
+        let mut proof_state = make_underdetermined_dense_core_state(&params, 16, 3, 7);
+        let mut trace = EliminationTrace::default();
+        let proof_err = decoder
+            .inactivate_and_solve_with_proof(&mut proof_state, &mut trace)
+            .unwrap_err();
+
+        assert_eq!(plain_err, proof_err);
+        assert_eq!(
+            plain_state.stats.peeling_fallback_reason,
+            Some("peeling_exhausted_to_dense_core")
+        );
+        assert_eq!(
+            proof_state.stats.peeling_fallback_reason, plain_state.stats.peeling_fallback_reason,
+            "proof capture must not change dense-core fallback telemetry"
         );
     }
 
@@ -4455,14 +4632,10 @@ mod tests {
                 );
             }
             Err(e) => {
-                // SingularMatrix is acceptable if duplicate introduces linear dependence
-                // that prevents pivot selection. But it must be a recognized error type.
+                // Redundant duplicate equations can still expose a rank-deficient witness,
+                // but they should not be flattened into a raw underprovisioning error.
                 assert!(
-                    matches!(
-                        e,
-                        DecodeError::SingularMatrix { .. }
-                            | DecodeError::InsufficientSymbols { .. }
-                    ),
+                    matches!(e, DecodeError::SingularMatrix { .. }),
                     "unexpected error type with duplicate ESI: {e:?}"
                 );
             }

@@ -11,6 +11,7 @@
 //! synchronous resolution. The async API is maintained for forward compatibility
 //! with future async DNS implementations.
 
+use std::io;
 use std::net::{IpAddr, SocketAddr, TcpStream as StdTcpStream, ToSocketAddrs};
 use std::pin::Pin;
 use std::sync::Arc;
@@ -302,6 +303,13 @@ impl Resolver {
     /// Connection attempts are started with staggered delays and raced
     /// concurrently. The first successful connection wins; all others are
     /// dropped. This replaces the previous sequential stagger implementation.
+    fn classify_connect_error(err: &io::Error) -> DnsError {
+        match err.kind() {
+            io::ErrorKind::TimedOut => DnsError::Timeout,
+            _ => DnsError::Connection(err.to_string()),
+        }
+    }
+
     async fn connect_happy_eyeballs(&self, addrs: &[SocketAddr]) -> Result<TcpStream, DnsError> {
         use crate::net::happy_eyeballs::{self, HappyEyeballsConfig};
 
@@ -318,7 +326,7 @@ impl Resolver {
 
         happy_eyeballs::connect_with_time_getter(addrs, &config, self.time_getter)
             .await
-            .map_err(|e| DnsError::Connection(e.to_string()))
+            .map_err(|err| Self::classify_connect_error(&err))
     }
 
     /// Attempts to connect to a single address.
@@ -659,6 +667,83 @@ mod tests {
         crate::assert_with_log!(timed_out, "timed out", true, timed_out);
 
         crate::test_complete!("resolver_timeout_zero");
+    }
+
+    #[test]
+    fn resolver_happy_eyeballs_single_address_zero_timeout_preserves_timeout_classification() {
+        init_test(
+            "resolver_happy_eyeballs_single_address_zero_timeout_preserves_timeout_classification",
+        );
+
+        let config = ResolverConfig {
+            timeout: Duration::ZERO,
+            cache_enabled: false,
+            happy_eyeballs: true,
+            ..Default::default()
+        };
+        let resolver = Resolver::with_config(config);
+
+        let result =
+            future::block_on(async { resolver.happy_eyeballs_connect("127.0.0.1", 80).await });
+        let timed_out = matches!(result, Err(DnsError::Timeout));
+        crate::assert_with_log!(
+            timed_out,
+            "happy eyeballs single-address path preserves timeout classification",
+            true,
+            timed_out
+        );
+
+        crate::test_complete!(
+            "resolver_happy_eyeballs_single_address_zero_timeout_preserves_timeout_classification"
+        );
+    }
+
+    #[test]
+    fn resolver_happy_eyeballs_race_timeout_preserves_timeout_classification() {
+        init_test("resolver_happy_eyeballs_race_timeout_preserves_timeout_classification");
+        set_test_time(0);
+
+        let resolver = Resolver::with_time_getter(
+            ResolverConfig {
+                timeout: Duration::ZERO,
+                happy_eyeballs: true,
+                ..Default::default()
+            },
+            test_time,
+        );
+        resolver.cache.put_ip(
+            "dual.test",
+            &LookupIp::new(
+                vec!["::1".parse().unwrap(), "127.0.0.1".parse().unwrap()],
+                Duration::from_mins(5),
+            ),
+        );
+
+        let mut future = Box::pin(resolver.happy_eyeballs_connect("dual.test", 80));
+        let waker = noop_waker();
+        let mut cx = Context::from_waker(&waker);
+
+        let first = Future::poll(future.as_mut(), &mut cx);
+        crate::assert_with_log!(
+            first.is_pending(),
+            "first poll pending",
+            true,
+            first.is_pending()
+        );
+
+        set_test_time(1_000_000_000);
+        let second = Future::poll(future.as_mut(), &mut cx);
+        let timed_out = matches!(second, Poll::Ready(Err(DnsError::Timeout)));
+        crate::assert_with_log!(
+            timed_out,
+            "race timeout preserves timeout classification",
+            true,
+            timed_out
+        );
+
+        crate::test_complete!(
+            "resolver_happy_eyeballs_race_timeout_preserves_timeout_classification"
+        );
     }
 
     #[test]

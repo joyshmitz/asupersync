@@ -648,13 +648,19 @@ fn plan_blocks(
 }
 
 fn required_symbols(k: u16, overhead: f64, min_overhead: usize) -> usize {
+    if k == 0 {
+        return 0;
+    }
     let raw = (f64::from(k) * overhead).ceil();
+    let minimum_threshold = usize::from(k).saturating_add(min_overhead);
     if !raw.is_finite() || raw.is_sign_negative() {
-        return min_overhead;
+        return minimum_threshold;
     }
     #[allow(clippy::cast_sign_loss)]
-    let base = raw as usize;
-    base.saturating_add(min_overhead)
+    let factor_threshold = raw as usize;
+    // `overhead` already encodes the total-symbol target; `min_overhead` is a
+    // floor on extra symbols beyond K, not an additional increment on top.
+    factor_threshold.max(minimum_threshold)
 }
 
 #[allow(clippy::too_many_lines)]
@@ -1283,6 +1289,14 @@ mod tests {
         assert!(!cfg.verify_auth);
     }
 
+    #[test]
+    fn required_symbols_uses_total_factor_and_minimum_extra_floor() {
+        assert_eq!(required_symbols(0, 1.05, 3), 0);
+        assert_eq!(required_symbols(10, 1.05, 3), 13);
+        assert_eq!(required_symbols(10, 1.5, 1), 15);
+        assert_eq!(required_symbols(10, 0.5, 0), 10);
+    }
+
     // ---- BlockStateKind ----
 
     #[test]
@@ -1450,6 +1464,41 @@ mod tests {
         let positive = estimate > 0;
         crate::assert_with_log!(positive, "symbols_needed_estimate > 0", true, positive);
         crate::test_complete!("progress_reports_blocks_total_after_params");
+    }
+
+    #[test]
+    fn progress_symbols_needed_estimate_does_not_double_count_min_overhead() {
+        init_test("progress_symbols_needed_estimate_does_not_double_count_min_overhead");
+        let object_id = ObjectId::new_for_test(1020);
+        let symbol_size = 256u16;
+        let k = 10u16;
+        let data_len = usize::from(symbol_size) * usize::from(k);
+
+        let mut pipeline = DecodingPipeline::new(DecodingConfig {
+            symbol_size,
+            max_block_size: 4096,
+            repair_overhead: 1.05,
+            min_overhead: 3,
+            max_buffered_symbols: 0,
+            block_timeout: Duration::from_secs(30),
+            verify_auth: false,
+        });
+        pipeline
+            .set_object_params(ObjectParams::new(
+                object_id,
+                data_len as u64,
+                symbol_size,
+                1,
+                k,
+            ))
+            .expect("set params");
+
+        let progress = pipeline.progress();
+        assert_eq!(progress.blocks_total, Some(1));
+        assert_eq!(progress.symbols_needed_estimate, 13);
+        crate::test_complete!(
+            "progress_symbols_needed_estimate_does_not_double_count_min_overhead"
+        );
     }
 
     #[test]

@@ -1294,7 +1294,7 @@ impl<P: Policy> Scope<'_, P> {
         results
     }
 
-    fn build_child_task_cx<Caps>(
+    pub(crate) fn build_child_task_cx<Caps>(
         &self,
         state: &RuntimeState,
         parent_cx: &Cx<Caps>,

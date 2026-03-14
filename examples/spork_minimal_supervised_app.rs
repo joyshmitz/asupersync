@@ -139,10 +139,11 @@ fn stop_named_server(
     named_handle_slot: &NamedHandleSlot,
     counter_task: TaskId,
 ) -> Result<(), Box<dyn std::error::Error>> {
-    let mut guard = named_handle_slot.lock();
-    let handle = guard.as_mut().ok_or("counter handle missing at shutdown")?;
-    handle.stop_and_release()?;
-    drop(guard);
+    {
+        let mut guard = named_handle_slot.lock();
+        let handle = guard.as_mut().ok_or("counter handle missing at shutdown")?;
+        handle.stop();
+    }
 
     {
         let mut scheduler = runtime.scheduler.lock();
@@ -150,7 +151,12 @@ fn stop_named_server(
     }
 
     runtime.run_until_quiescent();
-    registry.lock().unregister("counter")?;
+
+    let now = runtime.state.now;
+    let mut guard = named_handle_slot.lock();
+    let handle = guard.as_mut().ok_or("counter handle missing at release")?;
+    let mut registry_guard = registry.lock();
+    handle.release_name(&mut registry_guard, now)?;
 
     Ok(())
 }
